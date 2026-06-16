@@ -40,6 +40,8 @@ __pycache__/
 
 # Screenshots — investigation/dashboard captures belong in png/, never the repo root
 *.png
+# Allow committed screenshots in img/
+!img/*.png
 
 # Scratch — MCP browser console logs, investigation screenshots, prompt drafts
 .playwright-mcp/

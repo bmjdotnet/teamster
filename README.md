@@ -14,6 +14,8 @@ Grafana dashboards and a terminal activity feed. Every dollar lands somewhere
 visible: attributed cost carries its attribution method, and whatever cannot
 be attributed is shown as a residual, not hidden.
 
+![AI Spend Overview](img/where_spend_goes.png)
+
 1. **Where is the AI spend going?** — by product, work type, component, phase
 2. **Who is spending it?** — engineers, and the agents they run
 3. **What outcomes is it producing?** — cost per delivered unit of work
@@ -77,6 +79,8 @@ This is where you answer "how much did feature X cost" or "where is the
 Opus spend going." Change the facet dropdowns and the whole dashboard
 reconfigures instantly.
 
+![Cost by feature and phase](img/cost_by_feature_phase.png)
+
 ### AI Usage & Effectiveness
 
 The efficiency dashboard. Answers "are we using AI well?"
@@ -93,6 +97,10 @@ The efficiency dashboard. Answers "are we using AI well?"
 - **Agent economics**: top agents by cost with context-bloat signals
   (high cache-read-per-message = agent is carrying too much context)
 
+![Model fit and work-type matrix](img/model_fit.png)
+
+![Work progress — status transitions, cycle time, outcomes delivered, stall table](img/work_progress.png)
+
 ### Multidimension Cost Explorer
 
 A composable OLAP tool. Pick any two tag dimensions as hierarchy levels
@@ -106,6 +114,10 @@ A composable OLAP tool. Pick any two tag dimensions as hierarchy levels
   with rework highlighted in red — the quickest way to see rework share
 - Burn-rate projection from month-to-date daily cost
 
+![Cost over time by component](img/cost_by_component.png)
+
+![Cost by work-type and phase](img/work_type_by_phase.png)
+
 ### Work Entity Explorer
 
 Explore costs entity by entity — every outcome and work unit, individually.
@@ -113,6 +125,8 @@ A treemap visualization sizes rectangles by cost and colors them by status
 (green = done, blue = active, yellow = review, red = blocked). Below it:
 cost by entity over time, model breakdown, attribution coverage trend,
 and per-agent cost with entity breadth (how many entities each agent touched).
+
+![Entity cost over time](img/entity_cost_over_time.png)
 
 ### Outcome Accounting
 
@@ -145,6 +159,8 @@ to two places as they happen:
 
 When you're running a team of 5 agents, `feed` is how you know what each one
 is doing without reading the lead's token-expensive summaries.
+
+![Terminal activity feed](img/activity_feed.png)
 
 ## Quick start
 
