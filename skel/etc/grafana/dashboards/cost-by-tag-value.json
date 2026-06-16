@@ -1,0 +1,279 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Faceted cost explorer: pick a tag key, see cost grouped by that key's values. Tagged-only (INNER JOIN); untagged cost is excluded. Cloned from the operator's live 'testbed' dashboard.",
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "teamster-mysql"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          },
+          "decimals": 0,
+          "mappings": [],
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 12,
+        "w": 7,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "displayLabels": [
+          "name",
+          "percent",
+          "value"
+        ],
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "values": [
+            "value",
+            "percent"
+          ]
+        },
+        "pieType": "pie",
+        "reduceOptions": {
+          "calcs": [],
+          "fields": "",
+          "values": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "teamster-mysql"
+          },
+          "format": "table",
+          "rawSql": "SELECT\n  COALESCE(x.tag_value, 'untagged') AS metric,\n  ROUND(SUM(cr.cost_usd), 4) AS \"cost_usd\"\nFROM cost_facts cr\nINNER JOIN (\n  SELECT entity_type, entity_id, tag_value FROM (\n    SELECT er.entity_type, er.entity_id, t.tag_value,\n           ROW_NUMBER() OVER (PARTITION BY er.entity_type, er.entity_id ORDER BY t.tag_value) rn\n    FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n    WHERE t.tag_key = '$tag_key'\n  ) z WHERE rn = 1\n) x ON x.entity_type = cr.entity_type AND x.entity_id = cr.entity_id\nWHERE $__timeFilter(cr.timestamp)\nGROUP BY x.tag_value\nORDER BY x.tag_value",
+          "refId": "A"
+        }
+      ],
+      "title": "Cost by $tag_key",
+      "type": "piechart"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "teamster-mysql"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 0,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "decimals": 2,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 12,
+        "w": 17,
+        "x": 7,
+        "y": 0
+      },
+      "id": 2,
+      "options": {
+        "legend": {
+          "calcs": [
+            "sum"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "teamster-mysql"
+          },
+          "format": "time_series",
+          "rawSql": "SELECT\n  $__timeGroupAlias(cr.timestamp, $agg),\n  COALESCE(x.tag_value, 'untagged') AS metric,\n  ROUND(SUM(cr.cost_usd), 4) AS cost_usd\nFROM cost_facts cr\nINNER JOIN (\n  SELECT entity_type, entity_id, tag_value FROM (\n    SELECT er.entity_type, er.entity_id, t.tag_value,\n           ROW_NUMBER() OVER (PARTITION BY er.entity_type, er.entity_id ORDER BY t.tag_value) rn\n    FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n    WHERE t.tag_key = '$tag_key'\n  ) z WHERE rn = 1\n) x ON x.entity_type = cr.entity_type AND x.entity_id = cr.entity_id\nWHERE $__timeFilter(cr.timestamp)\nGROUP BY 1, x.tag_value\nORDER BY 1, x.tag_value",
+          "refId": "A"
+        }
+      ],
+      "title": "Cost Over Time by $tag_key",
+      "type": "timeseries"
+    }
+  ],
+  "preload": false,
+  "refresh": "5m",
+  "schemaVersion": 41,
+  "tags": [
+    "teamster"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "text": "product",
+          "value": "product"
+        },
+        "datasource": {
+          "type": "mysql",
+          "uid": "teamster-mysql"
+        },
+        "definition": "SELECT DISTINCT t.tag_key FROM tags t JOIN entity_tags et ON et.tag_id = t.id WHERE (t.category = 'context' OR t.tag_key IN ('work-type','phase','priority')) AND t.tag_key NOT LIKE 'git.%' ORDER BY t.tag_key",
+        "includeAll": false,
+        "label": "Tag Key",
+        "name": "tag_key",
+        "options": [],
+        "query": "SELECT DISTINCT t.tag_key FROM tags t JOIN entity_tags et ON et.tag_id = t.id WHERE (t.category = 'context' OR t.tag_key IN ('work-type','phase','priority')) AND t.tag_key NOT LIKE 'git.%' ORDER BY t.tag_key",
+        "refresh": 2,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "auto": true,
+        "auto_count": 50,
+        "auto_min": "1m",
+        "current": {
+          "text": "$__auto",
+          "value": "$__auto"
+        },
+        "label": "Aggregation",
+        "name": "agg",
+        "options": [
+          {
+            "selected": false,
+            "text": "1m",
+            "value": "1m"
+          },
+          {
+            "selected": false,
+            "text": "5m",
+            "value": "5m"
+          },
+          {
+            "selected": false,
+            "text": "15m",
+            "value": "15m"
+          },
+          {
+            "selected": false,
+            "text": "1h",
+            "value": "1h"
+          },
+          {
+            "selected": false,
+            "text": "6h",
+            "value": "6h"
+          },
+          {
+            "selected": false,
+            "text": "1d",
+            "value": "1d"
+          }
+        ],
+        "query": "1m,5m,15m,1h,6h,1d",
+        "refresh": 2,
+        "type": "interval"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-30d",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "utc",
+  "title": "04.01 - Simple Cost Explorer",
+  "uid": "cost-by-tag-value"
+}

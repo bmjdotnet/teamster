@@ -1,0 +1,52 @@
+apiVersion: 1
+
+datasources:
+  - name: Teamster Prometheus
+    type: prometheus
+    uid: teamster-prometheus
+    url: http://127.0.0.1:{{ .PrometheusPort }}
+    access: proxy
+    isDefault: true
+    jsonData:
+      httpMethod: POST
+      timeInterval: "15s"
+    editable: true
+
+  # Read-only MySQL connection to the Teamster spine, for the granular
+  # per-entity / per-tag SQL panels (D1-D4). uid teamster-mysql is referenced
+  # directly by the dashboard JSON; do not rename without rewriting the
+  # dashboards. The user/password below is a least-privilege SELECT-only
+  # account (see skel/etc/grafana/grafana-readonly-user.sql), NOT the
+  # TEAMSTER_STORE_DSN write account. Connection fields are decomposed from
+  # the WMS StoreDSN by the supervisor (see grafana.go grafanaTemplateData).
+  - name: Teamster MySQL
+    type: mysql
+    uid: teamster-mysql
+    url: {{ .StoreHost }}:{{ .StorePort }}
+    database: {{ .StoreDB }}
+    user: {{ .GrafanaDBUser }}
+    access: proxy
+    isDefault: false
+    secureJsonData:
+      password: {{ .GrafanaDBPassword }}
+    jsonData:
+      timezone: "+00:00"        # MariaDB has no named tz tables; "UTC" errors. Numeric offset is engine-safe (works on MySQL+MariaDB).
+      maxOpenConns: 4
+      maxIdleConns: 2
+      connMaxLifetime: 14400
+    editable: true
+
+  # Infinity datasource for the real-time event feed panel. Queries hookd's
+  # /api/events endpoint for JSONL-enriched records. uid teamster-events is
+  # referenced by the activity-feed dashboard JSON; do not rename without
+  # rewriting the dashboard.
+  - name: Teamster Events
+    type: yesoreyeram-infinity-datasource
+    uid: teamster-events
+    url: http://127.0.0.1:{{ .HookdPort }}
+    access: proxy
+    isDefault: false
+    jsonData:
+      allowedHosts:
+        - http://127.0.0.1:{{ .HookdPort }}
+    editable: true

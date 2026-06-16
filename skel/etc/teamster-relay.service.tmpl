@@ -1,0 +1,13 @@
+[Unit]
+Description=Teamster Event Relay
+After=network.target teamster-hookd.service
+
+[Service]
+Type=simple
+User=__USER__
+ExecStart=__BASEDIR__/bin/relay --source __SOURCE_JSONL__ --target __TARGET_URL__
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

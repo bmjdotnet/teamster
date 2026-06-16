@@ -1,0 +1,64 @@
+# Go build output
+/build/
+src/*.exe
+src/*.test
+src/*.out
+# Built binaries — one per src/cmd/* subdir. Bins never go in the repo.
+# cmd/<name> compiles to src/<name>; keep new binaries (e.g. demogen) listed
+# here as they are added so a stray build artifact never shows as untracked.
+src/activity-mcp
+src/classify
+src/demogen
+src/feed
+src/hookd
+src/rollup
+src/teamster
+src/teamster-install
+src/token-scraper
+src/wms-mcp
+src/relay
+
+# Export pipeline artifacts
+.teamster-export
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Session artifacts
+HANDOFF.md
+HANDOFF*.md
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Python bytecode
+__pycache__/
+
+# Screenshots — investigation/dashboard captures belong in png/, never the repo root
+*.png
+
+# Scratch — MCP browser console logs, investigation screenshots, prompt drafts
+.playwright-mcp/
+dev-chat/
+png/
+
+# Local secrets / settings — never commit. etc/teamster.yaml holds the DB DSN.
+.claude/settings.local.json
+.env
+.env.*
+*.token
+*.secret
+etc/teamster.yaml
+
+# Sanitized public export tree (built by export-public.sh)
+/teamster-public/
+
+# Old root-level built artifacts (kept for transition)
+/teamster
+/atail
+/hookd
+/teamster-install

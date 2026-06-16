@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Teamster</title>
+    <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+    <script src="https://unpkg.com/htmx-ext-sse@2.3.0/sse.js"></script>
+    <style>
+        body { background: #1a1a2e; color: #e0e0e0; font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 13px; margin: 0; padding: 16px; }
+        #activity { max-width: 1200px; margin: 0 auto; }
+        .event { padding: 2px 0; white-space: pre; }
+        .tag { font-weight: bold; }
+        .tag-GOAL { color: #ffc83c; font-weight: bold; }
+        .tag-THNK { color: #8caa82; }
+        .tag-DONE { color: #006600; font-weight: bold; }
+        .tag-READ { color: #0000ff; }
+        .tag-EDIT { color: #808000; }
+        .tag-GREP { color: #788cc8; }
+        .tag-ACT  { color: #e69632; }
+        .tag-EXEC { color: #b4a03c; }
+        .tag-TEAM { color: #b478dc; }
+        .tag-COMM { color: #968cd2; }
+        .tag-TASK { color: #3cbeb4; }
+        .tag-WEB  { color: #d282b4; }
+        .tag-ASK  { color: #ff6464; }
+        .tag-PLAN { color: #a0a0dc; }
+        .tag-TOOL { color: #a0a0a0; }
+        .ts { color: #666666; }
+        .agent { font-weight: bold; }
+        .focus-line { color: #ffc83c; font-weight: bold; border-bottom: 1px solid #333; margin: 4px 0; padding: 2px 0; }
+        h1 { color: #ffc83c; font-size: 18px; margin: 0 0 16px 0; }
+    </style>
+</head>
+<body>
+    <h1>Teamster Activity</h1>
+    <nav style="margin-bottom:12px"><a href="/" style="color:#5099ff;text-decoration:none;margin-right:12px">Activity Stream</a><a href="/wms" style="color:#5099ff;text-decoration:none">WMS State</a></nav>
+    <div id="activity"
+         hx-ext="sse"
+         sse-connect="/events/stream?history=100"
+         sse-swap="message"
+         hx-swap="beforeend"
+         hx-target="#activity">
+    </div>
+    <script>
+        let autoScroll = true;
+        window.addEventListener('scroll', () => {
+            autoScroll = (window.innerHeight + window.scrollY) >= document.body.offsetHeight - 50;
+        });
+        const observer = new MutationObserver(() => {
+            if (autoScroll) window.scrollTo(0, document.body.scrollHeight);
+        });
+        observer.observe(document.getElementById('activity'), { childList: true });
+    </script>
+</body>
+</html>

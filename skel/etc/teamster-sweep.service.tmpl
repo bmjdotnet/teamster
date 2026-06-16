@@ -1,0 +1,19 @@
+[Unit]
+Description=Teamster LLM attribution sweep (hourly, skips if nothing to sweep)
+After=network.target teamster-hookd.service
+
+[Service]
+Type=oneshot
+User=__USER__
+ExecStart=/bin/bash -c '\
+  orphans=$(__BASEDIR__/bin/rollup --count-orphans 2>/dev/null || echo 0); \
+  if [ "$orphans" -eq 0 ] 2>/dev/null; then \
+    echo "sweep-llm: no orphan sessions, skipping"; \
+    exit 0; \
+  fi; \
+  echo "sweep-llm: $orphans orphan sessions found, running LLM sweep"; \
+  "__CLAUDE_BIN__" --print -p "/teamster:sweep" \
+    --allowedTools "Bash,Read,Write,mcp__wms__*,mcp__activity__*" \
+    2>>__BASEDIR__/var/sweep-llm.log || true'
+Environment=TEAMSTER_DATA_DIR=__BASEDIR__/var
+TimeoutStartSec=900

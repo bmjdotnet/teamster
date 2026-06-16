@@ -1,0 +1,9 @@
+[Unit]
+Description=Teamster attribution rollup (full mechanical sweep every 10 min)
+After=network.target teamster-hookd.service
+
+[Service]
+Type=oneshot
+User=__USER__
+ExecStart=__BASEDIR__/bin/rollup --sweep
+Environment=TEAMSTER_DATA_DIR=__BASEDIR__/var

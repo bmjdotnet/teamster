@@ -1,0 +1,1359 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Explore costs across work entities - where did the money go? Entity-by-entity cost attribution with time series, model breakdown, and agent attribution.",
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "panels": [],
+      "title": "Overview Stats",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "teamster-mysql"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "green",
+            "mode": "fixed"
+          },
+          "decimals": 0,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 1
+      },
+      "id": 2,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "teamster-mysql"
+          },
+          "format": "table",
+          "rawSql": "SELECT SUM(cost_usd) AS value FROM cost_facts WHERE $__timeFilter(timestamp)",
+          "refId": "A"
+        }
+      ],
+      "title": "Total Cost (USD)",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "teamster-mysql"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "blue",
+            "mode": "fixed"
+          },
+          "decimals": 0,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 1
+      },
+      "id": 3,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "teamster-mysql"
+          },
+          "format": "table",
+          "rawSql": "SELECT SUM(cost_usd) AS value FROM cost_facts WHERE $__timeFilter(timestamp) AND entity_type != '' AND ('$entity_type' = 'all' OR entity_type = '$entity_type')",
+          "refId": "A"
+        }
+      ],
+      "title": "Attributed Cost",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "teamster-mysql"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "orange",
+            "mode": "fixed"
+          },
+          "decimals": 0,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "orange",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 1
+      },
+      "id": 4,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "teamster-mysql"
+          },
+          "format": "table",
+          "rawSql": "SELECT SUM(cost_usd) AS value FROM cost_facts WHERE $__timeFilter(timestamp) AND entity_type = ''",
+          "refId": "A"
+        }
+      ],
+      "title": "Unallocated Cost",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "teamster-mysql"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 1,
+          "mappings": [],
+          "max": 100,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": 0
+              },
+              {
+                "color": "yellow",
+                "value": 50
+              },
+              {
+                "color": "green",
+                "value": 70
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 1
+      },
+      "id": 5,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "teamster-mysql"
+          },
+          "format": "table",
+          "rawSql": "SELECT ROUND(100.0 * SUM(CASE WHEN entity_type != '' THEN cost_usd ELSE 0 END) / NULLIF(SUM(cost_usd), 0), 1) AS value FROM cost_facts WHERE $__timeFilter(timestamp)",
+          "refId": "A"
+        }
+      ],
+      "title": "Attribution %",
+      "type": "stat"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "id": 20,
+      "panels": [],
+      "title": "Outcome Cost Over Time",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "teamster-mysql"
+      },
+      "description": "Daily cost for the top-5 entities by total cost. Unallocated is excluded here (it dwarfs everything) \u2014 see the Unallocated Cost stat and the coverage trend below.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 0,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "decimals": 0,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "unallocated"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#484f58",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 6
+      },
+      "id": 21,
+      "options": {
+        "legend": {
+          "calcs": [
+            "sum"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "teamster-mysql"
+          },
+          "format": "time_series",
+          "rawSql": "SELECT\n    $__timeGroupAlias(cr.timestamp, $agg),\n    CASE\n        WHEN cr.entity_type = 'outcome' THEN COALESCE(o.title, cr.entity_id)\n        WHEN cr.entity_type = 'workunit' THEN COALESCE(wu.title, cr.entity_id)\n        ELSE CONCAT('(legacy ', cr.entity_type, ') ', cr.entity_id)\n      END AS metric,\n    SUM(cr.cost_usd) AS cost_usd\nFROM cost_facts cr\nLEFT JOIN outcomes o ON o.id = cr.entity_id AND cr.entity_type = 'outcome'\nLEFT JOIN workunits wu ON wu.id = cr.entity_id AND cr.entity_type = 'workunit'\nWHERE $__timeFilter(cr.timestamp)\n  AND cr.entity_type != '' AND ('$entity_type' = 'all' OR cr.entity_type = '$entity_type')\nGROUP BY 1, cr.entity_type, cr.entity_id\nORDER BY 1, cr.entity_type, cr.entity_id",
+          "refId": "A"
+        }
+      ],
+      "title": "Cost Over Time by  ${entity_type:text} ",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 14
+      },
+      "id": 40,
+      "panels": [],
+      "title": "Cost by Model",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "teamster-mysql"
+      },
+      "description": "Cost breakdown by AI model used.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          },
+          "decimals": 0,
+          "mappings": [],
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 15
+      },
+      "id": 41,
+      "options": {
+        "displayLabels": [
+          "percent"
+        ],
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "values": [
+            "value"
+          ]
+        },
+        "pieType": "pie",
+        "reduceOptions": {
+          "calcs": [],
+          "fields": "",
+          "values": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "teamster-mysql"
+          },
+          "format": "table",
+          "rawSql": "SELECT\n    cr.model AS metric,\n    SUM(cr.cost_usd) AS cost_usd\nFROM cost_facts cr\nWHERE $__timeFilter(cr.timestamp)\nGROUP BY cr.model\nORDER BY metric",
+          "refId": "A"
+        }
+      ],
+      "title": "Cost by Model",
+      "type": "piechart"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "teamster-mysql"
+      },
+      "description": "Cost breakdown by AI model over time as stacked bars.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 0,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "decimals": 0,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 16,
+        "x": 8,
+        "y": 15
+      },
+      "id": 42,
+      "options": {
+        "legend": {
+          "calcs": [
+            "sum"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "teamster-mysql"
+          },
+          "format": "time_series",
+          "rawSql": "SELECT\n    $__timeGroupAlias(cr.timestamp, $agg),\n    cr.model AS metric,\n    SUM(cr.cost_usd) AS cost_usd\nFROM cost_facts cr\nWHERE $__timeFilter(cr.timestamp)\nGROUP BY 1, cr.model\nORDER BY 1, cr.model",
+          "refId": "A"
+        }
+      ],
+      "title": "Cost by Model Over Time",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 21
+      },
+      "id": 10,
+      "panels": [],
+      "title": "Work Cost Table",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "teamster-mysql"
+      },
+      "description": "One row per WMS entity, sorted by cost descending. Unallocated cost shown as explicit row. The direct replacement for the old 'Cost per WMS Entity' dashboard.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Cost_USD"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Cost (USD)"
+              },
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              },
+              {
+                "id": "custom.width",
+                "value": 120
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Tokens"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Status"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 90
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "options": {
+                      "-": {
+                        "color": "#484f58",
+                        "index": 5,
+                        "text": "-"
+                      },
+                      "active": {
+                        "color": "blue",
+                        "index": 1,
+                        "text": "active"
+                      },
+                      "blocked": {
+                        "color": "red",
+                        "index": 2,
+                        "text": "blocked"
+                      },
+                      "done": {
+                        "color": "green",
+                        "index": 0,
+                        "text": "done"
+                      },
+                      "pending": {
+                        "color": "gray",
+                        "index": 3,
+                        "text": "pending"
+                      },
+                      "review": {
+                        "color": "yellow",
+                        "index": 4,
+                        "text": "review"
+                      }
+                    },
+                    "type": "value"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Entity"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 280
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Type"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Phase"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 90
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "options": {
+                      "build": {
+                        "color": "blue",
+                        "index": 1
+                      },
+                      "design": {
+                        "color": "purple",
+                        "index": 0
+                      },
+                      "review": {
+                        "color": "orange",
+                        "index": 3
+                      },
+                      "rework": {
+                        "color": "red",
+                        "index": 4
+                      },
+                      "test": {
+                        "color": "yellow",
+                        "index": 2
+                      }
+                    },
+                    "type": "value"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Duration_Hours"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Duration (h)"
+              },
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              },
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Primary_Agent"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Agent"
+              },
+              {
+                "id": "custom.width",
+                "value": 140
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Tags"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 300
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 12,
+        "w": 24,
+        "x": 0,
+        "y": 22
+      },
+      "id": 11,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "enablePagination": true,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "Cost (USD)"
+          }
+        ]
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "teamster-mysql"
+          },
+          "format": "table",
+          "rawSql": "SELECT\n    CASE\n        WHEN cr.entity_type = '' THEN '(unallocated)'\n        WHEN cr.entity_type = 'outcome' THEN COALESCE(o.title, cr.entity_id)\n        WHEN cr.entity_type = 'workunit' THEN COALESCE(wu.title, cr.entity_id)\n        ELSE CONCAT('(legacy ', cr.entity_type, ') ', cr.entity_id)\n    END AS Entity,\n    CASE WHEN cr.entity_type = '' THEN '-' ELSE cr.entity_type END AS Type,\n    CASE\n        WHEN cr.entity_type = 'outcome' THEN o.status\n        WHEN cr.entity_type = 'workunit' THEN wu.status\n        ELSE '-'\n    END AS Status,\n    SUM(cr.cost_usd) AS Cost_USD,\n    SUM(cr.tokens) AS Tokens,\n    COALESCE(\n      (SELECT wi.phase FROM wms_intervals wi\n       WHERE wi.entity_type = cr.entity_type AND wi.entity_id = cr.entity_id\n         AND wi.kind = 'state' AND wi.phase IS NOT NULL\n       ORDER BY wi.started_at DESC LIMIT 1),\n      (SELECT t.tag_value FROM entity_tags et JOIN tags t ON t.id = et.tag_id\n       WHERE et.entity_type = cr.entity_type AND et.entity_id = cr.entity_id\n         AND t.tag_key = 'phase' AND t.retired = 0\n       ORDER BY et.applied_at DESC LIMIT 1)\n    ) AS Phase,\n    (SELECT ROUND(SUM(wi2.duration_ms) / 3600000.0, 1)\n     FROM wms_intervals wi2\n     WHERE wi2.entity_type = cr.entity_type AND wi2.entity_id = cr.entity_id\n       AND wi2.kind = 'state' AND wi2.ended_at IS NOT NULL) AS Duration_Hours,\n    (SELECT cf2.agent_name FROM cost_facts cf2\n     WHERE cf2.entity_type = cr.entity_type AND cf2.entity_id = cr.entity_id\n       AND cf2.agent_name != ''\n     GROUP BY cf2.agent_name ORDER BY SUM(cf2.cost_usd) DESC LIMIT 1) AS Primary_Agent,\n    COALESCE(\n      (SELECT GROUP_CONCAT(CONCAT(t.tag_key, ':', t.tag_value) ORDER BY t.tag_key, t.tag_value SEPARATOR ', ')\n       FROM entity_tags et JOIN tags t ON t.id = et.tag_id\n       WHERE et.entity_type = cr.entity_type AND et.entity_id = cr.entity_id\n         AND t.retired = 0\n         AND t.tag_key NOT IN ('git.branch','git.repo','lifecycle','team')),\n      '(untagged)'\n    ) AS Tags\nFROM cost_facts cr\nLEFT JOIN outcomes o ON o.id = cr.entity_id AND cr.entity_type = 'outcome'\nLEFT JOIN workunits wu ON wu.id = cr.entity_id AND cr.entity_type = 'workunit'\nWHERE $__timeFilter(cr.timestamp)\n  AND ('$entity_type' = 'all' OR cr.entity_type = '$entity_type')\nGROUP BY cr.entity_type, cr.entity_id\nORDER BY Cost_USD DESC\nLIMIT 50",
+          "refId": "A"
+        }
+      ],
+      "title": "Work Cost Table (${entity_type:text})",
+      "type": "table"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 34
+      },
+      "id": 30,
+      "panels": [],
+      "title": "Attribution Coverage Trend",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "teamster-mysql"
+      },
+      "description": "Fraction of total cost attributed to a WMS entity vs sitting in the unallocated bucket. A rising trend proves the attribution spine is working. Target: >70%.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "green",
+            "mode": "fixed"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "Attribution %",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 20,
+            "gradientMode": "opacity",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "decimals": 1,
+          "mappings": [],
+          "max": 100,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "transparent",
+                "value": 0
+              },
+              {
+                "color": "orange",
+                "value": 70
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 35
+      },
+      "id": 31,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "mean"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "teamster-mysql"
+          },
+          "format": "time_series",
+          "rawSql": "SELECT\n    $__timeGroupAlias(cr.timestamp, $agg),\n    SUM(CASE WHEN cr.entity_type != '' THEN cr.cost_usd ELSE 0 END)\n        / NULLIF(SUM(cr.cost_usd), 0) * 100 AS attributed_pct\nFROM cost_facts cr\nWHERE $__timeFilter(cr.timestamp)\nGROUP BY 1\nORDER BY 1",
+          "refId": "A"
+        }
+      ],
+      "title": "Attribution Coverage Trend",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 41
+      },
+      "id": 15,
+      "panels": [],
+      "title": "Entity Cost Treemap",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "teamster-mysql"
+      },
+      "description": "Where did the ATTRIBUTED money go? Each rectangle is a WMS entity, sized by cost and colored by status (green=done, blue=active, yellow=review, red=blocked, gray=legacy). Legacy v1 entities show as explicit (legacy <type>) rectangles per the locked label convention. Unallocated cost is excluded here (it would dominate ~69% of the area) \u2014 the Unallocated Cost stat and the Attribution Coverage Trend carry that full-picture honesty. Rendered via the Business Charts (ECharts) plugin.",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 11,
+        "w": 24,
+        "x": 0,
+        "y": 42
+      },
+      "id": 16,
+      "options": {
+        "baidu": {
+          "callback": "bmapReady",
+          "key": ""
+        },
+        "editor": {
+          "format": "auto"
+        },
+        "editorMode": "code",
+        "followTheme": true,
+        "gaode": {
+          "key": "",
+          "plugin": "AMap.Scale,AMap.ToolBar"
+        },
+        "getOption": "// Entity Cost Treemap \u2014 rectangles sized by cost, colored by status.\n// Data: one table-format series with fields entity, status, cost_usd (see panel target).\nconst s = context.panel.data.series[0];\nif (!s) { return { series: [] }; }\nconst f = (name) => {\n  const fld = s.fields.find((x) => x.name === name);\n  const v = fld ? fld.values : [];\n  return v.buffer || v;\n};\nconst names = f('entity');\nconst statuses = f('status');\nconst costs = f('cost_usd');\n// Status -> color, consistent with the Entity Cost Table (panel 11) and the locked convention.\nconst colorOf = {\n  done: '#73bf69',        // green\n  active: '#5794f2',      // blue\n  blocked: '#f2495c',     // red\n  review: '#fade2a',      // yellow\n  pending: '#8e8e8e',     // gray\n  unallocated: '#484f58', // gray-demote\n  legacy: '#484f58',      // gray-demote\n  unknown: '#8e8e8e',\n};\nconst data = names.map((name, i) => ({\n  name: name,\n  value: costs[i],\n  itemStyle: { color: colorOf[statuses[i]] || '#8e8e8e', borderColor: 'rgba(0,0,0,0.35)', gapWidth: 1 },\n}));\nreturn {\n  tooltip: {\n    formatter: (p) => p.name + '<br/>$' + Number(p.value).toFixed(0),\n  },\n  series: [{\n    type: 'treemap',\n    roam: false,\n    nodeClick: false,\n    breadcrumb: { show: false },\n    label: { show: true, formatter: '{b}', overflow: 'truncate', color: '#fff', fontSize: 11 },\n    upperLabel: { show: false },\n    data: data,\n  }],\n};\n",
+        "google": {
+          "callback": "gmapReady",
+          "key": ""
+        },
+        "map": "none",
+        "renderer": "canvas",
+        "themeEditor": {
+          "config": "{}",
+          "name": "default"
+        },
+        "visualEditor": {
+          "code": "return {}",
+          "dataset": [],
+          "series": []
+        }
+      },
+      "pluginVersion": "7.2.2",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "teamster-mysql"
+          },
+          "format": "table",
+          "rawSql": "SELECT\n    CASE\n        WHEN cr.entity_type = '' THEN '(unallocated)'\n        WHEN cr.entity_type = 'outcome' THEN COALESCE(o.title, cr.entity_id)\n        WHEN cr.entity_type = 'workunit' THEN COALESCE(wu.title, cr.entity_id)\n        ELSE CONCAT('(legacy ', cr.entity_type, ') ', cr.entity_id)\n    END AS entity,\n    CASE\n        WHEN cr.entity_type = '' THEN 'unallocated'\n        WHEN cr.entity_type IN ('outcome','workunit') THEN COALESCE(NULLIF(COALESCE(o.status, wu.status), ''), 'unknown')\n        ELSE 'legacy'\n    END AS status,\n    ROUND(SUM(cr.cost_usd), 4) AS cost_usd\nFROM cost_facts cr\nLEFT JOIN outcomes o ON o.id = cr.entity_id AND cr.entity_type = 'outcome'\nLEFT JOIN workunits wu ON wu.id = cr.entity_id AND cr.entity_type = 'workunit'\nWHERE $__timeFilter(cr.timestamp)\n  AND cr.entity_type != '' AND ('$entity_type' = 'all' OR cr.entity_type = '$entity_type')\nGROUP BY cr.entity_type, cr.entity_id\nHAVING cost_usd > 0\nORDER BY cost_usd DESC\nLIMIT 40",
+          "refId": "A"
+        }
+      ],
+      "title": "Work Entity Cost Treemap",
+      "type": "volkovlabs-echarts-panel"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 53
+      },
+      "id": 50,
+      "panels": [],
+      "title": "Cost by Agent",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "teamster-mysql"
+      },
+      "description": "Per-agent cost breakdown with entity breadth (how many distinct entities each agent touched).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Cost_USD"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Cost (USD)"
+              },
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              },
+              {
+                "id": "custom.width",
+                "value": 120
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Tokens"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Entities"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 80
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Agent"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 160
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 54
+      },
+      "id": 51,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "enablePagination": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "Cost (USD)"
+          }
+        ]
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "teamster-mysql"
+          },
+          "format": "table",
+          "rawSql": "SELECT\n    CASE WHEN cr.agent_name = '' THEN 'lead' ELSE cr.agent_name END AS Agent,\n    SUM(cr.cost_usd) AS Cost_USD,\n    SUM(cr.tokens) AS Tokens,\n    COUNT(DISTINCT CONCAT(cr.entity_type, ':', cr.entity_id)) AS Entities\nFROM cost_facts cr\nWHERE $__timeFilter(cr.timestamp)\n  AND ('$entity_type' = 'all' OR cr.entity_type = '$entity_type')\nGROUP BY cr.agent_name\nORDER BY Cost_USD DESC",
+          "refId": "A"
+        }
+      ],
+      "title": "Cost by Agent (${entity_type:text})",
+      "type": "table"
+    }
+  ],
+  "preload": true,
+  "refresh": "5m",
+  "schemaVersion": 41,
+  "tags": [
+    "teamster"
+  ],
+  "templating": {
+    "list": [
+      {
+        "auto": true,
+        "auto_count": 50,
+        "auto_min": "1m",
+        "current": {
+          "text": "auto",
+          "value": "$__auto_interval_agg"
+        },
+        "label": "Aggregation",
+        "name": "agg",
+        "options": [
+          {
+            "selected": true,
+            "text": "auto",
+            "value": "$__auto_interval_agg"
+          },
+          {
+            "selected": false,
+            "text": "1m",
+            "value": "1m"
+          },
+          {
+            "selected": false,
+            "text": "5m",
+            "value": "5m"
+          },
+          {
+            "selected": false,
+            "text": "15m",
+            "value": "15m"
+          },
+          {
+            "selected": false,
+            "text": "1h",
+            "value": "1h"
+          },
+          {
+            "selected": false,
+            "text": "6h",
+            "value": "6h"
+          },
+          {
+            "selected": false,
+            "text": "1d",
+            "value": "1d"
+          }
+        ],
+        "query": "1m,5m,15m,1h,6h,1d",
+        "refresh": 2,
+        "type": "interval"
+      },
+      {
+        "current": {
+          "text": "All",
+          "value": "all"
+        },
+        "includeAll": false,
+        "label": "Entity Type",
+        "name": "entity_type",
+        "options": [
+          {
+            "selected": true,
+            "text": "All",
+            "value": "all"
+          },
+          {
+            "selected": false,
+            "text": "workunit",
+            "value": "workunit"
+          },
+          {
+            "selected": false,
+            "text": "outcome",
+            "value": "outcome"
+          }
+        ],
+        "query": "all,workunit,outcome",
+        "type": "custom"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "utc",
+  "title": "04.03 - Work Entity Explorer",
+  "uid": "entity-cost-explorer"
+}

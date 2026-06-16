@@ -1,0 +1,14 @@
+[Unit]
+Description=Teamster replication push server
+After=network.target mysql.service
+
+[Service]
+Type=simple
+User=__USER__
+ExecStart=__BASEDIR__/lib/scripts/repl-push-server.sh
+Environment=REPL_PUSH_REMOTE=__REPL_PUSH_REMOTE__
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

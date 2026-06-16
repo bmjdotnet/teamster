@@ -1,0 +1,1411 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Composable tag-stack drill-down: pick any tag keys as hierarchy levels and see cost grouped by their values",
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 100,
+      "panels": [],
+      "title": "Overview \u2014 $stack_level_1 Stats",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "teamster-mysql"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "green",
+            "mode": "fixed"
+          },
+          "decimals": 0,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 0,
+        "y": 1
+      },
+      "id": 101,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "teamster-mysql"
+          },
+          "format": "table",
+          "rawSql": "SELECT ROUND(SUM(cost_usd), 4) AS value FROM cost_facts WHERE $__timeFilter(timestamp)",
+          "refId": "A"
+        }
+      ],
+      "title": "Total Cost (USD)",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "teamster-mysql"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": 0
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 8,
+        "y": 1
+      },
+      "id": 102,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "teamster-mysql"
+          },
+          "format": "table",
+          "rawSql": "SELECT COUNT(DISTINCT et.tag_id) AS value FROM entity_tags et JOIN tags t ON t.id = et.tag_id WHERE t.tag_key = '$stack_level_1'",
+          "refId": "A"
+        }
+      ],
+      "title": "Distinct $stack_level_1 Values",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "teamster-mysql"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": 0
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 16,
+        "y": 1
+      },
+      "id": 103,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "teamster-mysql"
+          },
+          "format": "table",
+          "rawSql": "SELECT COUNT(DISTINCT CONCAT(et.entity_type, ':', et.entity_id)) AS value FROM entity_tags et JOIN tags t ON t.id = et.tag_id WHERE t.tag_key = '$stack_level_1'",
+          "refId": "A"
+        }
+      ],
+      "title": "Entities Tagged with $stack_level_1",
+      "type": "stat"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "id": 110,
+      "panels": [],
+      "title": "Cost by Tag Stack ($stack_level_1 \u2192 $stack_level_2)",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "teamster-mysql"
+      },
+      "description": "Cost grouped by the selected tag stack levels. All cost is included. Cost with no WMS focus entity (entity_type='') appears as '(unallocated)' \u2014 no entity exists, so no tag can apply; this is an attribution gap, not a tagging gap. Cost whose entity exists but has no value for a level's key appears as '(untagged)'. Entities with multiple values for a key have their cost split evenly across the values (1/n weights), so the panel total always reconciles with Total Cost. Note: not all tag dimensions co-occur \u2014 e.g. product-tagged cost is rarely also work-type-tagged, so a large '(untagged)' share at Level 2 reflects real low overlap, not missing data. Pick Level 1/Level 2 keys that share entities (e.g. work-type \u2192 phase) for a dense stack.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineWidth": 1,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "decimals": 0,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 6
+      },
+      "id": 111,
+      "options": {
+        "barRadius": 0,
+        "barWidth": 0.6,
+        "fullHighlight": false,
+        "groupWidth": 0.7,
+        "legend": {
+          "calcs": [
+            "sum"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "orientation": "horizontal",
+        "showValue": "never",
+        "stacking": "normal",
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "xField": "level_1\\level_2",
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 100
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "teamster-mysql"
+          },
+          "format": "table",
+          "rawSql": "SELECT\n    CASE WHEN cr.entity_type = '' THEN '(unallocated)' ELSE COALESCE(x1.tag_value, '(untagged)') END AS level_1,\n    CASE WHEN cr.entity_type = '' THEN '(unallocated)' ELSE COALESCE(x2.tag_value, '(untagged)') END AS level_2,\n    ROUND(SUM(cr.cost_usd * COALESCE(x1.w, 1) * COALESCE(x2.w, 1)), 4) AS cost_usd\nFROM cost_facts cr\nLEFT JOIN (SELECT er.entity_type, er.entity_id, t.tag_value,\n           1.0 / COUNT(*) OVER (PARTITION BY er.entity_type, er.entity_id) AS w\n    FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n    WHERE t.tag_key = '$stack_level_1') x1\n  ON x1.entity_type = cr.entity_type AND x1.entity_id = cr.entity_id\nLEFT JOIN (SELECT er.entity_type, er.entity_id, t.tag_value,\n           1.0 / COUNT(*) OVER (PARTITION BY er.entity_type, er.entity_id) AS w\n    FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n    WHERE t.tag_key = '$stack_level_2') x2\n  ON x2.entity_type = cr.entity_type AND x2.entity_id = cr.entity_id\nWHERE $__timeFilter(cr.timestamp)\nGROUP BY level_1, level_2\nORDER BY level_1, cost_usd DESC\nLIMIT 500",
+          "refId": "A"
+        }
+      ],
+      "title": "Cost by $stack_level_1 \u2192 $stack_level_2 (stacked bars)",
+      "transformations": [
+        {
+          "id": "groupingToMatrix",
+          "options": {
+            "columnField": "level_2",
+            "emptyValue": "zero",
+            "rowField": "level_1",
+            "valueField": "cost_usd"
+          }
+        }
+      ],
+      "type": "barchart"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "teamster-mysql"
+      },
+      "description": "Two-dimensional cost matrix: Level 1 rows \u00d7 Level 2 columns. Cell background scales with cost (column-relative).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "continuous-GrYlRd"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "applyToRow": false,
+              "mode": "basic",
+              "type": "color-background"
+            },
+            "filterable": false,
+            "inspect": false,
+            "minWidth": 50
+          },
+          "decimals": 0,
+          "mappings": [],
+          "min": 0,
+          "noValue": "-",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "level_1\\level_2"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "$stack_level_1 \\ $stack_level_2"
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "auto"
+                }
+              },
+              {
+                "id": "unit",
+                "value": "string"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 12,
+        "w": 17,
+        "x": 0,
+        "y": 16
+      },
+      "id": 112,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "teamster-mysql"
+          },
+          "format": "table",
+          "rawSql": "SELECT\n    CASE WHEN cr.entity_type = '' THEN '(unallocated)' ELSE COALESCE(x1.tag_value, '(untagged)') END AS level_1,\n    CASE WHEN cr.entity_type = '' THEN '(unallocated)' ELSE COALESCE(x2.tag_value, '(untagged)') END AS level_2,\n    ROUND(SUM(cr.cost_usd * COALESCE(x1.w, 1) * COALESCE(x2.w, 1)), 4) AS cost_usd\nFROM cost_facts cr\nLEFT JOIN (SELECT er.entity_type, er.entity_id, t.tag_value,\n           1.0 / COUNT(*) OVER (PARTITION BY er.entity_type, er.entity_id) AS w\n    FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n    WHERE t.tag_key = '$stack_level_1') x1\n  ON x1.entity_type = cr.entity_type AND x1.entity_id = cr.entity_id\nLEFT JOIN (SELECT er.entity_type, er.entity_id, t.tag_value,\n           1.0 / COUNT(*) OVER (PARTITION BY er.entity_type, er.entity_id) AS w\n    FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n    WHERE t.tag_key = '$stack_level_2') x2\n  ON x2.entity_type = cr.entity_type AND x2.entity_id = cr.entity_id\nWHERE $__timeFilter(cr.timestamp)\nGROUP BY level_1, level_2\nORDER BY level_1, cost_usd DESC\nLIMIT 500",
+          "refId": "A"
+        }
+      ],
+      "title": "Cost Matrix: $stack_level_1 \u00d7 $stack_level_2",
+      "transformations": [
+        {
+          "id": "groupingToMatrix",
+          "options": {
+            "columnField": "level_2",
+            "rowField": "level_1",
+            "valueField": "cost_usd"
+          }
+        }
+      ],
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "teamster-mysql"
+      },
+      "description": "Cost table with filter_value applied to Level 1. Shows top entities within the selected filter.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": true,
+            "inspect": false
+          },
+          "decimals": 0,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "yellow",
+                "value": 10
+              },
+              {
+                "color": "orange",
+                "value": 50
+              }
+            ]
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "level_1"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "$stack_level_1"
+              },
+              {
+                "id": "custom.width",
+                "value": 180
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "level_2"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "$stack_level_2"
+              },
+              {
+                "id": "custom.width",
+                "value": 180
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "cost_usd"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Cost (USD)"
+              },
+              {
+                "id": "custom.width",
+                "value": 120
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 12,
+        "w": 7,
+        "x": 17,
+        "y": 16
+      },
+      "id": 113,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "enablePagination": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": true
+        },
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "Cost (USD)"
+          }
+        ]
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "teamster-mysql"
+          },
+          "format": "table",
+          "rawSql": "SELECT\n    CASE WHEN cr.entity_type = '' THEN '(unallocated)' ELSE COALESCE(x1.tag_value, '(untagged)') END AS level_1,\n    CASE WHEN cr.entity_type = '' THEN '(unallocated)' ELSE COALESCE(x2.tag_value, '(untagged)') END AS level_2,\n    ROUND(SUM(cr.cost_usd * COALESCE(x1.w, 1) * COALESCE(x2.w, 1)), 4) AS cost_usd\nFROM cost_facts cr\nLEFT JOIN (SELECT er.entity_type, er.entity_id, t.tag_value,\n           1.0 / COUNT(*) OVER (PARTITION BY er.entity_type, er.entity_id) AS w\n    FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n    WHERE t.tag_key = '$stack_level_1') x1\n  ON x1.entity_type = cr.entity_type AND x1.entity_id = cr.entity_id\nLEFT JOIN (SELECT er.entity_type, er.entity_id, t.tag_value,\n           1.0 / COUNT(*) OVER (PARTITION BY er.entity_type, er.entity_id) AS w\n    FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n    WHERE t.tag_key = '$stack_level_2') x2\n  ON x2.entity_type = cr.entity_type AND x2.entity_id = cr.entity_id\nWHERE $__timeFilter(cr.timestamp)\n  AND ('${filter_value:csv}' = '' OR FIND_IN_SET(x1.tag_value, '${filter_value:csv}') OR x1.tag_value IS NULL)\nGROUP BY level_1, level_2\nORDER BY cost_usd DESC\nLIMIT 500",
+          "refId": "A"
+        }
+      ],
+      "title": "Cost Table: $stack_level_1 \u2192 $stack_level_2 (filter: $filter_value)",
+      "type": "table"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 28
+      },
+      "id": 120,
+      "panels": [],
+      "title": "Cost by $stack_level_1 Over Time",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "teamster-mysql"
+      },
+      "description": "Cost series over time, one series per Level 1 tag value. Cost with no WMS focus entity (entity_type='') appears as '(unallocated)' \u2014 an attribution gap, not a tagging gap; cost whose entity has no Level 1 tag appears as '(untagged)'. Multi-valued entities are split evenly (1/n weights), so the stacked total reconciles with Total Cost. Stacked area shows total spend and each dimension's share over time.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "decimals": 0,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 29
+      },
+      "id": 121,
+      "options": {
+        "legend": {
+          "calcs": [
+            "sum",
+            "last"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "teamster-mysql"
+          },
+          "format": "time_series",
+          "rawSql": "SELECT\n    $__timeGroupAlias(cr.timestamp, $agg),\n    CASE WHEN cr.entity_type = '' THEN '(unallocated)' ELSE COALESCE(x1.tag_value, '(untagged)') END AS metric,\n    ROUND(SUM(cr.cost_usd * COALESCE(x1.w, 1)), 4) AS cost_usd\nFROM cost_facts cr\nLEFT JOIN (SELECT er.entity_type, er.entity_id, t.tag_value,\n           1.0 / COUNT(*) OVER (PARTITION BY er.entity_type, er.entity_id) AS w\n    FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n    WHERE t.tag_key = '$stack_level_1') x1\n  ON x1.entity_type = cr.entity_type AND x1.entity_id = cr.entity_id\nWHERE $__timeFilter(cr.timestamp)\nGROUP BY 1, CASE WHEN cr.entity_type = '' THEN '(unallocated)' ELSE COALESCE(x1.tag_value, '(untagged)') END\nORDER BY 1, metric",
+          "refId": "A"
+        }
+      ],
+      "title": "Cost by $stack_level_1 over time",
+      "transformations": [
+        {
+          "id": "convertFieldType",
+          "options": {
+            "conversions": [
+              {
+                "destinationType": "time",
+                "targetField": "time"
+              }
+            ]
+          }
+        },
+        {
+          "id": "partitionByValues",
+          "options": {
+            "fields": [
+              "metric"
+            ]
+          }
+        }
+      ],
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 37
+      },
+      "id": 130,
+      "panels": [],
+      "title": "Phase Cost Waterfall",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "teamster-mysql"
+      },
+      "description": "Cost per lifecycle phase from wms_intervals (kind=state, assembled). Rework is highlighted red as the key inefficiency metric.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineWidth": 1,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "decimals": 0,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "rework"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "build"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "green",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "review"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "test"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "design"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "purple",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 16,
+        "x": 0,
+        "y": 38
+      },
+      "id": 131,
+      "options": {
+        "barRadius": 0,
+        "barWidth": 0.6,
+        "fullHighlight": false,
+        "groupWidth": 0.7,
+        "legend": {
+          "calcs": [
+            "sum"
+          ],
+          "displayMode": "list",
+          "placement": "right",
+          "showLegend": true
+        },
+        "orientation": "auto",
+        "showValue": "auto",
+        "stacking": "none",
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 100
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "teamster-mysql"
+          },
+          "format": "table",
+          "rawSql": "SELECT\n    wi.phase AS Phase,\n    ROUND(SUM(wi.cost_usd), 4) AS Cost_USD,\n    ROUND(SUM(wi.duration_ms) / 3600000.0, 1) AS Hours\nFROM wms_intervals wi\nWHERE wi.kind = 'state'\n  AND wi.assembled_at IS NOT NULL\n  AND wi.phase IS NOT NULL\n  AND $__timeFilter(wi.started_at)\nGROUP BY wi.phase\nORDER BY FIELD(wi.phase, 'design', 'build', 'test', 'review', 'rework')",
+          "refId": "A"
+        }
+      ],
+      "title": "Phase Cost Waterfall (design \u2192 build \u2192 test \u2192 review \u2192 rework)",
+      "type": "barchart"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "teamster-mysql"
+      },
+      "description": "Phase cost and hours table. Rework % is the key efficiency metric.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": false,
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Cost_USD"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Hours"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "h"
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Phase"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 120
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 16,
+        "y": 38
+      },
+      "id": 132,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "enablePagination": false,
+          "fields": [
+            "Cost_USD",
+            "Hours"
+          ],
+          "reducer": [
+            "sum"
+          ],
+          "show": true
+        },
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": false,
+            "displayName": "Phase"
+          }
+        ]
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "teamster-mysql"
+          },
+          "format": "table",
+          "rawSql": "SELECT\n    wi.phase AS Phase,\n    ROUND(SUM(wi.cost_usd), 4) AS Cost_USD,\n    ROUND(SUM(wi.duration_ms) / 3600000.0, 1) AS Hours\nFROM wms_intervals wi\nWHERE wi.kind = 'state'\n  AND wi.assembled_at IS NOT NULL\n  AND wi.phase IS NOT NULL\n  AND $__timeFilter(wi.started_at)\nGROUP BY wi.phase\nORDER BY FIELD(wi.phase, 'design', 'build', 'test', 'review', 'rework')",
+          "refId": "A"
+        }
+      ],
+      "title": "Phase Cost Table",
+      "type": "table"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 47
+      },
+      "id": 140,
+      "panels": [],
+      "title": "Burn Rate Projection",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "teamster-mysql"
+      },
+      "description": "Daily cost from start of current month. Use this to project month-end spend based on the current run rate.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "decimals": 0,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 48
+      },
+      "id": 141,
+      "options": {
+        "legend": {
+          "calcs": [
+            "sum",
+            "last"
+          ],
+          "displayMode": "list",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "teamster-mysql"
+          },
+          "format": "time_series",
+          "rawSql": "SELECT\n    bucket_day AS time,\n    ROUND(SUM(cost_usd), 4) AS daily_cost\nFROM cost_rollup\nWHERE bucket_day >= DATE_FORMAT(CURDATE(), '%Y-%m-01')\nGROUP BY bucket_day\nORDER BY time",
+          "refId": "A"
+        }
+      ],
+      "title": "Month-to-date Daily Cost (burn projection base)",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 56
+      },
+      "id": 150,
+      "panels": [],
+      "title": "Tag Vocabulary",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "teamster-mysql"
+      },
+      "description": "Reference table: all defined tags with category, cardinality, usage count, and description.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": true,
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Key"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 120
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 140
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Category"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Cardinality"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Entities_Tagged"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Entities Tagged"
+              },
+              {
+                "id": "custom.width",
+                "value": 120
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 17,
+        "w": 24,
+        "x": 0,
+        "y": 57
+      },
+      "id": 151,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "enablePagination": true,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": false,
+            "displayName": "Key"
+          }
+        ]
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "teamster-mysql"
+          },
+          "format": "table",
+          "rawSql": "SELECT\n    t.tag_key AS `Key`,\n    t.tag_value AS Value,\n    t.category AS Category,\n    t.cardinality AS Cardinality,\n    COUNT(et.tag_id) AS Entities_Tagged,\n    t.description AS Description\nFROM tags t\nLEFT JOIN entity_tags et ON et.tag_id = t.id\nGROUP BY t.id, t.tag_key, t.tag_value, t.category, t.cardinality, t.description\nORDER BY t.tag_key, t.tag_value",
+          "refId": "A"
+        }
+      ],
+      "title": "Tag Vocabulary Reference",
+      "type": "table"
+    }
+  ],
+  "preload": false,
+  "refresh": "5m",
+  "schemaVersion": 41,
+  "tags": [
+    "teamster"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "text": "product",
+          "value": "product"
+        },
+        "datasource": {
+          "type": "mysql",
+          "uid": "teamster-mysql"
+        },
+        "definition": "SELECT DISTINCT tag_key FROM tags WHERE category = 'context' OR tag_key IN ('work-type', 'phase') ORDER BY tag_key",
+        "includeAll": false,
+        "label": "Level 1",
+        "name": "stack_level_1",
+        "options": [],
+        "query": "SELECT DISTINCT tag_key FROM tags WHERE category = 'context' OR tag_key IN ('work-type', 'phase') ORDER BY tag_key",
+        "refresh": 2,
+        "type": "query"
+      },
+      {
+        "current": {
+          "text": "work-type",
+          "value": "work-type"
+        },
+        "datasource": {
+          "type": "mysql",
+          "uid": "teamster-mysql"
+        },
+        "definition": "SELECT DISTINCT tag_key FROM tags WHERE category = 'context' OR tag_key IN ('work-type', 'phase') ORDER BY tag_key",
+        "includeAll": false,
+        "label": "Level 2",
+        "name": "stack_level_2",
+        "options": [],
+        "query": "SELECT DISTINCT tag_key FROM tags WHERE category = 'context' OR tag_key IN ('work-type', 'phase') ORDER BY tag_key",
+        "refresh": 2,
+        "type": "query"
+      },
+      {
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "mysql",
+          "uid": "teamster-mysql"
+        },
+        "definition": "SELECT DISTINCT tag_value FROM tags WHERE tag_key = '$stack_level_1' ORDER BY tag_value",
+        "includeAll": true,
+        "label": "Filter Level 1",
+        "multi": true,
+        "name": "filter_value",
+        "options": [],
+        "query": "SELECT DISTINCT tag_value FROM tags WHERE tag_key = '$stack_level_1' ORDER BY tag_value",
+        "refresh": 2,
+        "type": "query"
+      },
+      {
+        "auto": true,
+        "auto_count": 50,
+        "auto_min": "1m",
+        "current": {
+          "text": "$__auto",
+          "value": "$__auto"
+        },
+        "label": "Aggregation",
+        "name": "agg",
+        "options": [
+          {
+            "selected": false,
+            "text": "1m",
+            "value": "1m"
+          },
+          {
+            "selected": false,
+            "text": "5m",
+            "value": "5m"
+          },
+          {
+            "selected": false,
+            "text": "15m",
+            "value": "15m"
+          },
+          {
+            "selected": false,
+            "text": "1h",
+            "value": "1h"
+          },
+          {
+            "selected": false,
+            "text": "6h",
+            "value": "6h"
+          },
+          {
+            "selected": false,
+            "text": "1d",
+            "value": "1d"
+          }
+        ],
+        "query": "1m,5m,15m,1h,6h,1d",
+        "refresh": 2,
+        "type": "interval"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-30d",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "utc",
+  "title": "04.02 - Multidimension Cost Explorer",
+  "uid": "tag-stack-explorer"
+}

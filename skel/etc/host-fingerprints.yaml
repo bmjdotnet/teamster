@@ -1,0 +1,48 @@
+# Host fingerprint table — Path B collector host mapping (SPEC §8.2 / §8.3).
+#
+# When OTEL_RESOURCE_ATTRIBUTES="host.name=..." is NOT set on the client
+# (Path A), the bundled collector uses this table to assign a `host` label
+# by matching os_type and os_version from the metric resource attributes.
+#
+# Path A (OTEL_RESOURCE_ATTRIBUTES) wins when present; this file is the
+# fallback. Path C (scrape-time relabel, cc_host→host) handles in-flight
+# Mode-C sessions until Path A is fully rolled out.
+#
+# This file is the CANONICAL source of truth for host-name aliases.
+# The v1 collector does not consume it programmatically (deferred enrichment
+# seam per SPEC §8.3); it is rendered here for operator reference and future
+# use by a teamster_enricher processor.
+#
+# To add a host: append an entry with its os_type and os_version. The
+# collector will match the FIRST entry where all `when` conditions are
+# satisfied. The final entry should be the default fallback (no `when`).
+#
+# The entries below are EXAMPLES. Replace them with your own fleet, or
+# delete them to leave only the `unknown` fallback. To find a host's
+# os_version, run `uname -r` on Linux or check the OTEL resource attributes
+# the client emits.
+
+fingerprints:
+  # Example Linux host — match a specific kernel version.
+  - host: "host-a"
+    when:
+      os_type: "linux"
+      os_version: "6.8.0-0-generic"
+
+  # Example second Linux host on a different kernel.
+  # Add os_version when known; omit to match any Linux version on this host
+  # by adding a hostname-based condition instead (future enrichment seam).
+  - host: "host-b"
+    when:
+      os_type: "linux"
+      os_version: "6.1.0-0-amd64"
+
+  # Example macOS host — match any macOS version.
+  # If multiple macOS hosts exist, add os_version to disambiguate.
+  - host: "host-mac"
+    when:
+      os_type: "darwin"
+
+  # Default: no conditions match → emit "unknown". Operator should add
+  # host-specific entries above to eliminate this bucket in production.
+  - host: "unknown"

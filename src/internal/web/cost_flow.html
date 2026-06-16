@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cost Flow — Teamster</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #0d1117; color: #c9d1d9; font-family: monospace; font-size: 13px; padding: 16px; }
+h1 { color: #58a6ff; margin-bottom: 12px; font-size: 16px; }
+nav { margin-bottom: 12px; }
+nav a { color: #5099ff; text-decoration: none; margin-right: 12px; }
+.controls {
+  display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+  background: #161b22; border: 1px solid #21262d; border-radius: 4px;
+  padding: 10px 14px; margin-bottom: 16px;
+}
+.controls label { color: #8b949e; font-size: 12px; }
+.controls select, .controls input[type="date"] {
+  background: #0d1117; color: #c9d1d9; border: 1px solid #30363d;
+  border-radius: 3px; padding: 4px 8px; font-family: monospace; font-size: 12px;
+}
+.controls button {
+  background: #21262d; color: #58a6ff; border: 1px solid #30363d;
+  border-radius: 3px; padding: 4px 12px; font-family: monospace; font-size: 12px;
+  cursor: pointer;
+}
+.controls button:hover { background: #30363d; }
+.meta { color: #6e7681; font-size: 11px; margin-bottom: 12px; }
+.meta .total { color: #3fb950; font-weight: bold; }
+#chart-container {
+  width: 100%; min-height: 500px; background: #0d1117;
+  border: 1px solid #21262d; border-radius: 4px; padding: 8px;
+  position: relative;
+}
+#chart-container svg { display: block; width: 100%; }
+#status { color: #6e7681; font-size: 12px; padding: 12px; }
+.tooltip {
+  position: absolute; background: #161b22; border: 1px solid #30363d;
+  border-radius: 4px; padding: 8px 12px; font-size: 12px; pointer-events: none;
+  opacity: 0; transition: opacity 0.15s; z-index: 10; max-width: 220px;
+}
+.tooltip .tip-label { color: #c9d1d9; font-weight: bold; margin-bottom: 4px; }
+.tooltip .tip-value { color: #3fb950; }
+</style>
+</head>
+<body>
+<h1>Teamster — Cost Flow</h1>
+<nav>
+  <a href="/">Activity Stream</a>
+  <a href="/wms">WMS State</a>
+  <a href="/wms/cost-flow">Cost Flow</a>
+</nav>
+
+<div class="controls">
+  <label>View:
+    <select id="sel-view">
+      <option value="project-phase-agent">Project → Phase → Agent</option>
+      <option value="project-worktype-model">Project → Work-Type → Model</option>
+      <option value="entity-agent">Entity → Agent</option>
+    </select>
+  </label>
+  <label>From:
+    <input type="date" id="inp-from">
+  </label>
+  <label>To:
+    <input type="date" id="inp-to">
+  </label>
+  <button id="btn-refresh">Refresh</button>
+</div>
+
+<div class="meta" id="meta-line"></div>
+<div id="chart-container">
+  <div id="status">Loading…</div>
+  <div class="tooltip" id="tooltip"></div>
+</div>
+
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/d3-sankey@0.12.3/dist/d3-sankey.min.js"></script>
+<script>
+(function () {
+  // Defaults: from = 30 days ago, to = today.
+  const today = new Date();
+  const prior = new Date(today);
+  prior.setDate(prior.getDate() - 30);
+  const fmt = d => d.toISOString().slice(0, 10);
+
+  document.getElementById('inp-from').value = fmt(prior);
+  document.getElementById('inp-to').value   = fmt(today);
+
+  // Node group → CSS color
+  const groupColor = {
+    total:      '#c9d1d9',
+    project:    '#58a6ff',
+    phase:      null,       // per-value color below
+    worktype:   '#d2a8ff',
+    model:      '#d2a8ff',
+    agent:      '#56d364',
+    entity:     '#79c0ff',
+    entitytype: '#58a6ff',
+  };
+
+  const phaseColor = {
+    build:         '#56d364',
+    design:        '#58a6ff',
+    test:          '#e3b341',
+    review:        '#d29922',
+    rework:        '#f85149',
+    unclassified:  '#484f58',
+  };
+
+  function nodeColor(n) {
+    if (n.group === 'phase') return phaseColor[n.id.replace('phase:', '')] || '#6e7681';
+    if (n.group === 'untagged' || n.label === 'untagged' || n.label === 'untyped') return '#484f58';
+    return groupColor[n.group] || '#6e7681';
+  }
+
+  function fmtUSD(v) {
+    if (v >= 1000) return '$' + (v / 1000).toFixed(2) + 'k';
+    return '$' + v.toFixed(2);
+  }
+
+  const tooltip = document.getElementById('tooltip');
+  const container = document.getElementById('chart-container');
+
+  function showTip(evt, html) {
+    tooltip.innerHTML = html;
+    tooltip.style.opacity = '1';
+    moveTip(evt);
+  }
+  function moveTip(evt) {
+    const rect = container.getBoundingClientRect();
+    let x = evt.clientX - rect.left + 12;
+    let y = evt.clientY - rect.top + 12;
+    if (x + 230 > container.offsetWidth) x = x - 244;
+    tooltip.style.left = x + 'px';
+    tooltip.style.top  = y + 'px';
+  }
+  function hideTip() { tooltip.style.opacity = '0'; }
+
+  function render(data) {
+    const status = document.getElementById('status');
+    status.textContent = '';
+
+    // Clear old SVG.
+    d3.select('#chart-container svg').remove();
+
+    const nodes = data.nodes;
+    const links = data.links;
+
+    if (!nodes.length || !links.length) {
+      status.textContent = 'No data for the selected range and view.';
+      return;
+    }
+
+    const width  = container.clientWidth - 16;
+    const height = Math.max(500, Math.min(900, nodes.length * 28 + 80));
+
+    const svg = d3.select('#chart-container')
+      .append('svg')
+      .attr('width', width)
+      .attr('height', height);
+
+    // Build node id→index map for d3-sankey.
+    const nodeIndex = {};
+    nodes.forEach((n, i) => { nodeIndex[n.id] = i; });
+
+    const sankeyNodes = nodes.map(n => Object.assign({}, n));
+    const sankeyLinks = links
+      .map(l => ({
+        source: nodeIndex[l.source],
+        target: nodeIndex[l.target],
+        value:  l.value,
+        _src:   l.source,
+        _tgt:   l.target,
+      }))
+      .filter(l => l.source !== undefined && l.target !== undefined && l.source !== l.target);
+
+    const sankey = d3.sankey()
+      .nodeId(d => d.index)
+      .nodeWidth(16)
+      .nodePadding(12)
+      .extent([[1, 12], [width - 160, height - 12]]);
+
+    let graph;
+    try {
+      graph = sankey({ nodes: sankeyNodes, links: sankeyLinks });
+    } catch (e) {
+      document.getElementById('status').textContent = 'Sankey layout error: ' + e.message;
+      return;
+    }
+
+    // Links.
+    svg.append('g')
+      .attr('fill', 'none')
+      .selectAll('path')
+      .data(graph.links)
+      .join('path')
+        .attr('d', d3.sankeyLinkHorizontal())
+        .attr('stroke', d => nodeColor(graph.nodes[d.source.index]))
+        .attr('stroke-width', d => Math.max(1, d.width))
+        .attr('opacity', 0.3)
+        .on('mouseover', function (evt, d) {
+          d3.select(this).attr('opacity', 0.7);
+          showTip(evt,
+            `<div class="tip-label">${d.source.label} → ${d.target.label}</div>` +
+            `<div class="tip-value">${fmtUSD(d.value)}</div>`
+          );
+        })
+        .on('mousemove', moveTip)
+        .on('mouseout', function () {
+          d3.select(this).attr('opacity', 0.3);
+          hideTip();
+        });
+
+    // Nodes.
+    const node = svg.append('g')
+      .selectAll('g')
+      .data(graph.nodes)
+      .join('g');
+
+    node.append('rect')
+      .attr('x', d => d.x0)
+      .attr('y', d => d.y0)
+      .attr('height', d => Math.max(1, d.y1 - d.y0))
+      .attr('width', d => d.x1 - d.x0)
+      .attr('fill', d => nodeColor(d))
+      .attr('opacity', 0.9)
+      .on('mouseover', function (evt, d) {
+        showTip(evt,
+          `<div class="tip-label">${d.label}</div>` +
+          `<div class="tip-value">${fmtUSD(d.value)}</div>` +
+          `<div style="color:#8b949e;font-size:11px">${d.group}</div>`
+        );
+      })
+      .on('mousemove', moveTip)
+      .on('mouseout', hideTip);
+
+    // Node labels — right of node if space, left otherwise.
+    node.append('text')
+      .attr('x', d => (d.x0 < width / 2 ? d.x1 + 6 : d.x0 - 6))
+      .attr('y', d => (d.y0 + d.y1) / 2)
+      .attr('dy', '0.35em')
+      .attr('text-anchor', d => (d.x0 < width / 2 ? 'start' : 'end'))
+      .attr('font-size', 11)
+      .attr('fill', '#c9d1d9')
+      .text(d => {
+        const label = d.label.length > 22 ? d.label.slice(0, 20) + '…' : d.label;
+        return label + ' ' + fmtUSD(d.value);
+      });
+  }
+
+  function load() {
+    const from  = document.getElementById('inp-from').value;
+    const to    = document.getElementById('inp-to').value;
+    const view  = document.getElementById('sel-view').value;
+
+    document.getElementById('status').textContent = 'Loading…';
+    document.getElementById('meta-line').textContent = '';
+    d3.select('#chart-container svg').remove();
+
+    const url = `/wms/api/cost-flow?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&view=${encodeURIComponent(view)}`;
+    fetch(url)
+      .then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      })
+      .then(data => {
+        const m = data.metadata || {};
+        document.getElementById('meta-line').innerHTML =
+          `View: <strong>${m.view}</strong> &nbsp;|&nbsp; ` +
+          `Range: ${m.from} to ${m.to} &nbsp;|&nbsp; ` +
+          `Total: <span class="total">${fmtUSD(m.total_cost_usd || 0)}</span>`;
+        render(data);
+      })
+      .catch(err => {
+        document.getElementById('status').textContent = 'Error: ' + err.message;
+      });
+  }
+
+  document.getElementById('btn-refresh').addEventListener('click', load);
+
+  // Auto-load on page open.
+  load();
+})();
+</script>
+</body>
+</html>

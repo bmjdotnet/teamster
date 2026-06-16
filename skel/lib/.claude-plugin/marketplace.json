@@ -1,0 +1,12 @@
+{
+  "name": "teamster",
+  "description": "Teamster workflow orchestration skills",
+  "owner": {"name": "bmjdotnet"},
+  "plugins": [
+    {
+      "name": "teamster",
+      "description": "Agent Teams protocol, WMS, and observability",
+      "source": "./plugin"
+    }
+  ]
+}

@@ -1,0 +1,1866 @@
+// Package mysql is the MySQL-backed [store.Store] implementation.
+//
+// DSN form: mysql://user:pass@host:port/database (parsed by config.ParseStoreDSN).
+// The internal driver (go-sql-driver/mysql) takes its own DSN form which this
+// package derives from the URL.
+//
+// Schema target: MySQL 8.0.45, utf8mb4 / utf8mb4_0900_ai_ci. Timestamps are
+// DATETIME(6) UTC; Go always writes time.Now.UTC. Cross-backend conversion
+// rules per SPEC §6.3 keep this in lockstep with internal/store/sqlite.
+package mysql
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/url"
+	"strings"
+	"time"
+
+	mysqldriver "github.com/go-sql-driver/mysql"
+
+	"github.com/bmjdotnet/teamster/internal/store"
+	"github.com/bmjdotnet/teamster/internal/wms"
+)
+
+var _ store.Store = (*Store)(nil)
+
+// Store is the MySQL-backed implementation of [store.Store].
+type Store struct {
+	db *sql.DB
+	// requireTagsOnDone gates hard close-out enforcement in UpdateWorkUnitStatus:
+	// when true, a workunit's 'done' transition is rejected if a required tag key
+	// has no value bound. Set via WithRequireTagsOnDone; default false.
+	requireTagsOnDone bool
+}
+
+// Option configures a Store at construction. Options are applied after the
+// connection is opened and migrated, so they only set behavior flags — they
+// never touch the pool or schema.
+type Option func(*Store)
+
+// WithRequireTagsOnDone enables hard close-out enforcement: when set, the store
+// rejects a workunit's 'done' transition while any required tag key is unset.
+// Wired from config.RequireTagsOnDone (TEAMSTER_REQUIRE_TAGS_ON_DONE). Omitting
+// the option leaves enforcement off, byte-identical to pre-feature behavior.
+func WithRequireTagsOnDone(v bool) Option {
+	return func(s *Store) { s.requireTagsOnDone = v }
+}
+
+// New opens a MySQL connection from a TEAMSTER_STORE_DSN value (mysql://...)
+// and runs migrations. The connection pool is left at driver defaults; the
+// caller may tune via SetMaxOpenConns after construction if needed. Optional
+// Options set behavior flags (e.g. WithRequireTagsOnDone); existing callers
+// that pass none keep their prior behavior.
+func New(dsn string, opts ...Option) (*Store, error) {
+	drvDSN, err := convertDSN(dsn)
+	if err != nil {
+		return nil, err
+	}
+	db, err := sql.Open("mysql", drvDSN)
+	if err != nil {
+		return nil, fmt.Errorf("open mysql: %w", err)
+	}
+	pingCtx, pingCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer pingCancel()
+	if err := db.PingContext(pingCtx); err != nil {
+		db.Close() //nolint:errcheck
+		return nil, fmt.Errorf("ping mysql: %w", err)
+	}
+	// migrate gets its own, larger budget. A losing caller can block on the
+	// GET_LOCK advisory lock for up to migrateLockTimeout while the winner runs;
+	// the 5s ping budget would expire mid-wait and surface as a spurious
+	// "context deadline exceeded" even though the lock serialization is working.
+	// Allow the full lock wait plus headroom for the winner's actual DDL/backfill.
+	migrateCtx, migrateCancel := context.WithTimeout(context.Background(), migrateLockTimeout+30*time.Second)
+	defer migrateCancel()
+	if err := migrate(migrateCtx, db); err != nil {
+		db.Close() //nolint:errcheck
+		return nil, fmt.Errorf("migrate: %w", err)
+	}
+	s := &Store{db: db}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s, nil
+}
+
+// Close releases the underlying connection pool.
+func (s *Store) Close() error { return s.db.Close() }
+
+// DB returns the underlying *sql.DB for callers that need raw SQL access (e.g. the /wms dashboard).
+func (s *Store) DB() *sql.DB { return s.db }
+
+// convertDSN turns a mysql://user:pass@host:port/db?param=v URL into the
+// go-sql-driver DSN form (user:pass@tcp(host:port)/db?parseTime=true&...).
+// parseTime=true and time_zone='+00:00' are forced so DATETIME(6) columns
+// round-trip as UTC time.Time without surprise.
+func convertDSN(raw string) (string, error) {
+	if !strings.HasPrefix(raw, "mysql://") {
+		// raw is malformed (wrong scheme) but may still carry a password — report
+		// only the scheme, never the userinfo. redact.Redact's userinfo rule can't
+		// mask a password containing a space (RE2, no whitespace in the value
+		// class), so echoing even a redacted raw is not leak-proof here.
+		return "", fmt.Errorf("mysql DSN must start with mysql://; got scheme %q", dsnScheme(raw))
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		// net/url returns a *url.Error whose string embeds the raw DSN (and thus
+		// the password) via its URL field. Surface only the underlying cause.
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			err = ue.Err
+		}
+		return "", fmt.Errorf("parse mysql DSN: %v", err)
+	}
+	cfg := mysqldriver.NewConfig()
+	cfg.Net = "tcp"
+	cfg.Addr = u.Host
+	if u.User != nil {
+		cfg.User = u.User.Username()
+		if pw, ok := u.User.Password(); ok {
+			cfg.Passwd = pw
+		}
+	}
+	cfg.DBName = strings.TrimPrefix(u.Path, "/")
+	cfg.ParseTime = true
+	cfg.Loc = time.UTC
+	cfg.Params = map[string]string{"time_zone": "'+00:00'"}
+	for k, vs := range u.Query() {
+		if len(vs) > 0 {
+			cfg.Params[k] = vs[0]
+		}
+	}
+	return cfg.FormatDSN(), nil
+}
+
+// dsnScheme returns the scheme portion (before "://") of a DSN, or "<none>" if
+// there is no scheme separator. It deliberately never returns userinfo, so it
+// is safe to print in an error for a wrong-scheme DSN regardless of password
+// shape (a password with a space defeats redact.Redact's userinfo masking).
+func dsnScheme(raw string) string {
+	if i := strings.Index(raw, "://"); i >= 0 {
+		return raw[:i]
+	}
+	return "<none>"
+}
+
+// maxTagDescriptionLen is the tags.description column width (v31 widened it from
+// 255 to 1024). The store guards writes against it so an over-length description
+// returns a clear error instead of a raw MySQL 1406 "Data too long" — the tag
+// steward writes rich rule-bearing descriptions and needs an actionable message.
+const maxTagDescriptionLen = 1024
+
+// checkTagDescriptionLen returns a clear over-length error (naming the count and
+// the limit) when a description would not fit tags.description, else nil. Length
+// is measured in runes — the column is VARCHAR(1024) (characters), and multibyte
+// glyphs like em-dashes must count as one toward that limit, not as their byte
+// width.
+func checkTagDescriptionLen(description string) error {
+	if n := len([]rune(description)); n > maxTagDescriptionLen {
+		return fmt.Errorf("description too long: %d chars (max %d)", n, maxTagDescriptionLen)
+	}
+	return nil
+}
+
+// --- helpers ---
+
+func requireOneRow(res sql.Result, entityType, id string) error {
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("%s %s not found", entityType, id)
+	}
+	return nil
+}
+
+// validTagEntityType reports whether entityType may carry tags. Tags bind to
+// any work entity via entity_tags — outcome/workunit are the work-entity
+// targets; 'interval' annotates a wms_intervals row (entity_id = the
+// stringified interval row id). entity_tags.entity_id is VARCHAR(128), so a
+// stringified BIGINT id fits with no DDL change.
+func validTagEntityType(entityType string) error {
+	switch entityType {
+	case wms.EntityOutcome, wms.EntityWorkUnit, wms.EntityInterval:
+		return nil
+	default:
+		return fmt.Errorf("unknown entity type: %s", entityType)
+	}
+}
+
+// statusTableName maps an entity type to the base table whose status cache the
+// event-record machinery keeps current. Used by TransitionEventRecord to keep
+// the status column in sync with the open event record.
+func statusTableName(entityType string) (string, error) {
+	switch entityType {
+	case wms.EntityOutcome:
+		return "outcomes", nil
+	case wms.EntityWorkUnit:
+		return "workunits", nil
+	default:
+		return "", fmt.Errorf("unknown entity type: %s", entityType)
+	}
+}
+
+func nowUTC() time.Time { return time.Now().UTC() }
+
+// --- v2 entity CRUD is in store_v2.go. v1 CRUD removed (v17 rename). ---
+
+// RoleAllowed checks whether role may make the transition entityType:oldStatus→newStatus.
+// If transition_rules is empty, all transitions are allowed (backward-compatible).
+// Otherwise, the role must match an explicit row or a wildcard ('*') row.
+func (s *Store) RoleAllowed(ctx context.Context, entityType, oldStatus, newStatus, role string) (bool, error) {
+	var total int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM transition_rules`).Scan(&total); err != nil {
+		return false, err
+	}
+	if total == 0 {
+		return true, nil
+	}
+
+	var count int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM transition_rules
+		WHERE entity_type = ? AND old_status = ? AND new_status = ?
+		  AND (required_role = ? OR required_role = '*')`,
+		entityType, oldStatus, newStatus, role,
+	).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+// --- Journal ---
+
+func (s *Store) GetJournalEntries(ctx context.Context, entityType, entityID string, limit int) ([]wms.JournalEntry, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, entity_type, entity_id, field,
+		       COALESCE(old_value, ''), COALESCE(new_value, ''),
+		       COALESCE(agent_id, ''), COALESCE(host, ''),
+		       COALESCE(session_id, ''), COALESCE(notes, ''),
+		       created_at
+		FROM wms_journal
+		WHERE entity_type = ? AND entity_id = ?
+		ORDER BY created_at DESC
+		LIMIT ?`, entityType, entityID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []wms.JournalEntry
+	for rows.Next() {
+		var e wms.JournalEntry
+		if err := rows.Scan(
+			&e.ID, &e.EntityType, &e.EntityID, &e.Field,
+			&e.OldValue, &e.NewValue,
+			&e.AgentID, &e.Host, &e.SessionID, &e.Notes,
+			&e.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		e.CreatedAt = e.CreatedAt.UTC()
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) WriteJournalEntry(ctx context.Context, entry wms.JournalEntry) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO wms_journal
+			(entity_type, entity_id, field, old_value, new_value,
+			 agent_id, host, session_id, notes)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		entry.EntityType, entry.EntityID, entry.Field,
+		entry.OldValue, entry.NewValue,
+		entry.AgentID, entry.Host, entry.SessionID, entry.Notes,
+	)
+	return err
+}
+
+// --- Event Records ---
+
+func (s *Store) OpenEventRecord(ctx context.Context, entityType, entityID, state, sessionID, agentName, host string) error {
+	now := nowUTC()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	if err := openStateInterval(ctx, tx, entityType, entityID, state, sessionID, agentName, host, now); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// openStateInterval inserts a kind='state' wms_intervals row for an EventRecord
+// open. identity_source is "direct" when identity is present, otherwise empty
+// (the v23 carry fills it). wms_intervals is the sole store post-W3; phase/cost
+// stay NULL until the async assembly (MF-5).
+func openStateInterval(ctx context.Context, tx *sql.Tx, entityType, entityID, state, sessionID, agentName, host string, at time.Time) error {
+	idSource := ""
+	if sessionID != "" {
+		idSource = "direct"
+	}
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO wms_intervals
+			(kind, entity_type, entity_id, state, started_at, session_id, agent_name, host, identity_source)
+		VALUES ('state', ?, ?, ?, ?, ?, ?, ?, ?)`,
+		entityType, entityID, state, at, sessionID, agentName, host, idSource)
+	return err
+}
+
+func (s *Store) GetOpenEventRecord(ctx context.Context, entityType, entityID string) (*wms.EventRecord, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, entity_type, entity_id, state, started_at, ended_at,
+		       duration_ms, session_id, agent_name, host, phase, phase_source
+		FROM wms_intervals
+		WHERE kind = 'state' AND entity_type = ? AND entity_id = ? AND ended_at IS NULL
+		ORDER BY started_at DESC
+		LIMIT 1`, entityType, entityID)
+	var r wms.EventRecord
+	var endedAt sql.NullTime
+	var durationMs sql.NullInt64
+	var phase sql.NullString
+	if err := row.Scan(&r.ID, &r.EntityType, &r.EntityID, &r.State, &r.StartedAt,
+		&endedAt, &durationMs, &r.SessionID, &r.AgentName, &r.Host, &phase, &r.PhaseSource); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	r.StartedAt = r.StartedAt.UTC()
+	if endedAt.Valid {
+		t := endedAt.Time.UTC()
+		r.EndedAt = &t
+	}
+	if durationMs.Valid {
+		r.DurationMs = &durationMs.Int64
+	}
+	if phase.Valid {
+		p := phase.String
+		r.Phase = &p
+	}
+	return &r, nil
+}
+
+func (s *Store) ListEventRecords(ctx context.Context, entityType, entityID string, limit int) ([]wms.EventRecord, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, entity_type, entity_id, state, started_at, ended_at,
+		       duration_ms, session_id, agent_name, host, phase, phase_source
+		FROM wms_intervals
+		WHERE kind = 'state' AND entity_type = ? AND entity_id = ?
+		ORDER BY started_at DESC
+		LIMIT ?`, entityType, entityID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []wms.EventRecord
+	for rows.Next() {
+		var r wms.EventRecord
+		var endedAt sql.NullTime
+		var durationMs sql.NullInt64
+		var phase sql.NullString
+		if err := rows.Scan(&r.ID, &r.EntityType, &r.EntityID, &r.State, &r.StartedAt,
+			&endedAt, &durationMs, &r.SessionID, &r.AgentName, &r.Host, &phase, &r.PhaseSource); err != nil {
+			return nil, err
+		}
+		r.StartedAt = r.StartedAt.UTC()
+		if endedAt.Valid {
+			t := endedAt.Time.UTC()
+			r.EndedAt = &t
+		}
+		if durationMs.Valid {
+			r.DurationMs = &durationMs.Int64
+		}
+		if phase.Valid {
+			p := phase.String
+			r.Phase = &p
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) TransitionEventRecord(ctx context.Context, entityType, entityID, newState, sessionID, agentName, host string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	now := nowUTC()
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id, state, started_at FROM wms_intervals
+		WHERE kind = 'state' AND entity_type = ? AND entity_id = ? AND ended_at IS NULL
+		ORDER BY started_at DESC
+		FOR UPDATE`, entityType, entityID)
+	if err != nil {
+		return fmt.Errorf("lock open records: %w", err)
+	}
+
+	type openRec struct {
+		id        int64
+		state     string
+		startedAt time.Time
+	}
+	var open []openRec
+	for rows.Next() {
+		var r openRec
+		if err := rows.Scan(&r.id, &r.state, &r.startedAt); err != nil {
+			rows.Close() //nolint:errcheck
+			return err
+		}
+		open = append(open, r)
+	}
+	rows.Close() //nolint:errcheck
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	if len(open) == 0 {
+		if err := openStateInterval(ctx, tx, entityType, entityID, newState, sessionID, agentName, host, now); err != nil {
+			return fmt.Errorf("open state interval (no prior): %w", err)
+		}
+		table, tErr := statusTableName(entityType)
+		if tErr != nil {
+			return tErr
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE `+table+` SET status = ?, updated_at = ? WHERE id = ?`,
+			newState, now, entityID); err != nil {
+			return fmt.Errorf("update status cache: %w", err)
+		}
+		return tx.Commit()
+	}
+
+	if len(open) > 1 {
+		slog.Warn("wms: double-open detected",
+			"entity_type", entityType, "entity_id", entityID, "count", len(open))
+		for i := 1; i < len(open); i++ {
+			closeAt := open[0].startedAt
+			dur := closeAt.Sub(open[i].startedAt).Milliseconds()
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE wms_intervals SET ended_at = ?, duration_ms = ? WHERE id = ?`,
+				closeAt, dur, open[i].id); err != nil {
+				return fmt.Errorf("close stale record %d: %w", open[i].id, err)
+			}
+		}
+	}
+
+	current := open[0]
+
+	if current.state == newState {
+		return tx.Commit()
+	}
+
+	// Close the current open row and open the new one. closeOpenStateIntervals
+	// closes EVERY remaining open kind='state' row for this entity at `now`
+	// (the stale double-open rows above were already closed at open[0].startedAt,
+	// so this targets `current`); the FOR-UPDATE serialization is the single-open
+	// invariant.
+	if err := closeOpenStateIntervals(ctx, tx, entityType, entityID, now); err != nil {
+		return fmt.Errorf("close state intervals: %w", err)
+	}
+	if err := openStateInterval(ctx, tx, entityType, entityID, newState, sessionID, agentName, host, now); err != nil {
+		return fmt.Errorf("open state interval: %w", err)
+	}
+
+	table, tErr := statusTableName(entityType)
+	if tErr != nil {
+		return tErr
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE `+table+` SET status = ?, updated_at = ? WHERE id = ?`,
+		newState, now, entityID); err != nil {
+		return fmt.Errorf("update status cache: %w", err)
+	}
+
+	return tx.Commit()
+}
+
+// closeOpenStateIntervals closes every open kind='state' wms_intervals row for
+// the entity at `at`, computing duration_ms from started_at. Closing all open
+// rows (not just one) also reconciles any stale double-open, keeping the
+// single-open-after-transition shape.
+func closeOpenStateIntervals(ctx context.Context, tx *sql.Tx, entityType, entityID string, at time.Time) error {
+	_, err := tx.ExecContext(ctx, `
+		UPDATE wms_intervals
+		SET ended_at = ?,
+		    duration_ms = TIMESTAMPDIFF(MICROSECOND, started_at, ?) / 1000
+		WHERE kind = 'state' AND entity_type = ? AND entity_id = ? AND ended_at IS NULL`,
+		at, at, entityType, entityID)
+	return err
+}
+
+// UpdateEventRecordPhase sets the phase classification on one interval row,
+// enforcing declared-wins precedence in the WHERE clause:
+//   - a 'declared' write always applies (the `OR ? = 'declared'` arm);
+//   - a 'classifier' write (B4) applies only when the row is not already
+//     declared (`phase_source <> 'declared'`).
+//
+// It writes the wms_intervals column directly — NOT the tag vocabulary —
+// so it never touches the systemManagedKeys deny-list. A no-op (0 rows) when a
+// classifier write is blocked by an existing declared phase; that is expected,
+// not an error.
+func (s *Store) UpdateEventRecordPhase(ctx context.Context, id int64, phase, source string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE wms_intervals
+		SET phase = ?, phase_source = ?, assembled_at = ?
+		WHERE id = ? AND kind = 'state' AND (phase_source <> 'declared' OR ? = 'declared')`,
+		phase, source, nowUTC(), id, source)
+	return err
+}
+
+// MarkIntervalAssembled stamps assembled_at on an interval WITHOUT setting a
+// phase — for an interval that had no activity signals, so its phase stays NULL
+// ("unclassified") yet it is not re-selected by ListIntervalsNeedingPhase every
+// pass (the anti-join keys on assembled_at). Scoped to non-declared rows so a
+// declared phase is never disturbed.
+func (s *Store) MarkIntervalAssembled(ctx context.Context, id int64) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE wms_intervals
+		SET assembled_at = ?
+		WHERE id = ? AND kind = 'state' AND phase_source <> 'declared'`, nowUTC(), id)
+	return err
+}
+
+// ListIntervalsNeedingPhase returns closed intervals whose phase is not yet
+// derived (or is stale) and is not a declared override — the work set for the
+// async phase classifier (cmd/classify). An interval qualifies when it is
+//   - closed (ended_at IS NOT NULL),
+//   - not declared (phase_source <> 'declared'; declared wins and is left
+//     alone), and
+//   - unassembled or stale (phase IS NULL, or assembled_at predates the close,
+//     so an interval re-closed after assembly is re-derived).
+//
+// The SELECT column set mirrors ListEventRecords so callers scan EventRecord
+// consistently. Rows are returned oldest-first so a forward pass progresses
+// deterministically. limit <= 0 defaults to 500.
+func (s *Store) ListIntervalsNeedingPhase(ctx context.Context, limit int) ([]wms.EventRecord, error) {
+	if limit <= 0 {
+		limit = 500
+	}
+	// Idempotency is driven by assembled_at, NOT by phase IS NULL: a no-signal
+	// interval legitimately keeps a NULL phase but IS marked assembled (via
+	// MarkIntervalAssembled), so it must not be re-selected every pass. The
+	// anti-join is therefore "unassembled or re-closed since assembly".
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, entity_type, entity_id, state, started_at, ended_at,
+		       duration_ms, session_id, agent_name, host, phase, phase_source
+		FROM wms_intervals
+		WHERE kind = 'state'
+		  AND ended_at IS NOT NULL
+		  AND phase_source <> 'declared'
+		  AND (assembled_at IS NULL OR assembled_at < ended_at)
+		ORDER BY ended_at ASC
+		LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []wms.EventRecord
+	for rows.Next() {
+		var r wms.EventRecord
+		var endedAt sql.NullTime
+		var durationMs sql.NullInt64
+		var phase sql.NullString
+		if err := rows.Scan(&r.ID, &r.EntityType, &r.EntityID, &r.State, &r.StartedAt,
+			&endedAt, &durationMs, &r.SessionID, &r.AgentName, &r.Host, &phase, &r.PhaseSource); err != nil {
+			return nil, err
+		}
+		r.StartedAt = r.StartedAt.UTC()
+		if endedAt.Valid {
+			t := endedAt.Time.UTC()
+			r.EndedAt = &t
+		}
+		if durationMs.Valid {
+			r.DurationMs = &durationMs.Int64
+		}
+		if phase.Valid {
+			p := phase.String
+			r.Phase = &p
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// ClearClassifierPhases resets the assembly state of every interval the
+// classifier has touched so the next forward pass re-derives it with the current
+// rules and signals — the --reclassify (Reallocate-style) recovery path. It
+// clears two cohorts, both NON-declared so a 'declared' phase is never disturbed:
+//   - phase_source = 'classifier' rows: a phase was derived — clear it.
+//   - phase_source = ” AND phase IS NULL AND assembled_at IS NOT NULL rows: a
+//     no-signal interval the classifier visited and marked assembled (via
+//     MarkIntervalAssembled). Resetting assembled_at lets a signal backfill be
+//     re-evaluated. A never-touched interval (assembled_at NULL) is left alone.
+//
+// Returns the number of rows reset.
+func (s *Store) ClearClassifierPhases(ctx context.Context) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE wms_intervals
+		SET phase = NULL, phase_source = '', assembled_at = NULL
+		WHERE kind = 'state'
+		  AND (phase_source = 'classifier'
+		   OR (phase_source = '' AND phase IS NULL AND assembled_at IS NOT NULL))`)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// EarliestClosureByEntity returns, for each (entity_type, entity_id) pair in
+// keys, the earliest ended_at among that entity's CLOSED review/done intervals —
+// i.e. the first time it fully left a closed lifecycle state. The result is keyed
+// by a [entity_type, entity_id] array. Entities with no closed review/done
+// interval are omitted (they have no closure, so no later active can be a
+// re-entry). This lets the forward phase pass detect cross-batch rework: an
+// active interval whose started_at is AFTER its entity's earliest closure end is
+// a re-entry regardless of whether the closing interval is in the same batch.
+//
+// Using ended_at (not started_at) matches the "a review/done interval that ENDED
+// before this active interval STARTED" semantics, so an active interval that
+// merely overlaps an in-progress review is not falsely flagged rework.
+//
+// keys is the batch's distinct entities as [entity_type, entity_id] pairs; an
+// empty keys returns an empty map. The signature uses primitive pairs so the
+// classify engine need not import this package.
+func (s *Store) EarliestClosureByEntity(ctx context.Context, keys [][2]string) (map[[2]string]time.Time, error) {
+	out := map[[2]string]time.Time{}
+	if len(keys) == 0 {
+		return out, nil
+	}
+	// Build an IN list over (entity_type, entity_id) pairs.
+	var sb strings.Builder
+	sb.WriteString(`
+		SELECT entity_type, entity_id, MIN(ended_at)
+		FROM wms_intervals
+		WHERE kind = 'state'
+		  AND state IN ('review','done')
+		  AND ended_at IS NOT NULL
+		  AND (entity_type, entity_id) IN (`)
+	args := make([]any, 0, len(keys)*2)
+	for i, k := range keys {
+		if i > 0 {
+			sb.WriteString(",")
+		}
+		sb.WriteString("(?,?)")
+		args = append(args, k[0], k[1])
+	}
+	sb.WriteString(`)
+		GROUP BY entity_type, entity_id`)
+
+	rows, err := s.db.QueryContext(ctx, sb.String(), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var etype, eid string
+		var firstEnd time.Time
+		if err := rows.Scan(&etype, &eid, &firstEnd); err != nil {
+			return nil, err
+		}
+		out[[2]string{etype, eid}] = firstEnd.UTC()
+	}
+	return out, rows.Err()
+}
+
+// ListWorkUnitsWithActivity returns the distinct workunit ids that have at
+// least one kind='state' interval in wms_intervals — the workunits that have
+// actually accrued execution signals and are therefore worth re-deriving
+// work-type for. This scopes the async work-type pass to entities with activity
+// without walking the outcome DAG, and naturally skips empty/never-run workunits.
+func (s *Store) ListWorkUnitsWithActivity(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT DISTINCT entity_id
+		FROM wms_intervals
+		WHERE kind = 'state' AND entity_type = ?
+		ORDER BY entity_id ASC`, wms.EntityWorkUnit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// ListOutcomesNeedingPhase returns [outcomeID, workType] pairs for outcomes
+// that have no phase tag and no child workunits (so they cannot acquire phase
+// via the entity_tags_resolved view's promotion leg). The classifier
+// safety-net pass uses this to apply a rule-based default.
+func (s *Store) ListOutcomesNeedingPhase(ctx context.Context) ([][2]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT o.id,
+		  COALESCE(
+		    (SELECT t.tag_value FROM entity_tags et
+		     JOIN tags t ON t.id = et.tag_id
+		     WHERE et.entity_type = 'outcome' AND et.entity_id = o.id
+		       AND t.tag_key = 'work-type'
+		     LIMIT 1),
+		    ''
+		  ) AS work_type
+		FROM outcomes o
+		WHERE NOT EXISTS (
+		  SELECT 1 FROM entity_tags et
+		  JOIN tags t ON t.id = et.tag_id AND t.tag_key = 'phase'
+		  WHERE et.entity_type = 'outcome' AND et.entity_id = o.id
+		)
+		AND NOT EXISTS (
+		  SELECT 1 FROM workunits wu WHERE wu.outcome_id = o.id
+		)
+		ORDER BY o.id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out [][2]string
+	for rows.Next() {
+		var pair [2]string
+		if err := rows.Scan(&pair[0], &pair[1]); err != nil {
+			return nil, err
+		}
+		out = append(out, pair)
+	}
+	return out, rows.Err()
+}
+
+// --- Tags ---
+
+// TagEntity applies a key:value tag to an entity. It upserts the tag (creating
+// it as a non-seed tag if new), resolves its id, then upserts the entity_tags
+// link. Idempotent: re-tagging the same entity with the same key/value only
+// refreshes source + applied_at.
+//
+// Cardinality guard: when the KEY's cardinality is 'single', the binding
+// REPLACES any other value of that key on the entity (latest-write-wins, across
+// all sources — manual, classifier, backfill all funnel here), so a single-value
+// key holds exactly one value per entity. The replace (delete-others + insert)
+// runs in one transaction so a failure can't leave the key value-less. A 'multi'
+// key (the default) accumulates values exactly as before, via the cheap non-tx
+// upsert. Cardinality is resolved at KEY grain so create-on-apply values inherit
+// it (and the guard fires) instead of seeing the column DEFAULT.
+func (s *Store) TagEntity(ctx context.Context, entityType, entityID, tagKey, tagValue, source, description string) error {
+	if err := validTagEntityType(entityType); err != nil {
+		return err
+	}
+	if tagKey == "" || tagValue == "" {
+		return fmt.Errorf("tagKey and tagValue are required")
+	}
+	// Reject a 'phase' tag on an interval: phase lives in the wms_intervals
+	// column (set via UpdateEventRecordPhase / wms_setPhase), and cost-by-phase
+	// reads only that column. A phase TAG on an interval would be silently
+	// ignored, so refuse it explicitly rather than accept-and-drop. Other keys on
+	// an interval (B0's generic annotations) are fine.
+	if entityType == wms.EntityInterval && tagKey == "phase" {
+		return fmt.Errorf("phase on an interval is column-only; use wms_setPhase, not a phase tag")
+	}
+	if err := checkTagDescriptionLen(description); err != nil {
+		return err
+	}
+	if source == "" {
+		source = "manual"
+	}
+	// Resolve the key's cardinality at KEY grain BEFORE upserting the value row.
+	// Cardinality is a per-key attribute, but it is stored denormalized on every
+	// value row, so a create-on-apply value minted here must inherit the KEY's
+	// cardinality — reading the just-inserted row would always see the column
+	// DEFAULT 'multi' and silently disable the guard for single keys (project is
+	// exactly this case: its values are created on first use). A single 'single'
+	// row anywhere under the key makes the key single-valued; default 'multi'.
+	cardinality := "multi"
+	var found string
+	switch err := s.db.QueryRowContext(ctx,
+		`SELECT cardinality FROM tags WHERE tag_key = ? AND cardinality = 'single' LIMIT 1`, tagKey,
+	).Scan(&found); err {
+	case nil:
+		cardinality = "single"
+	case sql.ErrNoRows:
+		// key is multi-value (or new) — leave cardinality as 'multi'
+	default:
+		return err
+	}
+	// Upsert the value row (non-seed when newly created), stamping it with the
+	// key's cardinality so all of a key's values stay consistent. A fresh insert
+	// keeps the caller's description and the DEFAULT 'context' category; new
+	// operator keys are multi-value context tags (single-value is opt-in via the
+	// vocabulary). The ON DUPLICATE branch sets only LAST_INSERT_ID, so an
+	// existing tag's category/cardinality/is_seed are never clobbered.
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO tags (tag_key, tag_value, is_seed, cardinality, description) VALUES (?, ?, 0, ?, ?)
+		 ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)`,
+		tagKey, tagValue, cardinality, description,
+	)
+	if err != nil {
+		return err
+	}
+	tagID, err := res.LastInsertId()
+	if err != nil {
+		return err
+	}
+	// Description ordering (§4): backfill a description onto an existing tag
+	// only when the caller supplies one AND the stored value is still empty.
+	// A self-describing description set first wins; a later caller never
+	// overwrites it. No-op on a fresh insert (it already carries description).
+	if description != "" {
+		if _, err := s.db.ExecContext(ctx,
+			`UPDATE tags SET description = ? WHERE id = ? AND (description IS NULL OR description = '')`,
+			description, tagID,
+		); err != nil {
+			return err
+		}
+	}
+
+	if cardinality == "single" {
+		// Single-value: replace any other value of this key on the entity, then
+		// bind the new value — one transaction so the key is never left without a
+		// value. The DELETE targets sibling values (same tag_key, different tag_id)
+		// of the SAME entity; the new tag_id is excluded so a re-tag with the same
+		// value is a no-op delete + idempotent upsert.
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback() //nolint:errcheck
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM entity_tags
+			 WHERE entity_type = ? AND entity_id = ? AND tag_id IN (
+			     SELECT id FROM tags WHERE tag_key = ? AND id <> ?
+			 )`,
+			entityType, entityID, tagKey, tagID,
+		); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO entity_tags (entity_type, entity_id, tag_id, source, applied_at)
+			 VALUES (?, ?, ?, ?, ?)
+			 ON DUPLICATE KEY UPDATE source = VALUES(source), applied_at = VALUES(applied_at)`,
+			entityType, entityID, tagID, source, nowUTC(),
+		); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
+
+	_, err = s.db.ExecContext(ctx,
+		`INSERT INTO entity_tags (entity_type, entity_id, tag_id, source, applied_at)
+		 VALUES (?, ?, ?, ?, ?)
+		 ON DUPLICATE KEY UPDATE source = VALUES(source), applied_at = VALUES(applied_at)`,
+		entityType, entityID, tagID, source, nowUTC(),
+	)
+	return err
+}
+
+// ListTags returns all known tags ordered by key then value.
+func (s *Store) ListTags(ctx context.Context) ([]wms.Tag, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT tag_key, tag_value, is_seed, category, cardinality, description, retired, required FROM tags ORDER BY tag_key, tag_value`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close() //nolint:errcheck
+	var out []wms.Tag
+	for rows.Next() {
+		var t wms.Tag
+		var isSeed, retired, required int
+		if err := rows.Scan(&t.Key, &t.Value, &isSeed, &t.Category, &t.Cardinality, &t.Description, &retired, &required); err != nil {
+			return nil, err
+		}
+		t.IsSeed = isSeed != 0
+		t.Retired = retired != 0
+		t.Required = required != 0
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// ListRequiredTagKeys returns the distinct, non-retired tag keys marked
+// required=1. Close-out enforcement gates a workunit's 'done' transition on
+// every key returned here having a tag bound to the entity.
+func (s *Store) ListRequiredTagKeys(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT DISTINCT tag_key FROM tags WHERE required = 1 AND retired = 0 ORDER BY tag_key`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close() //nolint:errcheck
+	var out []string
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			return nil, err
+		}
+		out = append(out, k)
+	}
+	return out, rows.Err()
+}
+
+// RetireTagValue marks a single tag value as retired (retired=1).
+func (s *Store) RetireTagValue(ctx context.Context, tagKey, tagValue string) error {
+	if tagKey == "" || tagValue == "" {
+		return fmt.Errorf("RetireTagValue: tagKey and tagValue are required")
+	}
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE tags SET retired = 1 WHERE tag_key = ? AND tag_value = ?`, tagKey, tagValue)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("RetireTagValue: tag %s:%s not found", tagKey, tagValue)
+	}
+	return nil
+}
+
+// UpdateTagValueDescription overwrites the description on ONE (tag_key,
+// tag_value) row — per-value, unlike the CLI's per-key `tags describe`. A
+// description is free-text classification rubric ("when to apply this value")
+// with zero engine coupling, so this DELIBERATELY has NO systemManagedKeys
+// guard: the deny-list protects category/cardinality/seed-membership (the v15
+// wrong-category bug), not descriptions. It MUST work for the lifecycle keys
+// (work-type/phase/resolution/lifecycle) — refining those descriptions is the
+// whole point of the tag steward's "the description IS the rule" pillar, and
+// TagEntity's create-only description write (WHERE description IS NULL OR '')
+// cannot update an existing one.
+//
+// Not-found correctness: MySQL's RowsAffected counts CHANGED rows, so writing
+// the same description back is a 0-row no-op indistinguishable from a missing
+// row. After a 0-row update we existence-check the (key,value): truly absent →
+// a clear error; present but unchanged → nil (never false-error on a no-op).
+func (s *Store) UpdateTagValueDescription(ctx context.Context, tagKey, tagValue, description string) error {
+	if tagKey == "" || tagValue == "" {
+		return fmt.Errorf("UpdateTagValueDescription: tagKey and tagValue are required")
+	}
+	if err := checkTagDescriptionLen(description); err != nil {
+		return err
+	}
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE tags SET description = ? WHERE tag_key = ? AND tag_value = ?`,
+		description, tagKey, tagValue)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		return nil
+	}
+	// 0 rows changed: either the row is absent, or the description already equals
+	// the new value (a no-op). Disambiguate with an existence check.
+	var exists int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT 1 FROM tags WHERE tag_key = ? AND tag_value = ? LIMIT 1`, tagKey, tagValue,
+	).Scan(&exists); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("tag %s:%s not found", tagKey, tagValue)
+		}
+		return err
+	}
+	return nil
+}
+
+// GetEntityTags returns the tags directly bound to one entity, joining the
+// binding (entity_tags) to the vocabulary (tags) so each row carries the
+// binding Source and applied_at alongside the tag's key/value/category/
+// description. Inherited context tags are NOT included — this returns only the
+// direct bindings, which is what the classifier needs to decide whether an
+// operator already set a key.
+func (s *Store) GetEntityTags(ctx context.Context, entityType, entityID string) ([]wms.EntityTag, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT t.tag_key, t.tag_value, t.category, et.source, t.description, et.applied_at
+		FROM entity_tags et
+		JOIN tags t ON t.id = et.tag_id
+		WHERE et.entity_type = ? AND et.entity_id = ?
+		ORDER BY t.tag_key, t.tag_value`, entityType, entityID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close() //nolint:errcheck
+	var out []wms.EntityTag
+	for rows.Next() {
+		var et wms.EntityTag
+		if err := rows.Scan(&et.TagKey, &et.TagValue, &et.Category, &et.Source, &et.Description, &et.AppliedAt); err != nil {
+			return nil, err
+		}
+		et.AppliedAt = et.AppliedAt.UTC()
+		out = append(out, et)
+	}
+	return out, rows.Err()
+}
+
+// DeleteEntityTag removes one (tagKey, tagValue) binding from an entity. It
+// joins entity_tags to tags on tag_id to match the key+value, then deletes the
+// binding row only — the vocabulary tags row is untouched. Idempotent: deleting
+// a binding that does not exist returns nil (0 rows affected is not an error),
+// so the steward's rollback can revert without first checking presence.
+func (s *Store) DeleteEntityTag(ctx context.Context, entityType, entityID, tagKey, tagValue string) error {
+	_, err := s.db.ExecContext(ctx, `
+		DELETE et FROM entity_tags et
+		JOIN tags t ON t.id = et.tag_id
+		WHERE et.entity_type = ? AND et.entity_id = ?
+		  AND t.tag_key = ? AND t.tag_value = ?`,
+		entityType, entityID, tagKey, tagValue)
+	return err
+}
+
+// systemManagedKeys is the DENY-LIST of writer-coupled lifecycle keys owned
+// exclusively by migrations and emitted by the classifier/backfill/done-
+// transitions. The config/admin vocabulary layer must NEVER create, overwrite,
+// demote, or retire these — doing so out of band re-creates the v15 wrong-
+// category bug (a later create-on-apply re-inserts the key with the v14 context
+// DEFAULT instead of its lifecycle category). Every admin/config write path
+// (DefineTag, ReconcileVocabulary, RetireTag, and the reconcile demote sweep)
+// gates on this one set. Everything NOT in this set — project/priority/scope/
+// team/release and any new user-defined key (e.g. topic) — is fully manageable.
+var systemManagedKeys = map[string]bool{
+	"phase":      true,
+	"work-type":  true,
+	"resolution": true,
+	"lifecycle":  true,
+}
+
+// ReconcileVocabulary brings the seed vocabulary in line with the declared
+// specs (the yaml `tags:` section). It is NON-DESTRUCTIVE and idempotent:
+//   - each spec's key is upserted is_seed=1 with its category/cardinality, and
+//     its explicit values (if any) seeded; a value-less key gets a ” stub so
+//     the key exists in the vocabulary while values are created on first use.
+//     A declared key that is system-managed (deny-list) is SKIPPED with a
+//     warning — the config cannot overwrite a lifecycle key's category.
+//   - any NON-system seed key NOT in specs is DEMOTED to is_seed=0 — never
+//     deleted, and its entity_tags bindings are left intact. So a user key
+//     removed from config demotes, while lifecycle keys are never swept.
+//
+// It never deletes a tags row and never touches entity_tags. Cardinality is a
+// per-key attribute, so it is set across every value of the key.
+func (s *Store) ReconcileVocabulary(ctx context.Context, specs []wms.TagSpec) error {
+	declared := map[string]bool{}
+	for _, spec := range specs {
+		if spec.Key == "" {
+			continue
+		}
+		if systemManagedKeys[spec.Key] {
+			slog.Warn("reconcile: ignoring system-managed key in tags config (owned by migrations)",
+				"key", spec.Key)
+			continue
+		}
+		declared[spec.Key] = true
+		if err := s.DefineTag(ctx, spec); err != nil {
+			return err
+		}
+	}
+	// Demote any currently-seeded key the config no longer declares. The set is
+	// read from the DB (not a fixed list) so a removed user key demotes too;
+	// system-managed keys are excluded so the lifecycle vocabulary is untouchable.
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT DISTINCT tag_key FROM tags WHERE is_seed = 1`)
+	if err != nil {
+		return err
+	}
+	var seedKeys []string
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			rows.Close() //nolint:errcheck
+			return err
+		}
+		seedKeys = append(seedKeys, k)
+	}
+	rows.Close() //nolint:errcheck
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, key := range seedKeys {
+		if declared[key] || systemManagedKeys[key] {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx,
+			`UPDATE tags SET is_seed = 0 WHERE tag_key = ?`, key,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// DefineTag promotes a key into the seed vocabulary (is_seed=1) with the given
+// category/cardinality/description, seeding its explicit values (or a ” stub
+// for create-on-apply keys). It is the runtime equivalent of a yaml `tags:`
+// entry. Idempotent: re-defining converges (is_seed=1, category/cardinality
+// refreshed). An existing tag's description is preserved when already set.
+//
+// It refuses a system-managed key (deny-list): those lifecycle keys are owned
+// by migrations, so letting config/admin overwrite their category/cardinality
+// re-creates the v15 wrong-category bug.
+func (s *Store) DefineTag(ctx context.Context, spec wms.TagSpec) error {
+	if spec.Key == "" {
+		return fmt.Errorf("DefineTag: key is required")
+	}
+	if systemManagedKeys[spec.Key] {
+		return fmt.Errorf("DefineTag: %q is a system-managed key and cannot be redefined", spec.Key)
+	}
+	if err := checkTagDescriptionLen(spec.Description); err != nil {
+		return err
+	}
+	category := spec.Category
+	if category == "" {
+		category = "context"
+	}
+	cardinality := spec.Cardinality
+	if cardinality == "" {
+		cardinality = "multi"
+	}
+	values := spec.Values
+	if len(values) == 0 {
+		values = []string{""} // create-on-apply stub
+	}
+	for _, v := range values {
+		if _, err := s.db.ExecContext(ctx,
+			`INSERT INTO tags (tag_key, tag_value, is_seed, category, cardinality, description)
+			 VALUES (?, ?, 1, ?, ?, ?)
+			 ON DUPLICATE KEY UPDATE
+			     is_seed     = 1,
+			     category    = VALUES(category),
+			     cardinality = VALUES(cardinality),
+			     description = IF(description = '', VALUES(description), description)`,
+			spec.Key, v, category, cardinality, spec.Description,
+		); err != nil {
+			return err
+		}
+	}
+	// Cardinality is per-key: keep every value of the key consistent (covers
+	// rows minted by create-on-apply that predate this define).
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE tags SET cardinality = ? WHERE tag_key = ?`, cardinality, spec.Key,
+	); err != nil {
+		return err
+	}
+	// required is per-key like cardinality. Only written when the caller set it
+	// (non-nil pointer) — a plain DefineTag that omits Required leaves the flag
+	// untouched.
+	if spec.Required != nil {
+		if _, err := s.db.ExecContext(ctx,
+			`UPDATE tags SET required = ? WHERE tag_key = ?`, *spec.Required, spec.Key,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// RetireTag demotes a key from the seed vocabulary (is_seed=0). Non-destructive:
+// the tags rows and all entity_tags bindings survive, so the key can be
+// re-promoted later via DefineTag or the yaml vocabulary.
+//
+// It refuses a system-managed key (deny-list) — the writer-coupled lifecycle
+// keys (phase/work-type/resolution/lifecycle) are owned by migrations and
+// emitted by the classifier/backfill/done-transitions; demoting one out of band
+// re-creates the v15 wrong-category bug (a later create-on-apply re-inserts it
+// as the context DEFAULT). Any other key, including a new user-defined key, is
+// retirable. Same gate as DefineTag and the reconcile demote sweep.
+func (s *Store) RetireTag(ctx context.Context, tagKey string) error {
+	if tagKey == "" {
+		return fmt.Errorf("RetireTag: tagKey is required")
+	}
+	if systemManagedKeys[tagKey] {
+		return fmt.Errorf("RetireTag: %q is a system-managed key and cannot be retired", tagKey)
+	}
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE tags SET is_seed = 0 WHERE tag_key = ?`, tagKey)
+	return err
+}
+
+// --- Sessions ---
+
+func (s *Store) UpsertSession(ctx context.Context, sess store.Session) error {
+	if sess.SessionID == "" {
+		return errors.New("UpsertSession: SessionID is required")
+	}
+	if sess.FirstSeen.IsZero() {
+		sess.FirstSeen = nowUTC()
+	}
+	if sess.LastSeen.IsZero() {
+		sess.LastSeen = sess.FirstSeen
+	}
+	if sess.Status == "" {
+		sess.Status = store.SessionStatusActive
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO sessions (
+			session_id, agent_name, host, username, team_name,
+			project_id, goal_id, task_id, workitem_id,
+			focus, first_seen, last_seen, status
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON DUPLICATE KEY UPDATE
+			host = VALUES(host),
+			username = VALUES(username),
+			team_name = VALUES(team_name),
+			project_id = VALUES(project_id),
+			goal_id = VALUES(goal_id),
+			task_id = VALUES(task_id),
+			workitem_id = VALUES(workitem_id),
+			focus = VALUES(focus),
+			last_seen = VALUES(last_seen),
+			status = VALUES(status)`,
+		sess.SessionID, sess.AgentName, sess.Host, sess.Username, sess.TeamName,
+		sess.ProjectID, sess.GoalID, sess.TaskID, sess.WorkitemID,
+		sess.Focus, sess.FirstSeen, sess.LastSeen, string(sess.Status),
+	)
+	return err
+}
+
+func (s *Store) CreateSession(ctx context.Context, sess store.Session) error {
+	if sess.SessionID == "" {
+		return errors.New("CreateSession: SessionID is required")
+	}
+	if sess.FirstSeen.IsZero() {
+		sess.FirstSeen = nowUTC()
+	}
+	if sess.LastSeen.IsZero() {
+		sess.LastSeen = sess.FirstSeen
+	}
+	if sess.Status == "" {
+		sess.Status = store.SessionStatusActive
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO sessions (
+			session_id, agent_name, host, username, team_name,
+			project_id, goal_id, task_id, workitem_id,
+			focus, first_seen, last_seen, status
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		sess.SessionID, sess.AgentName, sess.Host, sess.Username, sess.TeamName,
+		sess.ProjectID, sess.GoalID, sess.TaskID, sess.WorkitemID,
+		sess.Focus, sess.FirstSeen, sess.LastSeen, string(sess.Status),
+	)
+	return err
+}
+
+func (s *Store) GetSession(ctx context.Context, key store.SessionKey) (store.Session, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT session_id, agent_name, host, username, team_name,
+		       project_id, goal_id, task_id, workitem_id,
+		       focus, first_seen, last_seen, status
+		FROM sessions WHERE session_id = ? AND agent_name = ?`,
+		key.SessionID, key.AgentName,
+	)
+	var sess store.Session
+	var status string
+	if err := row.Scan(
+		&sess.SessionID, &sess.AgentName, &sess.Host, &sess.Username, &sess.TeamName,
+		&sess.ProjectID, &sess.GoalID, &sess.TaskID, &sess.WorkitemID,
+		&sess.Focus, &sess.FirstSeen, &sess.LastSeen, &status,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return store.Session{}, fmt.Errorf("session %q/%q: %w", key.SessionID, key.AgentName, err)
+		}
+		return store.Session{}, err
+	}
+	sess.Status = store.SessionStatus(status)
+	sess.FirstSeen = sess.FirstSeen.UTC()
+	sess.LastSeen = sess.LastSeen.UTC()
+	return sess, nil
+}
+
+func (s *Store) UpdateSessionFocus(ctx context.Context, key store.SessionKey, focus string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE sessions SET focus = ?, last_seen = ? WHERE session_id = ? AND agent_name = ?`,
+		focus, nowUTC(), key.SessionID, key.AgentName,
+	)
+	return err
+}
+
+func (s *Store) SetSessionTeam(ctx context.Context, sessionID, teamName string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE sessions SET team_name = ?, last_seen = ? WHERE session_id = ?`,
+		teamName, nowUTC(), sessionID,
+	)
+	return err
+}
+
+func (s *Store) setSessionField(ctx context.Context, key store.SessionKey, column, value string) error {
+	switch column {
+	case "project_id", "goal_id", "task_id", "workitem_id":
+	default:
+		return fmt.Errorf("unknown session column: %s", column)
+	}
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE sessions SET `+column+` = ?, last_seen = ? WHERE session_id = ? AND agent_name = ?`,
+		value, nowUTC(), key.SessionID, key.AgentName,
+	)
+	return err
+}
+
+func (s *Store) SetSessionProject(ctx context.Context, key store.SessionKey, projectID string) error {
+	return s.setSessionField(ctx, key, "project_id", projectID)
+}
+
+func (s *Store) SetSessionGoal(ctx context.Context, key store.SessionKey, goalID string) error {
+	return s.setSessionField(ctx, key, "goal_id", goalID)
+}
+
+func (s *Store) SetSessionTask(ctx context.Context, key store.SessionKey, taskID string) error {
+	return s.setSessionField(ctx, key, "task_id", taskID)
+}
+
+func (s *Store) SetSessionWorkItem(ctx context.Context, key store.SessionKey, workitemID string) error {
+	return s.setSessionField(ctx, key, "workitem_id", workitemID)
+}
+
+// OpenFocusInterval closes the currently-open focus interval for (session,
+// agent) and opens a new one for entityType/entityID. Append-only history; the
+// allocator later joins a message's timestamp against these intervals. Both
+// statements use the same nowUTC instant so the close and open are contiguous.
+//
+// Same-entity guard: if the current open interval is already this exact
+// (entityType, entityID), it is a no-op — avoids a degenerate zero-duration
+// interval when e.g. createTask and setFocus both fire for the same task.
+func (s *Store) OpenFocusInterval(ctx context.Context, key store.SessionKey, entityType, entityID string) error {
+	var curType, curID string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT entity_type, entity_id FROM wms_intervals
+		 WHERE kind = 'focus' AND session_id = ? AND agent_name = ? AND ended_at IS NULL
+		 ORDER BY started_at DESC LIMIT 1`,
+		key.SessionID, key.AgentName,
+	).Scan(&curType, &curID)
+	if err == nil && curType == entityType && curID == entityID {
+		return nil // already focused on this exact entity
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+
+	now := nowUTC()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	// Close the open focus interval then open the new one. Focus rows carry
+	// identity directly (it's always present on the focus path), so
+	// identity_source='direct'.
+	if err := closeOpenFocusIntervals(ctx, tx, key.SessionID, key.AgentName, now); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO wms_intervals
+			(kind, entity_type, entity_id, state, session_id, agent_name, host, started_at, identity_source)
+		VALUES ('focus', ?, ?, '', ?, ?, '', ?, 'direct')`,
+		entityType, entityID, key.SessionID, key.AgentName, now,
+	); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// HasOpenFocusInterval returns true when (session, agent) has at least one open
+// kind='focus' interval row.
+func (s *Store) HasOpenFocusInterval(ctx context.Context, key store.SessionKey) (bool, error) {
+	var exists int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT 1 FROM wms_intervals
+		 WHERE kind = 'focus' AND session_id = ? AND agent_name = ? AND ended_at IS NULL
+		 LIMIT 1`,
+		key.SessionID, key.AgentName,
+	).Scan(&exists)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// closeOpenFocusIntervals closes every open kind='focus' wms_intervals row for
+// (session, agent) at `at`, computing duration_ms.
+func closeOpenFocusIntervals(ctx context.Context, tx *sql.Tx, sessionID, agentName string, at time.Time) error {
+	_, err := tx.ExecContext(ctx, `
+		UPDATE wms_intervals
+		SET ended_at = ?,
+		    duration_ms = TIMESTAMPDIFF(MICROSECOND, started_at, ?) / 1000
+		WHERE kind = 'focus' AND session_id = ? AND agent_name = ? AND ended_at IS NULL`,
+		at, at, sessionID, agentName)
+	return err
+}
+
+// CloseFocusInterval ends the currently-open focus interval for (session, agent)
+// without opening a new one — the pure close half of OpenFocusInterval. Called
+// when an entity reaches a terminal state so post-completion cost stops
+// attributing to finished work. No-op (0 rows affected) when nothing is open.
+func (s *Store) CloseFocusInterval(ctx context.Context, key store.SessionKey) error {
+	now := nowUTC()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	if err := closeOpenFocusIntervals(ctx, tx, key.SessionID, key.AgentName, now); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// CloseFocusIntervalForEntity is the entity-scoped close: it ends the agent's
+// open focus interval ONLY when that interval's (entity_type, entity_id) is
+// exactly (entityType, entityID). A 0-row no-op otherwise — including when the
+// agent is focused on a different (e.g. parent) entity. Mirrors the reaper's
+// CloseIntervalsOnTerminalEntities scoping: "when the thing you were working on
+// finishes, stop billing to it" — without the collateral close of an unrelated
+// focus. Used by the WMSStatusChange→done handler in place of the unconditional
+// CloseFocusInterval, which closed whatever the agent had open and could orphan
+// a lead's parent-Outcome focus when a child WorkUnit completed.
+func (s *Store) CloseFocusIntervalForEntity(ctx context.Context, key store.SessionKey, entityType, entityID string) error {
+	now := nowUTC()
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE wms_intervals
+		SET ended_at = ?,
+		    duration_ms = TIMESTAMPDIFF(MICROSECOND, started_at, ?) / 1000
+		WHERE kind = 'focus' AND session_id = ? AND agent_name = ?
+		  AND entity_type = ? AND entity_id = ? AND ended_at IS NULL`,
+		now, now, key.SessionID, key.AgentName, entityType, entityID)
+	return err
+}
+
+// ResolveSessionEnd returns the best-known end timestamp for a session.
+// Precedence: token_ledger MAX(timestamp), sessions.last_seen, fallback.
+func (s *Store) ResolveSessionEnd(ctx context.Context, sessionID string, fallback time.Time) (time.Time, error) {
+	var ledgerMax sql.NullTime
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT MAX(timestamp) FROM token_ledger WHERE session_id = ?`, sessionID,
+	).Scan(&ledgerMax); err != nil {
+		return time.Time{}, err
+	} else if ledgerMax.Valid {
+		return ledgerMax.Time.UTC(), nil
+	}
+
+	var lastSeen sql.NullTime
+	err := s.db.QueryRowContext(ctx,
+		`SELECT last_seen FROM sessions WHERE session_id = ? ORDER BY last_seen DESC LIMIT 1`, sessionID,
+	).Scan(&lastSeen)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, err
+	}
+	if err == nil && lastSeen.Valid {
+		return lastSeen.Time.UTC(), nil
+	}
+
+	if fallback.IsZero() {
+		return nowUTC(), nil
+	}
+	return fallback.UTC(), nil
+}
+
+// CloseSessionIntervals closes all open wms_intervals rows for the given
+// session, computing duration_ms from started_at. When agentName is non-empty,
+// only that agent's intervals are closed; when empty, ALL intervals for the
+// session are closed (used by CLI drain and API). Returns the number of rows
+// closed. No-op when nothing is open.
+func (s *Store) CloseSessionIntervals(ctx context.Context, sessionID, agentName string, at time.Time) (int64, error) {
+	if at.IsZero() {
+		at = nowUTC()
+	}
+	query := `
+		UPDATE wms_intervals
+		SET ended_at = ?,
+		    duration_ms = TIMESTAMPDIFF(MICROSECOND, started_at, ?) / 1000
+		WHERE session_id = ? AND ended_at IS NULL`
+	args := []any{at, at, sessionID}
+	if agentName != "" {
+		query += ` AND agent_name = ?`
+		args = append(args, agentName)
+	}
+	res, err := s.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// CloseIntervalsOnTerminalEntities closes open intervals whose entity has
+// reached a terminal status (done). Uses NOW(6) as the close timestamp to
+// avoid uq_open collisions when e.updated_at matches an existing closed
+// interval's ended_at. Phase 1 of the reaper.
+func (s *Store) CloseIntervalsOnTerminalEntities(ctx context.Context) (int64, error) {
+	var total int64
+	for _, tbl := range []struct{ table, entityType string }{
+		{"outcomes", "outcome"},
+		{"workunits", "workunit"},
+	} {
+		res, err := s.db.ExecContext(ctx, `
+			UPDATE wms_intervals i
+			JOIN `+tbl.table+` e ON e.id = i.entity_id AND e.status = 'done'
+			SET i.ended_at = NOW(6),
+			    i.duration_ms = TIMESTAMPDIFF(MICROSECOND, i.started_at, NOW(6)) / 1000
+			WHERE i.entity_type = ? AND i.ended_at IS NULL`,
+			tbl.entityType)
+		if err != nil {
+			return total, err
+		}
+		n, _ := res.RowsAffected()
+		total += n
+	}
+	return total, nil
+}
+
+// CloseIntervalsForClosedSessions closes open intervals belonging to sessions
+// marked closed. Uses NOW(6) as the close timestamp to avoid uq_open
+// collisions. Phase 2 of the reaper.
+func (s *Store) CloseIntervalsForClosedSessions(ctx context.Context) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE wms_intervals i
+		JOIN sessions s ON s.session_id = i.session_id
+		                AND s.agent_name = i.agent_name
+		                AND s.status = 'closed'
+		SET i.ended_at = NOW(6),
+		    i.duration_ms = TIMESTAMPDIFF(MICROSECOND, i.started_at, NOW(6)) / 1000
+		WHERE i.ended_at IS NULL`)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// CloseIntervalsForStaleSessions closes open intervals for sessions whose
+// last_seen is older than staleThreshold and that are not already closed.
+// Uses NOW(6) as the close timestamp to avoid uq_open collisions. Phase 3
+// of the reaper (guarded, disabled by default).
+func (s *Store) CloseIntervalsForStaleSessions(ctx context.Context, staleThreshold time.Time) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE wms_intervals i
+		JOIN sessions s ON s.session_id = i.session_id
+		                AND s.agent_name = i.agent_name
+		SET i.ended_at = NOW(6),
+		    i.duration_ms = TIMESTAMPDIFF(MICROSECOND, i.started_at, NOW(6)) / 1000
+		WHERE i.ended_at IS NULL
+		  AND s.last_seen < ?
+		  AND s.status <> 'closed'`,
+		staleThreshold)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+func (s *Store) CloseSession(ctx context.Context, sessionID string, at time.Time) error {
+	if at.IsZero() {
+		at = nowUTC()
+	}
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE sessions SET status = ?, last_seen = ? WHERE session_id = ?`,
+		string(store.SessionStatusClosed), at, sessionID,
+	)
+	return err
+}
+
+func (s *Store) PruneSessions(ctx context.Context, inactiveSince time.Time) (int, error) {
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM sessions WHERE last_seen < ?`, inactiveSince,
+	)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return int(n), nil
+}
+
+// --- Counts ---
+
+func (s *Store) CountEntitiesByStatus(ctx context.Context) (map[store.EntityTypeStatus]int, error) {
+	out := make(map[store.EntityTypeStatus]int)
+	tables := []struct {
+		table  string
+		entity string
+	}{
+		{"outcomes", "outcome"},
+		{"workunits", "workunit"},
+	}
+	for _, t := range tables {
+		rows, err := s.db.QueryContext(ctx,
+			"SELECT status, COUNT(*) FROM "+t.table+" GROUP BY status",
+		)
+		if err != nil {
+			return nil, fmt.Errorf("count %s: %w", t.table, err)
+		}
+		for rows.Next() {
+			var status string
+			var n int
+			if err := rows.Scan(&status, &n); err != nil {
+				rows.Close() //nolint:errcheck
+				return nil, err
+			}
+			out[store.EntityTypeStatus{EntityType: t.entity, Status: status}] = n
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close() //nolint:errcheck
+			return nil, err
+		}
+		rows.Close() //nolint:errcheck
+	}
+	return out, nil
+}
+
+// --- Activity events ---
+
+func (s *Store) CreateActivityEvent(ctx context.Context, a store.ActivityEvent) error {
+	if a.SessionID == "" {
+		return errors.New("CreateActivityEvent: SessionID is required")
+	}
+	if a.Timestamp.IsZero() {
+		a.Timestamp = nowUTC()
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO activity_events (
+			session_id, agent_name, host, tag, display, focus, timestamp
+		) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		a.SessionID, a.AgentName, a.Host, a.Tag, a.Display, a.Focus, a.Timestamp,
+	)
+	return err
+}
+
+func (s *Store) ListActivityForSession(ctx context.Context, key store.SessionKey, since time.Time) ([]store.ActivityEvent, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, session_id, agent_name, host, tag, display, focus, timestamp
+		FROM activity_events
+		WHERE session_id = ? AND agent_name = ? AND timestamp >= ?
+		ORDER BY timestamp, session_id, agent_name`,
+		key.SessionID, key.AgentName, since,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []store.ActivityEvent
+	for rows.Next() {
+		var a store.ActivityEvent
+		var id int64
+		if err := rows.Scan(&id, &a.SessionID, &a.AgentName, &a.Host, &a.Tag, &a.Display, &a.Focus, &a.Timestamp); err != nil {
+			return nil, err
+		}
+		a.SetID(id)
+		a.Timestamp = a.Timestamp.UTC()
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// ListRelatedEntities returns outcomes and workunits that may relate to new
+// work — dangling (adoptable) or terminal (potential rework linkage). UNIONs
+// both entity types, LEFT JOINs wms_intervals for last activity, collects
+// tags and session status in batch follow-ups. Entities are "stale" when they
+// have no interval activity in staleHours (or have no intervals at all).
+func (s *Store) ListRelatedEntities(ctx context.Context, opts store.ListRelatedOpts) ([]store.RelatedEntity, error) {
+	if opts.StaleHours <= 0 {
+		opts.StaleHours = 4
+	}
+	staleThreshold := nowUTC().Add(-time.Duration(opts.StaleHours) * time.Hour)
+
+	var sb strings.Builder
+	var args []any
+
+	sb.WriteString(`
+		SELECT e.id, e.title, e.entity_type, e.status,
+		       COALESCE(MAX(i.started_at), e.created_at) AS last_activity,
+		       COALESCE((
+		           SELECT i2.session_id FROM wms_intervals i2
+		           WHERE i2.entity_type = e.entity_type AND i2.entity_id = e.id
+		             AND i2.kind = 'state'
+		           ORDER BY i2.started_at DESC LIMIT 1
+		       ), '') AS last_session_id
+		FROM (
+			SELECT id, title, 'outcome' AS entity_type, status, created_at
+			FROM outcomes
+			UNION ALL
+			SELECT id, title, 'workunit' AS entity_type, status, created_at
+			FROM workunits
+		) e
+		LEFT JOIN wms_intervals i
+			ON i.entity_type = e.entity_type AND i.entity_id = e.id AND i.kind = 'state'
+		WHERE 1=1`)
+
+	if !opts.IncludeTerminal {
+		sb.WriteString(` AND e.status <> 'done'`)
+	}
+
+	if opts.Query != "" {
+		sb.WriteString(` AND e.title LIKE ?`)
+		args = append(args, "%"+opts.Query+"%")
+	}
+
+	if len(opts.TagFilters) > 0 {
+		sb.WriteString(` AND e.id IN (
+			SELECT et.entity_id FROM entity_tags et
+			JOIN tags t ON t.id = et.tag_id
+			WHERE et.entity_type = e.entity_type AND (`)
+		idx := 0
+		for k, v := range opts.TagFilters {
+			if idx > 0 {
+				sb.WriteString(` OR `)
+			}
+			sb.WriteString(`(t.tag_key = ? AND t.tag_value = ?)`)
+			args = append(args, k, v)
+			idx++
+		}
+		sb.WriteString(fmt.Sprintf(`) GROUP BY et.entity_id HAVING COUNT(DISTINCT et.tag_id) = %d)`, len(opts.TagFilters)))
+	}
+
+	sb.WriteString(`
+		GROUP BY e.id, e.title, e.entity_type, e.status, e.created_at
+		ORDER BY last_activity DESC
+		LIMIT 100`)
+
+	rows, err := s.db.QueryContext(ctx, sb.String(), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	type rawEntity struct {
+		id, title, entityType, status, lastSessionID string
+		lastActivity                                 time.Time
+	}
+	var raw []rawEntity
+	for rows.Next() {
+		var r rawEntity
+		if err := rows.Scan(&r.id, &r.title, &r.entityType, &r.status, &r.lastActivity, &r.lastSessionID); err != nil {
+			return nil, err
+		}
+		r.lastActivity = r.lastActivity.UTC()
+		raw = append(raw, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(raw) == 0 {
+		return nil, nil
+	}
+
+	// Batch tag lookup.
+	type entityKey struct{ etype, eid string }
+	tagMap := map[entityKey]map[string]string{}
+	{
+		var tsb strings.Builder
+		var targs []any
+		tsb.WriteString(`
+			SELECT et.entity_type, et.entity_id, t.tag_key, t.tag_value
+			FROM entity_tags et
+			JOIN tags t ON t.id = et.tag_id
+			WHERE (et.entity_type, et.entity_id) IN (`)
+		for i, r := range raw {
+			if i > 0 {
+				tsb.WriteString(",")
+			}
+			tsb.WriteString("(?,?)")
+			targs = append(targs, r.entityType, r.id)
+		}
+		tsb.WriteString(`)`)
+		trows, err := s.db.QueryContext(ctx, tsb.String(), targs...)
+		if err != nil {
+			return nil, err
+		}
+		defer trows.Close()
+		for trows.Next() {
+			var etype, eid, tk, tv string
+			if err := trows.Scan(&etype, &eid, &tk, &tv); err != nil {
+				return nil, err
+			}
+			k := entityKey{etype, eid}
+			if tagMap[k] == nil {
+				tagMap[k] = map[string]string{}
+			}
+			tagMap[k][tk] = tv
+		}
+		if err := trows.Err(); err != nil {
+			return nil, err
+		}
+	}
+
+	// Batch session status lookup.
+	sessStatus := map[string]string{}
+	{
+		sids := map[string]bool{}
+		for _, r := range raw {
+			if r.lastSessionID != "" {
+				sids[r.lastSessionID] = true
+			}
+		}
+		if len(sids) > 0 {
+			var ssb strings.Builder
+			var sargs []any
+			ssb.WriteString(`SELECT session_id, status FROM sessions WHERE session_id IN (`)
+			first := true
+			for sid := range sids {
+				if !first {
+					ssb.WriteString(",")
+				}
+				ssb.WriteString("?")
+				sargs = append(sargs, sid)
+				first = false
+			}
+			ssb.WriteString(`)`)
+			srows, err := s.db.QueryContext(ctx, ssb.String(), sargs...)
+			if err != nil {
+				return nil, err
+			}
+			defer srows.Close()
+			for srows.Next() {
+				var sid, status string
+				if err := srows.Scan(&sid, &status); err != nil {
+					return nil, err
+				}
+				sessStatus[sid] = status
+			}
+			if err := srows.Err(); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	// Filter to stale or terminal entities.
+	var out []store.RelatedEntity
+	for _, r := range raw {
+		isTerminal := r.status == "done"
+		isStale := r.lastActivity.Before(staleThreshold)
+		if !isTerminal && !isStale {
+			continue
+		}
+		if isTerminal && !opts.IncludeTerminal {
+			continue
+		}
+		tags := tagMap[entityKey{r.entityType, r.id}]
+		if tags == nil {
+			tags = map[string]string{}
+		}
+		out = append(out, store.RelatedEntity{
+			ID:            r.id,
+			Title:         r.title,
+			EntityType:    r.entityType,
+			Status:        r.status,
+			Tags:          tags,
+			LastActivity:  r.lastActivity,
+			SessionID:     r.lastSessionID,
+			SessionStatus: sessStatus[r.lastSessionID],
+			IsTerminal:    isTerminal,
+		})
+	}
+	return out, nil
+}

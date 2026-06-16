@@ -1,0 +1,1578 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Executive home. Spend, trajectory, decomposition, and live activity at a glance.",
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [
+    {
+      "icon": "external link",
+      "tags": [],
+      "targetBlank": false,
+      "title": "Data Quality & Health",
+      "type": "link",
+      "url": "/d/fd-data-quality-v2"
+    },
+    {
+      "icon": "external link",
+      "tags": [],
+      "targetBlank": false,
+      "title": "Cost Explorer",
+      "type": "link",
+      "url": "/d/fd-cost-explorer-v1"
+    }
+  ],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "panels": [],
+      "title": "Headline \u2014 Selected Period",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "teamster-mysql"
+      },
+      "description": "scope: immediate ledger (attribution pending for recent messages)",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "blue",
+            "mode": "fixed"
+          },
+          "decimals": 2,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 5,
+        "x": 0,
+        "y": 1
+      },
+      "id": 2,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/^cost$/",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "teamster-mysql"
+          },
+          "format": "table",
+          "rawSql": "SELECT SUM(cost_usd) AS cost FROM token_ledger tl WHERE $__timeFilter(tl.timestamp)\n  AND ('${engineer:raw}' = 'All' OR tl.username = '${engineer:raw}')\n  AND ('${team:raw}' = 'All' OR tl.session_id IN (SELECT session_id FROM sessions WHERE team_name = '${team:raw}'))",
+          "refId": "A"
+        }
+      ],
+      "title": "Spend (window)",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "teamster-mysql"
+      },
+      "description": "scope: immediate ledger \u2014 % change vs prior equal window. Positive = more spend than prior period.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 1,
+          "mappings": [],
+          "max": 100,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "yellow",
+                "value": 10
+              },
+              {
+                "color": "red",
+                "value": 25
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 5,
+        "y": 1
+      },
+      "id": 3,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/^delta_pct$/",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "teamster-mysql"
+          },
+          "format": "table",
+          "rawSql": "SELECT ROUND(\n  (curr.cost - prev.cost) / NULLIF(prev.cost, 0) * 100, 1\n) AS delta_pct\nFROM\n  (SELECT SUM(cost_usd) AS cost FROM token_ledger tl\n   WHERE $__timeFilter(tl.timestamp)\n     AND ('${engineer:raw}' = 'All' OR tl.username = '${engineer:raw}')\n  AND ('${team:raw}' = 'All' OR tl.session_id IN (SELECT session_id FROM sessions WHERE team_name = '${team:raw}'))) curr,\n  (SELECT SUM(cost_usd) AS cost FROM token_ledger tl\n   WHERE tl.timestamp >= DATE_SUB($__timeFrom(), INTERVAL TIMESTAMPDIFF(SECOND, $__timeFrom(), $__timeTo()) SECOND)\n     AND tl.timestamp < $__timeFrom()\n     AND ('${engineer:raw}' = 'All' OR tl.username = '${engineer:raw}')\n  AND ('${team:raw}' = 'All' OR tl.session_id IN (SELECT session_id FROM sessions WHERE team_name = '${team:raw}'))) prev",
+          "refId": "A"
+        }
+      ],
+      "title": "vs Prior Period",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "teamster-mysql"
+      },
+      "description": "scope: immediate ledger. MTD actual spend and linear run-rate projection to month end.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "purple",
+            "mode": "fixed"
+          },
+          "decimals": 2,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "mtd"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "MTD Actual"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "projected"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Projected"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 5,
+        "x": 9,
+        "y": 1
+      },
+      "id": 4,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": true
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "teamster-mysql"
+          },
+          "format": "table",
+          "rawSql": "SELECT\n  ROUND(SUM(cost_usd), 2) AS mtd,\n  ROUND(SUM(cost_usd) / GREATEST(DAY(NOW()), 1) * DAY(LAST_DAY(NOW())), 2) AS projected\nFROM token_ledger tl\nWHERE tl.timestamp >= DATE_FORMAT(NOW(), '%Y-%m-01')\n  AND tl.timestamp <= NOW()\n  AND ('${engineer:raw}' = 'All' OR tl.username = '${engineer:raw}')\n  AND ('${team:raw}' = 'All' OR tl.session_id IN (SELECT session_id FROM sessions WHERE team_name = '${team:raw}'))",
+          "refId": "A"
+        }
+      ],
+      "title": "Month-to-Date \u00b7 Projected",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "teamster-mysql"
+      },
+      "description": "scope: WMS journal. Distinct outcomes transitioned to status=done in the selected window.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "green",
+            "mode": "fixed"
+          },
+          "decimals": 0,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 5,
+        "x": 14,
+        "y": 1
+      },
+      "id": 5,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/^outcomes$/",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "teamster-mysql"
+          },
+          "format": "table",
+          "rawSql": "SELECT COUNT(DISTINCT entity_id) AS outcomes\nFROM wms_journal\nWHERE entity_type = 'outcome'\n  AND field = 'status'\n  AND new_value = 'done'\n  AND created_at BETWEEN $__timeFrom() AND $__timeTo()",
+          "refId": "A"
+        }
+      ],
+      "title": "Outcomes Delivered (window)",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "teamster-mysql"
+      },
+      "description": "scope: attributed messages, excluding trailing 24h (pending nightly sweep). Click to open FD: Data Quality for full pipeline health.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 1,
+          "mappings": [],
+          "max": 100,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": 0
+              },
+              {
+                "color": "yellow",
+                "value": 80
+              },
+              {
+                "color": "green",
+                "value": 95
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 5,
+        "x": 19,
+        "y": 1
+      },
+      "id": 6,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/^attribution_pct$/",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "teamster-mysql"
+          },
+          "format": "table",
+          "rawSql": "SELECT ROUND(\n  100.0 * SUM(CASE WHEN ua.method != 'unallocated' THEN 1 ELSE 0 END) / COUNT(*), 1\n) AS attribution_pct\nFROM usage_attribution ua\nJOIN token_ledger tl USING (message_id)\nWHERE tl.timestamp BETWEEN $__timeFrom() AND DATE_SUB(NOW(), INTERVAL 24 HOUR)\n  AND ('${engineer:raw}' = 'All' OR tl.username = '${engineer:raw}')\n  AND ('${team:raw}' = 'All' OR tl.session_id IN (SELECT session_id FROM sessions WHERE team_name = '${team:raw}'))",
+          "refId": "A"
+        }
+      ],
+      "title": "Attribution Confidence",
+      "type": "stat"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "id": 10,
+      "panels": [],
+      "title": "Decomposition \u2014 Where Spend Goes",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "teamster-mysql"
+      },
+      "description": "scope: all spend incl. unallocated. Daily spend stacked by product tag. Fractional weighting for multi-tagged entities.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "bars",
+            "fillOpacity": 70,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "decimals": 0,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "(unallocated)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#E02F44",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "(untagged)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#9E9E9E",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 6
+      },
+      "id": 11,
+      "options": {
+        "legend": {
+          "calcs": [
+            "sum"
+          ],
+          "displayMode": "list",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "teamster-mysql"
+          },
+          "format": "time_series",
+          "rawSql": "SELECT\n  $__timeGroupAlias(cf.timestamp, $agg),\n  COALESCE(t.tag_value, IF(cf.entity_type = '', '(unallocated)', '(untagged)')) AS metric,\n  SUM(cf.cost_usd * COALESCE(w.frac, 1)) AS value\nFROM cost_facts cf\nLEFT JOIN (\n  SELECT etr.entity_type, etr.entity_id, etr.tag_id,\n         1.0 / COUNT(*) OVER (PARTITION BY etr.entity_type, etr.entity_id) AS frac\n  FROM entity_tags_resolved etr\n  JOIN tags tt ON tt.id = etr.tag_id AND tt.tag_key = 'product'\n) w ON w.entity_type = cf.entity_type AND w.entity_id = cf.entity_id\nLEFT JOIN tags t ON t.id = w.tag_id\nWHERE cf.timestamp BETWEEN $__timeFrom() AND $__timeTo()\n  AND ('${product:raw}' = 'All' OR t.tag_value = '${product:raw}')\n  AND ('${team:raw}' = 'All' OR EXISTS (\n    SELECT 1 FROM entity_tags_resolved etr3\n    JOIN tags t3 ON t3.id = etr3.tag_id AND t3.tag_key = 'team' AND t3.tag_value = '${team:raw}'\n    WHERE etr3.entity_type = cf.entity_type AND etr3.entity_id = cf.entity_id))\nGROUP BY 1, metric\nORDER BY time",
+          "refId": "A"
+        }
+      ],
+      "title": "Daily Spend by Product",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "teamster-mysql"
+      },
+      "description": "scope: all spend incl. unallocated. Product breakdown for selected window.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          },
+          "decimals": 2,
+          "mappings": [],
+          "unit": "currencyUSD"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "(unallocated)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#E02F44",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "(untagged)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#9E9E9E",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 6
+      },
+      "id": 12,
+      "options": {
+        "legend": {
+          "calcs": [
+            "sum"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "pieType": "donut",
+        "reduceOptions": {
+          "calcs": [
+            "sum"
+          ],
+          "fields": "/^cost$/",
+          "values": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "teamster-mysql"
+          },
+          "format": "table",
+          "rawSql": "SELECT\n  COALESCE(t.tag_value, IF(cf.entity_type = '', '(unallocated)', '(untagged)')) AS facet,\n  SUM(cf.cost_usd * COALESCE(w.frac, 1)) AS cost\nFROM cost_facts cf\nLEFT JOIN (\n  SELECT etr.entity_type, etr.entity_id, etr.tag_id,\n         1.0 / COUNT(*) OVER (PARTITION BY etr.entity_type, etr.entity_id) AS frac\n  FROM entity_tags_resolved etr\n  JOIN tags tt ON tt.id = etr.tag_id AND tt.tag_key = 'product'\n) w ON w.entity_type = cf.entity_type AND w.entity_id = cf.entity_id\nLEFT JOIN tags t ON t.id = w.tag_id\nWHERE cf.timestamp BETWEEN $__timeFrom() AND $__timeTo()\n  AND ('${product:raw}' = 'All' OR t.tag_value = '${product:raw}')\n  AND ('${team:raw}' = 'All' OR EXISTS (\n    SELECT 1 FROM entity_tags_resolved etr3\n    JOIN tags t3 ON t3.id = etr3.tag_id AND t3.tag_key = 'team' AND t3.tag_value = '${team:raw}'\n    WHERE etr3.entity_type = cf.entity_type AND etr3.entity_id = cf.entity_id))\nGROUP BY facet\nORDER BY cost DESC",
+          "refId": "A"
+        }
+      ],
+      "title": "Spend by Product (window)",
+      "type": "piechart"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "teamster-mysql"
+      },
+      "description": "scope: all spend incl. unallocated. Fractional weighting applied \u2014 multi-work-type entities split cost equally across values.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "decimals": 2,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "feature"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#FF7F00",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "bug"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#FFD700",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "research"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#A855F7",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "docs"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#3B82F6",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "test"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#22C55E",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "infra"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#EF4444",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "refactor"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#14B8A6",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "admin"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#9E9E9E",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "(unallocated)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#E02F44",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "(untagged)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#CCCCCC",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 6
+      },
+      "id": 13,
+      "options": {
+        "displayMode": "gradient",
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "maxVizHeight": 300,
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "namePlacement": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "sum"
+          ],
+          "fields": "/^cost$/",
+          "values": true
+        },
+        "showUnfilled": true,
+        "sizing": "auto",
+        "valueMode": "color"
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "teamster-mysql"
+          },
+          "format": "table",
+          "rawSql": "SELECT\n  COALESCE(t.tag_value, IF(cf.entity_type = '', '(unallocated)', '(untagged)')) AS name,\n  SUM(cf.cost_usd * COALESCE(w.frac, 1)) AS cost\nFROM cost_facts cf\nLEFT JOIN (\n  SELECT etr.entity_type, etr.entity_id, etr.tag_id,\n         1.0 / COUNT(*) OVER (PARTITION BY etr.entity_type, etr.entity_id) AS frac\n  FROM entity_tags_resolved etr\n  JOIN tags tt ON tt.id = etr.tag_id AND tt.tag_key = 'work-type'\n) w ON w.entity_type = cf.entity_type AND w.entity_id = cf.entity_id\nLEFT JOIN tags t ON t.id = w.tag_id\nWHERE cf.timestamp BETWEEN $__timeFrom() AND $__timeTo()\n  AND ('${product:raw}' = 'All' OR EXISTS (\n    SELECT 1 FROM entity_tags_resolved etr2\n    JOIN tags t2 ON t2.id = etr2.tag_id AND t2.tag_key = 'product' AND t2.tag_value = '${product:raw}'\n    WHERE etr2.entity_type = cf.entity_type AND etr2.entity_id = cf.entity_id))\n  AND ('${team:raw}' = 'All' OR EXISTS (\n    SELECT 1 FROM entity_tags_resolved etr3\n    JOIN tags t3 ON t3.id = etr3.tag_id AND t3.tag_key = 'team' AND t3.tag_value = '${team:raw}'\n    WHERE etr3.entity_type = cf.entity_type AND etr3.entity_id = cf.entity_id))\nGROUP BY name\nORDER BY cost DESC",
+          "refId": "A"
+        }
+      ],
+      "title": "Spend by Work-Type (window)",
+      "type": "bargauge"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 14
+      },
+      "id": 20,
+      "panels": [],
+      "title": "Who \u2014 Engineers & Teams",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "teamster-mysql"
+      },
+      "description": "scope: immediate ledger. Spend by engineer (token_ledger.username). '(unstamped)' = legacy rows before username capture (v34).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": true,
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "engineer"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Engineer"
+              },
+              {
+                "id": "custom.width",
+                "value": 150
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "sessions"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Sessions"
+              },
+              {
+                "id": "custom.width",
+                "value": 80
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "messages"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Messages"
+              },
+              {
+                "id": "custom.width",
+                "value": 90
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "cost"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Cost"
+              },
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              },
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "cost_per_day"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "$/day"
+              },
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              },
+              {
+                "id": "custom.width",
+                "value": 80
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 14,
+        "x": 0,
+        "y": 15
+      },
+      "id": 21,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "enablePagination": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": true
+        },
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "Cost"
+          }
+        ]
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "teamster-mysql"
+          },
+          "format": "table",
+          "rawSql": "SELECT\n  COALESCE(NULLIF(username, ''), '(unstamped)') AS engineer,\n  COUNT(DISTINCT session_id) AS sessions,\n  COUNT(*) AS messages,\n  ROUND(SUM(cost_usd), 2) AS cost,\n  ROUND(SUM(cost_usd) / GREATEST(DATEDIFF($__timeTo(), $__timeFrom()), 1), 2) AS cost_per_day\nFROM token_ledger tl\nWHERE $__timeFilter(tl.timestamp)\n  AND ('${engineer:raw}' = 'All' OR tl.username = '${engineer:raw}')\n  AND ('${team:raw}' = 'All' OR tl.session_id IN (SELECT session_id FROM sessions WHERE team_name = '${team:raw}'))\nGROUP BY username\nORDER BY cost DESC\nLIMIT 20",
+          "refId": "A"
+        }
+      ],
+      "title": "Spend by Engineer",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "teamster-mysql"
+      },
+      "description": "scope: attributed spend. Spend by team via WMS entity_tags (tag_key='team'). Unattributed spend shows as '(no team)'.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "decimals": 2,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 14,
+        "y": 15
+      },
+      "id": 22,
+      "options": {
+        "displayMode": "gradient",
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "maxVizHeight": 300,
+        "minVizHeight": 16,
+        "minVizWidth": 8,
+        "namePlacement": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "sum"
+          ],
+          "fields": "/^cost$/",
+          "values": true
+        },
+        "showUnfilled": true,
+        "sizing": "auto",
+        "valueMode": "color"
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "teamster-mysql"
+          },
+          "format": "table",
+          "rawSql": "SELECT\n  COALESCE(t.tag_value, '(no team)') AS name,\n  ROUND(SUM(cf.cost_usd * COALESCE(w.frac, 1)), 2) AS cost\nFROM cost_facts cf\nLEFT JOIN (\n  SELECT etr.entity_type, etr.entity_id, etr.tag_id,\n         1.0 / COUNT(*) OVER (PARTITION BY etr.entity_type, etr.entity_id) AS frac\n  FROM entity_tags_resolved etr\n  JOIN tags tt ON tt.id = etr.tag_id AND tt.tag_key = 'team'\n) w ON w.entity_type = cf.entity_type AND w.entity_id = cf.entity_id\nLEFT JOIN tags t ON t.id = w.tag_id\nWHERE $__timeFilter(cf.timestamp)\n  AND ('${product:raw}' = 'All' OR EXISTS (\n    SELECT 1 FROM entity_tags_resolved etr2\n    JOIN tags t2 ON t2.id = etr2.tag_id AND t2.tag_key = 'product' AND t2.tag_value = '${product:raw}'\n    WHERE etr2.entity_type = cf.entity_type AND etr2.entity_id = cf.entity_id))\n  AND ('${team:raw}' = 'All' OR EXISTS (\n    SELECT 1 FROM entity_tags_resolved etr3\n    JOIN tags t3 ON t3.id = etr3.tag_id AND t3.tag_key = 'team' AND t3.tag_value = '${team:raw}'\n    WHERE etr3.entity_type = cf.entity_type AND etr3.entity_id = cf.entity_id))\nGROUP BY name\nORDER BY cost DESC\nLIMIT 20",
+          "refId": "A"
+        }
+      ],
+      "title": "Spend by Team",
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "teamster-mysql"
+      },
+      "description": "scope: attributed spend. Lead (agent_name='') vs named teammates. Anti-pattern: lead > 60% signals coordination failure per the Eight Rules.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          },
+          "decimals": 2,
+          "mappings": [],
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 4,
+        "x": 20,
+        "y": 15
+      },
+      "id": 23,
+      "options": {
+        "legend": {
+          "calcs": [
+            "sum"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "pieType": "donut",
+        "reduceOptions": {
+          "calcs": [
+            "sum"
+          ],
+          "fields": "/^cost$/",
+          "values": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "teamster-mysql"
+          },
+          "format": "table",
+          "rawSql": "SELECT\n  CASE WHEN COALESCE(agent_name, '') = '' THEN 'lead' ELSE 'teammates' END AS role,\n  ROUND(SUM(cost_usd), 2) AS cost\nFROM cost_facts cf\nWHERE cf.timestamp BETWEEN $__timeFrom() AND $__timeTo()\n  AND ('${product:raw}' = 'All' OR EXISTS (\n    SELECT 1 FROM entity_tags_resolved etr2\n    JOIN tags t2 ON t2.id = etr2.tag_id AND t2.tag_key = 'product' AND t2.tag_value = '${product:raw}'\n    WHERE etr2.entity_type = cf.entity_type AND etr2.entity_id = cf.entity_id))\n  AND ('${team:raw}' = 'All' OR EXISTS (\n    SELECT 1 FROM entity_tags_resolved etr3\n    JOIN tags t3 ON t3.id = etr3.tag_id AND t3.tag_key = 'team' AND t3.tag_value = '${team:raw}'\n    WHERE etr3.entity_type = cf.entity_type AND etr3.entity_id = cf.entity_id))\nGROUP BY role",
+          "refId": "A"
+        }
+      ],
+      "title": "Lead vs Teammates Split",
+      "type": "piechart"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 23
+      },
+      "id": 30,
+      "panels": [],
+      "title": "Live \u2014 Current Activity (1m refresh)",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "teamster-mysql"
+      },
+      "description": "scope: distinct sessions with open focus intervals (ended_at IS NULL). Uses wms_intervals as liveness source \u2014 sessions table closes rows immediately, so status is not a reliable liveness signal.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "green",
+            "mode": "fixed"
+          },
+          "decimals": 0,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 4,
+        "x": 0,
+        "y": 24
+      },
+      "id": 31,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/^active$/",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "teamster-mysql"
+          },
+          "format": "table",
+          "rawSql": "SELECT COUNT(DISTINCT session_id) AS active\nFROM wms_intervals\nWHERE ended_at IS NULL\n  AND started_at > DATE_SUB(NOW(), INTERVAL 4 HOUR)",
+          "refId": "A"
+        }
+      ],
+      "title": "Sessions Active Now",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "teamster-mysql"
+      },
+      "description": "Open focus intervals joined to WMS entities and sessions. Shows who is doing what right now. Uses same wms_intervals liveness source as the stat panel. Honest empty state when no sessions are active.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": false,
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "agent"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Agent"
+              },
+              {
+                "id": "custom.width",
+                "value": 140
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "engineer"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Engineer"
+              },
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "entity"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Entity"
+              },
+              {
+                "id": "custom.width",
+                "value": 260
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "focus"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Current Focus"
+              },
+              {
+                "id": "custom.width",
+                "value": 320
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "since_min"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Min ago"
+              },
+              {
+                "id": "custom.width",
+                "value": 70
+              },
+              {
+                "id": "unit",
+                "value": "short"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 20,
+        "x": 4,
+        "y": 24
+      },
+      "id": 32,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "enablePagination": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "teamster-mysql"
+          },
+          "format": "table",
+          "rawSql": "SELECT\n  COALESCE(NULLIF(wi.agent_name, ''), '(lead)') AS agent,\n  COALESCE(NULLIF(s.username, ''), '(unstamped)') AS engineer,\n  CONCAT(wi.entity_type, ' / ', COALESCE(o.title, wu.title, wi.entity_id)) AS entity,\n  COALESCE(s.focus, '(no focus set)') AS focus,\n  ROUND(TIMESTAMPDIFF(SECOND, wi.started_at, NOW()) / 60, 0) AS since_min\nFROM wms_intervals wi\nLEFT JOIN sessions s ON s.session_id = wi.session_id AND s.agent_name = wi.agent_name\nLEFT JOIN outcomes o ON wi.entity_type = 'outcome' AND wi.entity_id = o.id\nLEFT JOIN workunits wu ON wi.entity_type = 'workunit' AND wi.entity_id = wu.id\nWHERE wi.ended_at IS NULL\n  AND wi.started_at > DATE_SUB(NOW(), INTERVAL 4 HOUR)\nORDER BY wi.started_at DESC\nLIMIT 20",
+          "refId": "A"
+        }
+      ],
+      "title": "Current Activity",
+      "type": "table"
+    }
+  ],
+  "preload": false,
+  "refresh": "1m",
+  "schemaVersion": 41,
+  "tags": [
+    "teamster"
+  ],
+  "templating": {
+    "list": [
+      {
+        "auto": true,
+        "auto_count": 50,
+        "auto_min": "1m",
+        "current": {
+          "text": "$__auto",
+          "value": "$__auto"
+        },
+        "label": "Aggregation",
+        "name": "agg",
+        "options": [
+          {
+            "selected": false,
+            "text": "1m",
+            "value": "1m"
+          },
+          {
+            "selected": false,
+            "text": "5m",
+            "value": "5m"
+          },
+          {
+            "selected": false,
+            "text": "15m",
+            "value": "15m"
+          },
+          {
+            "selected": false,
+            "text": "1h",
+            "value": "1h"
+          },
+          {
+            "selected": false,
+            "text": "6h",
+            "value": "6h"
+          },
+          {
+            "selected": false,
+            "text": "1d",
+            "value": "1d"
+          }
+        ],
+        "query": "1m,5m,15m,1h,6h,1d",
+        "refresh": 2,
+        "type": "interval"
+      },
+      {
+        "allValue": "All",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "mysql",
+          "uid": "teamster-mysql"
+        },
+        "definition": "SELECT DISTINCT tag_value FROM tags WHERE tag_key = 'product' AND tag_value IS NOT NULL ORDER BY tag_value",
+        "includeAll": true,
+        "label": "Product",
+        "name": "product",
+        "options": [],
+        "query": "SELECT DISTINCT tag_value FROM tags WHERE tag_key = 'product' AND tag_value IS NOT NULL ORDER BY tag_value",
+        "refresh": 2,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "allValue": "All",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "mysql",
+          "uid": "teamster-mysql"
+        },
+        "definition": "SELECT DISTINCT tag_value FROM tags WHERE tag_key = 'team' AND tag_value IS NOT NULL ORDER BY tag_value",
+        "includeAll": true,
+        "label": "Team",
+        "name": "team",
+        "options": [],
+        "query": "SELECT DISTINCT tag_value FROM tags WHERE tag_key = 'team' AND tag_value IS NOT NULL ORDER BY tag_value",
+        "refresh": 2,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "allValue": "All",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "mysql",
+          "uid": "teamster-mysql"
+        },
+        "definition": "SELECT DISTINCT COALESCE(NULLIF(username,''), '(unstamped)') AS engineer FROM token_ledger WHERE timestamp > DATE_SUB(NOW(), INTERVAL 30 DAY) ORDER BY 1",
+        "includeAll": true,
+        "label": "Engineer",
+        "name": "engineer",
+        "options": [],
+        "query": "SELECT DISTINCT COALESCE(NULLIF(username,''), '(unstamped)') AS engineer FROM token_ledger WHERE timestamp > DATE_SUB(NOW(), INTERVAL 30 DAY) ORDER BY 1",
+        "refresh": 2,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-30d",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "utc",
+  "title": "01 - AI Spend Explorer",
+  "uid": "fd-ai-spend-overview-v2"
+}

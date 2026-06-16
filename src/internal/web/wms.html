@@ -1,0 +1,83 @@
+{{define "outcome-node"}}
+<div class="outcome-node">
+  <div class="outcome-header">
+    <span class="outcome-title">{{.Title}}</span>
+    <span class="status status-{{.Status}}">{{.Status}}</span>
+    <span class="ts">{{.ID}}</span>
+    {{if .Focus}}<span class="focus">{{.Focus}}</span>{{end}}
+  </div>
+  {{range .WorkUnits}}
+  <div class="v2-workunit">
+    <span class="v2-wu-bullet">▸</span>
+    <span class="workitem-title">{{.Title}}</span>
+    <span class="status status-{{.Status}}">{{.Status}}</span>
+    {{if .AgentID}}<span class="agent">→ @{{.AgentID}}</span>{{end}}
+    {{if .Focus}}<span class="focus">{{.Focus}}</span>{{end}}
+    <span class="ts">{{.ID}}</span>
+  </div>
+  {{end}}
+  {{range .Children}}{{template "outcome-node" .}}{{end}}
+</div>
+{{end}}
+{{define "wms.html"}}<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="refresh" content="15">
+<title>WMS Dashboard</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #0d1117; color: #c9d1d9; font-family: monospace; font-size: 13px; padding: 16px; }
+h1 { color: #58a6ff; margin-bottom: 16px; font-size: 16px; }
+h2 { color: #79c0ff; margin: 20px 0 10px; font-size: 14px; border-bottom: 1px solid #21262d; padding-bottom: 4px; }
+.error { color: #f85149; background: #1c1c1c; padding: 8px; border-left: 3px solid #f85149; margin-bottom: 12px; }
+.empty { color: #6e7681; margin: 24px 0; }
+.project { border: 1px solid #21262d; border-radius: 4px; margin-bottom: 16px; }
+.project-header { background: #161b22; padding: 8px 12px; display: flex; gap: 12px; align-items: baseline; }
+.project-name { color: #58a6ff; font-weight: bold; }
+.goal { border-top: 1px solid #21262d; padding: 8px 12px 4px 24px; }
+.goal-header { display: flex; gap: 12px; align-items: baseline; margin-bottom: 4px; }
+.goal-title { color: #79c0ff; }
+.task { padding: 4px 12px 4px 36px; }
+.task-header { display: flex; gap: 12px; align-items: baseline; }
+.task-title { color: #e3b341; }
+.workitem { padding: 2px 12px 2px 48px; display: flex; gap: 12px; color: #8b949e; }
+.workitem-title { color: #c9d1d9; }
+.status { font-size: 11px; padding: 1px 6px; border-radius: 10px; }
+.status-pending   { background: #21262d; color: #8b949e; }
+.status-active    { background: #1a3a1a; color: #3fb950; }
+.status-assigned  { background: #1a2a3a; color: #58a6ff; }
+.status-review    { background: #2d2a00; color: #e3b341; }
+.status-done      { background: #0a2a0a; color: #3fb950; }
+.status-complete, .status-achieved { background: #0a2a0a; color: #3fb950; }
+.status-blocked   { background: #3a1a1a; color: #f85149; }
+.status-open      { background: #21262d; color: #8b949e; }
+.status-planning  { background: #21262d; color: #8b949e; }
+.focus { font-size: 11px; color: #6e7681; font-style: italic; }
+.agent { color: #79c0ff; }
+.ts { color: #484f58; font-size: 11px; }
+.cost-tokens { font-size: 11px; color: #6e7681; }
+.cost-usd { font-size: 11px; color: #3fb950; }
+/* v2 outcome tree */
+.outcome-node { border-left: 2px solid #21262d; margin: 6px 0 6px 0; padding: 4px 0 4px 10px; }
+.outcome-header { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.outcome-title { color: #c9d1d9; }
+.v2-workunit { display: flex; gap: 8px; align-items: baseline; padding: 2px 0 2px 1em; color: #8b949e; flex-wrap: wrap; }
+.v2-wu-bullet { color: #484f58; }
+.v2-section { margin-top: 24px; }
+</style>
+</head>
+<body>
+<h1>Teamster — WMS State</h1>
+<nav style="margin-bottom:12px"><a href="/" style="color:#5099ff;text-decoration:none;margin-right:12px">Activity Stream</a><a href="/wms" style="color:#5099ff;text-decoration:none">WMS State</a></nav>
+{{if .Error}}<div class="error">{{.Error}}</div>{{end}}
+{{if .V2Outcomes}}
+<div class="v2-section">
+<h2>Outcomes</h2>
+{{range .V2Outcomes}}{{template "outcome-node" .}}{{end}}
+</div>
+{{else}}<div class="empty">No outcomes found.</div>{{end}}
+</body>
+</html>
+{{end}}

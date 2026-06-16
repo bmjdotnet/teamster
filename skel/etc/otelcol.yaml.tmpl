@@ -1,0 +1,72 @@
+# Teamster OTLP Collector configuration template.
+# Rendered at install time by teamster-install using Go text/template.
+# Template variables: .OtelGRPCPort, .OtelHTTPPort, .PrometheusPort,
+#                     .Env, .ForwardEndpoint (optional).
+# Do NOT use shell expansion (${VAR}) — this is a Go template, not a shell script.
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:{{ .OtelGRPCPort }}
+      http:
+        endpoint: 0.0.0.0:{{ .OtelHTTPPort }}
+
+processors:
+  memory_limiter:
+    check_interval: 5s
+    limit_mib: 256
+    spike_limit_mib: 64
+
+  batch:
+    send_batch_size: 1024
+    timeout: 5s
+
+  resource:
+    attributes:
+      - key: source
+        value: claude_code
+        action: insert
+      - key: deployment.environment
+        value: {{ .Env }}
+        action: upsert
+
+exporters:
+  debug:
+    verbosity: basic
+
+  prometheusremotewrite:
+    endpoint: http://127.0.0.1:{{ .PrometheusPort }}/api/v1/write
+    resource_to_telemetry_conversion:
+      enabled: true
+{{ if .ForwardEndpoint }}
+  otlp/forward:
+    endpoint: {{ .ForwardEndpoint }}
+    tls:
+      insecure: true
+{{ end }}
+
+service:
+  extensions: [health_check]
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters: [prometheusremotewrite{{ if .ForwardEndpoint }}, otlp/forward{{ end }}]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters: [debug]
+{{ if .ForwardEndpoint }}
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters: [otlp/forward]
+{{ end }}
+  telemetry:
+    logs:
+      level: warn

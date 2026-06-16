@@ -1,0 +1,102 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "teamster-events"
+      },
+      "description": "Real-time activity stream replicating the terminal feed. Each line shows timestamp, session/team, agent, tag, and display text with deterministic entity colors.",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 20,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "baidu": {
+          "callback": "bmapReady",
+          "key": ""
+        },
+        "editor": {
+          "format": "auto"
+        },
+        "editorMode": "code",
+        "followTheme": true,
+        "gaode": {
+          "key": "",
+          "plugin": "AMap.Scale,AMap.ToolBar"
+        },
+        "getOption": "if (!document.getElementById('feed-font')) {\n  const style = document.createElement('style');\n  style.id = 'feed-font';\n  style.textContent = \"@font-face { font-family: 'GlassTTY'; src: url('/public/fonts/Glass_TTY_VT220.ttf') format('truetype'); }\";\n  document.head.appendChild(style);\n}\n\nif (!document.fonts.check('20px GlassTTY')) {\n  document.fonts.load('20px GlassTTY').catch(() => {});\n  return {\n    backgroundColor: '#181b1f',\n    animation: false,\n    graphic: [{ type: 'group', $action: 'replace', children: [{\n      type: 'text', left: 'center', top: 'center',\n      style: { text: 'Loading font...', fill: '#666', fontSize: 16 }\n    }] }],\n    series: []\n  };\n}\n\nconst TAG_COLORS = {\n  'GOAL': [255, 200,  60],\n  'THNK': [140, 170, 130],\n  'DONE': [  0, 102,   0],\n  'READ': [  0,   0, 255],\n  'EDIT': [128, 128,   0],\n  'GREP': [120, 140, 200],\n  'ACT':  [230, 150,  50],\n  'EXEC': [180, 160,  60],\n  'TEAM': [180, 120, 220],\n  'COMM': [150, 140, 210],\n  'TASK': [240, 110, 170],\n  'WEB':  [210, 130, 180],\n  'ASK':  [255, 100, 100],\n  'PLAN': [160, 160, 220],\n  'TOOL': [160, 160, 160],\n  'WARN': [255, 160,  40],\n};\n\nconst FONT = \"'GlassTTY', 'Roboto Mono', 'Consolas', monospace\";\nconst FONT_SIZE = 20;\nconst LINE_H = 22;\nconst PAD_LEFT = 8;\nconst PAD_TOP = 8;\n\nfunction tagColor(tag) {\n  const t = (tag || '').trim();\n  return TAG_COLORS[t] || TAG_COLORS['TOOL'];\n}\n\nfunction rgb(c) { return 'rgb(' + c[0] + ',' + c[1] + ',' + c[2] + ')'; }\n\nfunction simpleHash(str) {\n  let h0 = 0x811c9dc5, h1 = 0x01000193, h2 = 0xdeadbeef;\n  for (let i = 0; i < str.length; i++) {\n    const c = str.charCodeAt(i);\n    h0 = ((h0 ^ c) * 0x01000193) >>> 0;\n    h1 = ((h1 ^ c) * 0x811c9dc5) >>> 0;\n    h2 = ((h2 ^ c) * 0x1b873593) >>> 0;\n  }\n  return [(h0 >>> 24) & 0xff, (h1 >>> 24) & 0xff, (h2 >>> 24) & 0xff];\n}\n\nfunction entityColor(name, salt) {\n  const bytes = simpleHash((salt || '') + (name || ''));\n  let ch = [\n    60 + (bytes[0] * 150 / 255),\n    60 + (bytes[1] * 150 / 255),\n    60 + (bytes[2] * 150 / 255)\n  ];\n  let mx = 0, mn = 0;\n  for (let i = 1; i < 3; i++) {\n    if (ch[i] > ch[mx]) mx = i;\n    if (ch[i] < ch[mn]) mn = i;\n  }\n  ch[mx] = Math.min(ch[mx] + 40, 230);\n  ch[mn] = Math.max(ch[mn] - 30, 40);\n  return 'rgb(' + Math.round(ch[0]) + ',' + Math.round(ch[1]) + ',' + Math.round(ch[2]) + ')';\n}\n\nfunction padTag(tag) {\n  const t = (tag || '').trim();\n  if (t.length >= 4) return t.substring(0, 4);\n  return (' '.repeat(4 - t.length)) + t;\n}\n\nfunction mkStyle(fill) {\n  return { fontFamily: FONT, fontSize: FONT_SIZE, fill: fill };\n}\n\nfunction truncLine(s) {\n  let line = (s || '').replace(/\\r?\\n/g, ' ').replace(/[\\r\\x00-\\x1f]/g, '');\n  if (line.length > 120) line = line.substring(0, 117) + '...';\n  return line;\n}\n\nfunction renderDisplay(display, tagColorStr, stylePrefix) {\n  const line = truncLine(display || '');\n  const parts = line.split(/__([^_]+)__/g);\n  const rich = {};\n  let text = '';\n  for (let j = 0; j < parts.length; j++) {\n    let part = parts[j];\n    const key = stylePrefix + '_' + j;\n    if (j % 2 === 1) {\n      if (j > 0 && parts[j-1].endsWith(' ')) {\n        part = ' ' + part;\n      }\n      rich[key] = { fontFamily: FONT, fontSize: FONT_SIZE, fill: 'rgb(0,255,255)' };\n    } else {\n      if (j < parts.length - 1 && part.endsWith(' ')) {\n        part = part.slice(0, -1);\n      }\n      rich[key] = { fontFamily: FONT, fontSize: FONT_SIZE, fill: tagColorStr };\n    }\n    text += '{' + key + '|' + part + '}';\n  }\n  return { text, rich };\n}\n\nconst s = context.panel.data.series[0];\nif (!s || !s.fields || s.fields.length === 0) {\n  return {\n    backgroundColor: '#181b1f',\n    animation: false,\n    graphic: [{ type: 'group', $action: 'replace', children: [{\n      type: 'text', left: 'center', top: 'center',\n      style: { text: 'No data', fill: '#888', fontFamily: FONT, fontSize: 16 }\n    }] }],\n    series: []\n  };\n}\n\nconst field = (name) => {\n  const f = s.fields.find(x => x.name === name);\n  if (!f) return [];\n  return f.values.buffer || f.values;\n};\n\nconst tsArr = field('ts');\nconst sessionArr = field('session');\nconst agentArr = field('agent_name');\nconst tagArr = field('tag');\nconst displayArr = field('display');\nconst teamArr = field('team');\nconst focusArr = field('focus');\nconst bashArr = field('bash_cmd');\nconst warnArr = field('warn_msg');\n\nconst len = tsArr.length || 0;\n\nlet maxSession = 'session/team'.length;\nlet maxAgent = 'agent'.length;\nfor (let i = 0; i < len; i++) {\n  const session = sessionArr[i] || '';\n  const team = (teamArr.length > i) ? (teamArr[i] || '') : '';\n  const agent = (agentArr[i] || '') || '@lead';\n  const sl = team ? ('#' + team).length : Math.min(session.length, 8);\n  const al = (agent.startsWith('@') ? agent : '@' + agent).length;\n  if (sl > maxSession) maxSession = sl;\n  if (al > maxAgent) maxAgent = al;\n}\n\nconst elements = [];\nlet row = 0;\n\nconst hrich = {};\nhrich.ht = { fontFamily: FONT, fontSize: FONT_SIZE, fill: '#ffffff', fontWeight: 'bold' };\nelements.push({\n  type: 'text',\n  left: 0,\n  top: PAD_TOP,\n  style: {\n    text: '{ht|' + 'HH:MM:SS' + ' }{ht|' + 'session/team'.padEnd(maxSession) + ' }{ht|' + 'agent'.padEnd(maxAgent) + ' }{ht|' + '[' + 'tag'.padEnd(4) + ']' + ' }{ht|display}',\n    rich: hrich,\n    backgroundColor: '#0000aa',\n    width: 2000,\n    padding: [2, PAD_LEFT, 2, PAD_LEFT]\n  }\n});\nrow = 1;\n\nfor (let i = 0; i < len; i++) {\n  const ts = tsArr[i] || '';\n  const session = sessionArr[i] || '';\n  const agent = agentArr[i] || '@lead';\n  const tag = (tagArr[i] || '').trim();\n  const display = displayArr[i] || '';\n  const team = (teamArr.length > i) ? (teamArr[i] || '') : '';\n  const focus = (focusArr.length > i) ? (focusArr[i] || '') : '';\n  const bash = (bashArr.length > i) ? (bashArr[i] || '') : '';\n  const warn = (warnArr.length > i) ? (warnArr[i] || '') : '';\n\n  if (!tag && !focus && !bash && !warn) continue;\n\n  let timePart = '';\n  try {\n    const d = new Date(ts);\n    timePart = d.toLocaleTimeString('en-GB', {hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});\n  } catch(e) { timePart = (ts || '').substring(11,19) || '??:??:??'; }\n\n  const sessionLabel = team ? '#' + team : (session.length > 8 ? session.substring(0,8) : session);\n  const sessionColor = entityColor(sessionLabel, session);\n  const agentLabel = agent.startsWith('@') ? agent : '@' + agent;\n  const agentColor = entityColor(agentLabel, session);\n\n  let tc = tagColor(tag);\n  let tagDisplay = tag;\n  let lineDisplay = display;\n  if (warn) { tagDisplay = 'WARN'; lineDisplay = warn; tc = TAG_COLORS['WARN']; }\n  if (focus && !tag) { tagDisplay = 'GOAL'; lineDisplay = focus; tc = TAG_COLORS['GOAL']; }\n\n  const pt = padTag(tagDisplay);\n  const ri = 'r' + row;\n  const rich = {};\n  rich['t' + ri] = mkStyle('#666');\n  rich['s' + ri] = mkStyle(sessionColor);\n  rich['a' + ri] = mkStyle(agentColor);\n  rich['g' + ri] = mkStyle(rgb(tc));\n\n  const disp = renderDisplay(lineDisplay, rgb(tc), 'd' + ri);\n  Object.assign(rich, disp.rich);\n\n  const lineText = '{t' + ri + '|' + timePart + ' }{s' + ri + '|' + sessionLabel.padEnd(maxSession) + ' }{a' + ri + '|' + agentLabel.padEnd(maxAgent) + ' }{g' + ri + '|[' + pt + '] }' + disp.text;\n\n  elements.push({\n    type: 'text',\n    left: PAD_LEFT,\n    top: PAD_TOP + row * LINE_H,\n    style: { text: lineText, rich: rich }\n  });\n  row++;\n\n  if (bash) {\n    const bi = 'r' + row;\n    const brich = {};\n    brich['t' + bi] = mkStyle('#666');\n    brich['s' + bi] = mkStyle(sessionColor);\n    brich['a' + bi] = mkStyle(agentColor);\n    brich['g' + bi] = mkStyle(rgb(TAG_COLORS['EXEC']));\n    brich['d' + bi] = mkStyle('rgb(120,120,100)');\n\n    const bashText = '{t' + bi + '|' + timePart + ' }{s' + bi + '|' + sessionLabel.padEnd(maxSession) + ' }{a' + bi + '|' + agentLabel.padEnd(maxAgent) + ' }{g' + bi + '|[EXEC] }{d' + bi + '|' + truncLine(bash) + '}';\n    elements.push({ type: 'text', left: PAD_LEFT, top: PAD_TOP + row * LINE_H, style: { text: bashText, rich: brich } });\n    row++;\n  }\n\n  if (focus && tag) {\n    const fi = 'r' + row;\n    const frich = {};\n    frich['t' + fi] = mkStyle('#666');\n    frich['s' + fi] = mkStyle(sessionColor);\n    frich['a' + fi] = mkStyle(agentColor);\n    frich['g' + fi] = mkStyle(rgb(TAG_COLORS['GOAL']));\n\n    const fdisp = renderDisplay(focus, rgb(TAG_COLORS['GOAL']), 'd' + fi);\n    Object.assign(frich, fdisp.rich);\n\n    const focusText = '{t' + fi + '|' + timePart + ' }{s' + fi + '|' + sessionLabel.padEnd(maxSession) + ' }{a' + fi + '|' + agentLabel.padEnd(maxAgent) + ' }{g' + fi + '|[GOAL] }' + fdisp.text;\n\n    elements.push({\n      type: 'text',\n      left: PAD_LEFT,\n      top: PAD_TOP + row * LINE_H,\n      style: { text: focusText, rich: frich }\n    });\n    row++;\n  }\n}\n\nif (elements.length <= 1) {\n  elements.push({\n    type: 'text', left: 'center', top: 'center',\n    style: { text: 'No displayable events', fill: '#888', fontFamily: FONT, fontSize: 14 }\n  });\n}\n\nreturn {\n  backgroundColor: '#181b1f',\n  animation: false,\n  graphic: [{ type: 'group', $action: 'replace', children: elements }],\n  series: []\n};\n",
+        "google": {
+          "callback": "gmapReady",
+          "key": ""
+        },
+        "map": "none",
+        "renderer": "canvas",
+        "themeEditor": {
+          "config": "{}",
+          "name": "default"
+        },
+        "visualEditor": {
+          "code": "return {}",
+          "dataset": [],
+          "series": []
+        }
+      },
+      "pluginVersion": "7.2.2",
+      "targets": [
+        {
+          "columns": [],
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "teamster-events"
+          },
+          "filters": [],
+          "format": "table",
+          "global_query_id": "",
+          "parser": "backend",
+          "refId": "A",
+          "root_selector": "",
+          "source": "url",
+          "type": "json",
+          "url": "/api/events?limit=200",
+          "url_options": {
+            "data": "",
+            "method": "GET"
+          }
+        }
+      ],
+      "title": "Activity Feed",
+      "type": "volkovlabs-echarts-panel"
+    }
+  ],
+  "preload": false,
+  "refresh": "5s",
+  "schemaVersion": 41,
+  "tags": [
+    "teamster"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "00 - Realtime Activity Feed (Claude Agent Teams)",
+  "uid": "activity-feed"
+}

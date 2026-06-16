@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tag Vocabulary — Teamster</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: #0d1117;
+    color: #c9d1d9;
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 13px;
+    padding: 20px;
+  }
+
+  a { color: #58a6ff; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  h1 {
+    font-size: 16px;
+    font-weight: bold;
+    color: #e6edf3;
+    margin-bottom: 16px;
+  }
+
+  .header-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 20px;
+  }
+
+  .nav-links {
+    font-size: 12px;
+    color: #8b949e;
+  }
+  .nav-links a { margin-right: 12px; }
+
+  .btn {
+    background: #21262d;
+    border: 1px solid #30363d;
+    color: #c9d1d9;
+    padding: 4px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 12px;
+  }
+  .btn:hover { background: #30363d; }
+
+  .section-label {
+    color: #8b949e;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin: 20px 0 8px;
+    border-bottom: 1px solid #21262d;
+    padding-bottom: 4px;
+  }
+
+  .key-group {
+    margin-bottom: 4px;
+    border: 1px solid #21262d;
+    border-radius: 4px;
+    overflow: hidden;
+  }
+
+  .key-header {
+    display: flex;
+    align-items: center;
+    padding: 8px 12px;
+    background: #161b22;
+    cursor: pointer;
+    user-select: none;
+    gap: 8px;
+  }
+  .key-header:hover { background: #1c2128; }
+
+  .chevron {
+    color: #8b949e;
+    width: 14px;
+    flex-shrink: 0;
+    transition: transform 0.15s ease;
+    display: inline-block;
+  }
+  .key-group.open .chevron { transform: rotate(90deg); }
+
+  .key-name {
+    font-weight: bold;
+    color: #e6edf3;
+    flex: 0 0 auto;
+    min-width: 140px;
+  }
+
+  .key-meta {
+    color: #8b949e;
+    font-size: 12px;
+    flex: 1;
+  }
+
+  .key-summary {
+    color: #8b949e;
+    font-size: 12px;
+    margin-left: auto;
+    white-space: nowrap;
+  }
+
+  .badge {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 10px;
+    font-size: 10px;
+    font-weight: bold;
+    margin-left: 4px;
+  }
+  .badge-context   { background: #1f3a5c; color: #58a6ff; }
+  .badge-lifecycle { background: #1a3a1a; color: #3fb950; }
+  .badge-demoted   { background: #2d1f1f; color: #f85149; }
+  .badge-multi     { background: #2d2217; color: #d29922; }
+  .badge-seed      { background: #1a3a1a; color: #3fb950; }
+
+  .values-container {
+    display: none;
+    background: #0d1117;
+    border-top: 1px solid #21262d;
+  }
+  .key-group.open .values-container { display: block; }
+
+  .value-row {
+    display: flex;
+    align-items: center;
+    padding: 5px 12px 5px 36px;
+    border-bottom: 1px solid #161b22;
+    gap: 8px;
+  }
+  .value-row:last-child { border-bottom: none; }
+  .value-row:hover { background: #161b22; }
+
+  .value-name {
+    min-width: 180px;
+    color: #c9d1d9;
+  }
+  .value-name.stub {
+    color: #484f58;
+    font-style: italic;
+  }
+
+  .value-count {
+    color: #8b949e;
+    min-width: 80px;
+  }
+  .value-count.nonzero { color: #c9d1d9; }
+
+  .value-desc {
+    color: #6e7681;
+    font-size: 11px;
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .error-msg {
+    color: #f85149;
+    padding: 20px;
+    border: 1px solid #f85149;
+    border-radius: 4px;
+  }
+
+  .loading {
+    color: #8b949e;
+    padding: 20px;
+  }
+
+  .total-count {
+    color: #8b949e;
+    font-size: 12px;
+    margin-bottom: 16px;
+  }
+</style>
+</head>
+<body>
+
+<div class="header-row">
+  <div>
+    <h1>Tag Vocabulary</h1>
+    <div class="nav-links">
+      <a href="/">Activity</a>
+      <a href="/wms">WMS</a>
+      <a href="/wms/cost-flow">Cost Flow</a>
+      <a href="/wms/tags">Tags</a>
+    </div>
+  </div>
+  <button class="btn" onclick="loadTags()">Refresh</button>
+</div>
+
+<div id="content"><div class="loading">Loading tag vocabulary…</div></div>
+
+<script>
+async function loadTags() {
+  const container = document.getElementById('content');
+  try {
+    const resp = await fetch('/wms/api/tags');
+    if (!resp.ok) {
+      container.innerHTML = '<div class="error-msg">Failed to load tags: ' + resp.status + '</div>';
+      return;
+    }
+    const data = await resp.json();
+    renderTags(container, data.keys || []);
+  } catch (e) {
+    container.innerHTML = '<div class="error-msg">Error: ' + e.message + '</div>';
+  }
+}
+
+function entityCountLabel(n) {
+  if (n === 1) return '1 entity';
+  return n + ' entities';
+}
+
+function totalEntities(values) {
+  const seen = new Set();
+  // Sum distinct (count contributions already distinct per-entity in SQL)
+  return values.reduce((s, v) => s + v.entity_count, 0);
+}
+
+function renderTags(container, keys) {
+  if (keys.length === 0) {
+    container.innerHTML = '<div class="loading">No tags in vocabulary.</div>';
+    return;
+  }
+
+  const context   = keys.filter(k => k.category === 'context');
+  const lifecycle = keys.filter(k => k.category === 'lifecycle');
+  // Demoted = keys where all values have is_seed=false AND category != 'context'/'lifecycle'
+  // Actually demoted keys have is_seed=0 on their stub row; category field still set.
+  // We detect demoted by checking if the key has no seed values.
+  const isActive = k => k.values && k.values.some(v => v.is_seed);
+  const isDemoted = k => !isActive(k);
+
+  const activeContext   = context.filter(isActive);
+  const activeLifecycle = lifecycle.filter(isActive);
+  const demoted         = keys.filter(isDemoted);
+
+  const html = [];
+
+  html.push('<div class="total-count">' + keys.length + ' keys</div>');
+
+  if (activeContext.length > 0) {
+    html.push('<div class="section-label">Context</div>');
+    activeContext.forEach(k => html.push(renderKey(k)));
+  }
+  if (activeLifecycle.length > 0) {
+    html.push('<div class="section-label">Lifecycle</div>');
+    activeLifecycle.forEach(k => html.push(renderKey(k)));
+  }
+  if (demoted.length > 0) {
+    html.push('<div class="section-label">Demoted</div>');
+    demoted.forEach(k => html.push(renderKey(k, true)));
+  }
+
+  container.innerHTML = html.join('');
+
+  // Attach click handlers.
+  document.querySelectorAll('.key-header').forEach(h => {
+    h.addEventListener('click', () => {
+      h.closest('.key-group').classList.toggle('open');
+    });
+  });
+}
+
+function renderKey(k, demoted) {
+  const total = totalEntities(k.values);
+  const nonStubCount = k.values.filter(v => v.tag_value !== '').length;
+
+  let catBadge = '';
+  if (demoted) {
+    catBadge = '<span class="badge badge-demoted">demoted</span>';
+  } else if (k.category === 'lifecycle') {
+    catBadge = '<span class="badge badge-lifecycle">lifecycle</span>';
+  } else {
+    catBadge = '<span class="badge badge-context">context</span>';
+  }
+
+  let cardBadge = '';
+  if (k.cardinality === 'multi') {
+    cardBadge = '<span class="badge badge-multi">multi</span>';
+  }
+
+  const summary = nonStubCount + ' value' + (nonStubCount !== 1 ? 's' : '') +
+    ', ' + entityCountLabel(total);
+
+  const valRows = k.values.map(v => {
+    const isStub = v.tag_value === '';
+    const nameClass = isStub ? 'value-name stub' : 'value-name';
+    const nameText  = isStub ? '(stub)' : v.tag_value;
+    const countClass = v.entity_count > 0 ? 'value-count nonzero' : 'value-count';
+    const seedBadge = v.is_seed ? '<span class="badge badge-seed">seed</span>' : '';
+    return [
+      '<div class="value-row">',
+      '  <span class="' + nameClass + '">' + esc(nameText) + '</span>',
+      '  ' + seedBadge,
+      '  <span class="' + countClass + '">' + entityCountLabel(v.entity_count) + '</span>',
+      '  <span class="value-desc">' + esc(v.description) + '</span>',
+      '</div>',
+    ].join('');
+  }).join('');
+
+  return [
+    '<div class="key-group">',
+    '  <div class="key-header">',
+    '    <span class="chevron">&#9658;</span>',
+    '    <span class="key-name">' + esc(k.tag_key) + '</span>',
+    '    <span class="key-meta">' + catBadge + cardBadge + '</span>',
+    '    <span class="key-summary">' + summary + '</span>',
+    '  </div>',
+    '  <div class="values-container">' + valRows + '</div>',
+    '</div>',
+  ].join('');
+}
+
+function esc(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+loadTags();
+</script>
+</body>
+</html>

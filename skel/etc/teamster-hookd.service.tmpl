@@ -1,0 +1,16 @@
+[Unit]
+Description=Teamster hookd event server
+After=network.target
+
+[Service]
+Type=simple
+User=__USER__
+ExecStart=__BASEDIR__/bin/hookd
+Restart=on-failure
+RestartSec=5
+Environment=TEAMSTER_DATA_DIR=__BASEDIR__/var
+Environment=TEAMSTER_HOOK_SERVER_PORT=__PORT__
+Environment=TEAMSTER_HOOK_SERVER_BIND=0.0.0.0
+
+[Install]
+WantedBy=multi-user.target

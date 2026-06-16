@@ -1,0 +1,9 @@
+[Unit]
+Description=Teamster phase + work-type classifier (derive interval phase + workunit work-type)
+After=network.target teamster-hookd.service
+
+[Service]
+Type=oneshot
+User=__USER__
+ExecStart=__BASEDIR__/bin/classify
+Environment=TEAMSTER_DATA_DIR=__BASEDIR__/var
