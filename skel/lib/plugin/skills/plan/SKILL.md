@@ -62,7 +62,7 @@ After approval:
 > (`wms_setFocus`), and do the work yourself, spawning an ephemeral subagent only
 > for a bounded sub-task like a fresh-context review. See `/teamster:solo`.
 
-1. Spawn each approved agent via Agent tool with `team_name`
+1. Spawn each approved agent via the Agent tool with a descriptive `name`
 2. Assign work units via `mcp__wms__wms_assignWorkUnit` or SendMessage
 3. Brief each agent on its domain and which files it owns
 4. Tell each agent who else is working in parallel (shared-worktree rule)

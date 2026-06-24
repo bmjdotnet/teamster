@@ -54,8 +54,8 @@ func TestWriteTempMappings_EmptySlice(t *testing.T) {
 }
 
 func TestSweepOutcomeID_IsStable(t *testing.T) {
-	if sweepOutcomeID != "out-sweep-nightly" {
-		t.Fatalf("sweepOutcomeID = %q, want out-sweep-nightly", sweepOutcomeID)
+	if sweepOutcomeID != "out-sweep" {
+		t.Fatalf("sweepOutcomeID = %q, want out-sweep", sweepOutcomeID)
 	}
 }
 

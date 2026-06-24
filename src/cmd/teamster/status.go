@@ -16,10 +16,11 @@ import (
 	mysqldriver "github.com/go-sql-driver/mysql"
 
 	"github.com/bmjdotnet/teamster/internal/config"
-	"github.com/bmjdotnet/teamster/internal/version"
+	"github.com/bmjdotnet/teamster/internal/statusui"
 )
 
-// ANSI color codes for status display.
+// ANSI color codes — used only by buildStatusRows / checkStatus return values.
+// The Bubbletea view strips these via stripANSI before applying lipgloss styles.
 const (
 	ansiReset  = "\033[0m"
 	ansiGreen  = "\033[0;32m"
@@ -29,33 +30,23 @@ const (
 )
 
 func colorize(s, code string) string {
-	if !isTerminal() {
+	if code == "" {
 		return s
 	}
 	return code + s + ansiReset
 }
 
-var terminalCheck = func() bool {
-	fi, err := os.Stdout.Stat()
-	if err != nil {
-		return false
-	}
-	return (fi.Mode() & os.ModeCharDevice) != 0
-}
-
-func isTerminal() bool { return terminalCheck() }
-
 // statusRow is one rendered row in the status table.
 type statusRow struct {
-	label    string // Col 1: "Event Server (hookd)"
-	status   string // Col 2: colored status text
-	mode     string // Col 3: install | managed | external | none
-	endpoint string // Col 4: URL or DSN or "—"
+	label    string
+	status   string // may contain ANSI escape codes from checkStatus
+	mode     string
+	endpoint string
 }
 
-// visLen returns the visible (printable) length of s, stripping ANSI escape sequences.
-func visLen(s string) int {
-	n := 0
+// stripANSI removes ANSI escape codes from s.
+func stripANSI(s string) string {
+	var b strings.Builder
 	inEsc := false
 	for i := 0; i < len(s); i++ {
 		if inEsc {
@@ -66,49 +57,48 @@ func visLen(s string) int {
 		}
 		if s[i] == '\033' && i+1 < len(s) && s[i+1] == '[' {
 			inEsc = true
-			i++ // skip '['
+			i++
 			continue
 		}
-		n++
+		b.WriteByte(s[i])
 	}
-	return n
+	return b.String()
 }
 
-// padVisible right-pads s with spaces to reach at least width visible characters.
-func padVisible(s string, width int) string {
-	pad := width - visLen(s)
-	if pad <= 0 {
-		return s
-	}
-	return s + strings.Repeat(" ", pad)
-}
+// statusLive is set by --live flag in parseSupervisorFlags.
+var statusLive bool
 
-// supervisorStatus reports current liveness of each configured service as a
-// 4-column ANSI-colored table. Column 2 (status) may contain ANSI codes, so
-// we compute visible-length padding manually rather than relying on tabwriter,
-// which counts bytes not printable characters.
+// supervisorStatus prints a status snapshot by default.
+// With --live, launches the Bubbletea interactive dashboard.
 func supervisorStatus(cfg config.Config) {
-	rows := buildStatusRows(cfg)
-
-	const (
-		col1W = 36
-		col2W = 24
-		col3W = 12
-		gap   = 2
-	)
-	sep := strings.Repeat(" ", gap)
-
-	fmt.Println()
-	fmt.Printf("  %s %s\n", padVisible("Teamster", col1W), colorize("teamster "+version.String(), ansiDim))
-	for _, r := range rows {
-		fmt.Printf("  %s%s%s%s%s%s%s\n",
-			padVisible(r.label, col1W), sep,
-			padVisible(r.status, col2W), sep,
-			padVisible(r.mode, col3W), sep,
-			r.endpoint,
-		)
+	fetcher := func() []statusui.ServiceRow {
+		return buildServiceRows(cfg)
 	}
-	fmt.Println()
+
+	if statusLive {
+		if err := statusui.Run(cfg, fetcher); err != nil {
+			fmt.Fprintf(os.Stderr, "status: %v\n", err)
+		}
+		return
+	}
+
+	fmt.Print(statusui.RenderOnce(cfg, fetcher))
+}
+
+// buildServiceRows converts buildStatusRows output to statusui.ServiceRow,
+// stripping ANSI codes from the status field so lipgloss can style it.
+func buildServiceRows(cfg config.Config) []statusui.ServiceRow {
+	raw := buildStatusRows(cfg)
+	out := make([]statusui.ServiceRow, len(raw))
+	for i, r := range raw {
+		out[i] = statusui.ServiceRow{
+			Label:    r.label,
+			Status:   stripANSI(r.status),
+			Mode:     r.mode,
+			Endpoint: r.endpoint,
+		}
+	}
+	return out
 }
 
 // buildStatusRows computes one row per service from cfg.

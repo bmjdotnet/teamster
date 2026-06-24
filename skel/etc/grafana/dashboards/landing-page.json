@@ -1,0 +1,132 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Welcome to Teamster — start here.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "links": [],
+  "panels": [
+    {
+      "type": "text",
+      "title": "",
+      "gridPos": {
+        "h": 2,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 900,
+      "options": {
+        "mode": "html",
+        "content": "<div style=\"display:flex; gap:6px; align-items:center; flex-wrap:wrap; padding:2px 0; margin: -4px 0;\">\n  <a href=\"/d/landing-page?from=${__from}&to=${__to}\" style=\"padding:4px 12px; background:#2a2a4a; color:#8ab4f8; border-radius:4px; text-decoration:none; font-size:13px; font-weight:600; border:1px solid #4a4a6a;\">Home</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/activity-feed?from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Activity</a>\n  <a href=\"/d/fd-ai-spend-overview-v2?from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Spend</a>\n  <a href=\"/d/fd-cost-explorer-v2?from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Trace</a>\n  <a href=\"/d/fd-usage-effectiveness-v2?from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Usage</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/cost-by-tag-value?from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Simple Cost</a>\n  <a href=\"/d/tag-stack-explorer?from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Multidim</a>\n  <a href=\"/d/entity-cost-explorer?from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Work</a>\n  <a href=\"/d/fd-outcome-accounting-v2?from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Outcomes</a>\n  <a href=\"/d/outcome-cost-explorer?from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Outcome Cost</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/fd-data-quality-v2?from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Health</a>\n</div>",
+        "code": {
+          "language": "html",
+          "showLineNumbers": false,
+          "showMiniMap": false
+        }
+      },
+      "transparent": true,
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "gridPos": {
+        "h": 3,
+        "w": 24,
+        "x": 0,
+        "y": 2
+      },
+      "id": 1,
+      "options": {
+        "code": {
+          "language": "plaintext",
+          "showLineNumbers": false,
+          "showMiniMap": false
+        },
+        "content": "# Teamster\n\nA live AI-usage observatory — real cost, attribution, and effectiveness data from daily Claude Code work.",
+        "mode": "markdown"
+      },
+      "title": "",
+      "transparent": true,
+      "type": "text"
+    },
+    {
+      "gridPos": {
+        "h": 17,
+        "w": 12,
+        "x": 0,
+        "y": 5
+      },
+      "id": 2,
+      "options": {
+        "code": {
+          "language": "plaintext",
+          "showLineNumbers": false,
+          "showMiniMap": false
+        },
+        "content": "### Dashboards\n\n**Overview**\n\n| | |\n|---|---|\n| [Realtime Activity Feed](/d/activity-feed) | Live agent action stream |\n| [AI Spend Explorer](/d/fd-ai-spend-overview-v2) | Headline spend, daily cost, lead vs teammate |\n| [AI Spend Trace](/d/fd-cost-explorer-v2) | Three-facet Sankey, cross-tab, model mix |\n| [Usage & Effectiveness](/d/fd-usage-effectiveness-v2) | Model fit, rework tax, cache economics |\n\n**Work & Cost Explorers**\n\n| | |\n|---|---|\n| [Simple Cost Explorer](/d/cost-by-tag-value) | Single-dimension cost breakdown |\n| [Multidimension Explorer](/d/tag-stack-explorer) | Two-level hierarchy, heat matrix |\n| [Work Explorer](/d/entity-cost-explorer) | Cost by outcome / work unit |\n| [Outcome Accounting](/d/fd-outcome-accounting-v2) | Attribution confidence, cost per outcome |\n| [Outcome Explorer](/d/outcome-cost-explorer) | Per-outcome cost drill-down |\n\n**Operations**\n\n| | |\n|---|---|\n| [System Health](/d/fd-data-quality-v2) | Pipeline health, data quality |",
+        "mode": "markdown"
+      },
+      "title": "",
+      "transparent": true,
+      "type": "text"
+    },
+    {
+      "gridPos": {
+        "h": 17,
+        "w": 12,
+        "x": 12,
+        "y": 5
+      },
+      "id": 3,
+      "options": {
+        "code": {
+          "language": "plaintext",
+          "showLineNumbers": false,
+          "showMiniMap": false
+        },
+        "content": "### Getting Started\n\nThese dashboards will populate as Claude Code sessions start using Teamster. Here's how to get started:\n\n**1. Install the client on hosts running Claude Code:**\n\n```\nteamster install-remote user@host\n```\n\nThis installs the lightweight client on remote hosts — no Go or daemons needed. The hub collects events and serves dashboards.\n\n**2. Configure your tag vocabulary:**\n\nTags are how Teamster classifies and attributes cost. Set them up with the guided TUI wizard (`teamster setup tags`) or conversationally in Claude Code (`/teamster:tags`).\n\n**3. Start a session:**\n\nRun `/teamster:start` in Claude Code to begin tracking work with WMS outcomes and cost attribution.\n\n---\n\n### Explore the dashboards\n\nOnce you have data, explore these dashboards:\n\n**Follow the money** — Open the [Simple Cost Explorer](/d/cost-by-tag-value) and change the **Tag Key** dropdown. Start with `product`, then try `work-type` and `phase`. Each dimension tells a different story. Then try the [Multidimension Cost Explorer](/d/tag-stack-explorer) to slice and dice across two dimensions.\n\n**Trace across dimensions** — The [AI Spend Trace](/d/fd-cost-explorer-v2) defaults to product &rarr; feature &rarr; phase. Try changing Facet 2 to `component` and Facet 3 to `work-type` for a different cross-section.\n\n**Check model efficiency** — In [Usage & Effectiveness](/d/fd-usage-effectiveness-v2), scroll to the **Model Fit** section. The heat matrix shows whether expensive models are doing routine work.\n\n**See what spend produces** — The [Outcome Explorer](/d/outcome-cost-explorer) shows cost accumulation per outcome. Filter by `product` to compare efficiency across efforts.",
+        "mode": "markdown"
+      },
+      "title": "",
+      "transparent": true,
+      "type": "text"
+    }
+  ],
+  "preload": false,
+  "refresh": "",
+  "schemaVersion": 41,
+  "tags": [
+    "teamster"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "timepicker": {
+    "hidden": true
+  },
+  "timezone": "utc",
+  "title": "Teamster — Welcome",
+  "uid": "landing-page"
+}

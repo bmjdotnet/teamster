@@ -69,10 +69,15 @@ func (h *HookObserver) OnStatusChange(change StatusChange) {
 		}
 	}
 
+	sid := h.sessionID
+	if change.SessionID != "" {
+		sid = change.SessionID
+	}
+
 	record := map[string]interface{}{
 		"_tool_tag":       tag,
 		"_tool_display":   display,
-		"session_id":      h.sessionID,
+		"session_id":      sid,
 		"_host":           h.host,
 		"hook_event_name": "WMSStatusChange",
 		"ts":              time.Now().UTC().Format("2006-01-02T15:04:05Z"),

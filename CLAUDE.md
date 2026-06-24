@@ -12,7 +12,7 @@ A Claude Code Agent Teams overlay providing three things:
    the lead how to decompose work, name agents, route by affinity, verify
    autonomously.
 3. **Work management** — Outcome → WorkUnit hierarchy in MySQL/MariaDB,
-   exposed via the `wms` MCP server. Nightly cost-attribution sweep
+   exposed via the `wms` MCP server. Scheduled cost-attribution sweep
    recovers unallocated spend from session transcripts.
 
 Go module: `github.com/bmjdotnet/teamster`. MySQL/MariaDB via `go-sql-driver/mysql`.
@@ -69,6 +69,7 @@ src/                          Go source (go.mod: github.com/bmjdotnet/teamster)
     token-scraper/            Session transcript token-usage scraper
     teamster-install/         Installer binary (called by lib/installrunner.sh)
     demogen/                  Synthetic data generator for dashboards
+    backup/                   Standalone backup binary (systemd timer)
   internal/
     activity/                 Shared activity-tool handler logic
     classify/                 Rule-based classifier engine (work-type, phase)
@@ -90,6 +91,7 @@ src/                          Go source (go.mod: github.com/bmjdotnet/teamster)
       mysql/                  MySQL/MariaDB store + migrations (v1–v43)
     transcript/               Session transcript reader (focus timeline, window)
     tui/                      Bubbletea TUI (tag setup wizard + editor)
+    backup/                   Backup engine (config, drivers, manifest, retention, flock)
     version/                  Build-time version info
     web/                      SSE dashboard + WMS hierarchy + cost-flow + tag browser
     wms/                      WMS engine (Outcome/WorkUnit), state machines, HookObserver
@@ -104,6 +106,8 @@ skel/                         Assets copied to BASEDIR at install time
     teamster-classify.timer.tmpl     Classifier timer (every 5 min)
     teamster-sweep.service.tmpl      Hourly sweep one-shot (rollup --sweep + claude --print)
     teamster-sweep.timer.tmpl        Sweep timer (every hour)
+    teamster-backup.service.tmpl     Backup one-shot service
+    teamster-backup.timer.tmpl       Backup timer (configurable, default 1h)
     teamster-relay.service.tmpl      Event relay (hub→replica), --relay-mode=install
     teamster-repl-push.service.tmpl  Repl-push MySQL sync server (hub side)
     teamster-prometheus-replica.yml.tmpl  Replica Prometheus scrape config
@@ -214,21 +218,35 @@ Settings.json on a remote points `TEAMSTER_HOOK_SERVER_URL` and the MCP
 endpoints at the hub. `TEAMSTER_HOST` carries the short hostname so the
 hub can attribute events. See `docs/specs/REMOTE-INSTALL.md`.
 
+The hub's own `TEAMSTER_HOOK_SERVER_URL` is written with the hub's **hostname**
+(`os.Hostname()`), not `localhost` — hookd binds all interfaces, so this works
+for both hub-local and remote clients, and lets `teamster install-remote`
+propagate a remote-reachable `--server` by default. Reinstall heals a stale
+`localhost`/`127.0.0.1` value but preserves a real hostname/FQDN or an explicit
+`--hookd-endpoint`.
+
+**macOS is a remote-only platform.** The hub installer (`install.sh` /
+`lib/installrunner.sh`) hard-fails on Darwin — run it on the Linux hub and
+enroll the Mac with `teamster install-remote <user>@<mac>` over SSH. On macOS
+the remote uses a launchd LaunchAgent (not cron) for the token-scraper, and
+Agent-Teams teammates run as separate top-level sessions (see Pitfalls).
+
 ## Components — what each one is for
 
 | Binary | Purpose | Notes |
 |--------|---------|-------|
-| `teamster` (Go) | Hook client + CLI on the hub | Forked per hook event. Reads JSON from stdin, enriches, POSTs to hookd. Must exit 0 always. Also serves as the CLI: `start`/`stop`/`status`/`wms-reset`/`tags`/`setup tags`/`wms drain`/`wms list`/`wms close`/`install-remote`. |
-| `teamster.py` (Python) | Hook client on remotes | Pure stdlib, no third-party deps. Same wire contract as Go version. |
-| `hookd` | HTTP event server | POST `/event` → JSONL append. Serves dashboard at `/`, WMS at `/wms`, SSE at `/events/stream`. Focus-absent nudge on PreToolUse (max 3 per session+agent). |
+| `teamster` (Go) | Hook client + CLI on the hub | Forked per hook event. Reads JSON from stdin, enriches, POSTs to hookd. Must exit 0 always. Also serves as the CLI: `start`/`stop`/`status`/`wms-reset`/`tags`/`setup tags`/`wms drain`/`wms list`/`wms close`/`install-remote`/`backup`/`restore`. |
+| `teamster.py` (Python) | Hook client on remotes | Pure stdlib, no third-party deps. Same wire contract as Go version. On macOS, derives teammate identity from the transcript's `agentName` (sets `agent_type` when the payload lacks one) and echoes hookd's `additionalContext` on PreToolUse **and** UserPromptSubmit. `TEAMSTER_DEBUG_RAW=1` dumps raw hook stdin to `var/raw-hook-debug.jsonl`. |
+| `hookd` | HTTP event server | POST `/event` → JSONL append. Serves dashboard at `/`, WMS at `/wms`, SSE at `/events/stream`. Focus-absent nudge on PreToolUse (max 3 per session+agent). Returns activity + team-dispatch `additionalContext` on UserPromptSubmit so remote Python clients get the nudge (the hub Go client ignores it — no double-inject; hookd can't see a remote's solo/team marker, so it always sends team context). |
 | `feed` | Terminal activity viewer | Tails JSONL, ANSI colorizes. Built from `cmd/feed/`. |
 | `activity-mcp` | MCP stdio (activity) | **No-op.** Tools just return confirmation strings. Real data extraction happens in the hook from PreToolUse payloads — that's how we get `agent_type` for teammate attribution. Includes `setMode` for session mode switching. |
 | `wms-mcp` | MCP stdio (WMS) | Outcome/WorkUnit CRUD, tags, focus, dependencies over MySQL/MariaDB via `TEAMSTER_STORE_DSN`. State changes posted to hookd via `HookObserver` when `TEAMSTER_HOOK_SERVER_URL` is set. |
-| `rollup` | Cost-attribution pipeline | Allocates token spend to WMS entities via focus intervals. Flags: `--reallocate`, `--recover-focus`, `--recover-warmup`, `--recover-gaps`, `--synthesize-focus <file>`, `--sweep` (chains all deterministic passes), `--sweep-llm` (adds LLM-assisted synthesis). Reversible: `--unrecover`, `--unrecover-warmup`, `--unrecover-gaps`, `--unsynthesize`. |
+| `rollup` | Cost-attribution pipeline | Allocates token spend to WMS entities via focus intervals. Flags: `--reallocate`, `--recover-focus`, `--recover-warmup`, `--recover-gaps`, `--recover-directives` (focus-less remote teammates → entity named in their dispatch brief), `--repair-focus-intervals` (one-time fix of negative-width focus intervals from the dual-writer/async race), `--synthesize-remote-orphans` (remote sessions with no focus/directive/transcript → temporal correlation with concurrent focused sessions on the same host), `--synthesize-focus <file>`, `--sweep` (chains all deterministic passes), `--sweep-llm` (adds LLM-assisted synthesis), `--count-orphans` (print processable orphan count; checks local transcript existence). Reversible: `--unrecover`, `--unrecover-warmup`, `--unrecover-gaps`, `--unrecover-directives`, `--unrepair-focus-intervals`, `--unsynthesize-remote-floor`, `--unsynthesize`. |
 | `classify` | Interval phase + work-type classifier | Derives `phase` and `work-type` tags on intervals/workunits from rule-based signals. Run by systemd timer every 5 min. `--reclassify` re-derives from scratch. |
 | `token-scraper` | Session transcript scraper | Reads Claude Code session JSONL transcripts and POSTs per-message token usage to hookd's `/telemetry` endpoint. |
 | `teamster-install` | Installer | Called by `lib/installrunner.sh`. Explicit `--basedir/--repo/--builddir` flags — no path inference. |
 | `demogen` | Synthetic data generator | Creates correlated demo data across token_ledger/wms_intervals/usage_attribution/entity_tags/cost_rollup. `--clean` for teardown. |
+| `backup` | Backup engine | Standalone binary for systemd timer. Takes timestamped snapshots of MySQL, OTel, and teamster config/state. No sudo. CLI also accessible via `teamster backup` and `teamster restore`. |
 | `relay` | Event relay | Tails hub JSONL, POSTs each line to replica hookd `/event`. Built by installer when `--relay-mode=install`. See `docs/specs/replication.md`. |
 | `teamster tags` | CLI tag management | Subcommands: `list`, `add-key`, `add-value`, `retire`, `describe`. Built into `cmd/teamster/tags.go`. |
 | `teamster setup tags` | TUI tag wizard | Bubbletea-based guided setup for tag keyspace. 8-screen wizard on first run, 3-column editor on subsequent runs. Built from `internal/tui/`. |
@@ -237,9 +255,10 @@ hub can attribute events. See `docs/specs/REMOTE-INSTALL.md`.
 
 | Unit | Schedule | Purpose |
 |------|----------|---------|
-| `teamster-rollup.timer` | Every 10 minutes | Runs `rollup` to allocate token spend |
+| `teamster-rollup.timer` | Every 10 minutes | Runs `rollup --sweep` (full deterministic pipeline: entity hygiene + attribution recovery + aggregation) |
 | `teamster-classify.timer` | Every 5 minutes | Runs `classify` to derive phase/work-type |
-| `teamster-sweep.timer` | Every hour | Chains `rollup --sweep` + `claude --print /teamster:sweep` for LLM-assisted recovery |
+| `teamster-sweep.timer` | Every hour | Runs `claude --print /teamster:sweep` for LLM-assisted synthesis, gated on `--count-orphans` (skips when nothing to process) |
+| `teamster-backup.timer` | Configurable (default 1h) | Runs backup to snapshot all stores |
 
 ## Key conventions
 
@@ -275,8 +294,27 @@ hub can attribute events. See `docs/specs/REMOTE-INSTALL.md`.
 - MCP config lives in `~/.claude.json` (`claude mcp add-json --scope user`),
   **not** `~/.claude/mcp.json` — that path is not read by Claude Code.
 - `SubagentStart` / `SubagentStop` hooks do **not** fire for Agent Teams.
-  Teammate events appear as regular tool calls within the lead's session_id.
-  Identity comes from the `agent_type` field on hook payloads.
+  On the **hub/Linux**, teammate events appear as regular tool calls within the
+  lead's session_id, and identity comes from the `agent_type` field on hook
+  payloads.
+- **macOS teammates differ — separate top-level sessions, no `agent_type`.** On
+  macOS, each Agent-Teams teammate runs as its own top-level Claude Code session
+  (distinct `session_id`, its own `~/.claude/projects/<proj>/<session>.jsonl`
+  transcript, NOT under `subagents/`), and its hook payloads carry **no
+  `agent_type`**. The teammate name lives only in the transcript's top-level
+  `agentName` field. `teamster.py` derives `agent_type` from `agentName` (via
+  `transcript_path`) so the feed shows `@<name>`; `token-scraper.py` does the
+  same so cost attributes to `@<name>` instead of the lead. Use
+  `TEAMSTER_DEBUG_RAW=1` to confirm what a payload actually contains.
+- The hub hook URL defaults to the hub **hostname** (`os.Hostname()`), not
+  `localhost`. A `localhost` value breaks remote installs (`install.sh` probe
+  warns); reinstall heals stale `localhost` but preserves a real hostname/FQDN
+  or `--hookd-endpoint`. hookd binds all interfaces, so a hostname URL is
+  correct for both hub-local and remote clients.
+- hookd returns activity + team-dispatch `additionalContext` on UserPromptSubmit
+  for remote Python clients; the hub Go client generates its own and ignores the
+  field (no double-inject). hookd can't see a remote session's solo/team marker
+  (client-local state), so it always sends **team** context to remotes.
 - Lead vs teammate hook semantics differ:
   - Lead: PreToolUse only for Bash; PostToolUse for other tools.
   - Teammate: Pre **and** Post fire for all tools — must dedup (file at
@@ -319,7 +357,7 @@ hub can attribute events. See `docs/specs/REMOTE-INSTALL.md`.
 | `skel/lib/plugin/skills/bootstrap/references/field-guide.md` | **Canonical lessons** | Practical operating and development lessons |
 | `skel/lib/plugin/skills/seasoning/SKILL.md` | **Current** | Iterative spec refinement skill |
 | `skel/lib/plugin/skills/solo/SKILL.md` | **Current** | Single-agent (subagent) mode — interview-driven selection; authoritative for the shipped solo mode |
-| `skel/lib/plugin/skills/sweep/SKILL.md` | **Current** | Nightly attribution sweep for `claude --print` |
+| `skel/lib/plugin/skills/sweep/SKILL.md` | **Current** | Attribution sweep for `claude --print` |
 | `skel/lib/plugin/skills/tags/SKILL.md` | **Current** | Tag steward — vocabulary refinement, merge/split, rollback |
 | `skel/lib/plugin/README.md` | **Current** | Plugin overview, skills table, install instructions |
 

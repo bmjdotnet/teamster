@@ -46,6 +46,24 @@ to either run `install.sh` first or pass `--server` explicitly. The hostname is
 written into `~/.claude/settings.json` on the remote — it must be the name
 the remote can use to reach the hub.
 
+**Hub URL must not be `localhost`.** `install.sh` now writes the hub's
+`TEAMSTER_HOOK_SERVER_URL` using the hub's own hostname
+(`http://<hub-hostname>:9125/event`, from `os.Hostname()`), **not** `localhost`.
+hookd binds all interfaces (`0.0.0.0:9125`), so a hostname-based URL works for
+both hub-local sessions and remote clients. This is what makes
+`teamster install-remote` propagate a remote-reachable address by default: it
+derives `--server` from this value, so a `localhost` hub URL would send remotes
+an address that resolves to *themselves*. If the hub URL is still `localhost`
+(e.g. an older install), `install.sh`'s probe now **warns** about it, and
+`teamster install-remote` cannot resolve a usable default — pass `--server
+<hub-host>:9125` explicitly.
+
+A reinstall **heals** a stale `localhost`/`127.0.0.1` hub URL (replacing it
+with the hostname-based default) but **preserves** a real hostname/FQDN the
+operator set deliberately, and always honors an explicit `--hookd-endpoint`
+override. See `isStaleLocalhostURL` / `hubHost()` in
+`src/cmd/teamster-install/`.
+
 ## What gets installed on the remote
 
 ```
@@ -59,9 +77,44 @@ the remote can use to reach the hub.
 
 **No Go binaries. No MCP processes. No databases.** Two Python scripts run
 on the remote: the hook client (spawned by Claude Code per event, exits
-immediately) and the token scraper (cron job every 60s, reads Claude Code
+immediately) and the token scraper (runs every 60s, reads Claude Code
 session JSONL files and POSTs per-message token usage to the hub's
 `/telemetry` endpoint for cost attribution).
+
+**Scheduling differs by OS:**
+
+- **Linux**: token-scraper runs as a crontab entry (`* * * * * ~/teamster/bin/token-scraper`)
+- **macOS**: token-scraper runs as a **launchd LaunchAgent** — cron on macOS
+  requires Full Disk Access and silently fails without it, so launchd is used
+  instead. The plist is installed at:
+
+  ```
+  ~/Library/LaunchAgents/net.bmj.teamster.token-scraper.plist
+  ```
+
+  Key plist settings: `Label: net.bmj.teamster.token-scraper`,
+  `StartInterval: 60`, `RunAtLoad: true`. `ProgramArguments` invokes the
+  scraper through the **absolute `python3` path** resolved by the probe
+  (`["<abs-python3>", "<scraper>"]`), because launchd runs with a minimal PATH
+  that excludes Homebrew — relying on PATH resolution would fail. Environment
+  variables (`TEAMSTER_HOOK_SERVER_URL`, `TEAMSTER_HOST`) are passed via the
+  plist's `EnvironmentVariables` dict — not inherited from the shell. Log
+  output goes to `~/teamster/var/token-scraper.log`.
+
+  The installer loads the agent with the macOS 10.13+ bootstrap API:
+
+  ```bash
+  # Unload any existing agent (idempotent — failure ignored):
+  launchctl bootout "gui/$(id -u)/net.bmj.teamster.token-scraper"
+  # Load the new plist:
+  launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/net.bmj.teamster.token-scraper.plist
+  ```
+
+  Verify the agent is running:
+
+  ```bash
+  launchctl list | grep teamster
+  ```
 
 ### `~/teamster/bin/teamster` — Python hook client
 
@@ -120,6 +173,15 @@ Merged keys (existing keys preserved, never overwritten):
 this when constructing event payloads so the hub can attribute events to
 the right host. Falls back to `socket.gethostname()` if unset.
 
+`remote-setup.sh` **pins** `TEAMSTER_HOST` to `hostname -s` (the short host)
+in two places so every event from the remote reports under one consistent
+label regardless of DNS search domain: in `settings.json` `env` (above) and as
+an `export TEAMSTER_HOST="<short-host>"` line in the login rc file (alongside
+`TEAMSTER_HOOK_SERVER_URL`). The launchd plist (macOS) also sets it in its
+`EnvironmentVariables` dict so the token-scraper reports under the same label.
+Both rc-file writes use a portable `_sed_i` helper (BSD `sed -i ''` on macOS,
+GNU `sed -i` on Linux).
+
 ### MCP servers — registered via `claude mcp add`
 
 The MCPs are HTTP endpoints on the hub. Registered on the remote with:
@@ -132,6 +194,26 @@ claude mcp add --transport http --scope user wms      http://<hub>:9125/mcp/wms
 This is what makes the architecture work: the remote's Claude Code, when it
 needs to call `reportActivity` or `wms_createOutcome`, opens an HTTP connection
 to the hub's hookd, which serves the MCP. No MCP process on the remote.
+
+### UserPromptSubmit context (the nudge, for remotes)
+
+On the hub, the Go hook client injects the activity-reporting reminder and the
+team-dispatch mandate locally — it generates that text from constants and never
+needs hookd to send it. A remote runs the thin Python client, which has no copy
+of that text. So hookd **returns it in the HTTP response**: on a
+`UserPromptSubmit` event, hookd sets `additionalContext` in the JSON response to
+the activity + team-dispatch instructions, and `teamster.py` echoes it back to
+Claude Code as `hookSpecificOutput.additionalContext`. (The Python client echoes
+`additionalContext` on both `PreToolUse` and `UserPromptSubmit`; previously only
+`PreToolUse`.) The hub's Go client ignores this response field — no
+double-injection on the hub.
+
+**Documented limitation:** hookd cannot observe a remote session's solo/team
+marker — that marker is client-local state and is never sent over the wire. So
+hookd always returns the **team** context on `UserPromptSubmit`. A genuinely
+solo remote session will therefore still see the team-dispatch text. This is the
+least-harm default: the common remote case is team work, and the text is
+guidance, not enforcement.
 
 ### `~/.claude/CLAUDE.md`
 
@@ -247,6 +329,123 @@ NOT required:
 - Pre-existing Teamster install
 - Network access to anything other than the hub on TCP/9125
 
+### macOS remotes
+
+macOS hosts are supported as **remotes only** — the hub installer (`install.sh` /
+`lib/installrunner.sh`) hard-fails on macOS with a message like:
+
+```
+ERROR: macOS is not supported as a Teamster hub.
+This installer only runs on apt-based Linux (Debian/Ubuntu); do not run it on the Mac.
+
+macOS is supported as a Teamster *remote* only. To enroll this Mac, go to your
+Teamster server (the Linux hub) and run the remote installer there, pointing it
+at this Mac over SSH:
+
+    # on the Teamster server (NOT on the Mac):
+    teamster install-remote <user>@<this-mac>
+
+See docs/specs/REMOTE-INSTALL.md for details.
+```
+
+To install a macOS remote, run from the hub:
+
+```bash
+teamster install-remote user@your-mac
+```
+
+**macOS-specific prerequisites:**
+
+- SSH access (same as Linux)
+- `python3` 3.6+ — available via Xcode Command Line Tools (`xcode-select --install`)
+  or Homebrew
+- `claude` CLI installed and authenticated
+- macOS 10.13 (High Sierra) or later — required for `launchctl bootstrap`
+
+**PATH resilience — probe and remote-setup augment PATH:** SSH non-login
+shells do not source `~/.zprofile`, and even a login shell may not place every
+tool on `PATH`. Rather than depend on the remote's login-shell PATH being
+correctly configured, both the probe (in `install-remote.sh`) and the
+`remote-setup.sh` script **prepend a set of well-known install directories**
+to `PATH` before resolving `python3` and `claude`:
+
+```
+$HOME/.local/bin        # Claude Code native installer
+/opt/homebrew/bin       # Homebrew, Apple Silicon
+/usr/local/bin          # Homebrew, Intel
+$HOME/bin
+$HOME/.npm-global/bin    # npm global installs
+$PATH                    # whatever the login shell already provides
+```
+
+Prepending these is harmless on Linux (directories that do not exist are
+silently skipped), so the same augmentation runs on both platforms.
+
+The probe runs both tools together under that augmented PATH:
+
+```bash
+bash -lc 'export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$HOME/bin:$HOME/.npm-global/bin:$PATH"; python3 --version && claude --version'
+```
+
+If that exits nonzero, it retries with `zsh -lc '…'`. Only bash and zsh are
+tried; the remote-setup script is then invoked under whichever login shell
+succeeded (`$REMOTE_SHELL`).
+
+**Absolute `python3` for launchd.** After the probe succeeds, `install-remote.sh`
+resolves the **absolute path** to `python3` (and `claude`) under the augmented
+PATH and passes the python3 path to `remote-setup.sh` via `--python3 <abs-path>`.
+This matters because the launchd LaunchAgent runs with a minimal PATH that does
+**not** include Homebrew — so the plist's `ProgramArguments` invokes
+`python3` by absolute path rather than relying on PATH resolution. `remote-setup.sh`
+prefers the passed-in absolute path and falls back to `command -v python3`
+under its own augmented PATH if none was supplied. The same absolute interpreter
+is used for the inline Python merge steps (settings.json, plugin cache).
+
+The net effect: `claude` and `python3` need only be **installed** on the remote
+in one of the well-known locations — they do not need to be on the
+non-interactive login PATH. A standard Homebrew install satisfies this with no
+extra configuration.
+
+**macOS teammate identity and cost attribution.** Agent-Teams teammates behave
+differently on macOS than on the Linux hub, and the remote clients compensate:
+
+- On the **hub/Linux**, dispatched teammates share the lead's `session_id`, and
+  each teammate's hook payloads carry an inline `agent_type` field. Identity is
+  read straight off the payload (`_agent_name = "@" + agent_type`).
+- On **macOS**, each teammate runs as a **separate top-level Claude Code
+  session** — its own `session_id`, its own transcript at
+  `~/.claude/projects/<proj>/<session>.jsonl` (NOT under a `subagents/`
+  subdirectory), and its hook payloads carry **no `agent_type`**. The teammate's
+  name lives only in the top-level `agentName` field inside its own transcript
+  (e.g. `{"agentName":"PizzaDude",...}` near the top of the file). Lead sessions
+  have no `agentName`.
+
+Both remote clients derive identity from that transcript so macOS teammates are
+not misattributed to the lead:
+
+- **`teamster.py`** (hook client): when a hook payload has no `agent_type` but
+  carries `transcript_path`, it scans the head of the transcript (bounded to
+  256 KB) for the first non-empty `agentName` and sets `event["agent_type"]` to
+  it, so hookd resolves `@<name>` in the feed. Fork-per-event, so no cache.
+- **`token-scraper.py`**: for each top-level session transcript it scans the
+  head for `agentName` and attributes that session's cost to `@<agentName>`
+  rather than the lead. Results are memoised per process **only when non-empty**
+  — an empty result (the `agentName` record not yet written when the scraper
+  polls) is not cached, so the next poll retries instead of permanently
+  misattributing the teammate's cost to the lead.
+
+Both scans are best-effort and never raise: an unreadable or not-yet-written
+transcript leaves the event/attribution unchanged.
+
+**Diagnostics — `TEAMSTER_DEBUG_RAW`.** Setting `TEAMSTER_DEBUG_RAW=1` in the
+environment makes `teamster.py` append the verbatim hook stdin (plus a small
+identity envelope: event name, tool, session id, top-level keys) to
+`~/teamster/var/raw-hook-debug.jsonl` before any redaction or field-capping.
+This is the tool for diagnosing missing `agent_type`/`agent_id` on a remote
+(e.g. confirming macOS teammate payloads really do lack `agent_type`). It is
+opt-in, gated on the env var, rotates at ~5 MB, and never raises — leave it
+unset in normal operation. Example: `TEAMSTER_DEBUG_RAW=1 claude`.
+
 ## Prerequisites on the hub
 
 - hookd running with `/mcp/*` routes enabled (this is the new hookd work)
@@ -265,7 +464,13 @@ Running `teamster install-remote user@host` repeatedly is safe:
 - `CLAUDE.md` append checks for existing marker text
 - `.bashrc` PATH addition checks for existing entry
 
+On macOS, the launchd agent reinstall uses bootout-then-bootstrap: the
+installer unloads any existing agent before loading the new plist, making
+re-runs safe even if the plist content changes.
+
 ## Uninstall
+
+**Linux:**
 
 ```bash
 ssh user@host "
@@ -276,9 +481,26 @@ ssh user@host "
   # ~/.claude/plugins/installed_plugins.json (no 'claude plugin uninstall'
   # subcommand exists yet)
   # Remove hooks from settings.json (manual or script)
-  # Remove PATH entry from shell rc file (the install wrote to whichever
-  # of ~/.bashrc or ~/.zshrc matched \$SHELL — adjust the path below):
-  sed -i'' '/teamster\\/bin/d' ~/.bashrc   # or ~/.zshrc on zsh systems
+  # Remove PATH entry from .bashrc:
+  sed -i'' '/teamster\\/bin/d' ~/.bashrc
+"
+```
+
+**macOS:**
+
+```bash
+ssh user@mac "
+  # Unload and remove the launchd agent:
+  launchctl bootout \"gui/\$(id -u)/net.bmj.teamster.token-scraper\" 2>/dev/null || true
+  rm -f ~/Library/LaunchAgents/net.bmj.teamster.token-scraper.plist
+
+  rm -rf ~/teamster
+  claude mcp remove activity
+  claude mcp remove wms
+  # Plugin: same as Linux above
+  # Remove hooks from settings.json (manual or script)
+  # Remove PATH entry from .zshrc (macOS default login shell):
+  sed -i '' '/teamster\\/bin/d' ~/.zshrc
 "
 ```
 

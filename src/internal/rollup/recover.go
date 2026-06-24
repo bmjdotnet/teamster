@@ -3,6 +3,7 @@ package rollup
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -497,20 +498,46 @@ func (r *Runner) RecoverWarmup(ctx context.Context, opts RecoverOptions) (Warmup
 	deferredByHost := map[string]int{}
 
 	for _, s := range sessions {
-		if opts.scoped() && (s.host != opts.Host || !localToUser(s.username, opts.User)) {
-			stats.Deferred++
-			stats.DeferredMessages += s.msgCount
-			deferredByHost[s.host+"\x00"+s.username] += s.msgCount
-			continue
+		isRemote := opts.scoped() && (s.host != opts.Host || !localToUser(s.username, opts.User))
+
+		var tl *transcript.FocusTimeline
+		if isRemote {
+			// Remote session: the transcript lives on another host, so we cannot
+			// use the local FocusTimelineSource. Instead, try the DB focus
+			// intervals that the remote token-scraper already shipped to the hub
+			// (identity_source='remote_scraper'). If the DB has at least one
+			// focus interval for this session we can reconstruct the timeline and
+			// proceed with the same downstream warmup logic; if the DB has none
+			// (the agent never called wms_setFocus), defer as before.
+			dbTL, err := r.focusTimelineFromIntervals(ctx, s.sessionID)
+			if err != nil {
+				r.log.Warn("recover-warmup: DB timeline build failed for remote session; deferring",
+					"session_id", s.sessionID, "host", s.host, "error", err)
+				stats.Deferred++
+				stats.DeferredMessages += s.msgCount
+				deferredByHost[s.host+"\x00"+s.username] += s.msgCount
+				continue
+			}
+			if len(dbTL.Events) == 0 {
+				// No focus intervals in DB → no-focus session (Objective 2) or
+				// intervals not yet scraped; defer rather than guess.
+				stats.Deferred++
+				stats.DeferredMessages += s.msgCount
+				deferredByHost[s.host+"\x00"+s.username] += s.msgCount
+				continue
+			}
+			tl = dbTL
+		} else {
+			var err error
+			tl, err = src(s.sessionID, opts.ProjectsDir)
+			if err != nil {
+				r.log.Warn("recover-warmup: timeline build failed; skipping session",
+					"session_id", s.sessionID, "error", err)
+				continue
+			}
 		}
 
 		stats.Sessions++
-		tl, err := src(s.sessionID, opts.ProjectsDir)
-		if err != nil {
-			r.log.Warn("recover-warmup: timeline build failed; skipping session",
-				"session_id", s.sessionID, "error", err)
-			continue
-		}
 
 		// The timeline must have at least one setFocus on some thread — otherwise
 		// this is a no-focus session (Objective 2 territory), not a warmup session.
@@ -645,6 +672,66 @@ func (r *Runner) RecoverWarmup(ctx context.Context, opts RecoverOptions) (Warmup
 // FocusEvent re-export for warmup recovery's sessionFirstFocus type usage.
 type FocusEvent = transcript.FocusEvent
 
+// focusTimelineFromIntervals builds a FocusTimeline from the wms_intervals rows
+// that the remote token-scraper has already shipped to the hub for sessionID
+// (kind='focus', identity_source='remote_scraper'). This is the fallback timeline
+// source for remote sessions whose transcript does not exist on the local host.
+//
+// The returned timeline has the same shape as transcript.SetFocusTimeline returns:
+// Events keyed by agent_name (lead = ""), each slice ascending by Timestamp.
+// An empty Events map means the session has no focus intervals in the DB.
+func (r *Runner) focusTimelineFromIntervals(ctx context.Context, sessionID string) (*transcript.FocusTimeline, error) {
+	// Exclude brief_directive intervals: a focus-less teammate's INTENDED focus
+	// (from its dispatch brief) is recovered wholesale by RecoverDirective, which
+	// covers the entire session. Treating a directive as a real focus here would
+	// split the session into a warmup window + post-focus window and double-handle
+	// it against RecoverDirective. Only genuine setFocus intervals
+	// (remote_scraper/direct) drive warmup recovery.
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT agent_name, entity_type, entity_id, started_at
+		FROM wms_intervals
+		WHERE kind = 'focus' AND identity_source <> 'brief_directive' AND session_id = ?
+		ORDER BY agent_name, started_at`,
+		sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("query focus intervals: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck
+
+	tl := &transcript.FocusTimeline{
+		SessionID: sessionID,
+		Events:    make(map[string][]transcript.FocusEvent),
+	}
+	for rows.Next() {
+		var agentName, entityType, entityID string
+		var startedAt time.Time
+		if err := rows.Scan(&agentName, &entityType, &entityID, &startedAt); err != nil {
+			return nil, fmt.Errorf("scan focus interval: %w", err)
+		}
+		ev := transcript.FocusEvent{
+			Timestamp:  startedAt,
+			EntityType: entityType,
+			EntityID:   entityID,
+			AgentName:  agentName,
+		}
+		tl.Events[agentName] = append(tl.Events[agentName], ev)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate focus intervals: %w", err)
+	}
+	// ORDER BY agent_name, started_at already gives ascending order per thread;
+	// sort defensively to match the guarantee transcript.SetFocusTimeline provides.
+	for agent, evs := range tl.Events {
+		for i := 1; i < len(evs); i++ {
+			for j := i; j > 0 && evs[j].Timestamp.Before(evs[j-1].Timestamp); j-- {
+				evs[j], evs[j-1] = evs[j-1], evs[j]
+			}
+		}
+		tl.Events[agent] = evs
+	}
+	return tl, nil
+}
+
 // resolveOutcome finds the parent Outcome for a given entity. If the entity is
 // already an outcome, it is returned directly. For a workunit, we look up its
 // parent outcome in the WMS hierarchy.
@@ -707,13 +794,27 @@ func (r *Runner) ensureAdminInterval(ctx context.Context, sessionID, entityType,
 		return 0, err
 	}
 
-	// SELECT the id whether we inserted or it already existed.
+	// SELECT the id whether we inserted or it already existed. If the INSERT
+	// IGNORE no-oped due to a uq_open collision from a different session, the
+	// session-scoped query finds nothing — fall back to the constraint columns.
 	var id uint64
-	if err := r.db.QueryRowContext(ctx, `
+	err := r.db.QueryRowContext(ctx, `
 		SELECT id FROM wms_intervals
 		WHERE kind = 'state' AND session_id = ? AND entity_type = ? AND entity_id = ?
 		  AND phase = 'admin' AND phase_source = 'warmup_recovery'
-		LIMIT 1`, sessionID, entityType, entityID).Scan(&id); err != nil {
+		LIMIT 1`, sessionID, entityType, entityID).Scan(&id)
+	if err == nil {
+		return id, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return 0, err
+	}
+	// Collision from a different session — find the row that occupies the
+	// uq_open slot: same (entity_type, entity_id, kind, ended_at).
+	if err := r.db.QueryRowContext(ctx, `
+		SELECT id FROM wms_intervals
+		WHERE kind = 'state' AND entity_type = ? AND entity_id = ? AND ended_at = ?
+		LIMIT 1`, entityType, entityID, firstFocusAt).Scan(&id); err != nil {
 		return 0, err
 	}
 	return id, nil

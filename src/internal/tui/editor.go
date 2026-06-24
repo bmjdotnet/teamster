@@ -22,6 +22,11 @@ type keyEntry struct {
 	isSeed      bool
 	required    bool
 	entityCount int
+
+	scope          string
+	exclusionGroup string
+	autoExtract    string
+	interview      string
 }
 
 type keyGroup struct {
@@ -238,10 +243,12 @@ func (m EditorModel) loadData() tea.Cmd {
 func loadKeyGroups(db *sql.DB) ([]keyGroup, error) {
 	rows, err := db.QueryContext(context.Background(), `
 		SELECT DISTINCT t.tag_key, t.category, t.cardinality, t.is_seed, t.required, t.description,
+		       t.scope, t.exclusion_group, t.auto_extract, t.interview,
 		       COUNT(DISTINCT et.entity_id) AS entity_count
 		FROM tags t
 		LEFT JOIN entity_tags et ON et.tag_id = t.id
-		GROUP BY t.tag_key, t.category, t.cardinality, t.is_seed, t.required, t.description
+		GROUP BY t.tag_key, t.category, t.cardinality, t.is_seed, t.required, t.description,
+		         t.scope, t.exclusion_group, t.auto_extract, t.interview
 		ORDER BY
 		    CASE t.category WHEN 'context' THEN 0 ELSE 1 END,
 		    t.tag_key`)
@@ -251,13 +258,17 @@ func loadKeyGroups(db *sql.DB) ([]keyGroup, error) {
 	defer rows.Close() //nolint:errcheck
 
 	type rawKey struct {
-		tagKey      string
-		category    string
-		cardinality string
-		isSeed      bool
-		required    bool
-		description string
-		entityCount int
+		tagKey         string
+		category       string
+		cardinality    string
+		isSeed         bool
+		required       bool
+		description    string
+		scope          string
+		exclusionGroup string
+		autoExtract    string
+		interview      string
+		entityCount    int
 	}
 
 	// Deduplicate by tagKey (multiple value rows share metadata).
@@ -267,7 +278,8 @@ func loadKeyGroups(db *sql.DB) ([]keyGroup, error) {
 		var rk rawKey
 		var isSeed, required int
 		if err := rows.Scan(&rk.tagKey, &rk.category, &rk.cardinality, &isSeed, &required,
-			&rk.description, &rk.entityCount); err != nil {
+			&rk.description, &rk.scope, &rk.exclusionGroup, &rk.autoExtract, &rk.interview,
+			&rk.entityCount); err != nil {
 			return nil, err
 		}
 		rk.isSeed = isSeed != 0
@@ -295,13 +307,17 @@ func loadKeyGroups(db *sql.DB) ([]keyGroup, error) {
 	for _, k := range order {
 		rk := seen[k]
 		entry := keyEntry{
-			tagKey:      rk.tagKey,
-			category:    rk.category,
-			cardinality: rk.cardinality,
-			description: rk.description,
-			isSeed:      rk.isSeed,
-			required:    rk.required,
-			entityCount: rk.entityCount,
+			tagKey:         rk.tagKey,
+			category:       rk.category,
+			cardinality:    rk.cardinality,
+			description:    rk.description,
+			isSeed:         rk.isSeed,
+			required:       rk.required,
+			entityCount:    rk.entityCount,
+			scope:          rk.scope,
+			exclusionGroup: rk.exclusionGroup,
+			autoExtract:    rk.autoExtract,
+			interview:      rk.interview,
 		}
 
 		if rk.category == "lifecycle" {
@@ -648,6 +664,42 @@ func (m *EditorModel) handleCol0Key(key string) (tea.Model, tea.Cmd) {
 		}
 		newReq := !m.selectedKey.required
 		return m, m.toggleRequiredCmd(m.selectedKey.tagKey, newReq)
+
+	case "s":
+		if m.selectedKey.tagKey == "" {
+			return m, nil
+		}
+		k := m.selectedKey
+		k.scope = cycleValue(k.scope, scopeValues)
+		return m, m.updateConventionCmd(k.tagKey, k.scope, k.exclusionGroup, k.autoExtract, k.interview)
+
+	case "i":
+		if m.selectedKey.tagKey == "" {
+			return m, nil
+		}
+		k := m.selectedKey
+		k.interview = cycleValue(k.interview, interviewValues)
+		return m, m.updateConventionCmd(k.tagKey, k.scope, k.exclusionGroup, k.autoExtract, k.interview)
+
+	case "x":
+		if m.selectedKey.tagKey == "" {
+			return m, nil
+		}
+		modal := newModal(modalEditDesc)
+		modal.title = "Exclusion Group: " + m.selectedKey.tagKey
+		modal.input.SetValue(m.selectedKey.exclusionGroup)
+		modal.input.Placeholder = "e.g. work-scope"
+		modal.editTarget = 2
+		m.modal = modal
+		return m, nil
+
+	case "X":
+		if m.selectedKey.tagKey == "" {
+			return m, nil
+		}
+		k := m.selectedKey
+		k.autoExtract = cycleValue(k.autoExtract, autoExtractValues)
+		return m, m.updateConventionCmd(k.tagKey, k.scope, k.exclusionGroup, k.autoExtract, k.interview)
 	}
 	return m, nil
 }
@@ -799,6 +851,10 @@ func (m *EditorModel) submitModal() (tea.Model, tea.Cmd) {
 		desc := strings.TrimSpace(m.modal.input.Value())
 		editTarget := m.modal.editTarget
 		m.modal = nil
+		if editTarget == 2 {
+			k := m.selectedKey
+			return m, m.updateConventionCmd(k.tagKey, k.scope, desc, k.autoExtract, k.interview)
+		}
 		if editTarget == 1 {
 			return m, m.editValueDescCmd(desc)
 		}
@@ -1331,6 +1387,8 @@ func (m EditorModel) renderCol3(w, h int) string {
 			seed = "yes"
 		}
 		lines = append(lines, TextStyle.Render("Seed: "+seed))
+		lines = append(lines, "")
+		lines = append(lines, m.renderConventionFields(w)...)
 		if m.selectedKey.description != "" {
 			lines = append(lines, "")
 			lines = append(lines, TextStyle.Render("Description:"))
@@ -1353,6 +1411,8 @@ func (m EditorModel) renderCol3(w, h int) string {
 			seed = "yes"
 		}
 		lines = append(lines, TextStyle.Render("seed: "+seed))
+		lines = append(lines, "")
+		lines = append(lines, m.renderConventionFields(w)...)
 		if d.description != "" {
 			lines = append(lines, "")
 			lines = append(lines, TextStyle.Render("Description:"))
@@ -1389,7 +1449,7 @@ func (m EditorModel) renderStatusBar() string {
 	if m.statusMsg != "" {
 		return StatusBarStyle.Render(m.statusMsg)
 	}
-	return StatusBarStyle.Render("Tab: col  ↑↓ nav  a add  d retire  e edit  t req  L context/lifecycle  /: filter  ?: help  q quit")
+	return StatusBarStyle.Render("Tab: col  ↑↓ nav  a add  d retire  e edit  t req  s scope  i interview  x excl  X extract  L mode  ?: help  q quit")
 }
 
 func (m EditorModel) renderWithHelp(content string) string {
@@ -1411,15 +1471,17 @@ Actions
   ?            this help
   q            quit editor
 
-Context tags are yours to define.
-Lifecycle tags are engine-managed: their values,
-category, and cardinality are locked, but you CAN
-edit a value's description (col 2, e) and toggle
-its required flag (t).
-A REQ marker means the key is required: every
-work unit must carry it before reaching done.
-Retiring a key hides it from defaults but
-preserves all data and entity bindings.
+Conventions (col 1 — per-key)
+  s            cycle scope: (any) → outcome → workunit
+  i            cycle interview: propose → auto → skip
+  x            edit exclusion group (free text slug)
+  X            cycle auto-extract: (none) → git → env
+
+Conventions are advisory metadata on each tag key.
+scope: where the key should be applied.
+interview: how the key behaves in the tag interview.
+exclusion_group: keys sharing a group are mutually
+exclusive. auto_extract: source for auto-extraction.
 
                             Press Esc to close`
 
@@ -1474,6 +1536,58 @@ func (m EditorModel) renderWithModal(content string) string {
 		overlay,
 		lipgloss.WithWhitespaceChars(" "),
 	)
+}
+
+// --- Convention editing ------------------------------------------------------
+
+func (m EditorModel) renderConventionFields(w int) []string {
+	k := m.selectedKey
+	var lines []string
+	lines = append(lines, DimStyle.Render("Conventions:"))
+	scopeVal := k.scope
+	if scopeVal == "" {
+		scopeVal = "(any)"
+	}
+	lines = append(lines, TextStyle.Render(fmt.Sprintf("  Scope:       %s", scopeVal)))
+	interviewVal := k.interview
+	if interviewVal == "" {
+		interviewVal = "propose"
+	}
+	lines = append(lines, TextStyle.Render(fmt.Sprintf("  Interview:   %s", interviewVal)))
+	exclVal := k.exclusionGroup
+	if exclVal == "" {
+		exclVal = "(none)"
+	}
+	lines = append(lines, TextStyle.Render(fmt.Sprintf("  Excl. group: %s", exclVal)))
+	extractVal := k.autoExtract
+	if extractVal == "" {
+		extractVal = "(none)"
+	}
+	lines = append(lines, TextStyle.Render(fmt.Sprintf("  Auto-extract: %s", extractVal)))
+	return lines
+}
+
+var scopeValues = []string{"", "outcome", "workunit"}
+var interviewValues = []string{"propose", "auto", "skip"}
+var autoExtractValues = []string{"", "git", "env"}
+
+func cycleValue(current string, options []string) string {
+	for i, v := range options {
+		if v == current {
+			return options[(i+1)%len(options)]
+		}
+	}
+	return options[0]
+}
+
+func (m *EditorModel) updateConventionCmd(tagKey, scope, exclusionGroup, autoExtract, interview string) tea.Cmd {
+	db := m.db
+	return func() tea.Msg {
+		_, err := db.ExecContext(context.Background(),
+			`UPDATE tags SET scope = ?, exclusion_group = ?, auto_extract = ?, interview = ? WHERE tag_key = ?`,
+			scope, exclusionGroup, autoExtract, interview, tagKey)
+		return dbWriteDone{err: err}
+	}
 }
 
 // --- Utility ----------------------------------------------------------------

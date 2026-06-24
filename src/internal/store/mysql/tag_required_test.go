@@ -26,38 +26,50 @@ func tagRequired(t *testing.T, s *Store, key, value string) bool {
 	return n != 0
 }
 
-// The v30 migration seeds work-type as required and ListRequiredTagKeys
-// surfaces it; ListTags carries the flag through to wms.Tag.Required.
+// v30 seeds work-type required; v40 (required-phase-product) additionally marks
+// phase and product required because the sweep, classifier, and cost dashboards
+// depend on them. ListRequiredTagKeys surfaces all three and ListTags carries
+// the flag through to wms.Tag.Required.
 func TestV30_WorkTypeRequiredByDefault(t *testing.T) {
 	s, _ := newTestStore(t)
 	ctx := context.Background()
+
+	// requiredKeys is the set v30+v40 ship required, in ListRequiredTagKeys order.
+	requiredKeys := map[string]bool{"phase": true, "product": true, "work-type": true}
 
 	keys, err := s.ListRequiredTagKeys(ctx)
 	if err != nil {
 		t.Fatalf("ListRequiredTagKeys: %v", err)
 	}
-	if len(keys) != 1 || keys[0] != "work-type" {
-		t.Errorf("required keys = %v, want [work-type] (v30 seeds work-type required)", keys)
+	if len(keys) != len(requiredKeys) {
+		t.Errorf("required keys = %v, want %d keys (work-type from v30; phase, product from v40)", keys, len(requiredKeys))
+	}
+	for _, k := range keys {
+		if !requiredKeys[k] {
+			t.Errorf("required keys = %v, %q is unexpectedly required", keys, k)
+		}
 	}
 
-	// ListTags reflects required on every work-type row and not on others.
+	// ListTags reflects required on every row of a required key and not on others.
 	tags, err := s.ListTags(ctx)
 	if err != nil {
 		t.Fatalf("ListTags: %v", err)
 	}
-	sawWorkType := false
+	seen := map[string]bool{}
 	for _, tag := range tags {
-		if tag.Key == "work-type" {
-			sawWorkType = true
+		if requiredKeys[tag.Key] {
+			seen[tag.Key] = true
 			if !tag.Required {
-				t.Errorf("ListTags work-type:%q Required=false, want true", tag.Value)
+				t.Errorf("ListTags %s:%q Required=false, want true", tag.Key, tag.Value)
 			}
 		} else if tag.Required {
-			t.Errorf("ListTags %s:%s Required=true, want false (only work-type ships required)", tag.Key, tag.Value)
+			t.Errorf("ListTags %s:%s Required=true, want false (only %v ship required)", tag.Key, tag.Value, keys)
 		}
 	}
-	if !sawWorkType {
-		t.Error("ListTags returned no work-type rows — v30 seed missing")
+	for k := range requiredKeys {
+		if !seen[k] {
+			t.Errorf("ListTags returned no %s rows — required-tag seed missing", k)
+		}
 	}
 }
 
@@ -370,9 +382,9 @@ func seedWorkUnit(t *testing.T, s *Store) string {
 	return wid
 }
 
-// With hard enforcement on, a workunit missing a required tag (work-type, seeded
-// required by v30) cannot transition to done; the error names the missing key.
-// Applying the tag clears the gate.
+// With hard enforcement on, a workunit missing a required tag (work-type seeded
+// required by v30; phase and product by v40) cannot transition to done; the
+// error names the missing key(s). Applying every required tag clears the gate.
 func TestUpdateWorkUnitStatus_HardEnforce(t *testing.T) {
 	s, _ := newTestStore(t)
 	s.requireTagsOnDone = true
@@ -381,7 +393,7 @@ func TestUpdateWorkUnitStatus_HardEnforce(t *testing.T) {
 
 	err := s.UpdateWorkUnitStatus(ctx, wid, wms.StatusDone)
 	if err == nil {
-		t.Fatal("UpdateWorkUnitStatus(done) succeeded with work-type unset — hard enforce must reject")
+		t.Fatal("UpdateWorkUnitStatus(done) succeeded with required tags unset — hard enforce must reject")
 	}
 	if !strings.Contains(err.Error(), "work-type") {
 		t.Errorf("error %q does not name the missing key work-type", err.Error())
@@ -395,16 +407,22 @@ func TestUpdateWorkUnitStatus_HardEnforce(t *testing.T) {
 		t.Error("workunit reached done despite the rejected transition")
 	}
 
-	// Apply work-type, then done succeeds.
-	if err := s.TagEntity(ctx, "workunit", wid, "work-type", "feature", "manual", ""); err != nil {
-		t.Fatalf("tag work-type: %v", err)
+	// Apply every required tag (work-type, phase, product), then done succeeds.
+	required, err := s.ListRequiredTagKeys(ctx)
+	if err != nil {
+		t.Fatalf("ListRequiredTagKeys: %v", err)
+	}
+	for _, key := range required {
+		if err := s.TagEntity(ctx, "workunit", wid, key, "feature", "manual", ""); err != nil {
+			t.Fatalf("tag %s: %v", key, err)
+		}
 	}
 	if err := s.UpdateWorkUnitStatus(ctx, wid, wms.StatusDone); err != nil {
-		t.Fatalf("done after tagging work-type should succeed: %v", err)
+		t.Fatalf("done after tagging all required keys should succeed: %v", err)
 	}
 	wu, _ = s.GetWorkUnit(ctx, wid)
 	if wu.Status != wms.StatusDone {
-		t.Errorf("status = %q after satisfying required tag, want done", wu.Status)
+		t.Errorf("status = %q after satisfying required tags, want done", wu.Status)
 	}
 }
 

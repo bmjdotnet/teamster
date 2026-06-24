@@ -18,6 +18,7 @@ import (
 
 	"github.com/bmjdotnet/teamster/internal/config"
 	"github.com/bmjdotnet/teamster/internal/redact"
+	"gopkg.in/yaml.v3"
 )
 
 const activityProtocol = `
@@ -63,16 +64,11 @@ and being completely opaque to the human operator.
 > and the shared-worktree section do not apply — you ARE the agent; Rules IV,
 > VI, VIII still apply.
 
-**I. Thou shalt use one persistent team per project.**
+**I. Thou shalt work within the session's implicit team.**
 
-Create the team ONCE at project start. It lives for the entire project. Never
-create and destroy teams per dispatch.
-
-` + "```" + `
-WRONG:  TeamCreate("fix-auth") -> agent -> TeamDelete
-        TeamCreate("add-tests") -> agent -> TeamDelete
-RIGHT:  TeamCreate("myproject") -> agents -> tasks -> more tasks -> ...
-` + "```" + `
+Every session with Agent Teams enabled has one implicit team — no creation step
+needed. Name your session's work via the WMS Outcome. Don't fight the implicit
+team or try to create/destroy teams per dispatch.
 
 **II. Thou shalt name agents for their domain, not their role.**
 
@@ -175,16 +171,14 @@ problem disappears.
 
 | Violation | Consequence |
 |-----------|-------------|
-| Agent tool without team_name | Hook injects correction — you spawned a subagent, not a teammate |
+| Unnamed agents (no name parameter) | No addressability, no affinity routing, invisible to monitoring |
 | New agent for work an idle peer owns | Wasted tokens, lost context, invisible to monitoring |
 | Shutting down agents between tasks | Lost context, cold start on next task |
-| Creating/destroying teams per dispatch | Overhead with zero benefit |
 | Generic role names (@builder) | No affinity, no context advantage |
 | Shutdown before human acceptance | Human hasn't reviewed — rework may be needed |
 | Lead relaying between peers | Agents message each other directly |
 | Unverified work presented as done | Build, test, exercise before reporting complete |
 | Asking human to run tests | The test agent is the operator — human reviews results |
-| Editing a file another agent is working on | Lead must warn agents about shared files in the brief |
 | Briefing agents without naming parallel peers | Agents can't discover each other — lead must say who else is active |
 `
 
@@ -325,6 +319,9 @@ func run() error {
 	otelcolBuildFromSrc := flag.Bool("otelcol-build-from-src", false, "build otelcol-contrib from source instead of downloading")
 	prometheusBuildFromSrc := flag.Bool("prometheus-build-from-src", false, "build prometheus from source instead of downloading")
 	grafanaBuildFromSrc := flag.Bool("grafana-build-from-src", false, "build grafana from source instead of downloading")
+	relayMode := flag.String("relay-mode", "", "relay mode: none | install (persisted to teamster.yaml)")
+	relayTarget := flag.String("relay-target", "", "relay target hookd URL (persisted to teamster.yaml)")
+	replPushRemote := flag.String("repl-push-remote", "", "repl-push SCP destination user@host (persisted to teamster.yaml)")
 	prometheusRetention := flag.String("prometheus-retention", "", "TEAMSTER_PROMETHEUS_RETENTION value (e.g. 7d)")
 	env := flag.String("env", "", "TEAMSTER_ENV value (e.g. production)")
 	debugLogPath := flag.String("debug-log", "", "append structured trace events to this file (Round 0 instrumentation)")
@@ -411,7 +408,7 @@ func run() error {
 	}
 
 	// 2. Copy runtime binaries (not teamster-install itself).
-	for _, b := range []string{"teamster", "hookd", "feed", "activity-mcp", "wms-mcp", "token-scraper", "rollup", "classify", "demogen", "relay"} {
+	for _, b := range []string{"teamster", "hookd", "feed", "activity-mcp", "wms-mcp", "token-scraper", "rollup", "classify", "demogen", "relay", "backup"} {
 		src := filepath.Join(*buildDir, b)
 		dst := filepath.Join(*basedir, "bin", b)
 		if err := copyFile(src, dst, 0o755); err != nil {
@@ -422,6 +419,9 @@ func run() error {
 	// at <basedir>/bin/{prometheus,otelcol-contrib,grafana,grafana-server}.
 	for _, b := range modeBinaries(*otelcolMode, *prometheusMode, *grafanaMode) {
 		src := filepath.Join(*buildDir, b)
+		if _, err := os.Stat(src); os.IsNotExist(err) {
+			continue
+		}
 		dst := filepath.Join(*basedir, "bin", b)
 		if err := copyFile(src, dst, 0o755); err != nil {
 			return fmt.Errorf("copying binary %s: %w", b, err)
@@ -521,7 +521,7 @@ func run() error {
 		port = findFreePort(9125)
 	}
 
-	hookServerURL := fmt.Sprintf("http://localhost:%d/event", port)
+	hookServerURL := fmt.Sprintf("http://%s:%d/event", hubHost(), port)
 	ports := portConfig{hookServerURL: hookServerURL}
 	if *prometheusMode == "install" {
 		if prior.Prometheus.Port != 0 {
@@ -681,8 +681,8 @@ func run() error {
 		}
 	}
 
-	// 5d. Materialize the sweep service + timer (nightly deep-clean attribution
-	// pipeline). Like rollup it needs the store DSN; the timer fires once daily.
+	// 5d. Materialize the sweep service + timer (deep-clean attribution
+	// pipeline). Like rollup it needs the store DSN.
 	// Both are written inside basedir/etc/; install.sh syncs them into
 	// /etc/systemd/system/ only when --wire is set.
 	sweepSvcTmpl := filepath.Join(*basedir, "etc", "teamster-sweep.service.tmpl")
@@ -707,7 +707,42 @@ func run() error {
 		}
 	}
 
-	// 5e. Materialize the logrotate config (replace __BASEDIR__ so logrotate
+	// 5e. Materialize the backup service + timer. The service runs the backup
+	// binary pointing at teamster.yaml. Written inside basedir/etc/;
+	// install.sh syncs them into /etc/systemd/system/ only when --wire is set.
+	backupSvcTmpl := filepath.Join(*basedir, "etc", "teamster-backup.service.tmpl")
+	backupSvcOut := filepath.Join(*basedir, "etc", "teamster-backup.service")
+	if data, err := os.ReadFile(backupSvcTmpl); err == nil {
+		user := currentUsername()
+		m := strings.ReplaceAll(string(data), "__BASEDIR__", *basedir)
+		m = strings.ReplaceAll(m, "__USER__", user)
+		if werr := os.WriteFile(backupSvcOut, []byte(m), 0o644); werr != nil {
+			fmt.Fprintf(os.Stderr, "warning: writing backup service unit: %v\n", werr)
+		}
+	}
+	backupTimerTmpl := filepath.Join(*basedir, "etc", "teamster-backup.timer.tmpl")
+	backupTimerOut := filepath.Join(*basedir, "etc", "teamster-backup.timer")
+	if data, err := os.ReadFile(backupTimerTmpl); err == nil {
+		// Read the schedule from the backup section of teamster.yaml if present.
+		schedule := "1h"
+		teamsterYAMLPath := filepath.Join(*basedir, "etc", "teamster.yaml")
+		if yamlData, yamlErr := os.ReadFile(teamsterYAMLPath); yamlErr == nil {
+			var rawCfg struct {
+				Backup struct {
+					Schedule string `yaml:"schedule"`
+				} `yaml:"backup"`
+			}
+			if parseErr := yaml.Unmarshal(yamlData, &rawCfg); parseErr == nil && rawCfg.Backup.Schedule != "" {
+				schedule = rawCfg.Backup.Schedule
+			}
+		}
+		m := strings.ReplaceAll(string(data), "__SCHEDULE__", schedule)
+		if werr := os.WriteFile(backupTimerOut, []byte(m), 0o644); werr != nil {
+			fmt.Fprintf(os.Stderr, "warning: writing backup timer unit: %v\n", werr)
+		}
+	}
+
+	// 5f. Materialize the logrotate config (replace __BASEDIR__ so logrotate
 	// knows the actual events.jsonl path). Written inside basedir/etc/;
 	// install.sh delivers it to /etc/logrotate.d/ when --wire is set.
 	logrotateConfTmpl := filepath.Join(*basedir, "etc", "teamster-logrotate.conf")
@@ -731,15 +766,25 @@ func run() error {
 		grafanaMode:        *grafanaMode,
 		prometheusEndpoint: *prometheusEndpoint,
 		grafanaEndpoint:    *grafanaEndpoint,
+		relayMode:          *relayMode,
+		relayTarget:        *relayTarget,
+		replPushRemote:     *replPushRemote,
 		env:                *env,
 		ports:              ports,
 		otelHTTP:           otelHTTPPort,
 	})
 
+	// Merge default backup: section into teamster.yaml. Runs AFTER writeYAMLConfig
+	// so the file exists. Only adds the key when absent — preserves operator config.
+	teamsterYAMLPath := filepath.Join(*basedir, "etc", "teamster.yaml")
+	if err := mergeBackupSection(teamsterYAMLPath, *basedir); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: merging backup section into teamster.yaml: %v\n", err)
+	}
+
 	if !*wire {
 		binPath := filepath.Join(*basedir, "bin")
 		hookBin := filepath.Join(*basedir, "bin", "teamster")
-		hookServerURL := fmt.Sprintf("http://localhost:%d/event", port)
+		hookServerURL := fmt.Sprintf("http://%s:%d/event", hubHost(), port)
 		dataDir := filepath.Join(*basedir, "var")
 		fragmentPath := filepath.Join(*basedir, "etc", "settings.fragment.json")
 		if err := writeSettingsFragment(fragmentPath, hookBin, hookServerURL, dataDir, port); err != nil {
@@ -855,40 +900,73 @@ Watch activity:  %s
 	return nil
 }
 
-// registerMCPServer ensures the named MCP server is registered with the correct command.
-// It reads ~/.claude.json to detect drift and removes/re-adds when necessary.
+// registerMCPServer ensures the named MCP server is registered with the correct
+// command and that no stale entry in a higher-precedence scope shadows it.
+//
+// Claude Code resolves MCP servers from three scopes (highest precedence first):
+//
+//	local   ~/.mcp.json           `claude mcp remove --scope local` is cwd-relative
+//	project ~/.claude/mcp.json    `claude mcp remove --scope project` is cwd-relative
+//	user    ~/.claude.json        `claude mcp remove --scope user` works globally
+//
+// Because local and project removal via CLI depends on cwd, we edit those files
+// directly (removeMCPFromFile). For user scope we use the CLI as normal.
 func registerMCPServer(name, desiredBin string) {
 	home := homeDir()
-	claudeJSON := filepath.Join(home, ".claude.json")
 
-	currentCmd := readMCPCommand(claudeJSON, name)
-
-	switch currentCmd {
-	case desiredBin:
-		fmt.Printf("MCP server %q: up to date (%s)\n", name, desiredBin)
-		return
-	case "":
-		// Not registered — fall through to add.
-	default:
-		fmt.Printf("MCP server %q: updating path\n  old: %s\n  new: %s\n", name, currentCmd, desiredBin)
-		removeCmd := exec.Command("claude", "mcp", "remove", "--scope", "user", name)
-		removeCmd.Stdout = os.Stdout
-		removeCmd.Stderr = os.Stderr
-		if err := removeCmd.Run(); err != nil {
-			fmt.Printf("Warning: could not remove stale MCP %q: %v\n", name, err)
-		}
+	type scopeFile struct {
+		scope string
+		path  string
+	}
+	scopeFiles := []scopeFile{
+		{"local", filepath.Join(home, ".mcp.json")},
+		{"project", filepath.Join(home, ".claude", "mcp.json")},
+		{"user", filepath.Join(home, ".claude.json")},
 	}
 
-	mcpJSON := fmt.Sprintf(`{"type":"stdio","command":%q}`, desiredBin)
+	needsAdd := true
+	for _, sf := range scopeFiles {
+		cmd := readMCPCommand(sf.path, name)
+		if cmd == "" {
+			continue
+		}
+		if cmd == desiredBin && sf.scope == "user" {
+			needsAdd = false
+			continue
+		}
+		// Stale or shadowing entry — remove it.
+		fmt.Printf("MCP server %q: removing stale entry from %s scope (%s)\n  old: %s\n", name, sf.scope, sf.path, cmd)
+		switch sf.scope {
+		case "local", "project":
+			if err := removeMCPFromFile(sf.path, name); err != nil {
+				fmt.Printf("Warning: could not remove MCP %q from %s: %v\n", name, sf.path, err)
+			}
+		default:
+			rmCmd := exec.Command("claude", "mcp", "remove", "--scope", "user", name)
+			rmCmd.Stdout = os.Stdout
+			rmCmd.Stderr = os.Stderr
+			if err := rmCmd.Run(); err != nil {
+				fmt.Printf("Warning: could not remove MCP %q from %s scope: %v\n", name, sf.scope, err)
+			}
+		}
+		needsAdd = true
+	}
+
+	if !needsAdd {
+		fmt.Printf("MCP server %q: up to date (%s)\n", name, desiredBin)
+		return
+	}
+
+	addJSON := fmt.Sprintf(`{"type":"stdio","command":%q}`, desiredBin)
 	claudePath, lookErr := exec.LookPath("claude")
 	if lookErr != nil {
 		fmt.Printf("\nNote: MCP server %q — claude not found in PATH.\n", name)
-		fmt.Printf("Run manually:\n  claude mcp add-json --scope user %s '%s'\n\n", name, mcpJSON)
+		fmt.Printf("Run manually:\n  claude mcp add-json --scope user %s '%s'\n\n", name, addJSON)
 		return
 	}
 
 	var errBuf strings.Builder
-	addCmd := exec.Command(claudePath, "mcp", "add-json", "--scope", "user", name, mcpJSON)
+	addCmd := exec.Command(claudePath, "mcp", "add-json", "--scope", "user", name, addJSON)
 	addCmd.Stdout = os.Stdout
 	addCmd.Stderr = &errBuf
 	if err := addCmd.Run(); err != nil {
@@ -896,8 +974,46 @@ func registerMCPServer(name, desiredBin string) {
 		if s := strings.TrimSpace(errBuf.String()); s != "" {
 			fmt.Printf("  stderr: %s\n", s)
 		}
-		fmt.Printf("Run manually:\n  claude mcp add-json --scope user %s '%s'\n\n", name, mcpJSON)
+		fmt.Printf("Run manually:\n  claude mcp add-json --scope user %s '%s'\n\n", name, addJSON)
 	}
+}
+
+// removeMCPFromFile removes the named server from the mcpServers object in a
+// JSON config file. No-op if the file doesn't exist or the server isn't in it.
+func removeMCPFromFile(path, name string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return fmt.Errorf("parse %s: %w", path, err)
+	}
+	raw, ok := doc["mcpServers"]
+	if !ok {
+		return nil
+	}
+	var servers map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &servers); err != nil {
+		return fmt.Errorf("parse mcpServers in %s: %w", path, err)
+	}
+	if _, exists := servers[name]; !exists {
+		return nil
+	}
+	delete(servers, name)
+	updated, err := json.MarshalIndent(servers, "", "  ")
+	if err != nil {
+		return err
+	}
+	doc["mcpServers"] = updated
+	out, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(out, '\n'), 0o644)
 }
 
 // readMCPCommand returns the currently registered command for the named MCP server,
@@ -1123,6 +1239,18 @@ func findFreePort(start int) int {
 		}
 	}
 	return start
+}
+
+// hubHost returns the machine's hostname for use in hub-side URLs. It falls
+// back to "localhost" when os.Hostname() errors or returns empty, so installs
+// on hosts without a resolvable name still work — the operator can always
+// override via --hookd-endpoint. hookd binds all interfaces (*:9125), so a
+// hostname-based URL works for both local sessions and remote clients.
+func hubHost() string {
+	if h, err := os.Hostname(); err == nil && h != "" {
+		return h
+	}
+	return "localhost"
 }
 
 // hookEntry is a single hook command within a hook event's matcher block.
@@ -1622,6 +1750,67 @@ func mergeClaudeMD(path string) error {
 		return err
 	}
 	return os.WriteFile(path, []byte(content), 0o644)
+}
+
+// mergeBackupSection adds a default backup: section to teamster.yaml when the
+// key is absent. Non-destructive: an existing backup: key is never touched.
+func mergeBackupSection(teamsterYAMLPath, basedir string) error {
+	data, err := os.ReadFile(teamsterYAMLPath)
+	if err != nil {
+		return nil // teamster.yaml not written yet; writeYAMLConfig will create it
+	}
+	var doc map[string]interface{}
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return fmt.Errorf("parse teamster.yaml: %w", err)
+	}
+	if doc == nil {
+		doc = make(map[string]interface{})
+	}
+	if _, exists := doc["backup"]; exists {
+		return nil // already has a backup section — do not touch
+	}
+
+	// Append a pre-formatted block rather than re-marshaling the whole map.
+	// yaml.Marshal destroys comments and key ordering in the existing file.
+	hostname, _ := os.Hostname()
+	block := fmt.Sprintf(`
+backup:
+    backup_dir: ""
+    hostname: %q
+    schedule: "1h"
+    retention:
+        keep_for: "7d"
+        max_count: 0
+    stores:
+        mysql:
+            enabled: true
+            databases: ["teamster", "claude_telemetry"]
+        prometheus:
+            enabled: false
+            data_dir: "/var/lib/prometheus/metrics2"
+        grafana:
+            enabled: true
+            data_dir: "/var/lib/grafana"
+            provisioning_dir: "/etc/grafana/provisioning"
+            include_plugins: false
+        otel:
+            enabled: true
+            files: [%q]
+        teamster:
+            enabled: true
+            base_dir: %q
+            include_logs: false
+`, hostname, filepath.Join(basedir, "etc", "otelcol.yaml"), basedir)
+
+	f, err := os.OpenFile(teamsterYAMLPath, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return fmt.Errorf("open teamster.yaml for append: %w", err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(block); err != nil {
+		return fmt.Errorf("append backup section: %w", err)
+	}
+	return nil
 }
 
 // modeBinaries returns the set of third-party binary filenames that must be

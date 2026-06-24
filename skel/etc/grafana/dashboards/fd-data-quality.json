@@ -19,28 +19,44 @@
   "editable": false,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
-  "links": [
-    {
-      "icon": "external link",
-      "tags": [],
-      "targetBlank": false,
-      "title": "AI Spend Overview",
-      "type": "link",
-      "url": "/d/fd-ai-spend-overview-v2"
-    }
-  ],
+  "links": [],
   "panels": [
+    {
+      "type": "text",
+      "title": "",
+      "gridPos": {
+        "h": 2,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 900,
+      "options": {
+        "mode": "html",
+        "content": "<div style=\"display:flex; gap:6px; align-items:center; flex-wrap:wrap; padding:2px 0; margin: -4px 0;\">\n  <a href=\"/d/landing-page?from=${__from}&to=${__to}\" style=\"padding:4px 12px; background:#1e1e2e; color:#8ab4f8; border-radius:4px; text-decoration:none; font-size:13px; font-weight:600; border:1px solid #333;\">Home</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/activity-feed?from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Activity</a>\n  <a href=\"/d/fd-ai-spend-overview-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Spend</a>\n  <a href=\"/d/fd-cost-explorer-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Trace</a>\n  <a href=\"/d/fd-usage-effectiveness-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Usage</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/cost-by-tag-value?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Simple Cost</a>\n  <a href=\"/d/tag-stack-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Multidim</a>\n  <a href=\"/d/entity-cost-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Work</a>\n  <a href=\"/d/fd-outcome-accounting-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Outcomes</a>\n  <a href=\"/d/outcome-cost-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Outcome Cost</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/fd-data-quality-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#2a2a4a; color:#8ab4f8; border-radius:4px; text-decoration:none; font-size:12px; font-weight:600; border:1px solid #4a4a6a;\">Health</a>\n</div>",
+        "code": {
+          "language": "html",
+          "showLineNumbers": false,
+          "showMiniMap": false
+        }
+      },
+      "transparent": true,
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
     {
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 0
+        "y": 2
       },
       "id": 1,
       "panels": [],
-      "title": "Verdict \u2014 Attribution & Pipeline Health",
+      "title": "Verdict — Attribution & Pipeline Health",
       "type": "row"
     },
     {
@@ -48,7 +64,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: attributed messages, excluding trailing 24h (pending nightly sweep). Green >=95%, yellow >=80%, red <80%.",
+      "description": "scope: attributed messages, excluding trailing 24h (pending sweep). Green >=95%, yellow >=80%, red <80%.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -83,7 +99,7 @@
         "h": 4,
         "w": 4,
         "x": 0,
-        "y": 1
+        "y": 3
       },
       "id": 2,
       "options": {
@@ -115,7 +131,7 @@
           "refId": "A"
         }
       ],
-      "title": "Attribution % (excl. trailing 24h)",
+      "title": "Attribution %",
       "type": "stat"
     },
     {
@@ -156,7 +172,7 @@
         "h": 4,
         "w": 4,
         "x": 4,
-        "y": 1
+        "y": 3
       },
       "id": 3,
       "options": {
@@ -188,7 +204,7 @@
           "refId": "A"
         }
       ],
-      "title": "Unallocated Messages (window)",
+      "title": "Unallocated Messages",
       "type": "stat"
     },
     {
@@ -229,7 +245,7 @@
         "h": 4,
         "w": 4,
         "x": 8,
-        "y": 1
+        "y": 3
       },
       "id": 4,
       "options": {
@@ -261,7 +277,7 @@
           "refId": "A"
         }
       ],
-      "title": "Unallocated Cost (window)",
+      "title": "Unallocated Cost",
       "type": "stat"
     },
     {
@@ -302,7 +318,7 @@
         "h": 4,
         "w": 4,
         "x": 12,
-        "y": 1
+        "y": 3
       },
       "id": 5,
       "options": {
@@ -375,7 +391,7 @@
         "h": 4,
         "w": 4,
         "x": 16,
-        "y": 1
+        "y": 3
       },
       "id": 6,
       "options": {
@@ -448,7 +464,7 @@
         "h": 4,
         "w": 4,
         "x": 20,
-        "y": 1
+        "y": 3
       },
       "id": 7,
       "options": {
@@ -489,11 +505,11 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 5
+        "y": 7
       },
       "id": 10,
       "panels": [],
-      "title": "Attribution Pipeline \u2014 Coverage & Method Mix",
+      "title": "Attribution Pipeline — Coverage & Method Mix",
       "type": "row"
     },
     {
@@ -501,7 +517,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: attributed messages, excluding trailing 24h. Coverage trend. Dip at right edge = pending nightly sweep (expected behavior, not breakage).",
+      "description": "scope: attributed messages, excluding trailing 24h. Coverage trend. Dip at right edge = pending sweep (expected behavior, not breakage).",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -562,7 +578,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 6
+        "y": 8
       },
       "id": 11,
       "options": {
@@ -590,7 +606,7 @@
           "refId": "A"
         }
       ],
-      "title": "Attribution Coverage Trend (excl. trailing 24h \u2014 pending sweep)",
+      "title": "Attribution Coverage Trend",
       "type": "timeseries"
     },
     {
@@ -598,7 +614,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: all attribution methods in selected window. Shows the recovery pipeline contribution \u2014 temporal_join=direct, transcript/warmup/gap/synthesis=recovered.",
+      "description": "scope: all attribution methods in selected window. Shows the recovery pipeline contribution — temporal_join=direct, transcript/warmup/gap/synthesis=recovered.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -656,7 +672,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 6
+        "y": 8
       },
       "id": 12,
       "options": {
@@ -686,7 +702,7 @@
           "refId": "A"
         }
       ],
-      "title": "Attribution Method Mix (per day)",
+      "title": "Attribution Method Mix",
       "type": "timeseries"
     },
     {
@@ -694,7 +710,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "Recovery method totals for selected window. Headline: only ~33% direct \u2014 the rest recovered by sweep passes.",
+      "description": "Recovery method totals for selected window. Headline: only ~33% direct — the rest recovered by sweep passes.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -729,10 +745,6 @@
               {
                 "id": "displayName",
                 "value": "Method"
-              },
-              {
-                "id": "custom.width",
-                "value": 240
               }
             ]
           },
@@ -745,10 +757,6 @@
               {
                 "id": "displayName",
                 "value": "Messages"
-              },
-              {
-                "id": "custom.width",
-                "value": 90
               }
             ]
           },
@@ -769,10 +777,6 @@
               {
                 "id": "decimals",
                 "value": 2
-              },
-              {
-                "id": "custom.width",
-                "value": 100
               }
             ]
           },
@@ -793,10 +797,6 @@
               {
                 "id": "decimals",
                 "value": 1
-              },
-              {
-                "id": "custom.width",
-                "value": 70
               }
             ]
           }
@@ -806,7 +806,7 @@
         "h": 8,
         "w": 10,
         "x": 0,
-        "y": 14
+        "y": 16
       },
       "id": 13,
       "options": {
@@ -877,10 +877,6 @@
               {
                 "id": "displayName",
                 "value": "Host"
-              },
-              {
-                "id": "custom.width",
-                "value": 130
               }
             ]
           },
@@ -893,10 +889,6 @@
               {
                 "id": "displayName",
                 "value": "Username"
-              },
-              {
-                "id": "custom.width",
-                "value": 110
               }
             ]
           },
@@ -909,10 +901,6 @@
               {
                 "id": "displayName",
                 "value": "Unallocated Msgs"
-              },
-              {
-                "id": "custom.width",
-                "value": 140
               }
             ]
           },
@@ -933,10 +921,6 @@
               {
                 "id": "decimals",
                 "value": 2
-              },
-              {
-                "id": "custom.width",
-                "value": 140
               }
             ]
           }
@@ -946,7 +930,7 @@
         "h": 8,
         "w": 14,
         "x": 10,
-        "y": 14
+        "y": 16
       },
       "id": 14,
       "options": {
@@ -983,11 +967,11 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 22
+        "y": 24
       },
       "id": 20,
       "panels": [],
-      "title": "Ingest \u2014 Hookd & Scrapers",
+      "title": "Ingest — Hookd & Scrapers",
       "type": "row"
     },
     {
@@ -1053,7 +1037,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 23
+        "y": 25
       },
       "id": 21,
       "options": {
@@ -1134,10 +1118,6 @@
                 "value": "Host"
               },
               {
-                "id": "custom.width",
-                "value": 130
-              },
-              {
                 "id": "custom.cellOptions",
                 "value": {
                   "type": "auto"
@@ -1162,10 +1142,6 @@
               {
                 "id": "decimals",
                 "value": 0
-              },
-              {
-                "id": "custom.width",
-                "value": 100
               }
             ]
           },
@@ -1178,10 +1154,6 @@
               {
                 "id": "displayName",
                 "value": "Last Message"
-              },
-              {
-                "id": "custom.width",
-                "value": 200
               },
               {
                 "id": "custom.cellOptions",
@@ -1197,7 +1169,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 23
+        "y": 25
       },
       "id": 22,
       "options": {
@@ -1233,7 +1205,7 @@
         "type": "prometheus",
         "uid": "teamster-prometheus"
       },
-      "description": "Process up/down for hookd (the only Teamster service with a Prometheus scrape target). MCP servers are stdio \u2014 not scraped.",
+      "description": "Process up/down for hookd (the only Teamster service with a Prometheus scrape target). MCP servers are stdio — not scraped.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1276,7 +1248,7 @@
         "h": 3,
         "w": 24,
         "x": 0,
-        "y": 31
+        "y": 33
       },
       "id": 23,
       "options": {
@@ -1317,7 +1289,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 34
+        "y": 36
       },
       "id": 30,
       "panels": [],
@@ -1364,10 +1336,6 @@
               {
                 "id": "displayName",
                 "value": "ID"
-              },
-              {
-                "id": "custom.width",
-                "value": 80
               }
             ]
           },
@@ -1380,10 +1348,6 @@
               {
                 "id": "displayName",
                 "value": "Title"
-              },
-              {
-                "id": "custom.width",
-                "value": 260
               }
             ]
           },
@@ -1396,10 +1360,6 @@
               {
                 "id": "displayName",
                 "value": "Missing Required Tags"
-              },
-              {
-                "id": "custom.width",
-                "value": 200
               }
             ]
           },
@@ -1420,10 +1380,6 @@
               {
                 "id": "decimals",
                 "value": 2
-              },
-              {
-                "id": "custom.width",
-                "value": 100
               }
             ]
           }
@@ -1433,7 +1389,7 @@
         "h": 8,
         "w": 14,
         "x": 0,
-        "y": 35
+        "y": 37
       },
       "id": 31,
       "options": {
@@ -1475,7 +1431,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "Tag key drift: keys defined with conflicting category or cardinality. Live data shows work-type and source duplicated \u2014 causes incorrect cost splits.",
+      "description": "Tag key drift: keys defined with conflicting category or cardinality. Live data shows work-type and source duplicated — causes incorrect cost splits.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1510,10 +1466,6 @@
               {
                 "id": "displayName",
                 "value": "Tag Key"
-              },
-              {
-                "id": "custom.width",
-                "value": 130
               }
             ]
           },
@@ -1526,10 +1478,6 @@
               {
                 "id": "displayName",
                 "value": "Categories"
-              },
-              {
-                "id": "custom.width",
-                "value": 200
               }
             ]
           },
@@ -1542,10 +1490,6 @@
               {
                 "id": "displayName",
                 "value": "Cardinalities"
-              },
-              {
-                "id": "custom.width",
-                "value": 160
               }
             ]
           },
@@ -1558,10 +1502,6 @@
               {
                 "id": "displayName",
                 "value": "# Values"
-              },
-              {
-                "id": "custom.width",
-                "value": 80
               }
             ]
           }
@@ -1571,7 +1511,7 @@
         "h": 8,
         "w": 10,
         "x": 14,
-        "y": 35
+        "y": 37
       },
       "id": 32,
       "options": {
@@ -1642,10 +1582,6 @@
               {
                 "id": "displayName",
                 "value": "Session"
-              },
-              {
-                "id": "custom.width",
-                "value": 200
               }
             ]
           },
@@ -1658,10 +1594,6 @@
               {
                 "id": "displayName",
                 "value": "Agent"
-              },
-              {
-                "id": "custom.width",
-                "value": 130
               }
             ]
           },
@@ -1674,10 +1606,6 @@
               {
                 "id": "displayName",
                 "value": "Team"
-              },
-              {
-                "id": "custom.width",
-                "value": 120
               }
             ]
           },
@@ -1690,10 +1618,6 @@
               {
                 "id": "displayName",
                 "value": "Status"
-              },
-              {
-                "id": "custom.width",
-                "value": 80
               }
             ]
           },
@@ -1710,10 +1634,6 @@
               {
                 "id": "unit",
                 "value": "h"
-              },
-              {
-                "id": "custom.width",
-                "value": 100
               }
             ]
           }
@@ -1723,7 +1643,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 43
+        "y": 45
       },
       "id": 33,
       "options": {
@@ -1800,10 +1720,6 @@
               {
                 "id": "displayName",
                 "value": "ID"
-              },
-              {
-                "id": "custom.width",
-                "value": 80
               }
             ]
           },
@@ -1816,10 +1732,6 @@
               {
                 "id": "displayName",
                 "value": "Title"
-              },
-              {
-                "id": "custom.width",
-                "value": 280
               }
             ]
           },
@@ -1832,10 +1744,6 @@
               {
                 "id": "displayName",
                 "value": "Status"
-              },
-              {
-                "id": "custom.width",
-                "value": 80
               }
             ]
           },
@@ -1852,10 +1760,6 @@
               {
                 "id": "unit",
                 "value": "short"
-              },
-              {
-                "id": "custom.width",
-                "value": 90
               }
             ]
           },
@@ -1876,10 +1780,6 @@
               {
                 "id": "decimals",
                 "value": 2
-              },
-              {
-                "id": "custom.width",
-                "value": 100
               }
             ]
           }
@@ -1889,7 +1789,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 43
+        "y": 45
       },
       "id": 34,
       "options": {
@@ -1932,11 +1832,11 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 51
+        "y": 53
       },
       "id": 40,
       "panels": [],
-      "title": "Attribution Flow \u2014 Sankey",
+      "title": "Attribution Flow — Sankey",
       "type": "row"
     },
     {
@@ -1953,7 +1853,7 @@
         "h": 14,
         "w": 24,
         "x": 0,
-        "y": 52
+        "y": 54
       },
       "id": 41,
       "options": {
@@ -1999,7 +1899,7 @@
           "refId": "A"
         }
       ],
-      "title": "Attribution Flow (spend \u2192 confidence \u2192 entity tier)",
+      "title": "Attribution Flow (spend → confidence → entity tier)",
       "type": "volkovlabs-echarts-panel"
     }
   ],
@@ -2008,7 +1908,8 @@
   "schemaVersion": 41,
   "tags": [
     "teamster",
-    "admin"
+    "admin",
+    "operations"
   ],
   "templating": {
     "list": [
@@ -2017,12 +1918,19 @@
         "auto_count": 50,
         "auto_min": "1m",
         "current": {
-          "text": "$__auto",
-          "value": "$__auto"
+          "selected": true,
+          "text": "auto",
+          "value": "$__auto_interval_agg"
         },
+        "hide": 0,
         "label": "Aggregation",
         "name": "agg",
         "options": [
+          {
+            "selected": true,
+            "text": "auto",
+            "value": "$__auto_interval_agg"
+          },
           {
             "selected": false,
             "text": "1m",
@@ -2055,7 +1963,7 @@
           }
         ],
         "query": "1m,5m,15m,1h,6h,1d",
-        "refresh": 2,
+        "skipUrlSync": false,
         "type": "interval"
       }
     ]

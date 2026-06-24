@@ -8,7 +8,10 @@ import (
 	"time"
 )
 
-const synthesisMethod = "synthesized_outcome"
+const (
+	synthesisMethod = "synthesized_outcome"
+	skipMethod      = "sweep_skipped"
+)
 
 // OrphanSession is one session with unallocated cost and no setFocus anywhere in
 // its transcript — the Objective 2 target set. The LLM orchestrator reads these
@@ -180,6 +183,32 @@ func (r *Runner) SynthesizeFocus(ctx context.Context, opts SynthesizeOptions) (S
 			continue
 		}
 
+		// Handle skip entries: entity_type=="skip" means the LLM examined
+		// this session and determined it can't be attributed. Mark it so
+		// future sweeps don't re-examine it.
+		if mapping.EntityType == "skip" {
+			stats.Sessions++
+			msgs, skipErr := r.unallocatedMessages(ctx, s)
+			if skipErr != nil {
+				return stats, fmt.Errorf("session %s: list unallocated messages: %w", s.sessionID, skipErr)
+			}
+			for _, m := range msgs {
+				stats.Examined++
+				if opts.DryRun {
+					stats.Skipped++
+					r.log.Info("synthesize (dry-run): would mark as skipped",
+						"message_id", m.messageID, "session_id", s.sessionID,
+						"reason", mapping.EvidenceExcerpt)
+					continue
+				}
+				if err := r.applySkip(ctx, m, s.sessionID, mapping, opts.MappingFile, now); err != nil {
+					return stats, fmt.Errorf("session %s message %s: apply skip: %w", s.sessionID, m.messageID, err)
+				}
+				stats.Skipped++
+			}
+			continue
+		}
+
 		// M-1: verify the session actually has NO setFocus events. If the
 		// orchestrator mistakenly mapped a session that DID have focus, skip it —
 		// that session belongs to RecoverFocus/RecoverWarmup, not synthesis.
@@ -285,6 +314,46 @@ func (r *Runner) applySynthesis(ctx context.Context, m unallocatedMsg, sessionID
 		m.messageID, mapping.EntityType, mapping.EntityID, sessionID,
 		mapping.Confidence, mapping.EvidenceExcerpt, mappingFile, now); err != nil {
 		return fmt.Errorf("insert synthesis evidence: %w", err)
+	}
+
+	return tx.Commit()
+}
+
+// applySkip marks one unallocated message as permanently skipped and records the reason.
+func (r *Runner) applySkip(ctx context.Context, m unallocatedMsg, sessionID string, mapping *SynthesisMapping, mappingFile string, now time.Time) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	res, err := tx.ExecContext(ctx, `
+		UPDATE usage_attribution
+		SET method = ?, computed_at = ?
+		WHERE message_id = ? AND method = 'unallocated'`,
+		skipMethod, now, m.messageID)
+	if err != nil {
+		return fmt.Errorf("update attribution: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return tx.Commit()
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO synthesis_evidence
+			(message_id, entity_type, entity_id, session_id, confidence, evidence_excerpt, mapping_source, recovered_at)
+		VALUES (?, 'skip', 'SKIP', ?, 'skip', ?, ?, ?)
+		ON DUPLICATE KEY UPDATE
+			entity_type      = VALUES(entity_type),
+			entity_id        = VALUES(entity_id),
+			confidence       = VALUES(confidence),
+			evidence_excerpt = VALUES(evidence_excerpt),
+			mapping_source   = VALUES(mapping_source),
+			recovered_at     = VALUES(recovered_at)`,
+		m.messageID, sessionID,
+		mapping.EvidenceExcerpt, mappingFile, now); err != nil {
+		return fmt.Errorf("insert skip evidence: %w", err)
 	}
 
 	return tx.Commit()

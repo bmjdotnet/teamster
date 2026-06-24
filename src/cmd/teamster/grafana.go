@@ -30,6 +30,7 @@ type grafanaTemplateData struct {
 	GrafanaStateDir      string
 	GrafanaSecretKey     string
 	GrafanaAdminPassword string
+	Hostname             string
 	PrometheusPort       int
 	HookdPort            int
 
@@ -73,9 +74,11 @@ func StartGrafana(ctx context.Context, cfg config.Config) (*exec.Cmd, error) {
 		return nil, fmt.Errorf("grafana: secret key: %w", err)
 	}
 
-	adminPassword, err := grafanaPersistentSecret(grafanaStateDir, "admin_password", 16)
-	if err != nil {
-		return nil, fmt.Errorf("grafana: admin password: %w", err)
+	adminPassword := "admin"
+
+	hostname, _ := os.Hostname()
+	if hostname == "" {
+		hostname = "localhost"
 	}
 
 	data := grafanaTemplateData{
@@ -84,6 +87,7 @@ func StartGrafana(ctx context.Context, cfg config.Config) (*exec.Cmd, error) {
 		GrafanaStateDir:      grafanaStateDir,
 		GrafanaSecretKey:     secretKey,
 		GrafanaAdminPassword: adminPassword,
+		Hostname:             hostname,
 		PrometheusPort:       cfg.PrometheusPort,
 		HookdPort:            cfg.HookServerPort,
 	}

@@ -22,12 +22,37 @@
   "links": [],
   "panels": [
     {
+      "type": "text",
+      "title": "",
+      "gridPos": {
+        "h": 2,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 900,
+      "options": {
+        "mode": "html",
+        "content": "<div style=\"display:flex; gap:6px; align-items:center; flex-wrap:wrap; padding:2px 0; margin: -4px 0;\">\n  <a href=\"/d/landing-page?from=${__from}&to=${__to}\" style=\"padding:4px 12px; background:#1e1e2e; color:#8ab4f8; border-radius:4px; text-decoration:none; font-size:13px; font-weight:600; border:1px solid #333;\">Home</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/activity-feed?from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Activity</a>\n  <a href=\"/d/fd-ai-spend-overview-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Spend</a>\n  <a href=\"/d/fd-cost-explorer-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#2a2a4a; color:#8ab4f8; border-radius:4px; text-decoration:none; font-size:12px; font-weight:600; border:1px solid #4a4a6a;\">Trace</a>\n  <a href=\"/d/fd-usage-effectiveness-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Usage</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/cost-by-tag-value?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Simple Cost</a>\n  <a href=\"/d/tag-stack-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Multidim</a>\n  <a href=\"/d/entity-cost-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Work</a>\n  <a href=\"/d/fd-outcome-accounting-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Outcomes</a>\n  <a href=\"/d/outcome-cost-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Outcome Cost</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/fd-data-quality-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Health</a>\n</div>",
+        "code": {
+          "language": "html",
+          "showLineNumbers": false,
+          "showMiniMap": false
+        }
+      },
+      "transparent": true,
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 0
+        "y": 2
       },
       "id": 1,
       "panels": [],
@@ -39,7 +64,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: all spend incl. unallocated \u2014 reads cost_facts (attribution lags rollup timer + nightly sweep)",
+      "description": "scope: all spend incl. unallocated — reads cost_facts (attribution lags rollup timer + sweep)",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -64,7 +89,7 @@
         "h": 4,
         "w": 5,
         "x": 0,
-        "y": 1
+        "y": 3
       },
       "id": 2,
       "options": {
@@ -139,7 +164,7 @@
         "h": 4,
         "w": 5,
         "x": 5,
-        "y": 1
+        "y": 3
       },
       "id": 3,
       "options": {
@@ -171,7 +196,7 @@
           "refId": "A"
         }
       ],
-      "title": "Attribution % (excl. trailing 24h)",
+      "title": "Attribution %",
       "type": "stat"
     },
     {
@@ -204,7 +229,7 @@
         "h": 4,
         "w": 5,
         "x": 10,
-        "y": 1
+        "y": 3
       },
       "id": 4,
       "options": {
@@ -269,7 +294,7 @@
         "h": 4,
         "w": 5,
         "x": 15,
-        "y": 1
+        "y": 3
       },
       "id": 5,
       "options": {
@@ -348,7 +373,7 @@
         "h": 4,
         "w": 4,
         "x": 20,
-        "y": 1
+        "y": 3
       },
       "id": 6,
       "options": {
@@ -397,11 +422,11 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 5
+        "y": 7
       },
       "id": 20,
       "panels": [],
-      "title": "Cost Explorer: $facet1 \u2192 $facet2 \u2192 $facet3",
+      "title": "Cost Explorer: $facet1 → $facet2 → $facet3",
       "type": "row"
     },
     {
@@ -409,7 +434,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: all spend incl. unallocated. Conservation guaranteed \u2014 sum of first-stage outflows equals window total. Node labels prefixed with stage key to prevent DAG cycle errors when facets share values. Top 10 per stage + (other). Multi-valued keys split cost fractionally. (unallocated)=bright red; (untagged @key)=grey.",
+      "description": "scope: all spend incl. unallocated. Conservation guaranteed — sum of first-stage outflows equals window total. Node labels prefixed with stage key to prevent DAG cycle errors when facets share values. Top 10 per stage + (other). Multi-valued keys split cost fractionally. (unallocated)=bright red; (untagged @key)=grey.",
       "fieldConfig": {
         "defaults": {},
         "overrides": []
@@ -418,7 +443,7 @@
         "h": 14,
         "w": 24,
         "x": 0,
-        "y": 6
+        "y": 8
       },
       "id": 21,
       "options": {
@@ -435,7 +460,7 @@
           "key": "",
           "plugin": "AMap.Scale,AMap.ToolBar"
         },
-        "getOption": "const allSeries = context.panel.data.series;\nif (!allSeries || allSeries.length < 1) return { series: [] };\n\nconst fld = (s, name) => {\n  const f = s.fields.find(x => x.name === name);\n  if (!f) return [];\n  const v = f.values;\n  return (v && v.buffer) ? v.buffer : (v || []);\n};\n\nconst links = [];\nconst nodeSet = new Set();\n\nfor (const s of allSeries) {\n  if (!s || !s.fields || s.fields.length < 3) continue;\n  const sources = fld(s, 'source');\n  const targets = fld(s, 'target');\n  const values  = fld(s, 'value');\n  for (let i = 0; i < sources.length; i++) {\n    const v = parseFloat(values[i]) || 0;\n    const src = String(sources[i]);\n    const tgt = String(targets[i]);\n    if (v > 0 && src !== tgt) {\n      links.push({ source: src, target: tgt, value: v });\n      nodeSet.add(src);\n      nodeSet.add(tgt);\n    }\n  }\n}\nif (!links.length) return { series: [] };\n\nconst phaseColors = { 'design':'#FADE2A','build':'#73BF69','test':'#73BF69','review':'#5794F2','rework':'#FF780A','admin':'#A9A9A9' };\nconst wtColors = { 'feature':'#FF780A','bug':'#FADE2A','research':'#B877D9','docs':'#5794F2','test':'#73BF69','infra':'#F2495C','refactor':'#64A0C8','admin':'#A9A9A9' };\nconst allColors = {...phaseColors, ...wtColors};\n\nconst nodes = Array.from(nodeSet).map(name => {\n  let color = null;\n  if (name.includes('(unallocated)')) color = '#F2495C';\n  else if (name.includes('(untagged')) color = '#808080';\n  else if (name.includes('(other)')) color = '#C0C0C0';\n  else {\n    const parts = name.split(': ');\n    const val = parts.length > 1 ? parts.slice(1).join(': ') : name;\n    if (allColors[val]) color = allColors[val];\n  }\n  return { name, itemStyle: color ? { color } : {} };\n});\n\nreturn {\n  tooltip: {\n    trigger: 'item',\n    formatter: p => {\n      const strip = s => { const ci = s.indexOf(': '); return ci >= 0 ? s.slice(ci + 2) : s; };\n      if (p.dataType === 'edge')\n        return strip(p.data.source) + ' \\u2192 ' + strip(p.data.target) + '<br/>$' + p.data.value.toFixed(2);\n      return strip(p.name) + '<br/>$' + ((p.value || 0).toFixed(2));\n    }\n  },\n  series: [{\n    type: 'sankey',\n    layout: 'none',\n    emphasis: { focus: 'adjacency' },\n    nodeAlign: 'left',\n    data: nodes,\n    links: links,\n    lineStyle: { color: 'gradient', opacity: 0.4 },\n    label: {\n      show: true, position: 'right', fontSize: 11,\n      formatter: p => { let lbl = p.name; const ci = lbl.indexOf(': '); if (ci >= 0) lbl = lbl.slice(ci + 2); if (lbl.length > 20) lbl = lbl.slice(0,18)+'\u2026'; return lbl + '\\n$' + ((p.value || 0).toFixed(0)); }\n    },\n    nodeGap: 12,\n    nodeWidth: 20\n  }]\n};",
+        "getOption": "const allSeries = context.panel.data.series;\nif (!allSeries || allSeries.length < 1) return { series: [] };\n\nconst fld = (s, name) => {\n  const f = s.fields.find(x => x.name === name);\n  if (!f) return [];\n  const v = f.values;\n  return (v && v.buffer) ? v.buffer : (v || []);\n};\n\nconst links = [];\nconst nodeSet = new Set();\n\nfor (const s of allSeries) {\n  if (!s || !s.fields || s.fields.length < 3) continue;\n  const sources = fld(s, 'source');\n  const targets = fld(s, 'target');\n  const values  = fld(s, 'value');\n  for (let i = 0; i < sources.length; i++) {\n    const v = parseFloat(values[i]) || 0;\n    const src = String(sources[i]);\n    const tgt = String(targets[i]);\n    if (v > 0 && src !== tgt) {\n      links.push({ source: src, target: tgt, value: v });\n      nodeSet.add(src);\n      nodeSet.add(tgt);\n    }\n  }\n}\nif (!links.length) return { series: [] };\n\nconst phaseColors = { 'design':'#FADE2A','build':'#73BF69','test':'#73BF69','review':'#5794F2','rework':'#FF780A','admin':'#A9A9A9' };\nconst wtColors = { 'feature':'#FF780A','bug':'#FADE2A','research':'#B877D9','docs':'#5794F2','test':'#73BF69','infra':'#F2495C','refactor':'#64A0C8','admin':'#A9A9A9' };\nconst allColors = {...phaseColors, ...wtColors};\n\nconst nodes = Array.from(nodeSet).map(name => {\n  let color = null;\n  if (name.includes('(unallocated)')) color = '#F2495C';\n  else if (name.includes('(untagged')) color = '#808080';\n  else if (name.includes('(other)')) color = '#C0C0C0';\n  else {\n    const parts = name.split(': ');\n    const val = parts.length > 1 ? parts.slice(1).join(': ') : name;\n    if (allColors[val]) color = allColors[val];\n  }\n  return { name, itemStyle: color ? { color } : {} };\n});\n\nreturn {\n  tooltip: {\n    trigger: 'item',\n    formatter: p => {\n      const strip = s => { const ci = s.indexOf(': '); return ci >= 0 ? s.slice(ci + 2) : s; };\n      if (p.dataType === 'edge')\n        return strip(p.data.source) + ' \\u2192 ' + strip(p.data.target) + '<br/>$' + p.data.value.toFixed(2);\n      return strip(p.name) + '<br/>$' + ((p.value || 0).toFixed(2));\n    }\n  },\n  series: [{\n    type: 'sankey',\n    layout: 'none',\n    emphasis: { focus: 'adjacency' },\n    nodeAlign: 'left',\n    data: nodes,\n    links: links,\n    lineStyle: { color: 'gradient', opacity: 0.4 },\n    label: {\n      show: true, position: 'right', fontSize: 11,\n      formatter: p => { let lbl = p.name; const ci = lbl.indexOf(': '); if (ci >= 0) lbl = lbl.slice(ci + 2); if (lbl.length > 20) lbl = lbl.slice(0,18)+'…'; return lbl + '\\n$' + ((p.value || 0).toFixed(0)); }\n    },\n    nodeGap: 12,\n    nodeWidth: 20\n  }]\n};",
         "google": {
           "callback": "gmapReady",
           "key": ""
@@ -460,7 +485,7 @@
             "uid": "teamster-mysql"
           },
           "format": "table",
-          "rawSql": "SELECT source, target, ROUND(SUM(value), 2) AS value FROM (\n  SELECT\n    CASE WHEN cr.entity_type = '' THEN CONCAT('${facet1:raw}', ': (unallocated)')\n         ELSE CONCAT('${facet1:raw}', ': ', COALESCE(r1.tag_value, '(untagged)')) END AS source,\n    CASE WHEN cr.entity_type = '' THEN CONCAT('${facet2:raw}', ': (unallocated)')\n         ELSE CONCAT('${facet2:raw}', ': ', COALESCE(r2.tag_value, '(untagged)')) END AS target,\n    cr.cost_usd * COALESCE(r1.w, 1) * COALESCE(r2.w, 1) AS value\n  FROM cost_facts cr\n  LEFT JOIN (\n    SELECT er.entity_type, er.entity_id, t.tag_value,\n           1.0 / COUNT(*) OVER (PARTITION BY er.entity_type, er.entity_id) AS w\n    FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n    WHERE '${facet1:raw}' != 'outcome' AND t.tag_key = '${facet1:raw}'\n    UNION ALL\n    SELECT 'workunit', wu.id, CONCAT(wu.outcome_id, ': ', o.title), 1.0\n    FROM workunits wu JOIN outcomes o ON o.id = wu.outcome_id\n    WHERE '${facet1:raw}' = 'outcome'\n    UNION ALL\n    SELECT 'outcome', o.id, CONCAT(o.id, ': ', o.title), 1.0\n    FROM outcomes o\n    WHERE '${facet1:raw}' = 'outcome'\n  ) r1 ON r1.entity_type = cr.entity_type AND r1.entity_id = cr.entity_id\n  LEFT JOIN (\n    SELECT er.entity_type, er.entity_id, t.tag_value,\n           1.0 / COUNT(*) OVER (PARTITION BY er.entity_type, er.entity_id) AS w\n    FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n    WHERE '${facet2:raw}' != 'outcome' AND t.tag_key = '${facet2:raw}'\n    UNION ALL\n    SELECT 'workunit', wu.id, CONCAT(wu.outcome_id, ': ', o.title), 1.0\n    FROM workunits wu JOIN outcomes o ON o.id = wu.outcome_id\n    WHERE '${facet2:raw}' = 'outcome'\n    UNION ALL\n    SELECT 'outcome', o.id, CONCAT(o.id, ': ', o.title), 1.0\n    FROM outcomes o\n    WHERE '${facet2:raw}' = 'outcome'\n  ) r2 ON r2.entity_type = cr.entity_type AND r2.entity_id = cr.entity_id\n  WHERE $__timeFilter(cr.timestamp)\n    AND ('${filter1:raw}' = 'All' OR COALESCE(r1.tag_value, '(untagged)') = '${filter1:raw}' OR (cr.entity_type = '' AND '${filter1:raw}' = '(unallocated)'))\n) raw\nGROUP BY source, target\nHAVING value > 0\nORDER BY value DESC\nLIMIT 120",
+          "rawSql": "SELECT source, target, ROUND(SUM(value), 2) AS value FROM (\n  SELECT\n    CASE WHEN cr.entity_type = '' THEN CONCAT('${facet1:raw}', ': (unallocated)')\n         ELSE CONCAT('${facet1:raw}', ': ', COALESCE(r1.tag_value, '(untagged)')) END AS source,\n    CASE WHEN cr.entity_type = '' THEN CONCAT('${facet2:raw}', ': (unallocated)')\n         ELSE CONCAT('${facet2:raw}', ': ', COALESCE(r2.tag_value, '(untagged)')) END AS target,\n    cr.cost_usd * COALESCE(r1.w, 1) * COALESCE(r2.w, 1) AS value\n  FROM cost_facts cr\n  LEFT JOIN (\n    SELECT er.entity_type, er.entity_id, t.tag_value,\n           1.0 / COUNT(*) OVER (PARTITION BY er.entity_type, er.entity_id) AS w\n    FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n    WHERE '${facet1:raw}' != 'outcome' AND t.tag_key = '${facet1:raw}'\n    UNION ALL\n    SELECT 'workunit', wu.id, COALESCE(o.title, wu.outcome_id), 1.0\n    FROM workunits wu JOIN outcomes o ON o.id = wu.outcome_id\n    WHERE '${facet1:raw}' = 'outcome'\n    UNION ALL\n    SELECT 'outcome', o.id, COALESCE(o.title, o.id), 1.0\n    FROM outcomes o\n    WHERE '${facet1:raw}' = 'outcome'\n  ) r1 ON r1.entity_type = cr.entity_type AND r1.entity_id = cr.entity_id\n  LEFT JOIN (\n    SELECT er.entity_type, er.entity_id, t.tag_value,\n           1.0 / COUNT(*) OVER (PARTITION BY er.entity_type, er.entity_id) AS w\n    FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n    WHERE '${facet2:raw}' != 'outcome' AND t.tag_key = '${facet2:raw}'\n    UNION ALL\n    SELECT 'workunit', wu.id, COALESCE(o.title, wu.outcome_id), 1.0\n    FROM workunits wu JOIN outcomes o ON o.id = wu.outcome_id\n    WHERE '${facet2:raw}' = 'outcome'\n    UNION ALL\n    SELECT 'outcome', o.id, COALESCE(o.title, o.id), 1.0\n    FROM outcomes o\n    WHERE '${facet2:raw}' = 'outcome'\n  ) r2 ON r2.entity_type = cr.entity_type AND r2.entity_id = cr.entity_id\n  WHERE $__timeFilter(cr.timestamp)\n    AND ('${filter1:raw}' = 'All' OR COALESCE(r1.tag_value, '(untagged)') = '${filter1:raw}' OR (cr.entity_type = '' AND '${filter1:raw}' = '(unallocated)'))\n) raw\nGROUP BY source, target\nHAVING value > 0\nORDER BY value DESC\nLIMIT 120",
           "refId": "A"
         },
         {
@@ -469,11 +494,11 @@
             "uid": "teamster-mysql"
           },
           "format": "table",
-          "rawSql": "SELECT source, target, ROUND(SUM(value), 2) AS value FROM (\n  SELECT\n    CASE WHEN cr.entity_type = '' THEN CONCAT('${facet2:raw}', ': (unallocated)')\n         ELSE CONCAT('${facet2:raw}', ': ', COALESCE(r2.tag_value, '(untagged)')) END AS source,\n    CASE WHEN cr.entity_type = '' THEN CONCAT('${facet3:raw}', ': (unallocated)')\n         ELSE CONCAT('${facet3:raw}', ': ', COALESCE(r3.tag_value, '(untagged)')) END AS target,\n    cr.cost_usd * COALESCE(r2.w, 1) * COALESCE(r3.w, 1) AS value\n  FROM cost_facts cr\n  LEFT JOIN (\n    SELECT er.entity_type, er.entity_id, t.tag_value,\n           1.0 / COUNT(*) OVER (PARTITION BY er.entity_type, er.entity_id) AS w\n    FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n    WHERE '${facet2:raw}' != 'outcome' AND t.tag_key = '${facet2:raw}'\n    UNION ALL\n    SELECT 'workunit', wu.id, CONCAT(wu.outcome_id, ': ', o.title), 1.0\n    FROM workunits wu JOIN outcomes o ON o.id = wu.outcome_id\n    WHERE '${facet2:raw}' = 'outcome'\n    UNION ALL\n    SELECT 'outcome', o.id, CONCAT(o.id, ': ', o.title), 1.0\n    FROM outcomes o\n    WHERE '${facet2:raw}' = 'outcome'\n  ) r2 ON r2.entity_type = cr.entity_type AND r2.entity_id = cr.entity_id\n  LEFT JOIN (\n    SELECT er.entity_type, er.entity_id, t.tag_value,\n           1.0 / COUNT(*) OVER (PARTITION BY er.entity_type, er.entity_id) AS w\n    FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n    WHERE '${facet3:raw}' != 'outcome' AND t.tag_key = '${facet3:raw}'\n    UNION ALL\n    SELECT 'workunit', wu.id, CONCAT(wu.outcome_id, ': ', o.title), 1.0\n    FROM workunits wu JOIN outcomes o ON o.id = wu.outcome_id\n    WHERE '${facet3:raw}' = 'outcome'\n    UNION ALL\n    SELECT 'outcome', o.id, CONCAT(o.id, ': ', o.title), 1.0\n    FROM outcomes o\n    WHERE '${facet3:raw}' = 'outcome'\n  ) r3 ON r3.entity_type = cr.entity_type AND r3.entity_id = cr.entity_id\n  WHERE $__timeFilter(cr.timestamp)\n    AND ('${filter1:raw}' = 'All'\n      OR (cr.entity_type = '' AND '${filter1:raw}' = '(unallocated)')\n      OR EXISTS (\n        SELECT 1 FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n        WHERE '${facet1:raw}' != 'outcome' AND t.tag_key = '${facet1:raw}' AND t.tag_value = '${filter1:raw}'\n          AND er.entity_type = cr.entity_type AND er.entity_id = cr.entity_id\n        UNION ALL\n        SELECT 1 FROM workunits wu JOIN outcomes o ON o.id = wu.outcome_id\n        WHERE '${facet1:raw}' = 'outcome' AND CONCAT(wu.outcome_id, ': ', o.title) = '${filter1:raw}'\n          AND cr.entity_type = 'workunit' AND wu.id = cr.entity_id\n        UNION ALL\n        SELECT 1 FROM outcomes o\n        WHERE '${facet1:raw}' = 'outcome' AND CONCAT(o.id, ': ', o.title) = '${filter1:raw}'\n          AND cr.entity_type = 'outcome' AND o.id = cr.entity_id\n      )\n      OR ('${filter1:raw}' = '(untagged)' AND cr.entity_type != '' AND NOT EXISTS (\n        SELECT 1 FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n        WHERE '${facet1:raw}' != 'outcome' AND t.tag_key = '${facet1:raw}'\n          AND er.entity_type = cr.entity_type AND er.entity_id = cr.entity_id\n        UNION ALL\n        SELECT 1 FROM workunits wu\n        WHERE '${facet1:raw}' = 'outcome' AND cr.entity_type = 'workunit' AND wu.id = cr.entity_id\n        UNION ALL\n        SELECT 1 FROM outcomes o\n        WHERE '${facet1:raw}' = 'outcome' AND cr.entity_type = 'outcome' AND o.id = cr.entity_id\n      ))\n    )\n) raw\nGROUP BY source, target\nHAVING value > 0\nORDER BY value DESC\nLIMIT 120",
+          "rawSql": "SELECT source, target, ROUND(SUM(value), 2) AS value FROM (\n  SELECT\n    CASE WHEN cr.entity_type = '' THEN CONCAT('${facet2:raw}', ': (unallocated)')\n         ELSE CONCAT('${facet2:raw}', ': ', COALESCE(r2.tag_value, '(untagged)')) END AS source,\n    CASE WHEN cr.entity_type = '' THEN CONCAT('${facet3:raw}', ': (unallocated)')\n         ELSE CONCAT('${facet3:raw}', ': ', COALESCE(r3.tag_value, '(untagged)')) END AS target,\n    cr.cost_usd * COALESCE(r2.w, 1) * COALESCE(r3.w, 1) AS value\n  FROM cost_facts cr\n  LEFT JOIN (\n    SELECT er.entity_type, er.entity_id, t.tag_value,\n           1.0 / COUNT(*) OVER (PARTITION BY er.entity_type, er.entity_id) AS w\n    FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n    WHERE '${facet2:raw}' != 'outcome' AND t.tag_key = '${facet2:raw}'\n    UNION ALL\n    SELECT 'workunit', wu.id, COALESCE(o.title, wu.outcome_id), 1.0\n    FROM workunits wu JOIN outcomes o ON o.id = wu.outcome_id\n    WHERE '${facet2:raw}' = 'outcome'\n    UNION ALL\n    SELECT 'outcome', o.id, COALESCE(o.title, o.id), 1.0\n    FROM outcomes o\n    WHERE '${facet2:raw}' = 'outcome'\n  ) r2 ON r2.entity_type = cr.entity_type AND r2.entity_id = cr.entity_id\n  LEFT JOIN (\n    SELECT er.entity_type, er.entity_id, t.tag_value,\n           1.0 / COUNT(*) OVER (PARTITION BY er.entity_type, er.entity_id) AS w\n    FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n    WHERE '${facet3:raw}' != 'outcome' AND t.tag_key = '${facet3:raw}'\n    UNION ALL\n    SELECT 'workunit', wu.id, COALESCE(o.title, wu.outcome_id), 1.0\n    FROM workunits wu JOIN outcomes o ON o.id = wu.outcome_id\n    WHERE '${facet3:raw}' = 'outcome'\n    UNION ALL\n    SELECT 'outcome', o.id, COALESCE(o.title, o.id), 1.0\n    FROM outcomes o\n    WHERE '${facet3:raw}' = 'outcome'\n  ) r3 ON r3.entity_type = cr.entity_type AND r3.entity_id = cr.entity_id\n  WHERE $__timeFilter(cr.timestamp)\n    AND ('${filter1:raw}' = 'All'\n      OR (cr.entity_type = '' AND '${filter1:raw}' = '(unallocated)')\n      OR EXISTS (\n        SELECT 1 FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n        WHERE '${facet1:raw}' != 'outcome' AND t.tag_key = '${facet1:raw}' AND t.tag_value = '${filter1:raw}'\n          AND er.entity_type = cr.entity_type AND er.entity_id = cr.entity_id\n        UNION ALL\n        SELECT 1 FROM workunits wu JOIN outcomes o ON o.id = wu.outcome_id\n        WHERE '${facet1:raw}' = 'outcome' AND COALESCE(o.title, wu.outcome_id) = '${filter1:raw}'\n          AND cr.entity_type = 'workunit' AND wu.id = cr.entity_id\n        UNION ALL\n        SELECT 1 FROM outcomes o\n        WHERE '${facet1:raw}' = 'outcome' AND COALESCE(o.title, o.id) = '${filter1:raw}'\n          AND cr.entity_type = 'outcome' AND o.id = cr.entity_id\n      )\n      OR ('${filter1:raw}' = '(untagged)' AND cr.entity_type != '' AND NOT EXISTS (\n        SELECT 1 FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n        WHERE '${facet1:raw}' != 'outcome' AND t.tag_key = '${facet1:raw}'\n          AND er.entity_type = cr.entity_type AND er.entity_id = cr.entity_id\n        UNION ALL\n        SELECT 1 FROM workunits wu\n        WHERE '${facet1:raw}' = 'outcome' AND cr.entity_type = 'workunit' AND wu.id = cr.entity_id\n        UNION ALL\n        SELECT 1 FROM outcomes o\n        WHERE '${facet1:raw}' = 'outcome' AND cr.entity_type = 'outcome' AND o.id = cr.entity_id\n      ))\n    )\n) raw\nGROUP BY source, target\nHAVING value > 0\nORDER BY value DESC\nLIMIT 120",
           "refId": "B"
         }
       ],
-      "title": "Tag Flow: $facet1 \u2192 $facet2 \u2192 $facet3",
+      "title": "Tag Flow: $facet1 → $facet2 → $facet3",
       "type": "volkovlabs-echarts-panel"
     },
     {
@@ -482,7 +507,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 20
+        "y": 22
       },
       "id": 30,
       "panels": [],
@@ -767,7 +792,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 21
+        "y": 23
       },
       "id": 31,
       "options": {
@@ -777,7 +802,9 @@
           ],
           "displayMode": "table",
           "placement": "right",
-          "showLegend": true
+          "showLegend": true,
+          "sortBy": "Total",
+          "sortDesc": true
         },
         "tooltip": {
           "hideZeros": false,
@@ -793,7 +820,7 @@
             "uid": "teamster-mysql"
           },
           "format": "time_series",
-          "rawSql": "SELECT\n    $__timeGroupAlias(cr.timestamp, $agg),\n    CASE WHEN cr.entity_type = '' THEN '(unallocated)' ELSE COALESCE(x1.tag_value, '(untagged)') END AS metric,\n    ROUND(SUM(cr.cost_usd * COALESCE(x1.w, 1)), 2) AS cost_usd\nFROM cost_facts cr\nLEFT JOIN (\n  SELECT er.entity_type, er.entity_id, t.tag_value,\n         1.0 / COUNT(*) OVER (PARTITION BY er.entity_type, er.entity_id) AS w\n  FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n  WHERE '${facet1:raw}' != 'outcome' AND t.tag_key = '${facet1:raw}'\n  UNION ALL\n  SELECT 'workunit', wu.id, CONCAT(wu.outcome_id, ': ', o.title), 1.0\n  FROM workunits wu JOIN outcomes o ON o.id = wu.outcome_id\n  WHERE '${facet1:raw}' = 'outcome'\n  UNION ALL\n  SELECT 'outcome', o.id, CONCAT(o.id, ': ', o.title), 1.0\n  FROM outcomes o\n  WHERE '${facet1:raw}' = 'outcome'\n) x1 ON x1.entity_type = cr.entity_type AND x1.entity_id = cr.entity_id\nWHERE $__timeFilter(cr.timestamp)\nGROUP BY 1, metric\nORDER BY 1, metric",
+          "rawSql": "SELECT\n    $__timeGroupAlias(cr.timestamp, $agg),\n    CASE WHEN cr.entity_type = '' THEN '(unallocated)' ELSE COALESCE(x1.tag_value, '(untagged)') END AS metric,\n    ROUND(SUM(cr.cost_usd * COALESCE(x1.w, 1)), 2) AS cost_usd\nFROM cost_facts cr\nLEFT JOIN (\n  SELECT er.entity_type, er.entity_id, t.tag_value,\n         1.0 / COUNT(*) OVER (PARTITION BY er.entity_type, er.entity_id) AS w\n  FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n  WHERE '${facet1:raw}' != 'outcome' AND t.tag_key = '${facet1:raw}'\n  UNION ALL\n  SELECT 'workunit', wu.id, COALESCE(o.title, wu.outcome_id), 1.0\n  FROM workunits wu JOIN outcomes o ON o.id = wu.outcome_id\n  WHERE '${facet1:raw}' = 'outcome'\n  UNION ALL\n  SELECT 'outcome', o.id, COALESCE(o.title, o.id), 1.0\n  FROM outcomes o\n  WHERE '${facet1:raw}' = 'outcome'\n) x1 ON x1.entity_type = cr.entity_type AND x1.entity_id = cr.entity_id\nWHERE $__timeFilter(cr.timestamp)\nGROUP BY 1, metric\nORDER BY 1, metric",
           "refId": "A"
         }
       ],
@@ -806,11 +833,11 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 31
+        "y": 33
       },
       "id": 10,
       "panels": [],
-      "title": "Cost Stack: $facet1 \u2192 $facet2",
+      "title": "Cost Stack: $facet1 → $facet2",
       "type": "row"
     },
     {
@@ -818,7 +845,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: all spend incl. unallocated. Fractional weights for multi-valued keys \u2014 totals reconcile with Total Spend above. (unallocated)=no entity; (untagged)=entity with no value for this key.",
+      "description": "scope: all spend incl. unallocated. Fractional weights for multi-valued keys — totals reconcile with Total Spend above. (unallocated)=no entity; (untagged)=entity with no value for this key.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1090,7 +1117,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 32
+        "y": 34
       },
       "id": 11,
       "options": {
@@ -1126,11 +1153,11 @@
             "uid": "teamster-mysql"
           },
           "format": "table",
-          "rawSql": "SELECT\n    CASE WHEN cr.entity_type = '' THEN '(unallocated)' ELSE COALESCE(x1.tag_value, '(untagged)') END AS level_1,\n    CASE WHEN cr.entity_type = '' THEN '(unallocated)' ELSE COALESCE(x2.tag_value, '(untagged)') END AS level_2,\n    ROUND(SUM(cr.cost_usd * COALESCE(x1.w, 1) * COALESCE(x2.w, 1)), 2) AS cost_usd\nFROM cost_facts cr\nLEFT JOIN (\n  SELECT er.entity_type, er.entity_id, t.tag_value,\n         1.0 / COUNT(*) OVER (PARTITION BY er.entity_type, er.entity_id) AS w\n  FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n  WHERE '${facet1:raw}' != 'outcome' AND t.tag_key = '${facet1:raw}'\n  UNION ALL\n  SELECT 'workunit', wu.id, CONCAT(wu.outcome_id, ': ', o.title), 1.0\n  FROM workunits wu JOIN outcomes o ON o.id = wu.outcome_id\n  WHERE '${facet1:raw}' = 'outcome'\n  UNION ALL\n  SELECT 'outcome', o.id, CONCAT(o.id, ': ', o.title), 1.0\n  FROM outcomes o\n  WHERE '${facet1:raw}' = 'outcome'\n) x1 ON x1.entity_type = cr.entity_type AND x1.entity_id = cr.entity_id\nLEFT JOIN (\n  SELECT er.entity_type, er.entity_id, t.tag_value,\n         1.0 / COUNT(*) OVER (PARTITION BY er.entity_type, er.entity_id) AS w\n  FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n  WHERE '${facet2:raw}' != 'outcome' AND t.tag_key = '${facet2:raw}'\n  UNION ALL\n  SELECT 'workunit', wu.id, CONCAT(wu.outcome_id, ': ', o.title), 1.0\n  FROM workunits wu JOIN outcomes o ON o.id = wu.outcome_id\n  WHERE '${facet2:raw}' = 'outcome'\n  UNION ALL\n  SELECT 'outcome', o.id, CONCAT(o.id, ': ', o.title), 1.0\n  FROM outcomes o\n  WHERE '${facet2:raw}' = 'outcome'\n) x2 ON x2.entity_type = cr.entity_type AND x2.entity_id = cr.entity_id\nWHERE $__timeFilter(cr.timestamp)\nGROUP BY level_1, level_2\nORDER BY level_1, cost_usd DESC\nLIMIT 500",
+          "rawSql": "SELECT\n    CASE WHEN cr.entity_type = '' THEN '(unallocated)' ELSE COALESCE(x1.tag_value, '(untagged)') END AS level_1,\n    CASE WHEN cr.entity_type = '' THEN '(unallocated)' ELSE COALESCE(x2.tag_value, '(untagged)') END AS level_2,\n    ROUND(SUM(cr.cost_usd * COALESCE(x1.w, 1) * COALESCE(x2.w, 1)), 2) AS cost_usd\nFROM cost_facts cr\nLEFT JOIN (\n  SELECT er.entity_type, er.entity_id, t.tag_value,\n         1.0 / COUNT(*) OVER (PARTITION BY er.entity_type, er.entity_id) AS w\n  FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n  WHERE '${facet1:raw}' != 'outcome' AND t.tag_key = '${facet1:raw}'\n  UNION ALL\n  SELECT 'workunit', wu.id, COALESCE(o.title, wu.outcome_id), 1.0\n  FROM workunits wu JOIN outcomes o ON o.id = wu.outcome_id\n  WHERE '${facet1:raw}' = 'outcome'\n  UNION ALL\n  SELECT 'outcome', o.id, COALESCE(o.title, o.id), 1.0\n  FROM outcomes o\n  WHERE '${facet1:raw}' = 'outcome'\n) x1 ON x1.entity_type = cr.entity_type AND x1.entity_id = cr.entity_id\nLEFT JOIN (\n  SELECT er.entity_type, er.entity_id, t.tag_value,\n         1.0 / COUNT(*) OVER (PARTITION BY er.entity_type, er.entity_id) AS w\n  FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n  WHERE '${facet2:raw}' != 'outcome' AND t.tag_key = '${facet2:raw}'\n  UNION ALL\n  SELECT 'workunit', wu.id, COALESCE(o.title, wu.outcome_id), 1.0\n  FROM workunits wu JOIN outcomes o ON o.id = wu.outcome_id\n  WHERE '${facet2:raw}' = 'outcome'\n  UNION ALL\n  SELECT 'outcome', o.id, COALESCE(o.title, o.id), 1.0\n  FROM outcomes o\n  WHERE '${facet2:raw}' = 'outcome'\n) x2 ON x2.entity_type = cr.entity_type AND x2.entity_id = cr.entity_id\nWHERE $__timeFilter(cr.timestamp)\nGROUP BY level_1, level_2\nORDER BY level_1, cost_usd DESC\nLIMIT 500",
           "refId": "A"
         }
       ],
-      "title": "Cost by $facet1 \u2192 $facet2",
+      "title": "Cost by $facet1 → $facet2",
       "transformations": [
         {
           "id": "groupingToMatrix",
@@ -1149,7 +1176,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: all spend incl. unallocated. Cell totals computed in SQL with fractional weights \u2014 no footer needed.",
+      "description": "scope: all spend incl. unallocated. Cell totals computed in SQL with fractional weights — no footer needed.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -1185,10 +1212,6 @@
             },
             "properties": [
               {
-                "id": "custom.width",
-                "value": 120
-              },
-              {
                 "id": "displayName",
                 "value": "$facet1"
               },
@@ -1215,10 +1238,6 @@
             },
             "properties": [
               {
-                "id": "custom.width",
-                "value": 120
-              },
-              {
                 "id": "displayName",
                 "value": "$facet2"
               },
@@ -1244,7 +1263,7 @@
         "h": 10,
         "w": 10,
         "x": 0,
-        "y": 42
+        "y": 44
       },
       "id": 12,
       "options": {
@@ -1273,11 +1292,11 @@
             "uid": "teamster-mysql"
           },
           "format": "table",
-          "rawSql": "SELECT\n    CASE WHEN cr.entity_type = '' THEN '(unallocated)' ELSE COALESCE(x1.tag_value, '(untagged)') END AS level_1,\n    CASE WHEN cr.entity_type = '' THEN '(unallocated)' ELSE COALESCE(x2.tag_value, '(untagged)') END AS level_2,\n    ROUND(SUM(cr.cost_usd * COALESCE(x1.w, 1) * COALESCE(x2.w, 1)), 2) AS cost_usd\nFROM cost_facts cr\nLEFT JOIN (\n  SELECT er.entity_type, er.entity_id, t.tag_value,\n         1.0 / COUNT(*) OVER (PARTITION BY er.entity_type, er.entity_id) AS w\n  FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n  WHERE '${facet1:raw}' != 'outcome' AND t.tag_key = '${facet1:raw}'\n  UNION ALL\n  SELECT 'workunit', wu.id, CONCAT(wu.outcome_id, ': ', o.title), 1.0\n  FROM workunits wu JOIN outcomes o ON o.id = wu.outcome_id\n  WHERE '${facet1:raw}' = 'outcome'\n  UNION ALL\n  SELECT 'outcome', o.id, CONCAT(o.id, ': ', o.title), 1.0\n  FROM outcomes o\n  WHERE '${facet1:raw}' = 'outcome'\n) x1 ON x1.entity_type = cr.entity_type AND x1.entity_id = cr.entity_id\nLEFT JOIN (\n  SELECT er.entity_type, er.entity_id, t.tag_value,\n         1.0 / COUNT(*) OVER (PARTITION BY er.entity_type, er.entity_id) AS w\n  FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n  WHERE '${facet2:raw}' != 'outcome' AND t.tag_key = '${facet2:raw}'\n  UNION ALL\n  SELECT 'workunit', wu.id, CONCAT(wu.outcome_id, ': ', o.title), 1.0\n  FROM workunits wu JOIN outcomes o ON o.id = wu.outcome_id\n  WHERE '${facet2:raw}' = 'outcome'\n  UNION ALL\n  SELECT 'outcome', o.id, CONCAT(o.id, ': ', o.title), 1.0\n  FROM outcomes o\n  WHERE '${facet2:raw}' = 'outcome'\n) x2 ON x2.entity_type = cr.entity_type AND x2.entity_id = cr.entity_id\nWHERE $__timeFilter(cr.timestamp)\nGROUP BY level_1, level_2\nORDER BY level_1, cost_usd DESC",
+          "rawSql": "SELECT\n    CASE WHEN cr.entity_type = '' THEN '(unallocated)' ELSE COALESCE(x1.tag_value, '(untagged)') END AS level_1,\n    CASE WHEN cr.entity_type = '' THEN '(unallocated)' ELSE COALESCE(x2.tag_value, '(untagged)') END AS level_2,\n    ROUND(SUM(cr.cost_usd * COALESCE(x1.w, 1) * COALESCE(x2.w, 1)), 2) AS cost_usd\nFROM cost_facts cr\nLEFT JOIN (\n  SELECT er.entity_type, er.entity_id, t.tag_value,\n         1.0 / COUNT(*) OVER (PARTITION BY er.entity_type, er.entity_id) AS w\n  FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n  WHERE '${facet1:raw}' != 'outcome' AND t.tag_key = '${facet1:raw}'\n  UNION ALL\n  SELECT 'workunit', wu.id, COALESCE(o.title, wu.outcome_id), 1.0\n  FROM workunits wu JOIN outcomes o ON o.id = wu.outcome_id\n  WHERE '${facet1:raw}' = 'outcome'\n  UNION ALL\n  SELECT 'outcome', o.id, COALESCE(o.title, o.id), 1.0\n  FROM outcomes o\n  WHERE '${facet1:raw}' = 'outcome'\n) x1 ON x1.entity_type = cr.entity_type AND x1.entity_id = cr.entity_id\nLEFT JOIN (\n  SELECT er.entity_type, er.entity_id, t.tag_value,\n         1.0 / COUNT(*) OVER (PARTITION BY er.entity_type, er.entity_id) AS w\n  FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n  WHERE '${facet2:raw}' != 'outcome' AND t.tag_key = '${facet2:raw}'\n  UNION ALL\n  SELECT 'workunit', wu.id, COALESCE(o.title, wu.outcome_id), 1.0\n  FROM workunits wu JOIN outcomes o ON o.id = wu.outcome_id\n  WHERE '${facet2:raw}' = 'outcome'\n  UNION ALL\n  SELECT 'outcome', o.id, COALESCE(o.title, o.id), 1.0\n  FROM outcomes o\n  WHERE '${facet2:raw}' = 'outcome'\n) x2 ON x2.entity_type = cr.entity_type AND x2.entity_id = cr.entity_id\nWHERE $__timeFilter(cr.timestamp)\nGROUP BY level_1, level_2\nORDER BY level_1, cost_usd DESC",
           "refId": "A"
         }
       ],
-      "title": "Cost Matrix: $facet1 \u00d7 $facet2",
+      "title": "Cost Matrix: $facet1 × $facet2",
       "type": "table"
     },
     {
@@ -1359,7 +1378,7 @@
         "h": 10,
         "w": 14,
         "x": 10,
-        "y": 42
+        "y": 44
       },
       "id": 13,
       "options": {
@@ -1391,11 +1410,11 @@
             "uid": "teamster-mysql"
           },
           "format": "table",
-          "rawSql": "SELECT\n    CASE WHEN cr.entity_type = '' THEN '(unallocated)' ELSE COALESCE(x1.tag_value, '(untagged)') END AS facet1_val,\n    CASE WHEN cr.entity_type = '' THEN '(unallocated)' ELSE COALESCE(x2.tag_value, '(untagged)') END AS facet2_val,\n    ROUND(SUM(cr.cost_usd * COALESCE(x1.w, 1) * COALESCE(x2.w, 1)), 2) AS cost_usd\nFROM cost_facts cr\nLEFT JOIN (\n  SELECT er.entity_type, er.entity_id, t.tag_value,\n         1.0 / COUNT(*) OVER (PARTITION BY er.entity_type, er.entity_id) AS w\n  FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n  WHERE '${facet1:raw}' != 'outcome' AND t.tag_key = '${facet1:raw}'\n  UNION ALL\n  SELECT 'workunit', wu.id, CONCAT(wu.outcome_id, ': ', o.title), 1.0\n  FROM workunits wu JOIN outcomes o ON o.id = wu.outcome_id\n  WHERE '${facet1:raw}' = 'outcome'\n  UNION ALL\n  SELECT 'outcome', o.id, CONCAT(o.id, ': ', o.title), 1.0\n  FROM outcomes o\n  WHERE '${facet1:raw}' = 'outcome'\n) x1 ON x1.entity_type = cr.entity_type AND x1.entity_id = cr.entity_id\nLEFT JOIN (\n  SELECT er.entity_type, er.entity_id, t.tag_value,\n         1.0 / COUNT(*) OVER (PARTITION BY er.entity_type, er.entity_id) AS w\n  FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n  WHERE '${facet2:raw}' != 'outcome' AND t.tag_key = '${facet2:raw}'\n  UNION ALL\n  SELECT 'workunit', wu.id, CONCAT(wu.outcome_id, ': ', o.title), 1.0\n  FROM workunits wu JOIN outcomes o ON o.id = wu.outcome_id\n  WHERE '${facet2:raw}' = 'outcome'\n  UNION ALL\n  SELECT 'outcome', o.id, CONCAT(o.id, ': ', o.title), 1.0\n  FROM outcomes o\n  WHERE '${facet2:raw}' = 'outcome'\n) x2 ON x2.entity_type = cr.entity_type AND x2.entity_id = cr.entity_id\nWHERE $__timeFilter(cr.timestamp)\n  AND ('${filter1:raw}' = 'All' OR COALESCE(x1.tag_value, '(untagged)') = '${filter1:raw}' OR (cr.entity_type = '' AND '${filter1:raw}' = '(unallocated)'))\nGROUP BY facet1_val, facet2_val\nORDER BY facet1_val, cost_usd DESC\nLIMIT 200",
+          "rawSql": "SELECT\n    CASE WHEN cr.entity_type = '' THEN '(unallocated)' ELSE COALESCE(x1.tag_value, '(untagged)') END AS facet1_val,\n    CASE WHEN cr.entity_type = '' THEN '(unallocated)' ELSE COALESCE(x2.tag_value, '(untagged)') END AS facet2_val,\n    ROUND(SUM(cr.cost_usd * COALESCE(x1.w, 1) * COALESCE(x2.w, 1)), 2) AS cost_usd\nFROM cost_facts cr\nLEFT JOIN (\n  SELECT er.entity_type, er.entity_id, t.tag_value,\n         1.0 / COUNT(*) OVER (PARTITION BY er.entity_type, er.entity_id) AS w\n  FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n  WHERE '${facet1:raw}' != 'outcome' AND t.tag_key = '${facet1:raw}'\n  UNION ALL\n  SELECT 'workunit', wu.id, COALESCE(o.title, wu.outcome_id), 1.0\n  FROM workunits wu JOIN outcomes o ON o.id = wu.outcome_id\n  WHERE '${facet1:raw}' = 'outcome'\n  UNION ALL\n  SELECT 'outcome', o.id, COALESCE(o.title, o.id), 1.0\n  FROM outcomes o\n  WHERE '${facet1:raw}' = 'outcome'\n) x1 ON x1.entity_type = cr.entity_type AND x1.entity_id = cr.entity_id\nLEFT JOIN (\n  SELECT er.entity_type, er.entity_id, t.tag_value,\n         1.0 / COUNT(*) OVER (PARTITION BY er.entity_type, er.entity_id) AS w\n  FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n  WHERE '${facet2:raw}' != 'outcome' AND t.tag_key = '${facet2:raw}'\n  UNION ALL\n  SELECT 'workunit', wu.id, COALESCE(o.title, wu.outcome_id), 1.0\n  FROM workunits wu JOIN outcomes o ON o.id = wu.outcome_id\n  WHERE '${facet2:raw}' = 'outcome'\n  UNION ALL\n  SELECT 'outcome', o.id, COALESCE(o.title, o.id), 1.0\n  FROM outcomes o\n  WHERE '${facet2:raw}' = 'outcome'\n) x2 ON x2.entity_type = cr.entity_type AND x2.entity_id = cr.entity_id\nWHERE $__timeFilter(cr.timestamp)\n  AND ('${filter1:raw}' = 'All' OR COALESCE(x1.tag_value, '(untagged)') = '${filter1:raw}' OR (cr.entity_type = '' AND '${filter1:raw}' = '(unallocated)'))\nGROUP BY facet1_val, facet2_val\nORDER BY facet1_val, cost_usd DESC\nLIMIT 200",
           "refId": "A"
         }
       ],
-      "title": "Drill Table: $facet1 \u2192 $facet2 \u2192 Cost  (filter: $filter1)",
+      "title": "Drill Table: $facet1 → $facet2 → Cost  (filter: $filter1)",
       "type": "table"
     },
     {
@@ -1404,7 +1423,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 52
+        "y": 54
       },
       "id": 50,
       "panels": [],
@@ -1439,7 +1458,7 @@
         "h": 8,
         "w": 10,
         "x": 0,
-        "y": 53
+        "y": 55
       },
       "id": 51,
       "options": {
@@ -1450,15 +1469,17 @@
           "values": [
             "value",
             "percent"
-          ]
+          ],
+          "sortBy": "Total",
+          "sortDesc": true
         },
         "pieType": "donut",
         "reduceOptions": {
           "calcs": [
             "sum"
           ],
-          "fields": "/^cost_usd$/",
-          "values": true
+          "fields": "",
+          "values": false
         },
         "tooltip": {
           "hideZeros": false,
@@ -1473,20 +1494,12 @@
             "type": "mysql",
             "uid": "teamster-mysql"
           },
-          "format": "table",
-          "rawSql": "SELECT model AS model, ROUND(SUM(cost_usd), 2) AS cost_usd FROM cost_facts WHERE $__timeFilter(timestamp) GROUP BY model ORDER BY cost_usd DESC LIMIT 10",
+          "format": "time_series",
+          "rawSql": "SELECT $__timeGroupAlias(cr.timestamp, $agg), cr.model AS metric, ROUND(SUM(cr.cost_usd), 2) AS cost_usd\nFROM cost_facts cr\nWHERE $__timeFilter(cr.timestamp)\nGROUP BY 1, cr.model\nORDER BY 1, cr.model",
           "refId": "A"
         }
       ],
       "title": "Cost by Model",
-      "transformations": [
-        {
-          "id": "labelsToFields",
-          "options": {
-            "valueLabel": "model"
-          }
-        }
-      ],
       "type": "piechart"
     },
     {
@@ -1494,7 +1507,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: all spend in cost_facts. Model cost share trend \u2014 watch for premium model growth.",
+      "description": "scope: all spend in cost_facts. Model cost share trend — watch for premium model growth.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1556,7 +1569,7 @@
         "h": 8,
         "w": 14,
         "x": 10,
-        "y": 53
+        "y": 55
       },
       "id": 52,
       "options": {
@@ -1566,7 +1579,9 @@
           ],
           "displayMode": "table",
           "placement": "right",
-          "showLegend": true
+          "showLegend": true,
+          "sortBy": "Total",
+          "sortDesc": true
         },
         "tooltip": {
           "hideZeros": false,
@@ -1595,7 +1610,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 61
+        "y": 63
       },
       "id": 40,
       "panels": [],
@@ -1607,7 +1622,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: immediate token ledger \u2014 cache_read_tokens / (input_tokens + cache_read_tokens). High ratio means prompt caching is effective.",
+      "description": "scope: immediate token ledger — cache_read_tokens / (input_tokens + cache_read_tokens). High ratio means prompt caching is effective.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1642,7 +1657,7 @@
         "h": 4,
         "w": 6,
         "x": 0,
-        "y": 62
+        "y": 64
       },
       "id": 41,
       "options": {
@@ -1682,7 +1697,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: immediate token ledger \u2014 estimated savings vs paying full input price for cache-read tokens. Per-model: cache_read_tokens \u00d7 (input_price \u2212 cache_read_price). Rates per Mtok: opus-4-8 $5/$0.5, opus-4-5/6/7 $15/$1.5, sonnet-4-5/6 $3/$0.3, haiku-4-5 $0.8/$0.08, fable-5 $10/$1.0. List-price approximation.",
+      "description": "scope: immediate token ledger — estimated savings vs paying full input price for cache-read tokens. Per-model: cache_read_tokens × (input_price − cache_read_price). Rates per Mtok: opus-4-8 $5/$0.5, opus-4-5/6/7 $15/$1.5, sonnet-4-5/6 $3/$0.3, haiku-4-5 $0.8/$0.08, fable-5 $10/$1.0. List-price approximation.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1707,7 +1722,7 @@
         "h": 4,
         "w": 6,
         "x": 6,
-        "y": 62
+        "y": 64
       },
       "id": 42,
       "options": {
@@ -1747,7 +1762,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: immediate token ledger \u2014 average USD cost per message in the window",
+      "description": "scope: immediate token ledger — average USD cost per message in the window",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1772,7 +1787,7 @@
         "h": 4,
         "w": 6,
         "x": 12,
-        "y": 62
+        "y": 64
       },
       "id": 43,
       "options": {
@@ -1812,7 +1827,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: immediate token ledger \u2014 message count in the window",
+      "description": "scope: immediate token ledger — message count in the window",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1837,7 +1852,7 @@
         "h": 4,
         "w": 6,
         "x": 18,
-        "y": 62
+        "y": 64
       },
       "id": 44,
       "options": {
@@ -1877,7 +1892,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: immediate token ledger \u2014 per-token-class cost reconstruction. cacheRead cost is low (1/10th input price) \u2014 its dominance is the cache dividend, not a cost concern.",
+      "description": "scope: immediate token ledger — per-token-class cost reconstruction. cacheRead cost is low (1/10th input price) — its dominance is the cache dividend, not a cost concern.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -2000,7 +2015,7 @@
         "h": 8,
         "w": 14,
         "x": 0,
-        "y": 66
+        "y": 68
       },
       "id": 45,
       "options": {
@@ -2038,7 +2053,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: immediate token ledger \u2014 rolling average cost per message. Rising trend may indicate model mix shift or context bloat.",
+      "description": "scope: immediate token ledger — rolling average cost per message. Rising trend may indicate model mix shift or context bloat.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -2100,7 +2115,7 @@
         "h": 8,
         "w": 10,
         "x": 14,
-        "y": 66
+        "y": 68
       },
       "id": 46,
       "options": {
@@ -2139,7 +2154,8 @@
   "refresh": "5m",
   "schemaVersion": 41,
   "tags": [
-    "teamster"
+    "teamster",
+    "overview"
   ],
   "templating": {
     "list": [
@@ -2211,20 +2227,29 @@
         "label": "Filter Facet 1",
         "name": "filter1",
         "options": [],
-        "query": "SELECT DISTINCT tag_value FROM tags WHERE '${facet1:raw}' != 'outcome' AND tag_key = '${facet1:raw}' AND retired = 0 UNION ALL SELECT DISTINCT CONCAT(o.id, ': ', o.title) AS tag_value FROM outcomes o WHERE '${facet1:raw}' = 'outcome' ORDER BY tag_value",
+        "query": "SELECT DISTINCT tag_value FROM tags WHERE '${facet1:raw}' != 'outcome' AND tag_key = '${facet1:raw}' AND retired = 0 UNION ALL SELECT DISTINCT COALESCE(o.title, o.id) AS tag_value FROM outcomes o WHERE '${facet1:raw}' = 'outcome' ORDER BY tag_value",
         "refresh": 2,
         "sort": 1,
         "type": "query"
       },
       {
-        "auto": false,
+        "auto": true,
+        "auto_count": 50,
+        "auto_min": "1m",
         "current": {
-          "text": "6h",
-          "value": "6h"
+          "selected": true,
+          "text": "auto",
+          "value": "$__auto_interval_agg"
         },
+        "hide": 0,
         "label": "Aggregation",
         "name": "agg",
         "options": [
+          {
+            "selected": true,
+            "text": "auto",
+            "value": "$__auto_interval_agg"
+          },
           {
             "selected": false,
             "text": "1m",
@@ -2246,7 +2271,7 @@
             "value": "1h"
           },
           {
-            "selected": true,
+            "selected": false,
             "text": "6h",
             "value": "6h"
           },
@@ -2257,12 +2282,13 @@
           }
         ],
         "query": "1m,5m,15m,1h,6h,1d",
+        "skipUrlSync": false,
         "type": "interval"
       }
     ]
   },
   "time": {
-    "from": "now-30d",
+    "from": "now-7d",
     "to": "now"
   },
   "timepicker": {},

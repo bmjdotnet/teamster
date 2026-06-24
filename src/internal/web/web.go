@@ -9,6 +9,7 @@ import (
 	"html"
 	"html/template"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -34,6 +35,29 @@ func HandleDashboard(w http.ResponseWriter, r *http.Request) {
 // tagCSSClass returns the CSS class for a given tag, stripping leading spaces.
 func tagCSSClass(tag string) string {
 	return "tag-" + strings.TrimSpace(tag)
+}
+
+var paramReHTML = regexp.MustCompile(`__(.+?)__`)
+
+// renderDisplayHTML escapes display text for HTML and wraps __param__ markers
+// in <span class="param"> for styling.
+func renderDisplayHTML(s string) string {
+	indices := paramReHTML.FindAllStringIndex(s, -1)
+	if len(indices) == 0 {
+		return html.EscapeString(s)
+	}
+	var sb strings.Builder
+	prev := 0
+	for _, loc := range indices {
+		sb.WriteString(html.EscapeString(s[prev:loc[0]]))
+		inner := s[loc[0]+2 : loc[1]-2]
+		sb.WriteString(`<span class="param">`)
+		sb.WriteString(html.EscapeString(inner))
+		sb.WriteString(`</span>`)
+		prev = loc[1]
+	}
+	sb.WriteString(html.EscapeString(s[prev:]))
+	return sb.String()
 }
 
 // entityColor derives a hex color from MD5(salt+name), matching display.EntityColor logic.
@@ -113,7 +137,7 @@ func FormatEventHTML(rec map[string]interface{}) string {
 	}
 
 	if display != "" {
-		sb.WriteString(html.EscapeString(display))
+		sb.WriteString(renderDisplayHTML(display))
 	}
 
 	sb.WriteString("</div>")

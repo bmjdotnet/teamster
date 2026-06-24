@@ -51,7 +51,7 @@ func runWMSList(args []string) int {
 	printed := 0
 
 	if showOutcomes {
-		outcomes, err := s.ListOutcomes(ctx, "", nil, "")
+		outcomes, err := s.ListOutcomes(ctx, "", nil, "", "")
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "wms list: outcomes: %v\n", err)
 			return 1
@@ -69,7 +69,7 @@ func runWMSList(args []string) int {
 	}
 
 	if showWorkunits {
-		outcomes, err := s.ListOutcomes(ctx, "", nil, "")
+		outcomes, err := s.ListOutcomes(ctx, "", nil, "", "")
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "wms list: outcomes: %v\n", err)
 			return 1

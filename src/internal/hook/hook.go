@@ -19,18 +19,11 @@ import (
 	"github.com/bmjdotnet/teamster/internal/redact"
 )
 
-// AGENT_TEAMS_ENFORCEMENT is injected when the Agent tool is used without team_name.
-const AGENT_TEAMS_ENFORCEMENT = "STOP. You just spawned a subagent, not a teammate. This is " +
-	"the single most important anti-pattern to avoid. Subagents are anonymous — they have no " +
-	"identity in the activity stream, no observability, no persistent context. They are invisible " +
-	"to monitoring and to the human operator. You MUST use Agent Teams instead:\n\n" +
-	"1. Call TeamCreate ONCE to create a persistent team (if not already created).\n" +
-	"2. Use the Agent tool WITH the team_name parameter to spawn named teammates.\n" +
-	"3. Route subsequent work to existing teammates via SendMessage — do NOT spawn new agents " +
-	"for work that an existing idle teammate already has context for.\n\n" +
-	"A teammate has a name (@store, @engine), appears in the activity stream, retains context " +
-	"between tasks, and can be monitored. A subagent has none of these. Never use bare Agent " +
-	"without team_name."
+// AGENT_TEAMS_ENFORCEMENT was the bare-Agent block message. Removed in the
+// implicit-teams migration (v2.1.178+: TeamCreate/team_name no longer exist).
+// Kept as empty string so tests that reference the symbol compile without edits
+// to unrelated files.
+const AGENT_TEAMS_ENFORCEMENT = ""
 
 // ACTIVITY_INSTRUCTION is injected as additionalContext on UserPromptSubmit.
 // This is the always-on half: activity reporting is useful in solo mode too.
@@ -48,8 +41,8 @@ const ACTIVITY_INSTRUCTION = "Before starting work this turn, call reportActivit
 // Leading "\n\n" so ACTIVITY_INSTRUCTION + TEAM_DISPATCH_INSTRUCTION is
 // byte-identical to the pre-split string.
 const TEAM_DISPATCH_INSTRUCTION = "\n\n" +
-	"When dispatching parallel work, you MUST use Agent Teams (TeamCreate + Agent with team_name), " +
-	"never bare Agent calls. Route follow-up tasks to existing idle teammates via SendMessage — " +
+	"When dispatching parallel work, spawn named teammates (give each a `name` for addressability) " +
+	"and route follow-up tasks to existing idle teammates via SendMessage — " +
 	"do not spawn replacements. Teammates collaborate directly: @tester messages @store about a " +
 	"bug, @store fixes, @tester re-tests. The lead monitors but does not relay. Keep all " +
 	"teammates alive until the human operator reviews and accepts the work."
@@ -59,7 +52,7 @@ var TOOL_TAGS = map[string]string{
 	"Read": "READ", "Grep": "READ", "Glob": "READ",
 	"Edit": "EDIT", "Write": "EDIT", "NotebookEdit": "EDIT",
 	"Bash":  " ACT",
-	"Agent": "TEAM", "TeamCreate": "TEAM", "TeamDelete": "TEAM",
+	"Agent": "TEAM",
 	"SendMessage": "COMM",
 	"TaskCreate":  "TASK", "TaskUpdate": "TASK",
 	"TaskGet": "TASK", "TaskList": "TASK",
@@ -212,16 +205,6 @@ func GetToolTarget(toolName string, toolInput interface{}) ToolResult {
 			raw = summary
 		}
 		return ToolResult{Type: "plain", Display: raw}
-
-	case "TeamCreate":
-		name := strVal("team_name")
-		if name == "" {
-			name = "unknown"
-		}
-		return ToolResult{Type: "plain", Display: "Created team #" + name}
-
-	case "TeamDelete":
-		return ToolResult{Type: "plain", Display: "Dissolved team"}
 
 	case "TaskCreate":
 		subject := strVal("subject")
@@ -521,12 +504,6 @@ func ProcessEvent(event HookEvent, rawData map[string]interface{}, serverURL, de
 							rawData["_tool_tag"] = tag
 							rawData["_tool_display"] = display
 						}
-						if toolName == "TeamCreate" {
-							ti, _ := toolInput.(map[string]interface{})
-							if name := strField(ti, "team_name", 0); name != "" {
-								rawData["_team"] = name
-							}
-						}
 					}
 				}
 			}
@@ -575,6 +552,14 @@ func ProcessEvent(event HookEvent, rawData map[string]interface{}, serverURL, de
 		}
 	}
 
+	// Strip large fields that hookd's buildRecord never persists. Without this,
+	// PostToolUse events with big tool_response exceed hookd's 1MB body limit,
+	// the JSON gets truncated by io.LimitReader, and the event is rejected 400.
+	for _, key := range []string{"tool_response", "stop_response", "last_assistant_message"} {
+		delete(rawData, key)
+	}
+	trimLargeInput(rawData)
+
 	evResp := postEvent(rawData, serverURL)
 
 	switch hookEvent {
@@ -586,9 +571,8 @@ func ProcessEvent(event HookEvent, rawData map[string]interface{}, serverURL, de
 		}
 		// Gate (b): the bootstrap nudge is suppressed in solo mode.
 		if !effectiveSolo && !hasTeam() {
-			ctx += "\n\nNo team exists for this session. Run /teamster:bootstrap to create a " +
-				"team before dispatching parallel work. Bootstrap sets up WMS tracking " +
-				"and teaches you the dispatch protocol."
+			ctx += "\n\nNo Teamster session is active. Run /teamster:start to set up WMS " +
+				"tracking and the dispatch protocol before starting work."
 		}
 		out, _ := json.Marshal(map[string]interface{}{
 			"hookSpecificOutput": map[string]interface{}{
@@ -598,21 +582,6 @@ func ProcessEvent(event HookEvent, rawData map[string]interface{}, serverURL, de
 		})
 		return string(out)
 	case "PreToolUse":
-		// Gate (c): solo mode silently allows a bare Agent (no team_name) — no
-		// block decision, no additionalContext note. Team mode is unchanged.
-		if !effectiveSolo && event.ToolName == "Agent" {
-			ti := asMap(event.ToolInput)
-			if ti != nil && ti["team_name"] == nil {
-				out, _ := json.Marshal(map[string]interface{}{
-					"hookSpecificOutput": map[string]interface{}{
-						"hookEventName": "PreToolUse",
-						"decision":      "block",
-						"reason":        AGENT_TEAMS_ENFORCEMENT,
-					},
-				})
-				return string(out)
-			}
-		}
 		// Focus-absent nudge: pass through additionalContext from hookd when the
 		// agent has no open WMS focus interval.
 		if evResp != nil && evResp.AdditionalContext != "" {
@@ -851,6 +820,16 @@ func postEvent(data map[string]interface{}, serverURL string) *eventResponse {
 		return nil
 	}
 	return &er
+}
+
+// trimLargeInput caps tool_input to 32 KB when it is a raw string. Map inputs
+// are left alone — their individual fields are small. This prevents
+// oversized payloads when Claude Code passes a string-encoded tool_input.
+func trimLargeInput(data map[string]interface{}) {
+	const maxInputBytes = 32 << 10
+	if s, ok := data["tool_input"].(string); ok && len(s) > maxInputBytes {
+		data["tool_input"] = s[:maxInputBytes]
+	}
 }
 
 // normaliseToolInput coerces string-encoded JSON maps to map[string]interface{}.

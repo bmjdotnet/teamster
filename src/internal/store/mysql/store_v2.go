@@ -54,7 +54,7 @@ func (s *Store) GetOutcome(ctx context.Context, id string) (*wms.Outcome, error)
 	return &o, nil
 }
 
-func (s *Store) ListOutcomes(ctx context.Context, parentOutcomeID string, tagFilters map[string]string, statusFilter string) ([]*wms.Outcome, error) {
+func (s *Store) ListOutcomes(ctx context.Context, parentOutcomeID string, tagFilters map[string]string, statusFilter string, query string) ([]*wms.Outcome, error) {
 	var sb strings.Builder
 	args := []any{}
 
@@ -75,6 +75,13 @@ func (s *Store) ListOutcomes(ctx context.Context, parentOutcomeID string, tagFil
 	default:
 		sb.WriteString(` AND o.status = ?`)
 		args = append(args, statusFilter)
+	}
+
+	if query != "" {
+		esc := strings.NewReplacer("%", `\%`, "_", `\_`)
+		pattern := "%" + esc.Replace(query) + "%"
+		sb.WriteString(` AND (o.title LIKE ? OR o.description LIKE ?)`)
+		args = append(args, pattern, pattern)
 	}
 
 	if len(tagFilters) > 0 {
@@ -103,7 +110,7 @@ func (s *Store) ListOutcomes(ctx context.Context, parentOutcomeID string, tagFil
 	}
 	defer rows.Close()
 
-	var out []*wms.Outcome
+	out := make([]*wms.Outcome, 0)
 	for rows.Next() {
 		var o wms.Outcome
 		if err := scanOutcome(rows, &o); err != nil {

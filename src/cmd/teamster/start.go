@@ -131,6 +131,8 @@ func parseSupervisorFlags(args []string, cfg *config.Config) error {
 			}
 			cfg.PrometheusRetention = args[i+1]
 			i++
+		case a == "--live":
+			statusLive = true
 		default:
 			return fmt.Errorf("unknown argument: %s", a)
 		}

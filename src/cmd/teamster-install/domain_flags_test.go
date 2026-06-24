@@ -135,17 +135,57 @@ func TestApplyDomainServer_hookd_case1_override(t *testing.T) {
 }
 
 func TestApplyDomainServer_hookd_case2_install_writes_hookServerURL(t *testing.T) {
+	// Fresh install (no existing value): install-default URL is written.
 	cfg := domainConfig{}
 	modes := modeConfig{hookdMode: "systemd"}
-	ports := portConfig{hookServerURL: "http://localhost:9126/event"}
-	env := map[string]interface{}{"TEAMSTER_HOOK_SERVER_URL": "http://old-host:9999/event"}
+	ports := portConfig{hookServerURL: "http://hub-host:9126/event"}
+	env := map[string]interface{}{}
 	for _, s := range domainSpecs(cfg, modes, ports) {
 		if s.name == "hookd" {
 			applyDomainServer(env, s)
 		}
 	}
-	if got, want := env["TEAMSTER_HOOK_SERVER_URL"], "http://localhost:9126/event"; got != want {
-		t.Errorf("TEAMSTER_HOOK_SERVER_URL = %v; want install-default %v (stale value must be overwritten)", got, want)
+	if got, want := env["TEAMSTER_HOOK_SERVER_URL"], "http://hub-host:9126/event"; got != want {
+		t.Errorf("TEAMSTER_HOOK_SERVER_URL = %v; want install-default %v", got, want)
+	}
+}
+
+func TestApplyDomainServer_hookd_case2_replaces_stale_localhost(t *testing.T) {
+	// Reinstall with a stale localhost value: must be replaced with the
+	// hostname-based URL so remote clients can reach hookd.
+	cfg := domainConfig{}
+	modes := modeConfig{hookdMode: "systemd"}
+	ports := portConfig{hookServerURL: "http://hub-host:9125/event"}
+	for _, stale := range []string{
+		"http://localhost:9125/event",
+		"http://127.0.0.1:9125/event",
+	} {
+		env := map[string]interface{}{"TEAMSTER_HOOK_SERVER_URL": stale}
+		for _, s := range domainSpecs(cfg, modes, ports) {
+			if s.name == "hookd" {
+				applyDomainServer(env, s)
+			}
+		}
+		if got, want := env["TEAMSTER_HOOK_SERVER_URL"], "http://hub-host:9125/event"; got != want {
+			t.Errorf("stale %q: TEAMSTER_HOOK_SERVER_URL = %v; want %v", stale, got, want)
+		}
+	}
+}
+
+func TestApplyDomainServer_hookd_case2_preserves_real_hostname(t *testing.T) {
+	// Reinstall without --hookd-endpoint: a deliberately-set real hostname URL
+	// must NOT be overwritten by the install default.
+	cfg := domainConfig{}
+	modes := modeConfig{hookdMode: "systemd"}
+	ports := portConfig{hookServerURL: "http://hub-host:9125/event"}
+	env := map[string]interface{}{"TEAMSTER_HOOK_SERVER_URL": "http://custom-hub.example.com:9125/event"}
+	for _, s := range domainSpecs(cfg, modes, ports) {
+		if s.name == "hookd" {
+			applyDomainServer(env, s)
+		}
+	}
+	if got, want := env["TEAMSTER_HOOK_SERVER_URL"], "http://custom-hub.example.com:9125/event"; got != want {
+		t.Errorf("real hostname URL should be preserved; got %v want %v", got, want)
 	}
 }
 

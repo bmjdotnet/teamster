@@ -166,7 +166,7 @@ func Default() Config {
 	}
 
 	return Config{
-		HookServerURL:        "http://localhost:9125/event",
+		HookServerURL:        fmt.Sprintf("http://%s:9125/event", host),
 		HookServerPort:       9125,
 		HookServerBind:       "0.0.0.0",
 		DataDir:              dataDir,
@@ -448,13 +448,26 @@ func (c Config) TagSpecs() []wms.TagSpec {
 	specs := make([]wms.TagSpec, 0, len(keys))
 	for _, k := range keys {
 		tc := c.Tags[k]
-		specs = append(specs, wms.TagSpec{
+		spec := wms.TagSpec{
 			Key:         k,
 			Category:    tc.Category,
 			Cardinality: tc.Cardinality,
 			Values:      tc.Values,
 			Description: tc.Description,
-		})
+		}
+		if tc.Scope != "" {
+			spec.Scope = &tc.Scope
+		}
+		if tc.ExclusionGroup != "" {
+			spec.ExclusionGroup = &tc.ExclusionGroup
+		}
+		if tc.AutoExtract != "" {
+			spec.AutoExtract = &tc.AutoExtract
+		}
+		if tc.Interview != "" {
+			spec.Interview = &tc.Interview
+		}
+		specs = append(specs, spec)
 	}
 	return specs
 }

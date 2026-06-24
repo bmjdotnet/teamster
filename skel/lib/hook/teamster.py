@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """Teamster hook client (Python). Reads a Claude Code hook event from stdin,
 enriches with host identity, POSTs to the hub's hookd. Fire-and-forget."""
+from __future__ import annotations
 import json, os, re, socket, sys, urllib.request, urllib.error
 from datetime import datetime, timezone
+
+# Bounded transcript scan for agentName — stop after this many bytes to keep
+# each hook invocation fast. agentName appears near the top of child transcripts.
+_TRANSCRIPT_SCAN_LIMIT = 256 * 1024  # 256 KB
 
 _LOG_MAX_BYTES = 1_000_000  # rotate at ~1 MB
 
@@ -114,6 +119,38 @@ def _read_version() -> str:
 __version__ = _read_version()
 
 
+def _dump_raw_debug(raw: str, event: dict) -> None:
+    """Append a capture record to ~/teamster/var/raw-hook-debug.jsonl.
+
+    Activated by setting TEAMSTER_DEBUG_RAW to any non-empty value, e.g.:
+        TEAMSTER_DEBUG_RAW=1 claude
+    The file captures the verbatim stdin string plus a structured envelope
+    with identity fields — useful for diagnosing missing agent_type/agent_id
+    on remote hosts. Rotates at ~5 MB like hook-errors.log. Never raises.
+    """
+    try:
+        log_dir = os.path.join(os.path.expanduser("~"), "teamster", "var")
+        os.makedirs(log_dir, exist_ok=True)
+        log_path = os.path.join(log_dir, "raw-hook-debug.jsonl")
+        try:
+            if os.path.getsize(log_path) > 5_000_000:
+                os.replace(log_path, log_path + ".old")
+        except OSError:
+            pass
+        record = {
+            "captured_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "hook_event_name": event.get("hook_event_name"),
+            "tool_name": event.get("tool_name"),
+            "session_id": event.get("session_id"),
+            "top_level_keys": sorted(event.keys()),
+            "raw_stdin": raw,
+        }
+        with open(log_path, "a") as f:
+            f.write(json.dumps(record) + "\n")
+    except Exception:
+        pass  # debug logging must never block Claude Code
+
+
 def _log_error(host: str, url: str, error_type: str, error_msg: str, http_status: int = 0) -> None:
     """Append a JSON line to ~/teamster/var/hook-errors.log. Never raises."""
     try:
@@ -141,6 +178,44 @@ def _log_error(host: str, url: str, error_type: str, error_msg: str, http_status
         pass  # logging failure must never block Claude Code
 
 
+def _agent_name_from_transcript(path):
+    """Derive agentName from a Claude Code transcript file.
+
+    On macOS, dispatched teammates run as top-level sessions and carry no
+    agent_type in hook payloads. Their transcript's early lines contain a
+    top-level "agentName" field (e.g. {"agentName":"PizzaDude",...}) that
+    identifies the teammate. Lead sessions have no agentName.
+
+    Scans at most _TRANSCRIPT_SCAN_LIMIT bytes, stopping at the first line
+    containing a non-empty agentName. No caching — this client is fork-per-event
+    so each invocation is a fresh process.
+
+    Returns the agentName string, or "" if not found or on any error.
+    Never raises.
+    """
+    result = ""
+    try:
+        bytes_read = 0
+        with open(path, "rb") as f:
+            for raw_line in f:
+                bytes_read += len(raw_line)
+                if bytes_read > _TRANSCRIPT_SCAN_LIMIT:
+                    break
+                if b"agentName" not in raw_line:
+                    continue
+                try:
+                    rec = json.loads(raw_line)
+                    name = rec.get("agentName", "")
+                    if name and isinstance(name, str):
+                        result = name
+                        break
+                except (json.JSONDecodeError, TypeError, AttributeError):
+                    continue
+    except Exception:
+        pass  # unreadable transcript → leave event unchanged
+    return result
+
+
 def main():
     host = os.environ.get("TEAMSTER_HOST", socket.gethostname().split('.')[0])
     url = os.environ.get("TEAMSTER_HOOK_SERVER_URL", "")
@@ -154,14 +229,23 @@ def main():
         _log_error(host, url, type(e).__name__, str(e))
         return  # never block Claude on parse failure
 
+    # Opt-in raw capture: dump verbatim stdin + identity envelope before any
+    # redaction or field-capping. Set TEAMSTER_DEBUG_RAW=1 to activate.
+    if os.environ.get("TEAMSTER_DEBUG_RAW"):
+        _dump_raw_debug(raw, event)
+
     event.setdefault("_host", host)
 
-    if event.get("tool_name") == "TeamCreate":
-        ti = event.get("tool_input") or {}
-        if isinstance(ti, dict):
-            name = ti.get("team_name", "")
+    # On macOS, teammate sessions carry no agent_type in hook payloads.
+    # Derive it from the transcript's agentName field so hookd can resolve
+    # the teammate identity (EnrichRecord sets _agent_name = "@"+agent_type).
+    # Only runs when agent_type is absent/empty and transcript_path is present.
+    if not event.get("agent_type"):
+        transcript_path = event.get("transcript_path", "")
+        if transcript_path:
+            name = _agent_name_from_transcript(transcript_path)
             if name:
-                event["_team"] = name
+                event["agent_type"] = name
 
     # Mask any credential inlined in a Bash command before it leaves this host.
     # Defense in depth: the hub redacts again at ingest, but scrubbing here means
@@ -171,19 +255,30 @@ def main():
     if not url:
         return
 
+    # Cap large fields that hookd's buildRecord never persists. Without this,
+    # PostToolUse events with big tool_response exceed hookd's 1MB body limit.
+    for key in ("tool_response", "stop_response", "last_assistant_message"):
+        v = event.get(key)
+        if isinstance(v, str) and len(v) > 1024:
+            event[key] = v[:1024]
+    ti = event.get("tool_input")
+    if isinstance(ti, str) and len(ti) > 32768:
+        event["tool_input"] = ti[:32768]
+
     body = json.dumps(event).encode("utf-8")
     req = urllib.request.Request(url, data=body, method="POST",
                                  headers={"Content-Type": "application/json"})
     try:
         resp = urllib.request.urlopen(req, timeout=2)
         resp_body = resp.read(4096)
-        if resp_body and event.get("hook_event_name") == "PreToolUse":
+        hook_event = event.get("hook_event_name")
+        if resp_body and hook_event in ("PreToolUse", "UserPromptSubmit"):
             try:
                 resp_data = json.loads(resp_body)
                 ctx = resp_data.get("additionalContext", "")
                 if ctx:
                     out = {"hookSpecificOutput": {
-                        "hookEventName": "PreToolUse",
+                        "hookEventName": hook_event,
                         "additionalContext": ctx,
                     }}
                     sys.stdout.write(json.dumps(out))

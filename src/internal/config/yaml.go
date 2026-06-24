@@ -21,10 +21,14 @@ type ServiceConfig struct {
 // and yaml tags MUST stay identical to the installer's yamlTagConfig
 // (src/cmd/teamster-install/yaml_config.go) or the installer round-trip drifts.
 type TagConfig struct {
-	Category    string   `yaml:"category"`    // "context" | "lifecycle"
-	Cardinality string   `yaml:"cardinality"` // "single" | "multi"
-	Values      []string `yaml:"values"`      // explicit value list; empty for create-on-apply keys
-	Description string   `yaml:"description"`
+	Category       string   `yaml:"category"`        // "context" | "lifecycle"
+	Cardinality    string   `yaml:"cardinality"`     // "single" | "multi"
+	Values         []string `yaml:"values"`          // explicit value list; empty for create-on-apply keys
+	Description    string   `yaml:"description"`
+	Scope          string   `yaml:"scope"`           // "outcome" | "workunit" | ""
+	ExclusionGroup string   `yaml:"exclusion_group"` // mutual exclusion group slug
+	AutoExtract    string   `yaml:"auto_extract"`    // "git" | "env" | ""
+	Interview      string   `yaml:"interview"`       // "propose" | "auto" | "skip"
 }
 
 // FileConfig is the parsed shape of ~/teamster/etc/teamster.yaml.

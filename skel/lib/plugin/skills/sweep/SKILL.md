@@ -1,13 +1,13 @@
 ---
 name: sweep
-description: "Nightly data-quality sweep: run deterministic recovery passes, then synthesize outcomes for orphan sessions via targeted transcript reads. Designed for `claude --print` (headless, autonomous, no operator interaction)."
+description: "Data-quality sweep: run deterministic recovery passes, then synthesize outcomes for orphan sessions via targeted transcript reads. Designed for `claude --print` (headless, autonomous, no operator interaction)."
 disable-model-invocation: true
 argument-hint: "[--dry-run]"
 ---
 
-# Nightly Attribution Sweep
+# Attribution Sweep
 
-You are an autonomous background agent running the nightly data-quality sweep.
+You are an autonomous background agent running the data-quality sweep.
 You have NO operator to interact with. Every decision must be self-contained.
 When in doubt, skip and log — never block waiting for input.
 
@@ -20,7 +20,7 @@ deterministic passes cannot attribute.
 
 | Item | Value |
 |------|-------|
-| Standing outcome | `out-sweep-nightly` (create if absent) |
+| Standing outcome | `sweep` (create if absent) |
 | Tags on that outcome | `product:Teamster`, `feature:rollup`, `work-type:admin`, `component:wms` |
 | Mapping file | `/tmp/sweep-llm-mapping-YYYY-MM-DD.json` |
 | Max sessions per run | 10 |
@@ -35,24 +35,24 @@ deterministic passes cannot attribute.
 Before any work, attribute your own cost:
 
 ```
-wms_setFocus(entityType="outcome", entityID="out-sweep-nightly",
-             focus="nightly LLM attribution sweep")
+wms_setFocus(entityType="outcome", entityID="sweep",
+             focus="LLM attribution sweep")
 ```
 
-If `out-sweep-nightly` does not exist yet, create it first:
+If `sweep` does not exist yet, create it first:
 
 ```
-wms_createOutcome(id="out-sweep-nightly",
-                  title="Nightly Attribution Sweep",
+wms_createOutcome(id="sweep",
+                  title="Attribution Sweep",
                   description="Standing outcome for automated data-quality sweeps")
-wms_updateOutcomeStatus(id="out-sweep-nightly", status="active")
-wms_tagEntity(entityType="outcome", entityID="out-sweep-nightly",
+wms_updateOutcomeStatus(id="sweep", status="active")
+wms_tagEntity(entityType="outcome", entityID="sweep",
               tagKey="product", tagValue="Teamster", source="manual")
-wms_tagEntity(entityType="outcome", entityID="out-sweep-nightly",
+wms_tagEntity(entityType="outcome", entityID="sweep",
               tagKey="feature", tagValue="rollup", source="manual")
-wms_tagEntity(entityType="outcome", entityID="out-sweep-nightly",
+wms_tagEntity(entityType="outcome", entityID="sweep",
               tagKey="work-type", tagValue="admin", source="manual")
-wms_tagEntity(entityType="outcome", entityID="out-sweep-nightly",
+wms_tagEntity(entityType="outcome", entityID="sweep",
               tagKey="component", tagValue="wms", source="manual")
 ```
 
@@ -60,15 +60,25 @@ Then set focus on it. Keep this focus for the entire run.
 
 ---
 
-## Step 1 — Run the deterministic sweep (if not already run)
+## Step 1 — Check for work and run the deterministic sweep
 
-Check whether the deterministic sweep ran today:
+First, check whether there are orphan sessions to process:
 
 ```bash
-journalctl --user -u teamster-sweep.service --since today --no-pager | tail -5
+rollup --count-orphans
 ```
 
-If it ran, skip to Step 2. If not, run it:
+If the count is **0**, print `sweep-llm: no orphan sessions, nothing to do`
+and **exit immediately** — there is no LLM work to perform. The deterministic
+`rollup --sweep` runs separately on its own timer (every 10 min).
+
+If the count is > 0, ensure the deterministic sweep has run recently:
+
+```bash
+journalctl --user -u teamster-rollup.service --since "15 min ago" --no-pager | tail -5
+```
+
+If it ran in the last 15 minutes, skip to Step 2. If not, run it:
 
 ```bash
 rollup --sweep 2>&1 | tail -20
@@ -163,7 +173,7 @@ for line in sys.stdin:
 
 From the transcript excerpt, synthesize:
 
-1. **outcome_id**: `out-synth-<short-kebab-slug>` (unique, descriptive)
+1. **outcome_id**: `synth-<short-kebab-slug>` (unique, descriptive)
 2. **title**: 1-line description of the session's objective
 3. **description**: 1-2 sentences on what the session accomplished
 4. **Tags** (see Step 3a for guidance on each)
@@ -205,14 +215,24 @@ with descriptions. Each tag value has a `description` field that tells you
 - `p0` = emergency, `p1` = high, `p2` = normal, `p3` = low
 - Default to `p2` unless the transcript signals urgency
 
-### Step 3b — Confidence assessment
+### Step 3b — Confidence assessment and skip logging
 
 Rate each synthesis:
 - **high** — user's opening message clearly states the objective
 - **medium** — objective inferred from tool calls and assistant responses
 - **low** — ambiguous, multiple possible interpretations
 
-Skip (don't synthesize) if confidence is too low to be useful.
+If confidence is too low to synthesize, **skip the session but record why**.
+Every skip MUST have a specific, detailed reason — not just "low confidence."
+Good skip reasons describe what you saw in the transcript:
+- `"only '/effort max' then /exit — no user objective"`
+- `"3 messages, all system-reminder injections — no substantive content"`
+- `"user typed '4.6' then /exit — model version test, no work performed"`
+
+Bad skip reasons (never use these):
+- `"low confidence"` — too vague, doesn't say what was in the transcript
+- `"ambiguous"` — says nothing about what made it ambiguous
+- `"skipped"` — not a reason at all
 
 ---
 
@@ -221,30 +241,30 @@ Skip (don't synthesize) if confidence is too low to be useful.
 For each synthesized outcome, create it in WMS and apply all tags:
 
 ```
-wms_createOutcome(id="out-synth-<slug>",
+wms_createOutcome(id="synth-<slug>",
                   title="<title>",
                   description="<description>",
                   status="done")
 
-wms_tagEntity(entityType="outcome", entityID="out-synth-<slug>",
+wms_tagEntity(entityType="outcome", entityID="synth-<slug>",
               tagKey="source", tagValue="synthesized", source="classifier")
-wms_tagEntity(entityType="outcome", entityID="out-synth-<slug>",
+wms_tagEntity(entityType="outcome", entityID="synth-<slug>",
               tagKey="product", tagValue="<product>", source="manual")
-wms_tagEntity(entityType="outcome", entityID="out-synth-<slug>",
+wms_tagEntity(entityType="outcome", entityID="synth-<slug>",
               tagKey="work-type", tagValue="<work-type>", source="manual")
-wms_tagEntity(entityType="outcome", entityID="out-synth-<slug>",
+wms_tagEntity(entityType="outcome", entityID="synth-<slug>",
               tagKey="<feature|bug>", tagValue="<slug>", source="manual")
-wms_tagEntity(entityType="outcome", entityID="out-synth-<slug>",
+wms_tagEntity(entityType="outcome", entityID="synth-<slug>",
               tagKey="priority", tagValue="<priority>", source="manual")
-wms_tagEntity(entityType="outcome", entityID="out-synth-<slug>",
+wms_tagEntity(entityType="outcome", entityID="synth-<slug>",
               tagKey="resolution", tagValue="achieved", source="manual")
 ```
 
 **Do NOT create duplicate outcomes.** Before creating, check if
-`out-synth-<slug>` already exists:
+`synth-<slug>` already exists:
 
 ```bash
-teamster sql -N -e "SELECT id FROM outcomes WHERE id = 'out-synth-<slug>'"
+teamster sql -N -e "SELECT id FROM outcomes WHERE id = 'synth-<slug>'"
 ```
 
 If it exists, skip creation (a prior sweep already handled this session).
@@ -253,19 +273,33 @@ If it exists, skip creation (a prior sweep already handled this session).
 
 ## Step 5 — Produce the mapping file
 
-Write a JSON mapping file that `rollup --synthesize-focus` can consume:
+Write a JSON mapping file that `rollup --synthesize-focus` can consume.
+Include **both synthesized and skipped** sessions. Skipped sessions use
+`entity_type: "skip"` — the rollup binary marks them as `sweep_skipped`
+so they are excluded from future sweep runs.
 
 ```json
 [
   {
     "session_id": "full-uuid-here",
     "entity_type": "outcome",
-    "entity_id": "out-synth-<slug>",
+    "entity_id": "synth-<slug>",
     "confidence": "high",
     "evidence_excerpt": "User: <the key line from the transcript>"
+  },
+  {
+    "session_id": "skipped-uuid-here",
+    "entity_type": "skip",
+    "entity_id": "SKIP",
+    "confidence": "skip",
+    "evidence_excerpt": "only '/effort max' then /exit — no user objective"
   }
 ]
 ```
+
+The `evidence_excerpt` on skip entries is the specific reason from Step 3b.
+This is recorded as provenance — it's the permanent record of why this
+session was deemed unattributable.
 
 Write to `/tmp/sweep-llm-mapping-$(date +%F).json`.
 
@@ -305,13 +339,19 @@ log the delta and do NOT run again. The operator investigates.
 
 ## Step 8 — Log results
 
-Print a summary to stdout (this is captured by systemd journal):
+Print a summary to stdout (this is captured by systemd journal).
+**Every skipped session must appear with its specific reason.** This is
+the audit trail — if a session keeps showing up as unallocated, the
+operator needs to see why the sweep decided not to attribute it.
 
 ```
 sweep-llm complete: orphans_processed=N synthesized=N skipped=N
   conservation: $X == $X (delta $0.00)
-  methods: synthesized_outcome=N gap_recovery=N unallocated=N
+  methods: synthesized_outcome=N sweep_skipped=N gap_recovery=N unallocated=N
   remaining: N sessions / $X unallocated
+  skipped sessions:
+    <session_id_1>: <specific reason from Step 3b>
+    <session_id_2>: <specific reason from Step 3b>
 ```
 
 ---
@@ -321,7 +361,7 @@ sweep-llm complete: orphans_processed=N synthesized=N skipped=N
 1. **No operator interaction.** You are headless. Never use AskUserQuestion or
    wait for input. If uncertain, skip the session and log why.
 2. **Max 10 sessions per run.** Process cost-descending. The cap bounds cost
-   and runtime. Tomorrow's sweep gets the next batch.
+   and runtime. The next sweep gets the remaining batch.
 3. **Conservation is sacred.** If the conservation check fails, stop everything
    and log the error. Never retry — the operator investigates.
 4. **Reuse tag values.** Always call `wms_listTags` before inventing new values.
@@ -350,7 +390,7 @@ assistant: I'll read the spec file...
 ```
 
 Synthesis:
-- outcome_id: `out-synth-anchor-spec-review`
+- outcome_id: `synth-anchor-spec-review`
 - title: "Anchor IRC Harness — Initial Spec Review"
 - product: `anchor`
 - work-type: `research`
@@ -368,7 +408,7 @@ user: You are going to be fixing the monitoring stack on this system, along
 ```
 
 Synthesis:
-- outcome_id: `out-synth-monitoring-setup`
+- outcome_id: `synth-monitoring-setup`
 - title: "Homelab Monitoring Stack Setup"
 - product: `homelab`
 - work-type: `infra`
@@ -376,7 +416,7 @@ Synthesis:
 - priority: `p2`
 - confidence: `high`
 
-### Example 3: Ambiguous (skip)
+### Example 3: No objective (skip with reason)
 
 Transcript head:
 ```
@@ -385,7 +425,16 @@ user: /compact
 [no substantive user message in first 200 lines]
 ```
 
-Action: skip this session (no objective to synthesize).
+Action: include in mapping file as a skip entry so it won't be re-examined:
+```json
+{
+  "session_id": "abc123...",
+  "entity_type": "skip",
+  "entity_id": "SKIP",
+  "confidence": "skip",
+  "evidence_excerpt": "only '/effort max' and '/compact' commands — no user objective, no work performed"
+}
+```
 
 ---
 

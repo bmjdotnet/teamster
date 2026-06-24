@@ -6,15 +6,26 @@ set -euo pipefail
 die() { echo "ERROR: $*" >&2; exit 1; }
 
 SERVER=""
+PYTHON3_ARG=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --server) SERVER="$2"; shift 2 ;;
-        *)        die "unknown option: $1" ;;
+        --server)  SERVER="$2";      shift 2 ;;
+        --python3) PYTHON3_ARG="$2"; shift 2 ;;
+        *)         die "unknown option: $1" ;;
     esac
 done
 
 [[ -z "$SERVER" ]] && die "--server <host:port> required"
+
+# Augment PATH with well-known install dirs so claude and python3 are reachable
+# even when this script runs under a login shell that doesn't source ~/.zshrc.
+# Prepending is harmless on Linux (dirs that don't exist are silently skipped).
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$HOME/bin:$HOME/.npm-global/bin:$PATH"
+
+# Resolve python3: prefer the abs path passed in from the probe (most reliable
+# under launchd's minimal PATH); fall back to whatever is now on PATH.
+PYTHON3="${PYTHON3_ARG:-$(command -v python3 2>/dev/null || echo python3)}"
 
 TEAMSTER_DIR="$HOME/teamster"
 SETTINGS="$HOME/.claude/settings.json"
@@ -26,7 +37,7 @@ echo "==> remote-setup.sh: configuring for hub $SERVER"
 # 1. Merge settings.json
 echo "--> Step 1: Merging ~/.claude/settings.json..."
 mkdir -p "$HOME/.claude"
-python3 - "$SETTINGS" "$SERVER" "$SHORT_HOST" "$TEAMSTER_DIR/lib" <<'PYEOF' \
+"$PYTHON3" - "$SETTINGS" "$SERVER" "$SHORT_HOST" "$TEAMSTER_DIR/lib" <<'PYEOF' \
     || die "step 1 failed: settings.json merge script returned nonzero (see output above)"
 import json, sys, os, traceback
 
@@ -119,7 +130,7 @@ echo "  registered wms MCP -> http://$SERVER/mcp/wms"
 
 # 3. Install plugin via direct cache population (bypasses broken `claude plugin install` for local dirs)
 echo "--> Step 3: Installing Teamster plugin (direct cache)..."
-python3 - "$TEAMSTER_DIR/lib/plugin" "$TEAMSTER_DIR/lib" <<'PYEOF' \
+"$PYTHON3" - "$TEAMSTER_DIR/lib/plugin" "$TEAMSTER_DIR/lib" <<'PYEOF' \
     || die "step 3 failed: plugin cache population script returned nonzero (see output above)"
 import json, os, shutil, sys, traceback
 
@@ -259,10 +270,21 @@ else
     echo "  teamster/bin already in $RCFILE PATH"
 fi
 
-# Write env vars so plain shell sessions (e.g. manual testing) have them
+# Write env vars so plain shell sessions (e.g. manual testing) have them.
+# TEAMSTER_HOST is pinned to $SHORT_HOST (hostname -s) so all events from this
+# host use a single canonical label regardless of DNS search domain.
+_sed_i() {
+    # Portable sed -i: BSD (macOS) requires an explicit backup suffix; GNU forbids it.
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+        sed -i '' "$@"
+    else
+        sed -i "$@"
+    fi
+}
+
 URL_LINE="export TEAMSTER_HOOK_SERVER_URL=\"http://$SERVER/event\""
 if grep -qF 'TEAMSTER_HOOK_SERVER_URL' "$RCFILE" 2>/dev/null; then
-    sed -i "s|^export TEAMSTER_HOOK_SERVER_URL=.*|$URL_LINE|" "$RCFILE" \
+    _sed_i "s|^export TEAMSTER_HOOK_SERVER_URL=.*|$URL_LINE|" "$RCFILE" \
         || die "step 5 failed: could not update TEAMSTER_HOOK_SERVER_URL in $RCFILE"
     echo "  updated TEAMSTER_HOOK_SERVER_URL in $RCFILE"
 else
@@ -271,28 +293,82 @@ else
     echo "  added TEAMSTER_HOOK_SERVER_URL to $RCFILE"
 fi
 
-# 6. Install cron entry for token-scraper (cost attribution from remote sessions)
-echo "--> Step 6: Installing token-scraper cron entry..."
+HOST_LINE="export TEAMSTER_HOST=\"$SHORT_HOST\""
+if grep -qF 'TEAMSTER_HOST' "$RCFILE" 2>/dev/null; then
+    _sed_i "s|^export TEAMSTER_HOST=.*|$HOST_LINE|" "$RCFILE" \
+        || die "step 5 failed: could not update TEAMSTER_HOST in $RCFILE"
+    echo "  updated TEAMSTER_HOST in $RCFILE"
+else
+    printf '%s\n' "$HOST_LINE" >> "$RCFILE" \
+        || die "step 5 failed: could not write TEAMSTER_HOST to $RCFILE"
+    echo "  added TEAMSTER_HOST to $RCFILE"
+fi
+
+# 6. Schedule token-scraper (cost attribution from remote sessions)
+# macOS: cron needs Full Disk Access (TCC) to read ~/.claude/projects/ — use launchd instead.
+# Linux: cron works fine; keep existing behavior.
+echo "--> Step 6: Scheduling token-scraper..."
 SCRAPER="$TEAMSTER_DIR/bin/token-scraper"
 if [[ -x "$SCRAPER" ]]; then
-    CRON_LINE="* * * * * TEAMSTER_HOOK_SERVER_URL=http://$SERVER/event TEAMSTER_HOST=$SHORT_HOST $SCRAPER"
-    if crontab -l 2>/dev/null | grep -qF 'token-scraper'; then
-        # Update existing entry (server may have changed)
-        crontab -l 2>/dev/null | grep -vF 'token-scraper' | { cat; printf '%s\n' "$CRON_LINE"; } | crontab - \
-            || die "step 6 failed: could not update token-scraper cron entry"
-        echo "  updated token-scraper cron entry"
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+        PLIST="$HOME/Library/LaunchAgents/net.bmj.teamster.token-scraper.plist"
+        mkdir -p "$HOME/Library/LaunchAgents"
+        cat > "$PLIST" <<PLIST_EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>net.bmj.teamster.token-scraper</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$PYTHON3</string>
+        <string>$SCRAPER</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>TEAMSTER_HOOK_SERVER_URL</key>
+        <string>http://$SERVER/event</string>
+        <key>TEAMSTER_HOST</key>
+        <string>$SHORT_HOST</string>
+    </dict>
+    <key>StartInterval</key>
+    <integer>60</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>$HOME/teamster/var/token-scraper.log</string>
+    <key>StandardErrorPath</key>
+    <string>$HOME/teamster/var/token-scraper.log</string>
+</dict>
+</plist>
+PLIST_EOF
+        mkdir -p "$HOME/teamster/var"
+        # Idempotent load: boot out existing agent (ignore failure), then bootstrap.
+        launchctl bootout "gui/$(id -u)/net.bmj.teamster.token-scraper" 2>/dev/null || true
+        launchctl bootstrap "gui/$(id -u)" "$PLIST" \
+            || die "step 6 failed: launchctl bootstrap of token-scraper LaunchAgent failed"
+        echo "  installed token-scraper LaunchAgent (every 60s): $PLIST"
     else
-        ( crontab -l 2>/dev/null; printf '%s\n' "$CRON_LINE" ) | crontab - \
-            || die "step 6 failed: could not install token-scraper cron entry"
-        echo "  installed token-scraper cron entry (every 60s)"
+        CRON_LINE="* * * * * TEAMSTER_HOOK_SERVER_URL=http://$SERVER/event TEAMSTER_HOST=$SHORT_HOST $SCRAPER"
+        if crontab -l 2>/dev/null | grep -qF 'token-scraper'; then
+            # Update existing entry (server may have changed)
+            crontab -l 2>/dev/null | grep -vF 'token-scraper' | { cat; printf '%s\n' "$CRON_LINE"; } | crontab - \
+                || die "step 6 failed: could not update token-scraper cron entry"
+            echo "  updated token-scraper cron entry"
+        else
+            ( crontab -l 2>/dev/null; printf '%s\n' "$CRON_LINE" ) | crontab - \
+                || die "step 6 failed: could not install token-scraper cron entry"
+            echo "  installed token-scraper cron entry (every 60s)"
+        fi
     fi
 else
-    echo "  WARN: $SCRAPER not found — skipping cron entry (cost data will not be scraped)"
+    echo "  WARN: $SCRAPER not found — skipping scheduler setup (cost data will not be scraped)"
 fi
 
 echo ""
 echo "==> remote-setup.sh complete."
 echo "    Hub:     http://$SERVER"
 echo "    Hook:    $TEAMSTER_DIR/bin/teamster"
-echo "    Scraper: $SCRAPER (cron, every 60s)"
+echo "    Scraper: $SCRAPER (every 60s)"
 echo "    Test: echo '{\"hook_event_name\":\"test\"}' | TEAMSTER_HOOK_SERVER_URL=http://$SERVER/event ~/teamster/bin/teamster"

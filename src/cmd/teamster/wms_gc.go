@@ -99,10 +99,10 @@ func runWMSGC(args []string) int {
 }
 
 func countStaleEntities(ctx context.Context, s interface {
-	ListOutcomes(ctx context.Context, parentID string, tagFilters map[string]string, statusFilter string) ([]*wms.Outcome, error)
+	ListOutcomes(ctx context.Context, parentID string, tagFilters map[string]string, statusFilter string, query string) ([]*wms.Outcome, error)
 	ListWorkUnits(ctx context.Context, outcomeID string) ([]*wms.WorkUnit, error)
 }, threshold time.Time) (int, int) {
-	outcomes, err := s.ListOutcomes(ctx, "", nil, "")
+	outcomes, err := s.ListOutcomes(ctx, "", nil, "", "")
 	if err != nil {
 		return 0, 0
 	}
@@ -130,13 +130,13 @@ func countStaleEntities(ctx context.Context, s interface {
 }
 
 func closeStaleEntities(ctx context.Context, s interface {
-	ListOutcomes(ctx context.Context, parentID string, tagFilters map[string]string, statusFilter string) ([]*wms.Outcome, error)
+	ListOutcomes(ctx context.Context, parentID string, tagFilters map[string]string, statusFilter string, query string) ([]*wms.Outcome, error)
 	ListWorkUnits(ctx context.Context, outcomeID string) ([]*wms.WorkUnit, error)
 	UpdateOutcomeStatus(ctx context.Context, id, status string) error
 	UpdateWorkUnitStatus(ctx context.Context, id, status string) error
 	TagEntity(ctx context.Context, entityType, entityID, tagKey, tagValue, source, description string) error
 }, threshold time.Time) int {
-	outcomes, err := s.ListOutcomes(ctx, "", nil, "")
+	outcomes, err := s.ListOutcomes(ctx, "", nil, "", "")
 	if err != nil {
 		return 0
 	}

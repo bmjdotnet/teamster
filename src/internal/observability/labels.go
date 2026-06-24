@@ -15,7 +15,7 @@ type LabelBundle struct {
 	SessionID  string // required
 	Host       string // required
 	AgentName  string // required (may be "" for lead, "@<name>" for teammate)
-	TeamName   string // optional, "" before TeamCreate fires
+	TeamName   string // optional, sourced from WMS team tag or session metadata
 	OutcomeID  string // optional WMS context (v3 entity)
 	WorkunitID string
 }

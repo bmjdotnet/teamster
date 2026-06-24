@@ -12,7 +12,7 @@ Three things Teamster provides:
 2. **Workflow enforcement** — the Eight Rules + slash commands teach the lead how
    to decompose work, name agents, route by affinity, and verify autonomously.
 3. **Work management** — Outcome → WorkUnit hierarchy in MySQL, exposed via the
-   `wms` MCP server. Nightly sweep recovers unallocated cost attribution.
+   `wms` MCP server. Scheduled sweep recovers unallocated cost attribution.
 
 ---
 
@@ -37,9 +37,10 @@ a local hookd. This is the default out of `./install.sh` with no flags.
 │         →  /metrics (Prometheus)                                       │
 │                                                                        │
 │  systemd timers:                                                       │
-│    teamster-rollup.timer   → rollup (cost attribution)                │
+│    teamster-rollup.timer   → rollup --sweep (full deterministic sweep)│
 │    teamster-classify.timer → classify (phase/work-type tagging)       │
-│    teamster-sweep.timer    → rollup --sweep + claude --print          │
+│    teamster-sweep.timer    → claude --print (LLM sweep, gated)       │
+│    teamster-backup.timer   → backup (snapshot MySQL, OTel, config)    │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -70,7 +71,7 @@ only the Python hook client. No daemons, databases, or Go binaries on remotes.
 │  events.jsonl      feed (terminal viewer)                           │
 │  supervisor (manages hookd + optional monitoring bundle)            │
 │                                                                     │
-│  systemd timers: rollup, classify, sweep                            │
+│  systemd timers: rollup, classify, sweep, backup                    │
 └─────────────────────────────────────────────────────────────────────┘
          ▲                         ▲
          │ HTTP POST /event        │ HTTP POST /mcp/*
@@ -88,6 +89,27 @@ only the Python hook client. No daemons, databases, or Go binaries on remotes.
 On a remote, `TEAMSTER_HOOK_SERVER_URL` and the MCP endpoints point at the hub.
 `TEAMSTER_HOST` carries the short hostname so the hub can attribute events to
 the right machine.
+
+**Hub URL uses the hub's hostname, not `localhost`.** The installer writes
+`TEAMSTER_HOOK_SERVER_URL` as `http://<hub-hostname>:9125/event` (from
+`os.Hostname()`, falling back to `localhost` only if the hostname can't be
+resolved). hookd binds all interfaces (`0.0.0.0:9125`), so a hostname URL serves
+both hub-local sessions and remote clients — and `teamster install-remote`
+derives the remote's `--server` from this value, so the default is already
+remote-reachable. A reinstall heals a stale `localhost`/`127.0.0.1` value but
+preserves a real hostname/FQDN or an explicit `--hookd-endpoint`. See
+`hubHost()` / `isStaleLocalhostURL` in `src/cmd/teamster-install/`.
+
+**macOS is a remote-only platform.** The hub installer hard-fails on Darwin;
+macOS hosts join only as remotes (`teamster install-remote <user>@<mac>` from
+the Linux hub). Two macOS-specific behaviors matter:
+
+- The token-scraper runs as a **launchd LaunchAgent** (cron on macOS needs Full
+  Disk Access), with `ProgramArguments` invoking the **absolute** `python3`
+  resolved at install time (launchd has a minimal PATH).
+- **Teammates run as separate top-level sessions** with no `agent_type` in their
+  hook payloads — identity is derived from the transcript's `agentName` (see
+  *Remote teammate identity derivation* below).
 
 ### Replica (read-only mirror)
 
@@ -141,7 +163,7 @@ Claude Code session (hub-local)
   │           ├─ extracts agent identity (agent_type → @name)
   │           ├─ maps tool_name → _tool_tag + _tool_display
   │           ├─ injects additionalContext (activity reporting reminder)
-  │           ├─ enforces guardrail (Agent tool without team_name)
+  │           ├─ enforces guardrail (orphan Agent dispatch in team mode)
   │           └─→ POST http://localhost:9125/event
   │
   ├─[MCP stdio: activity tools]
@@ -204,6 +226,12 @@ Claude Code session (remote)
 
 ~/teamster/bin/classify     → interval phase + work-type classifier (systemd timer)
 
+~/teamster/bin/backup       → timestamped snapshots of MySQL, OTel, and teamster config/state
+  ├─ no sudo required (uses --defaults-extra-file for MySQL, DSN from teamster.yaml)
+  ├─ Prometheus disabled by default (ephemeral data)
+  ├─ Grafana.db skipped in external mode
+  └─ retention policy applied after each run
+
 supervisor process
   ├─ manages hookd as child (when TEAMSTER_HOOKD_MODE=supervisor)
   └─ manages optional monitoring bundle (otelcol, Prometheus, Grafana)
@@ -251,6 +279,50 @@ Claude Code on remote calls reportActivity / wms_createOutcome / etc.
   → response JSON-RPC result returned to remote Claude Code
 ```
 
+### Remote teammate identity derivation (macOS)
+
+```
+On the hub/Linux: teammate hook payloads carry agent_type inline; teammates
+  share the lead's session_id. Identity = _agent_name = "@" + agent_type.
+
+On macOS: each teammate is a SEPARATE top-level session — own session_id, own
+  ~/.claude/projects/<proj>/<session>.jsonl transcript (NOT under subagents/),
+  and hook payloads carry NO agent_type. Identity lives only in the transcript's
+  top-level "agentName" field. Two clients compensate:
+
+  teamster.py (hook client, fork-per-event):
+    if payload has no agent_type but has transcript_path:
+      scan transcript head (≤256 KB) for first non-empty "agentName"
+      set event["agent_type"] = agentName   → hookd resolves @<name> in feed
+
+  token-scraper.py (long-running, per-poll):
+    for each top-level session transcript:
+      agent_name = "@" + agentName from transcript head (≤256 KB)
+      attribute that session's cost to agent_name (not the lead)
+      memoise per-process, NON-EMPTY only (a not-yet-written agentName retries
+      next poll rather than permanently misattributing to the lead)
+
+  Both scans are best-effort and never raise.
+```
+
+### Remote UserPromptSubmit context (nudge parity)
+
+```
+Hub Go client: injects activity + team-dispatch text locally from constants;
+  ignores hookd's additionalContext response field (no double-injection).
+
+Remote Python client: has no copy of that text. So hookd returns it:
+  on UserPromptSubmit, hookd sets resp["additionalContext"] =
+    ACTIVITY_INSTRUCTION + TEAM_DISPATCH_INSTRUCTION
+  teamster.py echoes it as hookSpecificOutput.additionalContext
+    (echoes on PreToolUse AND UserPromptSubmit)
+
+Limitation: hookd cannot observe a remote session's solo/team marker (it is
+  client-local state, never sent over the wire), so remote UserPromptSubmit
+  always receives TEAM context. Least-harm default: common remote case is team,
+  and the text is guidance, not enforcement.
+```
+
 ### WMS status change flow
 
 ```
@@ -272,12 +344,14 @@ token-scraper runs (cron or systemd timer)
   → POSTs to hookd /telemetry endpoint
   → hookd writes to token_ledger table
 
-rollup runs (systemd timer)
+rollup --sweep runs (systemd timer, every 10 min)
+  → entity hygiene: drain dangling intervals, reclassify
   → reads token_ledger + wms_intervals (focus intervals)
   → temporal join: message timestamp ∈ focus interval → attribute to entity
   → fallback chain: direct → lead fallback → session fallback → unallocated
   → writes usage_attribution table
-  → optional recovery passes (--recover-focus, --recover-warmup, etc.)
+  → recovery passes (recover-focus, recover-warmup, recover-gaps)
+  → aggregation + reconciliation
 
 classify runs (systemd timer, every 5 min)
   → reads wms_intervals + tool signals
@@ -346,7 +420,7 @@ Enriched fields added by the hook client (Go or Python) and by hookd:
 | `[GREP]` | Grep tool | File search |
 | `[ ACT]` | Bash tool with description field | Agent's intent for a command |
 | `[EXEC]` | `Monitor` tool; also display-layer label for `bash_cmd` field | Monitor tool tag; `[EXEC]` display line also renders for ALL Bash tool calls from `bash_cmd` field, independent of tag |
-| `[TEAM]` | Agent/TeamCreate/TeamDelete tool | Team lifecycle: spawn, create, dissolve |
+| `[TEAM]` | Agent tool | Agent lifecycle: spawn teammates |
 | `[COMM]` | SendMessage tool | Inter-agent communication |
 | `[TASK]` | TaskCreate/TaskUpdate/TaskGet/TaskList tool | Task lifecycle |
 | `[ WEB]` | WebSearch/WebFetch tool | Web search or fetch |
@@ -366,7 +440,7 @@ mode is **per-project / per-session** — not an install-time choice.
 
 The default. When no mode signal is set, all three hook gates enforce the
 team mandate: team-dispatch prose is injected, the bootstrap nudge fires, and
-bare `Agent` calls without `team_name` are hard-blocked. This is the pre-solo
+bare `Agent` calls are monitored; team-dispatch prose is injected. This is the pre-solo
 behavior, byte-identical to any existing install.
 
 ### Subagent mode
@@ -446,7 +520,7 @@ All env vars are read by `src/internal/config/config.go`. Defaults shown.
 |----------|---------|-------|
 | `TEAMSTER_BASEDIR` | — | Master override: sets DataDir to `BASEDIR/var`, derives all paths |
 | `TEAMSTER_DATA_DIR` | `~/teamster/var` | Overrides DataDir only |
-| `TEAMSTER_HOOK_SERVER_URL` | `http://localhost:9125/event` | Where hook client POSTs events |
+| `TEAMSTER_HOOK_SERVER_URL` | `http://localhost:9125/event` | Where hook client POSTs events. Config-level fallback only — the installer writes the hub's **hostname** here (`http://<hub-hostname>:9125/event`), not localhost, so remotes can reach it. |
 | `TEAMSTER_HOOK_SERVER_PORT` | `9125` | Port hookd listens on |
 | `TEAMSTER_HOOK_SERVER_BIND` | `0.0.0.0` | Bind address for hookd |
 | `TEAMSTER_LOG_FILE` | `$DataDir/events.jsonl` | JSONL event log path |
@@ -473,6 +547,8 @@ All env vars are read by `src/internal/config/config.go`. Defaults shown.
 | `TEAMSTER_REAPER_INTERVAL` | — | Interval between reaper runs (duration string) |
 | `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | `1` | Enables Agent Teams in Claude Code |
 
+Backup configuration lives in the `backup:` section of `teamster.yaml` (merged in by the installer). Key fields: `schedule` (systemd OnCalendar expression), `retention` (keep N snapshots), and per-store enable/disable flags (`mysql`, `otelcol`, `grafana`, `config`). Prometheus is disabled by default (ephemeral data). Grafana.db is skipped when `grafana-mode=external`.
+
 ---
 
 ## Installation Layout
@@ -490,6 +566,7 @@ All env vars are read by `src/internal/config/config.go`. Defaults shown.
 │   ├── rollup            (cost-attribution pipeline)
 │   ├── classify          (interval phase + work-type classifier)
 │   ├── token-scraper     (session transcript token scraper)
+│   ├── backup            (backup engine, run by systemd timer)
 │   └── teamster-install  (called by lib/installrunner.sh)
 ├── var/
 │   ├── events.jsonl      (append-only JSONL event log)
@@ -501,8 +578,10 @@ All env vars are read by `src/internal/config/config.go`. Defaults shown.
 │   ├── teamster-rollup.timer     (rollup timer)
 │   ├── teamster-classify.service (classifier one-shot)
 │   ├── teamster-classify.timer   (classifier timer, every 5 min)
-│   ├── teamster-sweep.service    (nightly sweep one-shot)
-│   └── teamster-sweep.timer      (nightly sweep, 04:00 UTC)
+│   ├── teamster-sweep.service    (sweep one-shot)
+│   ├── teamster-sweep.timer      (sweep timer)
+│   ├── teamster-backup.service   (backup one-shot)
+│   └── teamster-backup.timer     (backup timer, configurable, default 1h)
 ├── lib/
 │   ├── .claude-plugin/
 │   │   └── marketplace.json     (plugin marketplace root)
@@ -544,6 +623,7 @@ the token scraper, and the plugin. MCP endpoints point at the hub over HTTP.
 | `token-scraper` | Go | hub | Reads session transcripts, extracts per-message token usage, writes to token_ledger. |
 | `teamster-install` | Go | hub | Called by `lib/installrunner.sh`. Copies binaries, materializes systemd units, merges settings.json. |
 | `demogen` | Go | hub | Synthetic data generator for dashboards. Creates correlated demo data. `--clean` for teardown. |
+| `backup` | Go | hub | Backup engine. Takes timestamped snapshots of MySQL, OTel, and teamster config/state. No sudo. Also reachable via `teamster backup` and `teamster restore`. Run by systemd timer. |
 
 ---
 

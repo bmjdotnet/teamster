@@ -1,0 +1,99 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "teamster-welcome",
+  "title": "Welcome to Teamster",
+  "blocks": [
+    {
+      "type": "markdown",
+      "content": "# Welcome to Teamster\n\nYou're looking at **live AI usage data** from a real development environment. Every token, every tool call, every cost allocation you see here is real and constantly evolving.\n\nTeamster is an observability platform for **Claude Code Agent Teams** — it tracks what AI agents are doing, how much they cost, and whether that spend is delivering value.\n\nLet's take a quick tour of the key dashboards."
+    },
+    {
+      "type": "markdown",
+      "content": "---\n\n## Stop 1: Simple Cost Explorer\n\nThis dashboard lets you slice AI spend by any dimension — product, feature, work type, phase. It's the fastest way to answer \"where is the money going?\""
+    },
+    {
+      "type": "interactive",
+      "action": "navigate",
+      "reftarget": "/d/cost-by-tag-value/04-01-simple-cost-explorer?var-agg=$__auto&orgId=1&from=2026-05-14T00:00:00.000Z&to=now&timezone=utc&var-tag_key=product&refresh=5m",
+      "content": "Navigate to the **Simple Cost Explorer** dashboard.",
+      "completeEarly": true
+    },
+    {
+      "type": "markdown",
+      "content": "You're now looking at spend broken down by **product** — each product is a distinct software project or initiative.\n\nThe real power is the **Tag Key** dropdown at the top. Try switching it to see different dimensions of the same spend data."
+    },
+    {
+      "type": "interactive",
+      "action": "highlight",
+      "reftarget": "[data-testid='data-testid Dashboard template variables submenu Label var-tag_key']",
+      "content": "Find the **Tag Key** dropdown — this controls which dimension you're viewing.",
+      "skippable": true,
+      "doIt": false,
+      "tooltip": "This dropdown lets you pivot between product, feature, work-type, phase, and other tag dimensions."
+    },
+    {
+      "type": "markdown",
+      "content": "Try switching to **work-type** to see whether spend goes to implementation, planning, review, or debugging. Then try **phase** to see the lifecycle stage."
+    },
+    {
+      "type": "markdown",
+      "content": "---\n\n## Stop 2: AI Spend Trace\n\nThis is the Sankey diagram — the signature visualization. It shows how money flows from one dimension through another, revealing correlations that flat charts miss."
+    },
+    {
+      "type": "interactive",
+      "action": "navigate",
+      "reftarget": "/d/fd-cost-explorer-v2/01-ai-spend-trace?var-agg=6h&orgId=1&from=2026-06-09T00:00:00.000Z&to=2026-06-12T23:59:59.000Z&timezone=utc&var-facet1=product&var-facet2=feature&var-facet3=phase&var-filter1=$__all&refresh=5m",
+      "content": "Navigate to the **AI Spend Trace** (Sankey diagram).",
+      "completeEarly": true
+    },
+    {
+      "type": "markdown",
+      "content": "The three columns of the Sankey show **product → feature → phase** by default. Each band's width is proportional to token cost.\n\nYou can change the three facet dropdowns at the top to explore different correlations. Try:\n- **Facet 2** → `component` (which code module?)\n- **Facet 3** → `work-type` (implementation vs planning?)\n\nThis reveals patterns like: \"most of the spend on project X goes to implementation of module Y during the active phase.\""
+    },
+    {
+      "type": "markdown",
+      "content": "---\n\n## Stop 3: Usage & Effectiveness\n\nBeyond cost, we track whether AI usage is *effective*. Are agents spending tokens productively, or spinning wheels?"
+    },
+    {
+      "type": "interactive",
+      "action": "navigate",
+      "reftarget": "/d/fd-usage-effectiveness-v2/03-ai-usage-and-effectiveness?var-agg=$__auto&orgId=1&from=2026-05-14T00:00:00.000Z&to=now&timezone=utc&var-engineer=$__all&var-team=$__all&refresh=5m",
+      "content": "Navigate to the **Usage & Effectiveness** dashboard.",
+      "completeEarly": true
+    },
+    {
+      "type": "markdown",
+      "content": "Scroll down to the **Model Fit** section. This shows which AI models are being used and how their cost-per-token compares. The goal is matching model capability to task complexity — don't use Opus for file reads.\n\nThe top panels show session duration, tool call patterns, and token efficiency over time."
+    },
+    {
+      "type": "markdown",
+      "content": "---\n\n## Stop 4: Outcome Cost Explorer\n\nTeamster organizes work into **Outcomes** (goals) and **Work Units** (tasks). This dashboard shows how much each outcome costs and whether it's delivering value."
+    },
+    {
+      "type": "interactive",
+      "action": "navigate",
+      "reftarget": "/d/outcome-cost-explorer/outcome-cost-explorer?var-agg=$__auto&orgId=1&from=2026-05-14T00:00:00.000Z&to=now&timezone=utc&var-filter_key=product&var-filter_value=$__all",
+      "content": "Navigate to the **Outcome Cost Explorer**.",
+      "completeEarly": true
+    },
+    {
+      "type": "markdown",
+      "content": "Each row represents a goal the developer set — like \"ship feature X\" or \"fix bug Y.\" The cost columns show how much AI spend was attributed to each outcome.\n\nThis is the bridge between *spend* and *value*: you can see exactly which goals consumed the budget and judge whether the investment paid off."
+    },
+    {
+      "type": "markdown",
+      "content": "---\n\n## That's the tour!\n\nYou've seen the four core views:\n\n1. **Simple Cost Explorer** — slice spend by any dimension\n2. **AI Spend Trace** — Sankey flow between dimensions\n3. **Usage & Effectiveness** — model fit and productivity\n4. **Outcome Cost Explorer** — cost-per-goal tracking\n\nThere's more to explore — the full dashboard directory is on the landing page."
+    },
+    {
+      "type": "interactive",
+      "action": "navigate",
+      "reftarget": "/d/landing-page/teamster-e28094-welcome",
+      "content": "Return to the **Teamster Welcome** landing page to see all available dashboards.",
+      "completeEarly": true
+    },
+    {
+      "type": "markdown",
+      "content": "### Want to learn more?\n\n- **Realtime Activity Feed** — watch AI agents work in real time\n- **Multidimension Cost Explorer** — cross-tabulate two dimensions\n- **Teamster System Health** — the platform's own observability\n\nTeamster is open source. Visit [github.com/bmjdotnet/teamster](https://github.com/bmjdotnet/teamster) to learn more.\n\n*This guide was built with Grafana Pathfinder. You can close this panel and explore on your own.*"
+    }
+  ]
+}

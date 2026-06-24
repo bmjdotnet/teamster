@@ -8,8 +8,8 @@ Canonical disambiguation of overlapping terms used in Teamster and Claude Code.
 
 | Term | Context | Meaning |
 |------|---------|---------|
-| **Agent Team** | Claude Code | Ephemeral group of teammates spawned via TeamCreate within a single session. Shared session ID. Dissolved at session end. |
-| **Teammate** | Claude Code | An agent spawned into an Agent Team via the Agent tool. Identified by `agent_type` in hook payloads. |
+| **Agent Team** | Claude Code | Implicit group of teammates spawned via the Agent tool within a single session. Shared session ID. One team per session; no explicit TeamCreate call needed. Dissolved at session end. |
+| **Teammate** | Claude Code | An agent spawned into an Agent Team via the Agent tool. On the hub/Linux, identified by `agent_type` in hook payloads (shared lead session). On macOS, teammates run as separate top-level sessions with no `agent_type` — identity is derived from the transcript's `agentName` (see `skel/doc/specs/semantic-conventions.md` §1.1). |
 | **Lead** | Claude Code / Teamster | The primary agent in a session. In team mode, the lead orchestrates teammates. In subagent mode, the lead works alone. |
 
 ---
@@ -57,14 +57,15 @@ carries a `method` describing how it was derived:
 
 ---
 
-## Nightly sweep
+## Sweep
 
-The `rollup --sweep` command chains all recovery passes into a single nightly
-run (04:00 UTC systemd timer). It runs entity hygiene (drain, reclassify),
-then the full attribution pipeline (allocate, recover-focus, recover-warmup,
-recover-gaps), then aggregation and reconciliation. Adding `--sweep-llm`
-enables LLM-assisted synthesis for sessions that deterministic passes cannot
-attribute.
+The `rollup --sweep` command chains all recovery passes into a single run
+(driven by the `teamster-rollup.timer` systemd timer). It runs entity hygiene
+(drain, reclassify), then the full attribution pipeline (allocate,
+recover-focus, recover-warmup, recover-gaps), then aggregation and
+reconciliation. A separate `teamster-sweep.timer` gates LLM-assisted synthesis
+(`claude --print /teamster:sweep`) on whether orphan sessions exist, skipping
+the LLM invocation when there is nothing to process.
 
 ---
 
@@ -96,7 +97,7 @@ The activity feed uses a 16-tag taxonomy to categorize tool calls:
 | `[GREP]` | Grep | File search |
 | `[ ACT]` | Bash (description) | Agent's intent for a command |
 | `[EXEC]` | Bash (command) | Actual command that ran |
-| `[TEAM]` | Agent/TeamCreate/TeamDelete | Team lifecycle |
+| `[TEAM]` | Agent | Agent lifecycle — spawning teammates |
 | `[COMM]` | SendMessage | Inter-agent communication |
 | `[TASK]` | TaskCreate/TaskUpdate/TaskGet/TaskList | Task lifecycle |
 | `[ WEB]` | WebSearch/WebFetch | Web access |

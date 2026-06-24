@@ -16,6 +16,10 @@ fi
 
 die() { printf -- "${C_BOLD_RED}ERROR: %s${C_RESET}\n" "$*" >&2; exit 1; }
 
+if [[ "$(uname -s)" == "Darwin" ]]; then
+    die "macOS is not supported as a Teamster hub — this installer only runs on apt-based Linux. macOS is a remote-only platform; do not run this on the Mac. From your Teamster server (the Linux hub) run 'teamster install-remote <user>@<this-mac>' to enroll this Mac over SSH. See docs/specs/REMOTE-INSTALL.md."
+fi
+
 # Bug #18: NFS-mounted repos (foreign uid) break git's VCS status, which
 # Go's default -buildvcs=true requires. Disable VCS stamping for every
 # downstream go/make invocation; we don't embed VCS info into Teamster
@@ -25,6 +29,7 @@ export GOFLAGS="${GOFLAGS:-} -buildvcs=false"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 BASEDIR="${HOME}/teamster"
 BUILDDIR="$REPO/build"
+GO_MIN_MINOR=22
 
 # --- Round 0 debug-log tracing (locked format with install.sh) ---
 # Line shape: "<RFC3339-UTC> <LEVEL5> <component> <msg>[ k=v ...]"
@@ -71,6 +76,20 @@ dtrace() {
 # newline becomes `\n` so the value stays on the replacement line.
 sed_escape_replacement() {
     printf '%s' "$1" | sed -e 's/[\&|]/\\&/g' -e ':a' -e '$!N;s/\n/\\n/;ta'
+}
+
+# version_lt returns 0 (true) if $1 < $2 using dotted-decimal comparison.
+version_lt() {
+    [[ "$1" == "$2" ]] && return 1
+    local IFS=.
+    local -a a=($1) b=($2)
+    local i ai bi max=$(( ${#a[@]} > ${#b[@]} ? ${#a[@]} : ${#b[@]} ))
+    for (( i=0; i<max; i++ )); do
+        ai="${a[i]:-0}"; bi="${b[i]:-0}"
+        (( ai < bi )) && return 0
+        (( ai > bi )) && return 1
+    done
+    return 1
 }
 
 # --- Flag parsing ---
@@ -470,6 +489,15 @@ install_mysql() {
     fi
     sudo mysql -e "GRANT ALL PRIVILEGES ON \`$_db\`.* TO '$_user'@'localhost'; FLUSH PRIVILEGES;" 2>/dev/null
 
+    # The backup config lists databases beyond the DSN database (e.g.
+    # claude_telemetry). Grant the minimum privileges mysqldump needs so
+    # pre-upgrade and scheduled backups don't fail with access-denied.
+    for _extra_db in claude_telemetry; do
+        if [[ "$_extra_db" != "$_db" ]]; then
+            sudo mysql -e "GRANT SELECT, LOCK TABLES, SHOW VIEW, TRIGGER ON \`$_extra_db\`.* TO '$_user'@'localhost';" 2>/dev/null || true
+        fi
+    done
+
     # Verify. MYSQL_PWD keeps the password out of argv (ps-visible); same pattern
     # as skel/lib/scripts/wms-smoketest.sh.
     if MYSQL_PWD="$_pass" mysql -u "$_user" "$_db" -e "SELECT 1" >/dev/null 2>&1; then
@@ -616,7 +644,7 @@ provision_grafana_ro() {
 # the default always downloads the pinned OSS release.
 install_grafana() {
     local builddir="$1"
-    local version="12.1.1"
+    local version="13.0.2"
     # v12+ tarballs use grafana-${version}/ (no "v" prefix); v10 used grafana-v${version}/.
     local inner_dir="grafana-${version}"
 
@@ -643,8 +671,12 @@ install_grafana() {
     # Stage binaries to builddir for teamster-install's binary copy step.
     cp "$tmp/${inner_dir}/bin/grafana" "$builddir/grafana"
     chmod 0755 "$builddir/grafana"
-    cp "$tmp/${inner_dir}/bin/grafana-server" "$builddir/grafana-server"
-    chmod 0755 "$builddir/grafana-server"
+    # Grafana 13+ ships only bin/grafana (unified binary); grafana-server was
+    # removed. Stage it only if present — teamster-install skips missing optionals.
+    if [[ -f "$tmp/${inner_dir}/bin/grafana-server" ]]; then
+        cp "$tmp/${inner_dir}/bin/grafana-server" "$builddir/grafana-server"
+        chmod 0755 "$builddir/grafana-server"
+    fi
     # Stage the full distribution tree to builddir/grafana-home/ so teamster-install
     # can copy it to BASEDIR/var/grafana-home/ (the --homepath value).
     rm -rf "$builddir/grafana-home"
@@ -689,6 +721,7 @@ install_grafana_plugins() {
     local plugins=(
         "volkovlabs-echarts-panel:7.2.2"
         "yesoreyeram-infinity-datasource:3.8.0"
+        "grafana-pathfinder-app:2.12.1"
     )
 
     rm -rf "$plugins_dir"
@@ -715,6 +748,47 @@ install_grafana_plugins() {
         fi
         echo "  plugin ${id} v${ver} staged to $plugins_dir/${id}/"
     done
+}
+
+# install_go downloads the latest stable Go release and installs to /usr/local/go.
+install_go() {
+    local arch
+    arch="$(uname -m)"
+    case "$arch" in
+        x86_64)  arch="amd64" ;;
+        aarch64) arch="arm64" ;;
+        *)       die "Unsupported architecture for Go install: $arch" ;;
+    esac
+    local os_name
+    os_name="$(uname -s | tr '[:upper:]' '[:lower:]')"
+
+    echo "  Querying go.dev for latest stable version..."
+    local go_ver
+    go_ver="$(curl -fsSL --retry 3 'https://go.dev/VERSION?m=text' | head -1)" \
+        || die "Could not determine latest Go version from go.dev"
+    [[ -n "$go_ver" ]] || die "Empty response from go.dev/VERSION"
+
+    local ver="${go_ver#go}"
+    local url="https://go.dev/dl/${go_ver}.${os_name}-${arch}.tar.gz"
+    echo "  Downloading Go ${ver} from ${url} ..."
+    dlog INFO install.go "downloading" "version=$ver" "url=$url"
+
+    local tmp
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' RETURN
+
+    curl -fsSL --retry 3 -o "$tmp/go.tar.gz" "$url" \
+        || die "Failed to download Go from $url"
+
+    echo "  Installing to /usr/local/go ..."
+    sudo rm -rf /usr/local/go
+    sudo tar -C /usr/local -xzf "$tmp/go.tar.gz" \
+        || die "Failed to extract Go tarball to /usr/local"
+
+    export PATH="/usr/local/go/bin:$PATH"
+    hash -r
+    printf -- "  ${C_GREEN}Go %s installed successfully${C_RESET}\n" "$ver"
+    dlog INFO install.go "installed" "version=$ver" "path=/usr/local/go"
 }
 
 # ============================================================
@@ -878,16 +952,25 @@ fi
 # Check prerequisites
 MISSING=""
 
+GO_NEED_INSTALL=0
 if ! command -v go &>/dev/null; then
-    MISSING="$MISSING go"
+    printf -- "${C_YELLOW}Go not found.${C_RESET}\n"
+    GO_NEED_INSTALL=1
+elif go_ver_str="$(go version | grep -oP '\d+\.\d+' | head -1)"; then
+    GO_CUR_MAJOR=$(echo "$go_ver_str" | cut -d. -f1)
+    GO_CUR_MINOR=$(echo "$go_ver_str" | cut -d. -f2)
+    if [ "$GO_CUR_MAJOR" -lt 1 ] || ([ "$GO_CUR_MAJOR" -eq 1 ] && [ "$GO_CUR_MINOR" -lt "$GO_MIN_MINOR" ]); then
+        printf -- "${C_YELLOW}Go 1.%d+ required, found %s.${C_RESET}\n" "$GO_MIN_MINOR" "$go_ver_str"
+        GO_NEED_INSTALL=1
+    fi
 fi
 
 if command -v go &>/dev/null; then
     GO_VER=$(go version | grep -oP '\d+\.\d+' | head -1)
     GO_MAJOR=$(echo "$GO_VER" | cut -d. -f1)
     GO_MINOR=$(echo "$GO_VER" | cut -d. -f2)
-    if [ "$GO_MAJOR" -lt 1 ] || ([ "$GO_MAJOR" -eq 1 ] && [ "$GO_MINOR" -lt 25 ]); then
-        printf -- "${C_BOLD_RED}ERROR: Go 1.25+ required (go.mod requires 1.25.0), found %s${C_RESET}\n" "$GO_VER"
+    if [ "$GO_MAJOR" -lt 1 ] || ([ "$GO_MAJOR" -eq 1 ] && [ "$GO_MINOR" -lt "$GO_MIN_MINOR" ]); then
+        printf -- "${C_BOLD_RED}ERROR: Go 1.%d+ required, found %s${C_RESET}\n" "$GO_MIN_MINOR" "$GO_VER"
         echo "  Install from: https://go.dev/dl/"
         exit 1
     fi
@@ -911,6 +994,54 @@ fi
 
 printf -- "${C_GREEN}Prerequisites OK: go %s, claude %s${C_RESET}\n" "$(go version | grep -oP '\d+\.\d+\.\d+')" "$(claude --version 2>/dev/null | head -1)"
 echo ""
+
+# Step 0.5: Pre-upgrade backup (safety net). If an existing install is present,
+# snapshot all stores to $BASEDIR/backups before touching anything. Uses the
+# existing binary so the backup matches the schema of the running install.
+# Best-effort: failure warns but never aborts the upgrade.
+if [[ -x "$BASEDIR/bin/teamster" ]] && [[ -f "$BASEDIR/etc/teamster.yaml" ]]; then
+    # Heal backup grants: older installs only granted on the DSN database,
+    # but the backup config may list additional databases. Apply the missing
+    # grants now so the pre-upgrade backup below doesn't fail with access-denied.
+    if [[ -n "${STORE_DSN:-}" ]] && sudo mysql -e "SELECT 1" >/dev/null 2>&1; then
+        _bu_user=$(echo "$STORE_DSN" | sed -n 's|mysql://\([^:]*\):.*|\1|p')
+        _bu_db=$(echo "$STORE_DSN" | sed -n 's|mysql://[^/]*/\(.*\)|\1|p')
+        if [[ -n "$_bu_user" ]]; then
+            for _extra_db in claude_telemetry; do
+                if [[ "$_extra_db" != "${_bu_db:-}" ]]; then
+                    sudo mysql -e "GRANT SELECT, LOCK TABLES, SHOW VIEW, TRIGGER ON \`$_extra_db\`.* TO '$_bu_user'@'localhost';" 2>/dev/null || true
+                fi
+            done
+        fi
+        unset _bu_user _bu_db _extra_db
+    fi
+
+    echo ""
+    printf -- "${C_BOLD_CYAN}--- Pre-upgrade backup ---${C_RESET}\n"
+    dlog INFO install.backup "starting pre-upgrade backup"
+    _pre_backup_dir="$BASEDIR/backups"
+    mkdir -p "$_pre_backup_dir"
+
+    _tmp_cfg=$(mktemp --suffix=.yaml)
+    cp "$BASEDIR/etc/teamster.yaml" "$_tmp_cfg"
+    if grep -q 'backup_dir:' "$_tmp_cfg"; then
+        sed -i "s|backup_dir:.*|backup_dir: $_pre_backup_dir|" "$_tmp_cfg"
+    elif grep -q '^backup:' "$_tmp_cfg"; then
+        sed -i "/^backup:/a\\  backup_dir: $_pre_backup_dir" "$_tmp_cfg"
+    else
+        printf '\nbackup:\n  backup_dir: %s\n' "$_pre_backup_dir" >> "$_tmp_cfg"
+    fi
+
+    if "$BASEDIR/bin/teamster" backup --config="$_tmp_cfg" 2>&1; then
+        printf -- "${C_GREEN}  Pre-upgrade backup saved to %s${C_RESET}\n" "$_pre_backup_dir"
+        dlog INFO install.backup "pre-upgrade backup complete" "dir=$_pre_backup_dir"
+    else
+        printf -- "${C_YELLOW}  WARN: pre-upgrade backup failed — proceeding with upgrade${C_RESET}\n"
+        dlog WARN install.backup "pre-upgrade backup failed — proceeding"
+    fi
+    rm -f "$_tmp_cfg"
+    unset _pre_backup_dir _tmp_cfg
+fi
 
 # Step 1: Detect and stop running hookd
 RUNNING_MODE="none"
@@ -1017,7 +1148,7 @@ LDFLAGS="-X ${_vpkg}.Version=${TEAMSTER_VERSION} -X ${_vpkg}.Commit=${TEAMSTER_C
 dlog INFO install.compile "version" "version=$TEAMSTER_VERSION" "commit=$TEAMSTER_COMMIT" "build_time=$TEAMSTER_BUILD_TIME"
 
 cd "$REPO/src"
-for _target in teamster hookd feed activity-mcp wms-mcp teamster-install token-scraper rollup classify demogen relay; do
+for _target in teamster hookd feed activity-mcp wms-mcp teamster-install token-scraper rollup classify demogen relay backup; do
     if go build -trimpath -ldflags "$LDFLAGS" -o "$BUILDDIR/$_target" "./cmd/$_target"; then
         dlog INFO install.compile "built" "target=$_target" "rc=0"
     else
@@ -1027,7 +1158,7 @@ for _target in teamster hookd feed activity-mcp wms-mcp teamster-install token-s
     fi
 done
 unset _target _rc
-printf -- "${C_GREEN}  11 binaries compiled to %s${C_RESET}\n" "$BUILDDIR"
+printf -- "${C_GREEN}  12 binaries compiled to %s${C_RESET}\n" "$BUILDDIR"
 
 # Step 2.5: Download/build service binaries for install-mode services.
 if [[ "${PROMETHEUS_MODE:-install}" == "install" ]]; then
@@ -1139,6 +1270,9 @@ INSTALL_FLAGS=(--basedir="$BASEDIR" --repo="$REPO" --builddir="$BUILDDIR")
 [[ -n "$TEAMSTER_ENV" ]]         && INSTALL_FLAGS+=(--env="$TEAMSTER_ENV")
 [[ -n "$DEBUG_LOG" ]]            && INSTALL_FLAGS+=(--debug-log="$DEBUG_LOG")
 [[ "$HOOKD_READ_ONLY" -eq 1 ]]   && INSTALL_FLAGS+=(--hookd-read-only)
+[[ -n "$RELAY_MODE" && "$RELAY_MODE" != "none" ]] && INSTALL_FLAGS+=(--relay-mode="$RELAY_MODE")
+[[ -n "$RELAY_TARGET" ]]         && INSTALL_FLAGS+=(--relay-target="$RELAY_TARGET")
+[[ -n "$REPL_PUSH_REMOTE" ]]    && INSTALL_FLAGS+=(--repl-push-remote="$REPL_PUSH_REMOTE")
 dlog INFO install.subproc "exec teamster-install" "cmd=$(printf '%q ' "$BUILDDIR/teamster-install" "${INSTALL_FLAGS[@]}")"
 if "$BUILDDIR/teamster-install" "${INSTALL_FLAGS[@]}"; then
     dlog INFO install.subproc "teamster-install done" "rc=0"
@@ -1148,6 +1282,16 @@ else
     exit $_rc
 fi
 unset _rc
+
+# Grafana 13+ has no separate grafana-server binary. The supervisor expects
+# bin/grafana-server, so create a wrapper that inserts the `server` subcommand.
+if [[ -f "$BASEDIR/bin/grafana" ]] && [[ ! -f "$BASEDIR/bin/grafana-server" ]]; then
+    cat > "$BASEDIR/bin/grafana-server" << 'WRAPPER'
+#!/bin/sh
+exec "$(dirname "$0")/grafana" server "$@"
+WRAPPER
+    chmod +x "$BASEDIR/bin/grafana-server"
+fi
 
 # Stamp the resolved version into BASEDIR so the Python hook client (which has
 # no Go build to receive -ldflags) can read it. Mirrors the Go binaries' version.
@@ -1259,7 +1403,7 @@ if [[ "$WIRE" -eq 1 ]] && [[ "$HOOKD_READ_ONLY" -eq 0 ]] && [[ "$HOOKD_MODE" != 
     fi
 fi
 
-# Sync the sweep service + timer (nightly deep-clean attribution pipeline) into
+# Sync the sweep service + timer (deep-clean attribution pipeline) into
 # systemd and enable the timer. Same guards as the rollup unit: only when wiring
 # locally-managed systemd. The service is Type=oneshot driven by the timer.
 if [[ "$WIRE" -eq 1 ]] && [[ "$HOOKD_READ_ONLY" -eq 0 ]] && [[ "$HOOKD_MODE" != "supervisor" ]] && [[ "$HOOKD_MODE" != "external" ]] && command -v systemctl &>/dev/null; then
@@ -1276,6 +1420,28 @@ if [[ "$WIRE" -eq 1 ]] && [[ "$HOOKD_READ_ONLY" -eq 0 ]] && [[ "$HOOKD_MODE" != 
         dlog INFO install.sweep-timer "installed" "svc=$SWEEP_SVC_SRC" "timer=$SWEEP_TIMER_SRC"
     else
         dlog WARN install.sweep-timer "src units not present" "svc=$SWEEP_SVC_SRC"
+    fi
+fi
+
+# Sync the backup service + timer (hourly data backup) into systemd and enable
+# the timer. Same guards as the other oneshot timers: only when wiring
+# locally-managed systemd and not in read-only replica mode.
+if [[ "$WIRE" -eq 1 ]] && [[ "$HOOKD_READ_ONLY" -eq 0 ]] && [[ "$HOOKD_MODE" != "supervisor" ]] && [[ "$HOOKD_MODE" != "external" ]] && command -v systemctl &>/dev/null; then
+    BACKUP_SVC_SRC="$BASEDIR/etc/teamster-backup.service"
+    BACKUP_TIMER_SRC="$BASEDIR/etc/teamster-backup.timer"
+    if [[ -f "$BACKUP_SVC_SRC" ]] && [[ -f "$BACKUP_TIMER_SRC" ]]; then
+        printf -- "${C_BOLD_CYAN}--- Syncing backup timer ---${C_RESET}\n"
+        sudo install -m 0644 "$BACKUP_SVC_SRC" /etc/systemd/system/teamster-backup.service
+        sudo install -m 0644 "$BACKUP_TIMER_SRC" /etc/systemd/system/teamster-backup.timer
+        sudo systemctl daemon-reload
+        # The timer is enabled but NOT started yet — the operator must set
+        # backup_dir in $BASEDIR/etc/teamster.yaml (backup.backup_dir) first.
+        sudo systemctl enable teamster-backup.timer 2>/dev/null \
+            && echo "    enabled teamster-backup.timer (edit $BASEDIR/etc/teamster.yaml to set backup.backup_dir, then: sudo systemctl start teamster-backup.timer)" \
+            || printf -- "${C_YELLOW}    WARN: could not enable teamster-backup.timer${C_RESET}\n"
+        dlog INFO install.backup-timer "installed" "svc=$BACKUP_SVC_SRC" "timer=$BACKUP_TIMER_SRC"
+    else
+        dlog WARN install.backup-timer "src units not present" "svc=$BACKUP_SVC_SRC"
     fi
 fi
 
@@ -1526,6 +1692,7 @@ if command -v systemctl &>/dev/null && { systemctl is-active --quiet grafana-ser
         # generator can't corrupt the rendered YAML (no-op on today's hex).
         _ds_pw_esc=$(sed_escape_replacement "$_ds_pw")
         sed -e "s|{{ .PrometheusPort }}|$PROM_PORT|g" \
+            -e "s|{{ .HookdPort }}|$HOOKD_PORT|g" \
             -e "s|{{ .StoreHost }}|$_ds_host|g" \
             -e "s|{{ .StorePort }}|$_ds_port|g" \
             -e "s|{{ .StoreDB }}|$_ds_db|g" \
@@ -1537,6 +1704,32 @@ if command -v systemctl &>/dev/null && { systemctl is-active --quiet grafana-ser
             "$GRAFANA_PROV/datasources/teamster.yaml" 2>/dev/null \
             && printf -- "${C_GREEN}    datasource provisioner deployed${C_RESET}\n" \
             || printf -- "${C_YELLOW}    WARN: could not deploy datasource provisioner (need sudo?)${C_RESET}\n"
+    fi
+
+    # Advisory: check Grafana version meets minimum for Pathfinder and groupings.
+    GRAFANA_MIN_VERSION="13.0.0"
+    _grafana_ver=""
+    if command -v grafana-server &>/dev/null; then
+        _grafana_ver=$(grafana-server -v 2>/dev/null | grep -oP 'Version \K[0-9]+\.[0-9]+\.[0-9]+' || true)
+    fi
+    if [[ -z "$_grafana_ver" ]] && command -v grafana &>/dev/null; then
+        _grafana_ver=$(grafana server -v 2>/dev/null | grep -oP 'Version \K[0-9]+\.[0-9]+\.[0-9]+' || true)
+    fi
+    if [[ -n "$_grafana_ver" ]] && version_lt "$_grafana_ver" "$GRAFANA_MIN_VERSION"; then
+        _arch="$(dpkg --print-architecture 2>/dev/null || echo amd64)"
+        printf -- "${C_YELLOW}    NOTE: Grafana %s is below the minimum %s required for Pathfinder and dashboard groupings.${C_RESET}\n" "$_grafana_ver" "$GRAFANA_MIN_VERSION"
+        printf -- "${C_YELLOW}          Upgrade manually (Teamster will not upgrade a shared Grafana):${C_RESET}\n"
+        printf -- "${C_YELLOW}            curl -fsSLO https://dl.grafana.com/oss/release/grafana_%s_${_arch}.deb && sudo dpkg -i grafana_%s_${_arch}.deb${C_RESET}\n" "$GRAFANA_MIN_VERSION" "$GRAFANA_MIN_VERSION"
+        dlog WARN install.grafana-version "grafana $_grafana_ver below minimum $GRAFANA_MIN_VERSION — manual upgrade required"
+    fi
+
+    # Advisory: check Pathfinder plugin is installed.
+    if ! sudo grafana cli plugins ls 2>/dev/null | grep -q "grafana-pathfinder-app" \
+        && ! ls /var/lib/grafana/plugins/grafana-pathfinder-app/plugin.json &>/dev/null; then
+        printf -- "${C_YELLOW}    NOTE: the Pathfinder interactive learning feature requires the 'grafana-pathfinder-app' plugin,${C_RESET}\n"
+        printf -- "${C_YELLOW}          which is not installed on this shared Grafana. Install it manually:${C_RESET}\n"
+        printf -- "${C_YELLOW}            sudo grafana cli plugins install grafana-pathfinder-app && sudo systemctl restart grafana-server${C_RESET}\n"
+        dlog WARN install.grafana-plugin "pathfinder plugin missing on external grafana — manual install required"
     fi
 
     # Advisory only: the Entity Cost Treemap needs the volkovlabs-echarts-panel
@@ -1556,7 +1749,7 @@ if command -v systemctl &>/dev/null && { systemctl is-active --quiet grafana-ser
         && ! ls /var/lib/grafana/plugins/yesoreyeram-infinity-datasource/plugin.json &>/dev/null; then
         printf -- "${C_YELLOW}    NOTE: the Activity Feed panel requires the 'yesoreyeram-infinity-datasource' Grafana plugin,${C_RESET}\n"
         printf -- "${C_YELLOW}          which is not installed on this shared Grafana. Install it manually:${C_RESET}\n"
-        printf -- "${C_YELLOW}            sudo grafana-cli plugins install yesoreyeram-infinity-datasource && sudo systemctl restart grafana-server${C_RESET}\n"
+        printf -- "${C_YELLOW}            sudo grafana cli plugins install yesoreyeram-infinity-datasource && sudo systemctl restart grafana-server${C_RESET}\n"
         dlog WARN install.grafana-plugin "infinity datasource plugin missing on external grafana — manual install required"
     fi
 
@@ -1606,6 +1799,7 @@ printf -- "${C_BOLD_CYAN}=== Install complete ===${C_RESET}\n"
 
 # --- Next steps guide ---
 GRAFANA_PORT="${GRAFANA_PORT:-3000}"
+SHORT_HOST="${SHORT_HOST:-$(hostname -s 2>/dev/null || hostname)}"
 echo ""
 printf -- "${C_BOLD_GREEN}━━━ Next Steps ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}\n"
 echo ""
@@ -1614,11 +1808,13 @@ echo ""
 printf -- "${C_BOLD_WHITE}  2. Use /teamster:start${C_RESET} at the beginning of each work session.\n"
 printf -- "     It sets up cost tracking and picks team vs solo mode.\n"
 echo ""
-printf -- "${C_BOLD_WHITE}  3. View your dashboards${C_RESET} at:\n"
-printf -- "     ${C_CYAN}http://localhost:${GRAFANA_PORT}/dashboards${C_RESET}\n"
-printf -- "     (Grafana — admin/<random>; password in %s/var/grafana/admin_password)\n" "$BASEDIR"
-printf -- "     ${C_YELLOW}Note:${C_RESET} dashboards will be empty until Teamster captures session data.\n"
-echo ""
+if [[ "$GRAFANA_MODE" == "install" || "$GRAFANA_MODE" == "managed" ]]; then
+    printf -- "${C_BOLD_WHITE}  3. View your dashboards${C_RESET} at:\n"
+    printf -- "     ${C_CYAN}http://${SHORT_HOST}:${GRAFANA_PORT}/dashboards${C_RESET}\n"
+    printf -- "     Login with ${C_BOLD_WHITE}admin/admin${C_RESET} — change the password on first login.\n"
+    printf -- "     ${C_YELLOW}Note:${C_RESET} dashboards will be empty until Teamster captures session data.\n"
+    echo ""
+fi
 printf -- "${C_BOLD_WHITE}  4. Configure your tag vocabulary:${C_RESET}\n"
 printf -- "     ${C_CYAN}teamster setup tags${C_RESET}     — guided TUI wizard (first time)\n"
 printf -- "     ${C_CYAN}/teamster:tags${C_RESET}          — conversational refinement (day two+)\n"

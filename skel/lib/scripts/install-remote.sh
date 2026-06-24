@@ -133,19 +133,46 @@ else
 fi
 echo ""
 
-# 1. Probe remote: confirm python3 and claude CLI present
-# Use bash -lc so ~/.profile is sourced and user-local PATH entries (e.g. ~/.local/bin) are visible.
+# 1. Probe remote: confirm python3 and claude CLI present.
+# Augment PATH with well-known install dirs before probing so tools are found
+# regardless of how the remote's login-shell PATH is configured.
+# Covers: Claude Code native installer (~/.local/bin), Homebrew Apple-Silicon
+# (/opt/homebrew/bin), Homebrew Intel (/usr/local/bin), ~/bin, npm-global.
+# $HOME and $PATH expand on the REMOTE (single-quoted outer string).
+_PROBE_PATH='$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$HOME/bin:$HOME/.npm-global/bin:$PATH'
+_PROBE_CMD='export PATH="'"$_PROBE_PATH"'"; python3 --version && claude --version'
+_RESOLVE_CMD='export PATH="'"$_PROBE_PATH"'"; command -v python3; command -v claude'
 echo "--> Step 1: Probing remote for prerequisites..."
+REMOTE_SHELL="bash"
+REMOTE_PYTHON3=""
+REMOTE_CLAUDE=""
 if [[ "$DRY_RUN" -eq 0 ]]; then
-    probe_out=$(ssh "$TARGET" 'bash -lc "python3 --version && claude --version"' 2>&1) || {
-        die "step 1 failed: prerequisite check on $TARGET returned nonzero
-$probe_out
-  Ensure python3 and claude are installed and visible in the login PATH.
-  Test with: ssh $TARGET 'bash -lc \"python3 --version && claude --version\"'"
-    }
+    # Use assignment-in-condition so set -e does not abort on probe failure.
+    if probe_out=$(ssh "$TARGET" "bash -lc '$_PROBE_CMD'" 2>&1); then
+        :
+    elif probe_out_zsh=$(ssh "$TARGET" "zsh -lc '$_PROBE_CMD'" 2>&1); then
+        probe_out="$probe_out_zsh"
+        REMOTE_SHELL="zsh"
+    else
+        die "step 1 failed: prerequisite check on $TARGET returned nonzero (tried bash and zsh)
+bash output: $probe_out
+zsh output:  $probe_out_zsh
+  Ensure python3 and claude are installed on the remote.
+  The installer searches: ~/.local/bin, /opt/homebrew/bin, /usr/local/bin, ~/bin, ~/.npm-global/bin, and \$PATH.
+  Test with: ssh $TARGET 'export PATH=\"\$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:\$PATH\"; python3 --version && claude --version'"
+    fi
     echo "$probe_out"
+    [[ "$REMOTE_SHELL" == "zsh" ]] && echo "  (note: tools found via augmented PATH using $REMOTE_SHELL)"
+    # Resolve absolute paths — needed for launchd ProgramArguments (item 3 in remote-setup.sh).
+    resolve_out=$(ssh "$TARGET" "$REMOTE_SHELL -lc '$_RESOLVE_CMD'" 2>&1) || true
+    REMOTE_PYTHON3=$(printf '%s\n' "$resolve_out" | grep -m1 'python3' | tr -d '[:space:]')
+    REMOTE_CLAUDE=$(printf '%s\n' "$resolve_out" | grep -m1 'claude' | tr -d '[:space:]')
+    echo "  python3: ${REMOTE_PYTHON3:-not resolved}"
+    echo "  claude:  ${REMOTE_CLAUDE:-not resolved}"
 else
-    echo "[dry-run] ssh $TARGET: bash -lc 'python3 --version && claude --version'"
+    echo "[dry-run] ssh $TARGET: (bash then zsh fallback) python3 --version && claude --version"
+    echo "[dry-run] augmented PATH: $_PROBE_PATH"
+    REMOTE_PYTHON3="/usr/local/bin/python3"  # placeholder for dry-run display
 fi
 
 # 2. Stage payload locally
@@ -194,15 +221,15 @@ echo "--> Step 4: Uploading and running remote-setup.sh..."
 if [[ "$DRY_RUN" -eq 0 ]]; then
     scp "$BASEDIR/lib/scripts/remote-setup.sh" "$TARGET:~/teamster/" \
         || die "step 4 failed: scp could not upload remote-setup.sh to $TARGET:~/teamster/"
-    setup_out=$(printf '%s\n' "$SERVER" \
-        | ssh "$TARGET" 'IFS= read -r _server; bash -lc "bash ~/teamster/remote-setup.sh --server \"$_server\""' 2>&1) || {
+    setup_out=$(printf '%s\n%s\n' "$SERVER" "$REMOTE_PYTHON3" \
+        | ssh "$TARGET" "IFS= read -r _server; IFS= read -r _python3; $REMOTE_SHELL -lc \"bash ~/teamster/remote-setup.sh --server \\\"\$_server\\\" --python3 \\\"\$_python3\\\"\"" 2>&1) || {
         die "step 4 failed: remote-setup.sh returned nonzero on $TARGET
 $setup_out"
     }
     echo "$setup_out"
 else
     echo "[dry-run] scp remote-setup.sh $TARGET:~/teamster/"
-    echo "[dry-run] ssh $TARGET: bash -lc 'bash ~/teamster/remote-setup.sh --server <server>'"
+    echo "[dry-run] ssh $TARGET: bash/zsh -lc 'bash ~/teamster/remote-setup.sh --server <server> --python3 <abs-path>'"
 fi
 
 # 5. Emit a synthetic event to prove the path works end-to-end

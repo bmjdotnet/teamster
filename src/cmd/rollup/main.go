@@ -4,7 +4,7 @@
 // driven by a systemd timer every 5 minutes (run-once-and-exit), not as a
 // long-lived daemon — each pass is idempotent.
 //
-// --sweep runs a full nightly deep-clean: entity hygiene (drain, gc,
+// --sweep runs a full deep-clean: entity hygiene (drain, gc,
 // reclassify), then the full attribution pipeline (allocate + all recovery
 // passes), then aggregation + reconciliation.
 package main
@@ -21,13 +21,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/bmjdotnet/teamster/internal/classify"
 	"github.com/bmjdotnet/teamster/internal/config"
 	"github.com/bmjdotnet/teamster/internal/logging"
 	"github.com/bmjdotnet/teamster/internal/observability"
 	"github.com/bmjdotnet/teamster/internal/rollup"
 	"github.com/bmjdotnet/teamster/internal/store/mysql"
-	"github.com/bmjdotnet/teamster/internal/wms"
 )
 
 func main() {
@@ -55,14 +53,26 @@ func run() int {
 		"re-attribute no-focus sessions using a JSON mapping file produced by the LLM orchestrator (writes method='synthesized_outcome'); reversible with --unsynthesize")
 	unsynthesize := flag.Bool("unsynthesize", false,
 		"reverse a --synthesize-focus pass: delete every method='synthesized_outcome' row and its evidence")
+	recoverDirectives := flag.Bool("recover-directives", false,
+		"re-attribute a focus-less remote teammate's cost to the entity its dispatch brief named (the wms_setFocus directive it never called, shipped as a brief_directive interval); writes method='brief_directive_recovery'; reversible with --unrecover-directives")
+	uncoverDirectives := flag.Bool("unrecover-directives", false,
+		"reverse a --recover-directives pass: delete every method='brief_directive_recovery' row and its evidence")
+	synthesizeRemoteOrphans := flag.Bool("synthesize-remote-orphans", false,
+		"re-attribute remote orphan sessions (no focus, no directive, no transcript) by temporal correlation with concurrent focused sessions on the same host; writes method='synthesized_remote_floor'; reversible with --unsynthesize-remote-floor")
+	unsynthesizeRemoteFloor := flag.Bool("unsynthesize-remote-floor", false,
+		"reverse a --synthesize-remote-orphans pass: delete every method='synthesized_remote_floor' row and its evidence")
+	repairFocusIntervals := flag.Bool("repair-focus-intervals", false,
+		"one-time repair of negative-width focus intervals (ended_at < started_at) from the dual-writer/async race: recompute ended_at from the (session,agent) focus chain, then reallocate; reversible with --unrepair-focus-intervals")
+	unrepairFocusIntervals := flag.Bool("unrepair-focus-intervals", false,
+		"reverse a --repair-focus-intervals pass: restore each repaired interval's prior ended_at from focus_interval_repair")
 	sweep := flag.Bool("sweep", false,
-		"nightly deep-clean: entity hygiene (drain, reclassify) + full attribution pipeline (allocate, recover-focus, recover-warmup, recover-gaps) + aggregation + reconciliation")
+		"deep-clean: entity hygiene (drain, reclassify) + full attribution pipeline (allocate, recover-focus, recover-warmup, recover-gaps) + aggregation + reconciliation")
 	sweepLLM := flag.Bool("sweep-llm", false,
 		"with --sweep, also run LLM-assisted synthesis passes (orphan + gap fallback; uses claude --print)")
 	dryRun := flag.Bool("dry-run", false,
 		"with --sweep, --recover-focus, --recover-warmup, --recover-gaps, or --synthesize-focus, perform ZERO writes: log the plan and counts only")
 	countOrphans := flag.Bool("count-orphans", false,
-		"print the number of orphan sessions (unallocated, not yet synthesized) and exit; used by the sweep-llm timer guard")
+		"print the number of orphan sessions (unallocated, not yet synthesized, transcript present locally) and exit; used by the sweep-llm timer guard")
 	flag.Parse()
 
 	if *sweepLLM && !*sweep {
@@ -90,9 +100,8 @@ func run() int {
 	defer st.Close() //nolint:errcheck
 
 	if *countOrphans {
-		var count int
-		err := st.DB().QueryRowContext(context.Background(),
-			`SELECT COUNT(DISTINCT t.session_id)
+		rows, err := st.DB().QueryContext(context.Background(),
+			`SELECT DISTINCT t.session_id
 			 FROM usage_attribution ua
 			 JOIN token_ledger t ON t.message_id = ua.message_id
 			 WHERE ua.method = 'unallocated'
@@ -100,12 +109,49 @@ func run() int {
 			     SELECT DISTINCT t2.session_id
 			     FROM usage_attribution ua2
 			     JOIN token_ledger t2 ON t2.message_id = ua2.message_id
-			     WHERE ua2.method = 'synthesized_outcome'
-			   )`).Scan(&count)
+			     WHERE ua2.method IN ('synthesized_outcome', 'sweep_skipped')
+			   )`)
 		if err != nil {
 			logger.Error("count-orphans query failed", "error", err)
 			return 1
 		}
+		defer rows.Close()
+
+		projectsDir := os.Getenv("TEAMSTER_CLAUDE_PROJECTS_DIR")
+		if projectsDir == "" {
+			projectsDir = filepath.Join(os.Getenv("HOME"), ".claude", "projects")
+		}
+
+		count := 0
+		var noTranscript []string
+		for rows.Next() {
+			var sessionID string
+			if err := rows.Scan(&sessionID); err != nil {
+				continue
+			}
+			matches, _ := filepath.Glob(filepath.Join(projectsDir, "*", sessionID+".jsonl"))
+			if len(matches) > 0 {
+				count++
+			} else {
+				noTranscript = append(noTranscript, sessionID)
+			}
+		}
+
+		// Mark sessions with no local transcript as sweep_skipped so future
+		// runs don't keep re-checking (and launching an expensive Claude
+		// session for an orphan that can't be processed on this host).
+		if len(noTranscript) > 0 {
+			for _, sid := range noTranscript {
+				_, _ = st.DB().ExecContext(context.Background(),
+					`UPDATE usage_attribution ua
+					 JOIN token_ledger t ON t.message_id = ua.message_id
+					 SET ua.method = 'sweep_skipped'
+					 WHERE ua.method = 'unallocated' AND t.session_id = ?`, sid)
+			}
+			logger.Info("count-orphans: marked no-transcript sessions as sweep_skipped",
+				"sessions", len(noTranscript))
+		}
+
 		fmt.Println(count)
 		return 0
 	}
@@ -180,6 +226,45 @@ func run() int {
 		}
 		logger.Info("unsynthesize complete", "reverted", n)
 	}
+	if *uncoverDirectives {
+		n, err := r.UncoverDirective(ctx)
+		if err != nil {
+			logger.Error("unrecover-directives failed", "error", err)
+			return 1
+		}
+		logger.Info("unrecover-directives complete", "reverted", n)
+	}
+	if *unsynthesizeRemoteFloor {
+		n, err := r.UnsynthesizeRemoteFloor(ctx)
+		if err != nil {
+			logger.Error("unsynthesize-remote-floor failed", "error", err)
+			return 1
+		}
+		logger.Info("unsynthesize-remote-floor complete", "reverted", n)
+	}
+	if *unrepairFocusIntervals {
+		n, err := r.UnrepairFocusIntervals(ctx)
+		if err != nil {
+			logger.Error("unrepair-focus-intervals failed", "error", err)
+			return 1
+		}
+		logger.Info("unrepair-focus-intervals complete", "reverted", n)
+	}
+	// --repair-focus-intervals runs BEFORE the normal allocate pass: it fixes the
+	// negative-width focus intervals so the subsequent focusAt-based allocate can
+	// finally attribute the cost those intervals cover. The repair itself
+	// reallocates when it changes data; the Run below is then an idempotent
+	// confirmation pass.
+	if *repairFocusIntervals {
+		stats, err := r.RepairFocusIntervals(ctx, *dryRun)
+		if err != nil {
+			logger.Error("repair-focus-intervals failed", "error", err)
+			return 1
+		}
+		logger.Info("repair-focus-intervals complete",
+			"inverted", stats.Inverted, "repaired", stats.Repaired,
+			"reopened", stats.Reopened, "dry_run", *dryRun)
+	}
 
 	if err := r.Run(ctx, *reallocate); err != nil {
 		logger.Error("rollup pass failed", "error", err)
@@ -248,6 +333,37 @@ func run() int {
 			"dry_run", *dryRun)
 	}
 
+	// --recover-directives runs after gaps: it attributes focus-less remote
+	// teammate sessions from the brief_directive intervals the scraper shipped
+	// (no transcript needed; host-neutral). Deterministic, so it precedes any
+	// LLM synthesis.
+	if *recoverDirectives {
+		stats, err := r.RecoverDirective(ctx, *dryRun)
+		if err != nil {
+			logger.Error("recover-directives failed", "error", err)
+			return 1
+		}
+		logger.Info("recover-directives complete",
+			"sessions", stats.Sessions, "examined", stats.Examined,
+			"recovered", stats.Recovered, "no_entity", stats.NoEntity,
+			"dry_run", *dryRun)
+	}
+
+	// --synthesize-remote-orphans runs after directives: it attributes remote
+	// orphan sessions (no focus, no directive, no transcript) by temporal
+	// correlation with concurrent focused sessions on the same host.
+	if *synthesizeRemoteOrphans {
+		stats, err := r.SynthesizeRemoteOrphans(ctx, cfg.Host, *dryRun)
+		if err != nil {
+			logger.Error("synthesize-remote-orphans failed", "error", err)
+			return 1
+		}
+		logger.Info("synthesize-remote-orphans complete",
+			"examined", stats.Examined, "synthesized", stats.Synthesized,
+			"no_concurrent_focus", stats.NoConcurrentFocus,
+			"skipped", stats.Skipped, "dry_run", *dryRun)
+	}
+
 	// --synthesize-focus consumes the LLM orchestrator's mapping file and writes
 	// the deterministic attributions. Runs after all transcript-based recovery.
 	if *synthesizeFocus != "" {
@@ -270,13 +386,13 @@ func run() int {
 	return 0
 }
 
-// runSweep executes the nightly deep-clean pipeline: entity hygiene, then the
+// runSweep executes the deep-clean pipeline: entity hygiene, then the
 // full attribution pipeline, then aggregation + reconciliation. Each step is
 // idempotent — a re-run fixes 0 if nothing new to fix. The pipeline ordering
 // matters: hygiene first (so dangling intervals don't pollute attribution),
 // allocate before recovery (so recovery targets fresh unallocated rows).
 func runSweep(ctx context.Context, st *mysql.Store, r *rollup.Runner, cfg config.Config, logger *slog.Logger, sweepLLM, dryRun bool) int {
-	logger.Info("sweep: starting nightly attribution sweep", "dry_run", dryRun, "sweep_llm", sweepLLM)
+	logger.Info("sweep: starting attribution sweep", "dry_run", dryRun, "sweep_llm", sweepLLM)
 	start := time.Now()
 
 	recoverOpts := rollup.RecoverOptions{
@@ -321,17 +437,9 @@ func runSweep(ctx context.Context, st *mysql.Store, r *rollup.Runner, cfg config
 		logger.Info("sweep (dry-run): would drain dangling intervals")
 	}
 
-	// Step 2: Reclassify phase/work-type on intervals the classifier missed.
-	if !dryRun {
-		cr := classify.New(st, wms.NewJSONLSignalReader(), cfg.LogFile, logger)
-		if err := cr.Run(ctx, false, classify.DefaultReclassifyLimit); err != nil {
-			logger.Warn("sweep: classify pass failed (non-fatal)", "error", err)
-		} else {
-			logger.Info("sweep: classify pass complete")
-		}
-	} else {
-		logger.Info("sweep (dry-run): would run classify pass")
-	}
+	// Step 2: classify pass — skipped. The standalone teamster-classify timer
+	// handles phase/work-type classification on a 10-min cadence; running it
+	// again here doubled the CPU cost with no benefit (both are idempotent).
 
 	// --- Tier 2: Cost attribution (deterministic) ---
 
@@ -370,6 +478,31 @@ func runSweep(ctx context.Context, st *mysql.Store, r *rollup.Runner, cfg config
 	logger.Info("sweep: recover-gaps complete",
 		"recovered", gapStats.Recovered, "skipped", gapStats.Skipped)
 
+	// Step 7: Brief-directive recovery (deterministic, host-neutral). Attributes
+	// focus-less remote TEAMMATE sessions to the entity their dispatch brief named,
+	// from the brief_directive intervals the remote scraper shipped. Runs last in
+	// the deterministic tier and reclaims sweep_skipped rows too, so a prior LLM
+	// skip of a focus-less remote session is superseded by the deterministic link.
+	directiveStats, err := r.RecoverDirective(ctx, dryRun)
+	if err != nil {
+		logger.Error("sweep: recover-directives failed", "error", err)
+		return 1
+	}
+	logger.Info("sweep: recover-directives complete",
+		"recovered", directiveStats.Recovered, "no_entity", directiveStats.NoEntity)
+
+	// Step 8: Remote-orphan temporal-correlation floor (B2). Attributes remote
+	// sessions with no focus, no directive, and no transcript by correlating
+	// with concurrent focused sessions on the same host. Last deterministic pass.
+	remoteStats, err := r.SynthesizeRemoteOrphans(ctx, cfg.Host, dryRun)
+	if err != nil {
+		logger.Error("sweep: synthesize-remote-orphans failed", "error", err)
+		return 1
+	}
+	logger.Info("sweep: synthesize-remote-orphans complete",
+		"synthesized", remoteStats.Synthesized,
+		"no_concurrent_focus", remoteStats.NoConcurrentFocus)
+
 	// --- Tier 3: LLM-assisted attribution (gated) ---
 	var llmStats rollup.SweepLLMStats
 	if sweepLLM {
@@ -387,11 +520,13 @@ func runSweep(ctx context.Context, st *mysql.Store, r *rollup.Runner, cfg config
 	}
 
 	elapsed := time.Since(start)
-	logger.Info("sweep: nightly attribution sweep complete",
+	logger.Info("sweep: attribution sweep complete",
 		"duration", elapsed.Round(time.Millisecond),
 		"focus_recovered", focusStats.Recovered,
 		"warmup_recovered", warmupStats.Recovered,
 		"gap_recovered", gapStats.Recovered,
+		"directive_recovered", directiveStats.Recovered,
+		"remote_synthesized", remoteStats.Synthesized,
 		"llm_synthesized", llmStats.OrphansSynthesized+llmStats.GapsSynthesized,
 		"dry_run", dryRun)
 

@@ -1,6 +1,12 @@
 package server
 
 import (
+	"bytes"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -336,4 +342,64 @@ func mfNames(mfs []*dto.MetricFamily) string {
 		names = append(names, mf.GetName())
 	}
 	return strings.Join(names, ",")
+}
+
+// TestHandleEvent_UserPromptSubmit_ReturnsAdditionalContext verifies that a
+// UserPromptSubmit POST to /event includes additionalContext in the JSON
+// response body. Remote clients (e.g. the Python thin client) read this field
+// to inject the activity/team-dispatch nudge; the hub Go client generates its
+// own copy locally and ignores hookd's response, so this only affects remotes.
+func TestHandleEvent_UserPromptSubmit_ReturnsAdditionalContext(t *testing.T) {
+	// Build a minimal Server with a real JSONL log file (handleEvent writes to it).
+	f, err := os.CreateTemp(t.TempDir(), "hookd-*.jsonl")
+	if err != nil {
+		t.Fatalf("create temp log: %v", err)
+	}
+	defer f.Close()
+
+	s := &Server{
+		cfg:     config.Config{Host: "testhost"},
+		logFile: f,
+		metrics: observability.NewMetrics(prometheus.NewRegistry()),
+		sessions: observability.NewSessionTracker(
+			"testhost", 5*time.Minute, 30*time.Second, nil,
+		),
+	}
+	s.bus.subscribers = make(map[uint64]chan []byte)
+
+	payload, _ := json.Marshal(map[string]interface{}{
+		"hook_event_name": "UserPromptSubmit",
+		"session_id":      "sess-remote",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/event", bytes.NewReader(payload))
+	rec := httptest.NewRecorder()
+	s.handleEvent(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+
+	body, _ := io.ReadAll(rec.Body)
+	var resp map[string]interface{}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+
+	ctx, ok := resp["additionalContext"].(string)
+	if !ok || ctx == "" {
+		t.Fatalf("additionalContext missing or empty in UserPromptSubmit response; got: %v", resp)
+	}
+	// Must contain both the activity instruction and the team-dispatch mandate.
+	if !strings.Contains(ctx, "reportActivity") {
+		t.Errorf("additionalContext missing activity instruction; got: %q", ctx)
+	}
+	if !strings.Contains(ctx, "dispatch") {
+		t.Errorf("additionalContext missing team-dispatch instruction; got: %q", ctx)
+	}
+	// The text must be byte-identical to the shared constants so hub Go client
+	// and remote Python client can never drift.
+	want := hook.ACTIVITY_INSTRUCTION + hook.TEAM_DISPATCH_INSTRUCTION
+	if ctx != want {
+		t.Errorf("additionalContext = %q\nwant: %q", ctx, want)
+	}
 }

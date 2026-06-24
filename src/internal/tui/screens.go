@@ -262,10 +262,125 @@ func (m WizardModel) viewScreen5(width int) string {
 	return sb.String()
 }
 
+// viewScreenConventions renders the Tag Conventions screen (between universal key review and integration key review).
+func (m WizardModel) viewScreenConventions(width int) string {
+	var sb strings.Builder
+	sb.WriteString(HeaderStyle("Tag Conventions", stepLabel(6), width))
+	sb.WriteString("\n\n")
+	sb.WriteString(TextStyle.Render("Set per-key conventions that control how tags behave in the"))
+	sb.WriteString("\n")
+	sb.WriteString(TextStyle.Render("interview flow and where they apply."))
+	sb.WriteString("\n\n")
+
+	// Column headers
+	keyColW := 18
+	scopeColW := 12
+	interviewColW := 12
+	exclColW := 18
+
+	headerLine := fmt.Sprintf("  %-*s %-*s %-*s %-*s %s",
+		keyColW, "Key", scopeColW, "Scope", interviewColW, "Interview", exclColW, "Excl. Group", "Extract")
+	sb.WriteString(BoldAccentStyle.Render(headerLine))
+	sb.WriteString("\n")
+	sb.WriteString(DimStyle.Render("  " + repeat("─", width-4)))
+	sb.WriteString("\n")
+
+	for i, ce := range m.conventions {
+		isCursor := i == m.convCursor
+
+		scopeDisp := ce.scope
+		if scopeDisp == "" {
+			scopeDisp = "(any)"
+		}
+		interviewDisp := ce.interview
+		if interviewDisp == "" {
+			interviewDisp = "propose"
+		}
+		exclDisp := ce.exclusionGroup
+		if exclDisp == "" {
+			exclDisp = ""
+		}
+		extractDisp := ce.autoExtract
+		if extractDisp == "" {
+			extractDisp = ""
+		}
+
+		// Render the key name
+		keyStr := fmt.Sprintf("%-*s", keyColW, ce.key)
+		if isCursor {
+			keyStr = SelectedStyle.Render(keyStr)
+		} else {
+			keyStr = AccentStyle.Render(keyStr)
+		}
+
+		// Render each field, highlighting the active column
+		scopeStr := fmt.Sprintf("%-*s", scopeColW, scopeDisp)
+		if isCursor && m.convCol == 0 {
+			scopeStr = SelectedStyle.Render(scopeStr)
+		} else {
+			scopeStr = TextStyle.Render(scopeStr)
+		}
+
+		interviewStr := fmt.Sprintf("%-*s", interviewColW, interviewDisp)
+		if isCursor && m.convCol == 1 {
+			interviewStr = SelectedStyle.Render(interviewStr)
+		} else {
+			interviewStr = TextStyle.Render(interviewStr)
+		}
+
+		var exclStr string
+		if isCursor && m.convCol == 2 && m.convEditing {
+			exclStr = m.convEditInput.View()
+			// Pad to column width
+			vis := lipgloss.Width(exclStr)
+			if vis < exclColW {
+				exclStr += repeat(" ", exclColW-vis)
+			}
+		} else {
+			padded := fmt.Sprintf("%-*s", exclColW, exclDisp)
+			if isCursor && m.convCol == 2 {
+				exclStr = SelectedStyle.Render(padded)
+			} else {
+				exclStr = TextStyle.Render(padded)
+			}
+		}
+
+		extractStr := extractDisp
+		if extractStr == "" {
+			extractStr = " "
+		}
+		if isCursor && m.convCol == 3 {
+			extractStr = SelectedStyle.Render(extractStr)
+		} else {
+			extractStr = TextStyle.Render(extractStr)
+		}
+
+		prefix := "  "
+		if isCursor {
+			prefix = CursorStyle.Render("▸ ")
+		}
+
+		sb.WriteString(prefix + keyStr + " " + scopeStr + " " + interviewStr + " " + exclStr + " " + extractStr)
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString("\n")
+	sb.WriteString(DimStyle.Render("  scope: where the key should be applied (outcome, workunit, or any)"))
+	sb.WriteString("\n")
+	sb.WriteString(DimStyle.Render("  interview: propose=ask operator, auto=apply silently, skip=don't mention"))
+	sb.WriteString("\n")
+	sb.WriteString(DimStyle.Render("  excl. group: keys in the same group are mutually exclusive"))
+	sb.WriteString("\n")
+	sb.WriteString(DimStyle.Render("  extract: auto-extraction source (git, env)"))
+	sb.WriteString("\n\n")
+	sb.WriteString(statusBar(width, "↑↓ navigate  Space/Enter cycle  Tab next column  Esc back", "q quit"))
+	return sb.String()
+}
+
 // viewScreen6 renders the Integration Keys Review screen.
 func (m WizardModel) viewScreen6(width int) string {
 	var sb strings.Builder
-	sb.WriteString(HeaderStyle("Integration Keys Review", stepLabel(6), width))
+	sb.WriteString(HeaderStyle("Integration Keys Review", stepLabel(7), width))
 	sb.WriteString("\n\n")
 	sb.WriteString(TextStyle.Render("Based on your selections, these keys will be added to your vocabulary."))
 	sb.WriteString("\n")
@@ -282,7 +397,7 @@ func (m WizardModel) viewScreen6(width int) string {
 // viewScreen7 renders the Lifecycle Tags Orientation screen.
 func (m WizardModel) viewScreen7(width int) string {
 	var sb strings.Builder
-	sb.WriteString(HeaderStyle("Lifecycle Tags (Engine-Managed)", stepLabel(7), width))
+	sb.WriteString(HeaderStyle("Lifecycle Tags (Engine-Managed)", stepLabel(8), width))
 	sb.WriteString("\n\n")
 	sb.WriteString(TextStyle.Render("These tags are set automatically by the classifier and execution loop."))
 	sb.WriteString("\n")
@@ -311,7 +426,7 @@ func (m WizardModel) viewScreen7(width int) string {
 // viewScreen8 renders the Summary + Apply screen.
 func (m WizardModel) viewScreen8(width int) string {
 	var sb strings.Builder
-	sb.WriteString(HeaderStyle("Setup Complete", stepLabel(8), width))
+	sb.WriteString(HeaderStyle("Setup Complete", stepLabel(9), width))
 	sb.WriteString("\n\n")
 
 	if m.errMsg != "" {

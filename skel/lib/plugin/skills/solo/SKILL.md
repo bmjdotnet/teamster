@@ -74,13 +74,49 @@ Load the WMS tools in one
 batch (these are deferred tools — load before first use):
 
 ```
-ToolSearch("select:mcp__wms__wms_createOutcome,mcp__wms__wms_createWorkUnit,mcp__wms__wms_updateOutcomeStatus,mcp__wms__wms_updateWorkUnitStatus,mcp__wms__wms_listWorkUnits,mcp__wms__wms_setFocus,mcp__wms__wms_tagEntity,mcp__wms__wms_listTags,mcp__wms__wms_defineTag")
+ToolSearch("select:mcp__wms__wms_createOutcome,mcp__wms__wms_createWorkUnit,mcp__wms__wms_updateOutcomeStatus,mcp__wms__wms_updateWorkUnitStatus,mcp__wms__wms_listOutcomes,mcp__wms__wms_getOutcome,mcp__wms__wms_listWorkUnits,mcp__wms__wms_setFocus,mcp__wms__wms_tagEntity,mcp__wms__wms_listTags,mcp__wms__wms_defineTag")
 ```
 
 Do this once. Do not call ToolSearch for WMS tools again after this.
 
-## Step 3 — Create the strategic Outcome
+## Step 3 — Create (or resume) the strategic Outcome
 
+> **Skip search if arrived via `/teamster:start` and the operator already
+> picked an outcome.** The start skill already ran the outcome search and the
+> operator selected an existing outcome or "New outcome" — use that decision.
+> If the operator picked an existing outcome, it is your strategic Outcome;
+> skip creation and proceed to Step 4. If they picked "New outcome", create
+> as below.
+
+Before creating a new Outcome, search for existing open outcomes that match
+the focus slug: extract 2–3 keywords from the slug (e.g., "fix the auth
+timeout bug" → `"auth timeout"`) and call
+`wms_listOutcomes(status="open", query="<keywords>")`.
+
+If matches are found, present them to the operator with AskUserQuestion:
+
+```
+AskUserQuestion (single-select, header "Outcome"):
+  question: "Found open outcomes matching your focus. Resume or start new?"
+  options (up to 3 most recent matches + "New outcome"):
+    - label: "<outcome-id>: <title> (<status>)"
+      description: "<description snippet or focus string>"
+    - ...
+    - label: "New outcome"
+      description: "Create a fresh strategic Outcome for this session"
+```
+
+If more than 3 outcomes match, show the 3 most recently updated and mention
+there are more.
+
+**If the operator picks an existing outcome:**
+- Skip creation — use the selected outcome as the strategic Outcome.
+- If its status is `done`, reactivate to `active`
+  (`mcp__wms__wms_updateOutcomeStatus`).
+- Proceed to Step 4 (tags) — skip tags already present on the outcome.
+- Then Step 5 (focus).
+
+**If the operator picks "New outcome" or no matches were found:**
 Call `mcp__wms__wms_createOutcome` with an id based on the focus slug. A root
 Outcome (no parent) IS the strategic one — its altitude comes from DAG position,
 so there is no altitude tag to apply. Set status to `active`
@@ -90,59 +126,61 @@ This is the same strategic Outcome the team-mode flow creates.
 
 ## Step 4 — The context-tag interview
 
+> **Skip if arrived via `/teamster:start`.** The start skill already ran the
+> batched interview (mode + tags in one prompt) and confirmed the tag set with
+> the operator. The tags are ready to apply — do so now on the strategic Outcome
+> you just created (or resumed) in Step 3, then proceed to Step 5. Do NOT
+> re-ask or re-propose tags.
+
+> **When resuming an existing outcome:** The outcome may already have context
+> tags applied. Call `wms_getOutcome` to check, and only propose tags that
+> aren't already set. Skip the interview entirely if the outcome is fully
+> tagged.
+
 This is the genuinely valuable part of session setup, and it applies fully in
 solo mode. **Tag classification IS the goal-setting conversation:** a session that
 knows it's working a "p1 feature for teamster" operates differently than one
 with no context.
 
-### 4a — Inspect the vocabulary
+### 4a — Inspect the key manifest
 
-Call `mcp__wms__wms_listTags`. Each entry is `{tag_key, tag_value, category,
-cardinality, description, is_seed}`:
+Call `mcp__wms__wms_listTags` (no args) to get the role-shaped manifest. The
+response groups keys by role — no interpretation needed:
 
-- **`category=context`** tags (`product`, `feature`/`bug`, `component`,
-  `priority`, `product-version`, plus any integration keys like `github.*`) are
-  the durable ones you propose now — they characterize the work and inherit down
-  the DAG.
-- **`category=lifecycle`** tags (`work-type`, `phase`, `resolution`) track
-  execution — **do NOT propose these now**; they are applied per work unit as
-  work progresses.
-- Read each `description` to avoid proposing a near-duplicate; note
-  `cardinality` (`single` replaces on re-tag, `multi` accumulates).
+- **`propose`** — keys to offer the operator. `values` lists options (when
+  present); `n` means drill down with `wms_listTags(tagKey=...)`. Respect
+  `exclusive` (at most one key per exclusion group). Apply `scope: "outcome"`
+  keys to the Outcome; keys without scope can go on either.
+- **`autoExtract`** — extract silently from the environment (git, env).
+- **`required`** — must be set on every WorkUnit before close-out.
+- **`engineManaged`** — do not propose, set, or modify.
 
-### 4b — Extract, then propose
+### 4b — Extract and propose
 
-Best-effort extraction (skip any step that fails):
+**Auto-apply:** For each key in `autoExtract`, extract its value from the
+named source (run `git remote -v`, `git branch --show-current` for `git`
+sources; read CLAUDE.md for project metadata). Apply silently in Step 4c.
 
-- **Git/GitHub.** Run `git remote -v` and `git branch --show-current`. Parse the
-  remote into integration keys (`github.com/Org/Repo.git` →
-  `github.owner:Org`, `github.repo:Repo`; other remotes → `git.remote:<url>`).
-  Set `git.branch`. If no remote, set `git.repo` to the directory name.
-- **Project metadata.** Read the project's CLAUDE.md for a declared product
-  name, version, component names, or tracker references.
-
-Then propose the context tags that fit, with source attribution so the operator
-can verify at a glance:
+**Propose:** From the `propose` group, infer values using the focus slug,
+CLAUDE.md, repo name, and existing vocabulary. Present with source attribution:
 
 ```
 Based on your focus "fix auth bug" and the git remote, I'd tag the
 strategic Outcome with:
 
   product:webapp        — from this repo's CLAUDE.md
-  github.owner:acme     — from git remote
-  github.repo:webapp    — from git remote
-  git.branch:main       — current branch
   bug:auth-timeout      — from your focus slug
   priority:p1           — no urgency signal, defaulting high
+
+I'll also auto-apply: github.owner:acme, github.repo:webapp,
+git.branch:main (extracted from git).
 
 Sound right?
 ```
 
-Use judgment — `product` from repo/CLAUDE.md, `feature:<slug>` or `bug:<slug>`
-from the focus (mutually exclusive — apply only one), `priority` matched to any
-urgency signal or a stated default, `product-version` only if a release target
-exists. Do NOT set `component` on the Outcome — it varies per WorkUnit (see
-per-entity tagging below).
+Respect `exclusive` — propose only one key per exclusion group. Apply
+`scope: "outcome"` keys to the Outcome; note `required` keys for WorkUnit
+dispatch time.
 
 ### 4c — Confirm and apply
 
@@ -161,18 +199,11 @@ tags yourself** with `mcp__wms__wms_tagEntity` on the strategic Outcome (source
 ### Per-entity tagging: Outcome vs. WorkUnit
 
 Context tags on the Outcome are inherited down the DAG automatically — you do
-NOT re-apply them per WorkUnit. But some context tags should vary across
-WorkUnits rather than being forced onto the Outcome:
-
-- **`component`** is always per-WorkUnit. Each piece of work targets specific
-  code; the Outcome spans them all. Apply `component` to each WorkUnit when
-  you create it, not to the Outcome. Reuse existing values from `wms_listTags`
-  where they fit; propose new values only when genuinely new and reusable
-  ("cli", "harness", "wms", "dashboard" are good; one-off labels are not).
-- **`feature`/`bug`** — when the session mixes both, apply the specific value
-  to each WorkUnit rather than picking one for the Outcome.
-- **Tags that are truly shared** (`product`, `priority`, `product-version`,
-  integration keys) belong on the Outcome and inherit normally.
+NOT re-apply them per WorkUnit. The manifest's `scope` on each key tells you
+where it belongs: `scope: "outcome"` keys go on the Outcome and inherit down;
+`required` keys (e.g., `component`) must be set per-WorkUnit before close-out.
+When a session mixes values from both sides of an `exclusive` group, apply the
+specific value to each WorkUnit rather than picking one for the Outcome.
 
 **Reuse existing values.** Always call `wms_listTags` before inventing new tag
 values. If an existing value fits (case-insensitive), use it. New values must
@@ -298,7 +329,7 @@ plan: run this ritual yourself so the engine has nothing to flag.
 
 ## What solo mode does NOT do
 
-- No `TeamCreate`, no team name.
+- No team ceremony — the implicit team handles itself.
 - No dispatch routing or affinity — there are no peers to route to.
 - No "keep teammates alive" discipline — ephemeral subagents are meant to exit.
 - It does not replace team mode. If the work needs durable parallel agents on

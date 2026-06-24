@@ -22,12 +22,37 @@
   "links": [],
   "panels": [
     {
+      "type": "text",
+      "title": "",
+      "gridPos": {
+        "h": 2,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 900,
+      "options": {
+        "mode": "html",
+        "content": "<div style=\"display:flex; gap:6px; align-items:center; flex-wrap:wrap; padding:2px 0; margin: -4px 0;\">\n  <a href=\"/d/landing-page?from=${__from}&to=${__to}\" style=\"padding:4px 12px; background:#1e1e2e; color:#8ab4f8; border-radius:4px; text-decoration:none; font-size:13px; font-weight:600; border:1px solid #333;\">Home</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/activity-feed?from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Activity</a>\n  <a href=\"/d/fd-ai-spend-overview-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Spend</a>\n  <a href=\"/d/fd-cost-explorer-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Trace</a>\n  <a href=\"/d/fd-usage-effectiveness-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Usage</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/cost-by-tag-value?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Simple Cost</a>\n  <a href=\"/d/tag-stack-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Multidim</a>\n  <a href=\"/d/entity-cost-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#2a2a4a; color:#8ab4f8; border-radius:4px; text-decoration:none; font-size:12px; font-weight:600; border:1px solid #4a4a6a;\">Work</a>\n  <a href=\"/d/fd-outcome-accounting-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Outcomes</a>\n  <a href=\"/d/outcome-cost-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Outcome Cost</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/fd-data-quality-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Health</a>\n</div>",
+        "code": {
+          "language": "html",
+          "showLineNumbers": false,
+          "showMiniMap": false
+        }
+      },
+      "transparent": true,
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 0
+        "y": 2
       },
       "id": 1,
       "panels": [],
@@ -64,7 +89,7 @@
         "h": 4,
         "w": 6,
         "x": 0,
-        "y": 1
+        "y": 3
       },
       "id": 2,
       "options": {
@@ -129,7 +154,7 @@
         "h": 4,
         "w": 6,
         "x": 6,
-        "y": 1
+        "y": 3
       },
       "id": 3,
       "options": {
@@ -194,7 +219,7 @@
         "h": 4,
         "w": 6,
         "x": 12,
-        "y": 1
+        "y": 3
       },
       "id": 4,
       "options": {
@@ -268,7 +293,7 @@
         "h": 4,
         "w": 6,
         "x": 18,
-        "y": 1
+        "y": 3
       },
       "id": 5,
       "options": {
@@ -309,7 +334,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 5
+        "y": 7
       },
       "id": 20,
       "panels": [],
@@ -321,7 +346,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "Daily cost for the top-5 entities by total cost. Unallocated is excluded here (it dwarfs everything) \u2014 see the Unallocated Cost stat and the coverage trend below.",
+      "description": "Daily cost for the top-5 entities by total cost. Unallocated is excluded here (it dwarfs everything) — see the Unallocated Cost stat and the coverage trend below.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -395,7 +420,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 6
+        "y": 8
       },
       "id": 21,
       "options": {
@@ -434,7 +459,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 14
+        "y": 16
       },
       "id": 40,
       "panels": [],
@@ -469,7 +494,7 @@
         "h": 6,
         "w": 8,
         "x": 0,
-        "y": 15
+        "y": 17
       },
       "id": 41,
       "options": {
@@ -574,7 +599,7 @@
         "h": 6,
         "w": 16,
         "x": 8,
-        "y": 15
+        "y": 17
       },
       "id": 42,
       "options": {
@@ -613,7 +638,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 21
+        "y": 23
       },
       "id": 10,
       "panels": [],
@@ -667,10 +692,6 @@
               {
                 "id": "decimals",
                 "value": 0
-              },
-              {
-                "id": "custom.width",
-                "value": 120
               }
             ]
           },
@@ -683,10 +704,6 @@
               {
                 "id": "unit",
                 "value": "short"
-              },
-              {
-                "id": "custom.width",
-                "value": 100
               }
             ]
           },
@@ -696,10 +713,6 @@
               "options": "Status"
             },
             "properties": [
-              {
-                "id": "custom.width",
-                "value": 90
-              },
               {
                 "id": "custom.cellOptions",
                 "value": {
@@ -751,37 +764,9 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Entity"
-            },
-            "properties": [
-              {
-                "id": "custom.width",
-                "value": 280
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Type"
-            },
-            "properties": [
-              {
-                "id": "custom.width",
-                "value": 100
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
               "options": "Phase"
             },
             "properties": [
-              {
-                "id": "custom.width",
-                "value": 90
-              },
               {
                 "id": "custom.cellOptions",
                 "value": {
@@ -837,10 +822,6 @@
               {
                 "id": "decimals",
                 "value": 1
-              },
-              {
-                "id": "custom.width",
-                "value": 100
               }
             ]
           },
@@ -853,22 +834,6 @@
               {
                 "id": "displayName",
                 "value": "Agent"
-              },
-              {
-                "id": "custom.width",
-                "value": 140
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Tags"
-            },
-            "properties": [
-              {
-                "id": "custom.width",
-                "value": 300
               }
             ]
           }
@@ -878,7 +843,7 @@
         "h": 12,
         "w": 24,
         "x": 0,
-        "y": 22
+        "y": 24
       },
       "id": 11,
       "options": {
@@ -921,7 +886,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 34
+        "y": 36
       },
       "id": 30,
       "panels": [],
@@ -998,7 +963,7 @@
         "h": 6,
         "w": 24,
         "x": 0,
-        "y": 35
+        "y": 37
       },
       "id": 31,
       "options": {
@@ -1038,7 +1003,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 41
+        "y": 43
       },
       "id": 15,
       "panels": [],
@@ -1050,7 +1015,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "Where did the ATTRIBUTED money go? Each rectangle is a WMS entity, sized by cost and colored by status (green=done, blue=active, yellow=review, red=blocked, gray=legacy). Legacy v1 entities show as explicit (legacy <type>) rectangles per the locked label convention. Unallocated cost is excluded here (it would dominate ~69% of the area) \u2014 the Unallocated Cost stat and the Attribution Coverage Trend carry that full-picture honesty. Rendered via the Business Charts (ECharts) plugin.",
+      "description": "Where did the ATTRIBUTED money go? Each rectangle is a WMS entity, sized by cost and colored by status (green=done, blue=active, yellow=review, red=blocked, gray=legacy). Legacy v1 entities show as explicit (legacy <type>) rectangles per the locked label convention. Unallocated cost is excluded here (it would dominate ~69% of the area) — the Unallocated Cost stat and the Attribution Coverage Trend carry that full-picture honesty. Rendered via the Business Charts (ECharts) plugin.",
       "fieldConfig": {
         "defaults": {},
         "overrides": []
@@ -1059,7 +1024,7 @@
         "h": 11,
         "w": 24,
         "x": 0,
-        "y": 42
+        "y": 44
       },
       "id": 16,
       "options": {
@@ -1076,7 +1041,7 @@
           "key": "",
           "plugin": "AMap.Scale,AMap.ToolBar"
         },
-        "getOption": "// Entity Cost Treemap \u2014 rectangles sized by cost, colored by status.\n// Data: one table-format series with fields entity, status, cost_usd (see panel target).\nconst s = context.panel.data.series[0];\nif (!s) { return { series: [] }; }\nconst f = (name) => {\n  const fld = s.fields.find((x) => x.name === name);\n  const v = fld ? fld.values : [];\n  return v.buffer || v;\n};\nconst names = f('entity');\nconst statuses = f('status');\nconst costs = f('cost_usd');\n// Status -> color, consistent with the Entity Cost Table (panel 11) and the locked convention.\nconst colorOf = {\n  done: '#73bf69',        // green\n  active: '#5794f2',      // blue\n  blocked: '#f2495c',     // red\n  review: '#fade2a',      // yellow\n  pending: '#8e8e8e',     // gray\n  unallocated: '#484f58', // gray-demote\n  legacy: '#484f58',      // gray-demote\n  unknown: '#8e8e8e',\n};\nconst data = names.map((name, i) => ({\n  name: name,\n  value: costs[i],\n  itemStyle: { color: colorOf[statuses[i]] || '#8e8e8e', borderColor: 'rgba(0,0,0,0.35)', gapWidth: 1 },\n}));\nreturn {\n  tooltip: {\n    formatter: (p) => p.name + '<br/>$' + Number(p.value).toFixed(0),\n  },\n  series: [{\n    type: 'treemap',\n    roam: false,\n    nodeClick: false,\n    breadcrumb: { show: false },\n    label: { show: true, formatter: '{b}', overflow: 'truncate', color: '#fff', fontSize: 11 },\n    upperLabel: { show: false },\n    data: data,\n  }],\n};\n",
+        "getOption": "// Entity Cost Treemap — rectangles sized by cost, colored by status.\n// Data: one table-format series with fields entity, status, cost_usd (see panel target).\nconst s = context.panel.data.series[0];\nif (!s) { return { series: [] }; }\nconst f = (name) => {\n  const fld = s.fields.find((x) => x.name === name);\n  const v = fld ? fld.values : [];\n  return v.buffer || v;\n};\nconst names = f('entity');\nconst statuses = f('status');\nconst costs = f('cost_usd');\n// Status -> color, consistent with the Entity Cost Table (panel 11) and the locked convention.\nconst colorOf = {\n  done: '#73bf69',        // green\n  active: '#5794f2',      // blue\n  blocked: '#f2495c',     // red\n  review: '#fade2a',      // yellow\n  pending: '#8e8e8e',     // gray\n  unallocated: '#484f58', // gray-demote\n  legacy: '#484f58',      // gray-demote\n  unknown: '#8e8e8e',\n};\nconst data = names.map((name, i) => ({\n  name: name,\n  value: costs[i],\n  itemStyle: { color: colorOf[statuses[i]] || '#8e8e8e', borderColor: 'rgba(0,0,0,0.35)', gapWidth: 1 },\n}));\nreturn {\n  tooltip: {\n    formatter: (p) => p.name + '<br/>$' + Number(p.value).toFixed(0),\n  },\n  series: [{\n    type: 'treemap',\n    roam: false,\n    nodeClick: false,\n    breadcrumb: { show: false },\n    label: { show: true, formatter: '{b}', overflow: 'truncate', color: '#fff', fontSize: 11 },\n    upperLabel: { show: false },\n    data: data,\n  }],\n};\n",
         "google": {
           "callback": "gmapReady",
           "key": ""
@@ -1114,7 +1079,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 53
+        "y": 55
       },
       "id": 50,
       "panels": [],
@@ -1168,10 +1133,6 @@
               {
                 "id": "decimals",
                 "value": 0
-              },
-              {
-                "id": "custom.width",
-                "value": 120
               }
             ]
           },
@@ -1184,34 +1145,6 @@
               {
                 "id": "unit",
                 "value": "short"
-              },
-              {
-                "id": "custom.width",
-                "value": 100
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Entities"
-            },
-            "properties": [
-              {
-                "id": "custom.width",
-                "value": 80
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Agent"
-            },
-            "properties": [
-              {
-                "id": "custom.width",
-                "value": 160
               }
             ]
           }
@@ -1221,7 +1154,7 @@
         "h": 6,
         "w": 24,
         "x": 0,
-        "y": 54
+        "y": 56
       },
       "id": 51,
       "options": {
@@ -1263,7 +1196,8 @@
   "refresh": "5m",
   "schemaVersion": 41,
   "tags": [
-    "teamster"
+    "teamster",
+    "work-cost"
   ],
   "templating": {
     "list": [
@@ -1272,9 +1206,11 @@
         "auto_count": 50,
         "auto_min": "1m",
         "current": {
+          "selected": true,
           "text": "auto",
           "value": "$__auto_interval_agg"
         },
+        "hide": 0,
         "label": "Aggregation",
         "name": "agg",
         "options": [
@@ -1315,7 +1251,7 @@
           }
         ],
         "query": "1m,5m,15m,1h,6h,1d",
-        "refresh": 2,
+        "skipUrlSync": false,
         "type": "interval"
       },
       {

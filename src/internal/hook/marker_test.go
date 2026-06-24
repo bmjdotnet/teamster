@@ -29,17 +29,18 @@ func promptOut(t *testing.T, srvURL, sid, dedupDir string, soloEnv bool) string 
 	return additionalContext(t, ProcessEvent(ev, raw, srvURL, dedupDir, soloEnv))
 }
 
-// bareAgentBlocked reports whether a bare Agent (no team_name) is blocked, with
-// env-solo = soloEnv.
-func bareAgentBlocked(t *testing.T, srvURL, sid, dedupDir string, soloEnv bool) bool {
+// bareAgentOutput runs a bare Agent (no team_name) through ProcessEvent and
+// returns the raw output string. Since the bare-Agent block was removed
+// (implicit-teams migration), this is used to verify that Agent calls pass
+// through without blocking.
+func bareAgentOutput(t *testing.T, srvURL, sid, dedupDir string, soloEnv bool) string {
 	t.Helper()
 	ti := map[string]interface{}{"description": "x", "name": "scout"}
 	ev := HookEvent{HookEventName: "PreToolUse", ToolName: "Agent", SessionID: sid, ToolInput: ti}
 	raw := map[string]interface{}{
 		"hook_event_name": "PreToolUse", "tool_name": "Agent", "session_id": sid, "tool_input": ti,
 	}
-	dec, _ := decision(t, ProcessEvent(ev, raw, srvURL, dedupDir, soloEnv))
-	return dec == "block"
+	return ProcessEvent(ev, raw, srvURL, dedupDir, soloEnv)
 }
 
 // TestMarker_SetModeWritesAndOverridesEnv: setMode("solo") writes the marker,
@@ -50,11 +51,8 @@ func TestMarker_SetModeWritesAndOverridesEnv(t *testing.T) {
 	dir := t.TempDir()
 	sid := "markersess01"
 
-	// Before any setMode, env=false → team: bare Agent blocked, full context.
-	if !bareAgentBlocked(t, srv.URL, sid, dir, false) {
-		t.Fatal("pre-setMode (env team) must block a bare Agent")
-	}
-	if ctx := promptOut(t, srv.URL, sid, dir, false); !strings.Contains(ctx, "Agent Teams") {
+	// Before any setMode, env=false → team: Agent calls pass through, full context.
+	if ctx := promptOut(t, srv.URL, sid, dir, false); !strings.Contains(ctx, "named teammates") {
 		t.Fatal("pre-setMode context must carry the team-dispatch mandate")
 	}
 
@@ -66,10 +64,7 @@ func TestMarker_SetModeWritesAndOverridesEnv(t *testing.T) {
 		t.Fatalf("after setMode(solo), marker = %q, want %q", got, "solo")
 	}
 
-	// Now, with env STILL false, the marker overrides → solo: no block, no mandate.
-	if bareAgentBlocked(t, srv.URL, sid, dir, false) {
-		t.Error("marker=solo must override env=team: bare Agent must NOT be blocked")
-	}
+	// Now, with env STILL false, the marker overrides → solo: no mandate.
 	if ctx := promptOut(t, srv.URL, sid, dir, false); ctx != ACTIVITY_INSTRUCTION {
 		t.Errorf("marker=solo context must be exactly ACTIVITY_INSTRUCTION, got %q", ctx)
 	}
@@ -101,7 +96,7 @@ func TestMarker_OnlySoloCounts(t *testing.T) {
 }
 
 // TestMarker_SetModeTeamWritesAndReEnforces: setMode("team") WRITES a "team"
-// marker (not a clear) and re-enforces after a prior solo, with env=team.
+// marker (not a clear) and re-enables the dispatch mandate after a prior solo.
 func TestMarker_SetModeTeamWritesAndReEnforces(t *testing.T) {
 	srv := discardServer(t)
 	defer srv.Close()
@@ -119,26 +114,23 @@ func TestMarker_SetModeTeamWritesAndReEnforces(t *testing.T) {
 	if got := readModeMarker(sid, dir); got != "team" {
 		t.Errorf("setMode(team) must write a \"team\" marker, got %q", got)
 	}
-	// Back to enforcing: bare Agent blocked again with env=false.
-	if !bareAgentBlocked(t, srv.URL, sid, dir, false) {
-		t.Error("after setMode(team), bare Agent must be blocked again")
+	// Back to team mode: dispatch mandate re-appears in context.
+	if ctx := promptOut(t, srv.URL, sid, dir, false); !strings.Contains(ctx, "named teammates") {
+		t.Error("after setMode(team), context must carry the team-dispatch mandate")
 	}
 }
 
-// TestMarker_TeamMarkerBeatsEnvSolo is the ship-blocking bug, now fixed: an
-// explicit setMode("team") must force team enforcement even when the launch env
-// is solo (env=true). Before the fix, setMode("team") cleared the marker and
-// effectiveSolo fell back to env=solo, leaving the session solo despite the
-// explicit team choice.
+// TestMarker_TeamMarkerBeatsEnvSolo: an explicit setMode("team") must force
+// team context (dispatch mandate) even when the launch env is solo (env=true).
 func TestMarker_TeamMarkerBeatsEnvSolo(t *testing.T) {
 	srv := discardServer(t)
 	defer srv.Close()
 	dir := t.TempDir()
 	sid := "markersess07"
 
-	// env=solo, no marker yet → solo (bare Agent allowed).
-	if bareAgentBlocked(t, srv.URL, sid, dir, true) {
-		t.Fatal("pre-setMode with env=solo must allow a bare Agent")
+	// env=solo, no marker yet → solo context (no dispatch mandate).
+	if ctx := promptOut(t, srv.URL, sid, dir, true); ctx != ACTIVITY_INSTRUCTION {
+		t.Fatal("pre-setMode with env=solo must produce ACTIVITY_INSTRUCTION only")
 	}
 
 	// Operator explicitly confirms team via setMode("team").
@@ -148,12 +140,9 @@ func TestMarker_TeamMarkerBeatsEnvSolo(t *testing.T) {
 		t.Fatal("setMode(team) should have written a team marker")
 	}
 
-	// THE FIX: with env=solo but a fresh "team" marker, the session is team —
-	// bare Agent blocked, full team-dispatch context.
-	if !bareAgentBlocked(t, srv.URL, sid, dir, true) {
-		t.Error("team marker must beat env=solo: bare Agent MUST be blocked")
-	}
-	if ctx := promptOut(t, srv.URL, sid, dir, true); !strings.Contains(ctx, "Agent Teams") {
+	// With env=solo but a fresh "team" marker, the session is team —
+	// dispatch mandate appears in context.
+	if ctx := promptOut(t, srv.URL, sid, dir, true); !strings.Contains(ctx, "named teammates") {
 		t.Error("team marker must beat env=solo: context must carry the team-dispatch mandate")
 	}
 }
@@ -165,16 +154,13 @@ func TestMarker_EnvStillWorksWithoutMarker(t *testing.T) {
 	defer srv.Close()
 	dir := t.TempDir()
 
-	// env solo, no marker → solo.
-	if bareAgentBlocked(t, srv.URL, "envsolo00001", dir, true) {
-		t.Error("env=solo with no marker must NOT block a bare Agent")
-	}
+	// env solo, no marker → solo: context is ACTIVITY_INSTRUCTION only.
 	if ctx := promptOut(t, srv.URL, "envsolo00001", dir, true); ctx != ACTIVITY_INSTRUCTION {
 		t.Errorf("env=solo context must be exactly ACTIVITY_INSTRUCTION, got %q", ctx)
 	}
-	// env team, no marker → team (byte-identical path).
-	if !bareAgentBlocked(t, srv.URL, "envteam00001", dir, false) {
-		t.Error("env=team with no marker must block a bare Agent")
+	// env team, no marker → team: context includes the dispatch mandate.
+	if ctx := promptOut(t, srv.URL, "envteam00001", dir, false); !strings.Contains(ctx, "named teammates") {
+		t.Errorf("env=team context must contain the team-dispatch mandate, got %q", ctx)
 	}
 }
 

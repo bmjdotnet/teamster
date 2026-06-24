@@ -188,11 +188,12 @@ joins per-message token spend to the declared work item. Sessions that didn't
 declare focus are recovered after the fact — deterministically from transcripts
 and session shape, or with optional LLM-assisted synthesis. Every attributed
 dollar records how it was attributed, so confidence is always inspectable.
-A nightly sweep runs all recovery passes automatically.
+A scheduled sweep runs all recovery passes automatically.
 
 ## Requirements
 
-- **Linux** (the only supported platform)
+- **Linux** — required for the hub
+- **macOS 10.13+** — supported as a remote only (see [Remote install](#remote-install))
 - **Go 1.25+** — to build the binaries (hub install only)
 - **MySQL or MariaDB** — backs the work-management store
 - **Grafana** — local or external; the installer provisions dashboards either way
@@ -217,7 +218,19 @@ hosts run only the Python hook client and participate in the same fabric:
 teamster install-remote user@host
 ```
 
-See [docs/specs/REMOTE-INSTALL.md](docs/specs/REMOTE-INSTALL.md).
+The hub's `TEAMSTER_HOOK_SERVER_URL` is written using the hub's **hostname**
+(not `localhost`), and `teamster install-remote` derives the remote's `--server`
+from it — so remotes get a hub address they can actually reach. If your hub URL
+is still `localhost` (an older install), pass `--server <hub-host>:9125`
+explicitly, or reinstall the hub to heal it.
+
+**macOS hosts** are supported as remotes only. The hub installer hard-fails on
+macOS — run it on your Linux hub instead, then enroll the Mac over SSH with
+`teamster install-remote user@mac` from that hub. On macOS the token-scraper
+runs as a launchd LaunchAgent rather than cron, and Agent-Teams teammates run as
+separate top-level sessions, so the remote clients derive each teammate's
+identity (and cost) from its transcript. See
+[docs/specs/REMOTE-INSTALL.md](docs/specs/REMOTE-INSTALL.md) for details.
 
 ## Replication
 
@@ -226,6 +239,27 @@ mirror (hookd, MySQL, Prometheus, Grafana) for DR/standby, staging,
 stakeholder dashboards, or public-facing demos. The hub pushes events and
 database state; the replica never connects back. See
 [docs/specs/replication.md](docs/specs/replication.md).
+
+## Backup and restore
+
+Teamster can snapshot its data stores to timestamped directories and restore from them.
+
+```bash
+teamster backup          # take a backup now
+teamster backup list     # list available backups (most recent first)
+teamster backup status   # show timer status and last run
+teamster restore <path>  # restore from a backup directory
+teamster restore <path> --dry-run   # preview without restoring
+teamster restore <path> --force     # skip confirmation
+```
+
+Set `backup.backup_dir` in `teamster.yaml`, then enable the timer:
+
+```bash
+sudo systemctl start teamster-backup.timer
+```
+
+What gets backed up is configurable per store (`mysql`, `grafana`, `otel`, `teamster`). Prometheus is opt-in (ephemeral data). Grafana is skipped in external mode. Retention defaults to 7 days (`backup.retention.keep_for`).
 
 ## Data & privacy
 
@@ -249,6 +283,8 @@ Early alpha, but built for multi-user environments and trustable data.
 | `teamster tags list` / `add-key` / `add-value` / `retire` / `describe` | Non-interactive tag management |
 | `teamster wms list` / `drain` / `close` | WMS entity management |
 | `teamster sql` | Credential-safe database queries |
+| `teamster backup` / `list` / `status` | Take a backup, list backups, show timer status |
+| `teamster restore <path>` | Restore from a backup directory |
 | `teamster install-remote user@host` | Install the client on a remote host |
 | `feed` | Terminal activity viewer |
 | `rollup --sweep` | Run the attribution pipeline manually |

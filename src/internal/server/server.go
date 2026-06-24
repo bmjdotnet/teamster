@@ -358,6 +358,20 @@ func (s *Server) handleEvent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Activity/team-dispatch nudge for UserPromptSubmit: return the same
+	// instruction text the hub Go client injects locally so remote clients
+	// (e.g. the Python thin client) receive it from hookd and can pass it
+	// through. The hub Go client generates its own copy from the constants
+	// directly and ignores this field — no double-injection on the hub.
+	// Always return both halves: hookd cannot observe a remote session's
+	// solo/team marker (it is client-local state, never sent over the wire),
+	// so remote UserPromptSubmit always receives team context. A solo remote
+	// will see the dispatch mandate; this is the least-harm default since the
+	// common remote case is team and the text is guidance, not enforcement.
+	if event.HookEventName == "UserPromptSubmit" {
+		resp["additionalContext"] = hook.ACTIVITY_INSTRUCTION + hook.TEAM_DISPATCH_INSTRUCTION
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(resp) //nolint:errcheck
@@ -412,15 +426,6 @@ func (s *Server) dispatchObservability(event hook.HookEvent, data map[string]int
 	case "PreToolUse":
 		toolInput := normaliseToolInput(event.ToolInput)
 		switch event.ToolName {
-		case "TeamCreate":
-			if teamName := hook.StrField(toolInput, "team_name", 128); teamName != "" {
-				s.sessions.SetTeamForSession(event.SessionID, teamName)
-				if s.obsStore != nil {
-					go func() {
-						_ = s.obsStore.SetSessionTeam(ctx, event.SessionID, teamName)
-					}()
-				}
-			}
 		// WMS label population uses PreToolUse (not PostToolUse) because Claude Code
 		// does not fire PostToolUse for successful MCP calls. The caller-provides-ID
 		// design means the id is in the tool INPUT, so PreToolUse has all data needed.
@@ -585,10 +590,11 @@ func (s *Server) dispatchObservability(event hook.HookEvent, data map[string]int
 			id := hook.StrField(data, "wms_entity_id", 128)
 			if id != "" {
 				agent := agentNameFor(hook.StrField(data, "wms_agent_name", 64))
+				warnSID := hook.StrField(data, "wms_session_id", 64)
 				// Detached like the focus-interval close above: keep the two
 				// store reads off the WMSStatusChange POST response path.
 				go func() {
-					s.warnMissingRequiredTags(ctx, entityType, id, agent)
+					s.warnMissingRequiredTags(ctx, entityType, id, agent, warnSID)
 				}()
 			}
 		}
@@ -645,7 +651,7 @@ func (s *Server) dispatchObservability(event hook.HookEvent, data map[string]int
 // visible in feed and the dashboards. The status transition is not affected — the
 // hard reject is the store's job, gated by RequireTagsOnDone. Best-effort: any
 // store error is logged and swallowed so the handler is never broken.
-func (s *Server) warnMissingRequiredTags(ctx context.Context, entityType, id, agentName string) {
+func (s *Server) warnMissingRequiredTags(ctx context.Context, entityType, id, agentName, sessionID string) {
 	required, err := s.obsStore.ListRequiredTagKeys(ctx)
 	if err != nil {
 		slog.Warn("closeout warning: list required tag keys", "entity_id", id, "error", err)
@@ -664,7 +670,7 @@ func (s *Server) warnMissingRequiredTags(ctx context.Context, entityType, id, ag
 		return
 	}
 	slog.Warn("workunit done without required tags", "entity_id", id, "missing", missing)
-	s.emitCloseOutWarning(id, agentName, missing)
+	s.emitCloseOutWarning(id, agentName, missing, sessionID)
 }
 
 // missingRequiredKeys returns the required keys for which present holds no tag,
@@ -688,10 +694,13 @@ func missingRequiredKeys(required []string, present []wms.EntityTag) []string {
 // handleEvent so feed and the dashboard render it like any other event. The
 // _warn_msg field surfaces a bold [WARN] line; entity_id and missing carry the
 // structured detail for dashboards.
-func (s *Server) emitCloseOutWarning(id, agentName string, missing []string) {
+func (s *Server) emitCloseOutWarning(id, agentName string, missing []string, sessionID string) {
+	if sessionID == "" {
+		sessionID = "wms"
+	}
 	payload := map[string]interface{}{
 		"hook_event_name": "WMSCloseOutWarning",
-		"session_id":      "wms",
+		"session_id":      sessionID,
 		"_host":           s.cfg.Host,
 		"_agent_name":     agentName,
 		"ts":              time.Now().UTC().Format("2006-01-02T15:04:05Z"),

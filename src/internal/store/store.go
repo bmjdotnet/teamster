@@ -153,6 +153,11 @@ type Store interface {
 	// rows closed.
 	CloseIntervalsForStaleSessions(ctx context.Context, staleThreshold time.Time) (int64, error)
 
+	// GetStatusSummary returns a snapshot of system health metrics for the
+	// status command. Individual query failures zero the affected fields rather
+	// than failing the whole call.
+	GetStatusSummary(ctx context.Context) (StatusSummary, error)
+
 	// Boot hydration for the eager teamster_wms_entities gauge. Returns the
 	// current counts grouped by (entity_type, status).
 	CountEntitiesByStatus(ctx context.Context) (map[EntityTypeStatus]int, error)
@@ -169,6 +174,35 @@ type Store interface {
 	// Close releases any underlying handles. Not on wms.Store historically;
 	// surfaced here so callers can clean up without type-asserting.
 	Close() error
+}
+
+// StatusSummary is a snapshot of system health metrics returned by GetStatusSummary.
+type StatusSummary struct {
+	// WMS entities
+	OutcomesOpen  int
+	OutcomesDone  int
+	WorkUnitsOpen int
+	WorkUnitsDone int
+
+	// Sessions
+	ActiveSessions int
+	ActiveAgents   int
+	ActiveUsers    int
+	ActiveHosts    int
+	AllTimeUsers   int
+
+	// Cost
+	TotalCostUSD   float64
+	TodayCostUSD   float64
+	TotalMessages  int64
+	DistinctModels int
+
+	// Database
+	DBSizeMB float64
+
+	// Attribution
+	TotalAttributions  int64
+	MappedAttributions int64
 }
 
 // ListRelatedOpts controls the wms_listRelated query.

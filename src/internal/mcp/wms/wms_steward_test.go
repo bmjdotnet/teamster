@@ -200,9 +200,9 @@ func TestDescribeTagRoundtrip(t *testing.T) {
 // listTagsDescription returns the description ListTags surfaces for a (key,value).
 func listTagsDescription(t *testing.T, store wms.Store, key, value string) string {
 	t.Helper()
-	r, ce := call(t, store, ToolListTags, map[string]interface{}{})
+	r, ce := call(t, store, ToolListTags, map[string]interface{}{"tagKey": key})
 	if ce != nil {
-		t.Fatalf("listTags: %v", ce)
+		t.Fatalf("listTags(tagKey=%s): %v", key, ce)
 	}
 	var tags []wms.Tag
 	if err := json.Unmarshal([]byte(resultText(t, r)), &tags); err != nil {
@@ -303,16 +303,16 @@ func TestAutoUserTagOnCreate(t *testing.T) {
 // listTagsCardinality returns the cardinality recorded for a (key,value) tag.
 func listTagsCardinality(t *testing.T, store wms.Store, key, value string) string {
 	t.Helper()
-	r, ce := call(t, store, ToolListTags, map[string]interface{}{})
+	r, ce := call(t, store, ToolListTags, map[string]interface{}{"tagKey": key})
 	if ce != nil {
-		t.Fatalf("listTags: %v", ce)
+		t.Fatalf("listTags(tagKey=%s): %v", key, ce)
 	}
 	var tags []wms.Tag
 	if err := json.Unmarshal([]byte(resultText(t, r)), &tags); err != nil {
 		t.Fatalf("decode listTags: %v", err)
 	}
 	for _, tg := range tags {
-		if tg.Key == key && tg.Value == value {
+		if tg.Key == key && (value == "" || tg.Value == value) {
 			return tg.Cardinality
 		}
 	}
@@ -368,23 +368,22 @@ func TestDefineTagRequiredRoundtrip(t *testing.T) {
 	}
 }
 
-// listTagsRequired reports the required flag the listTags tool surfaces for a key.
+// listTagsRequired reports the required flag the listTags manifest surfaces for a key.
 func listTagsRequired(t *testing.T, store wms.Store, key string) bool {
 	t.Helper()
 	r, ce := call(t, store, ToolListTags, map[string]interface{}{})
 	if ce != nil {
 		t.Fatalf("listTags: %v", ce)
 	}
-	var tags []wms.Tag
-	if err := json.Unmarshal([]byte(resultText(t, r)), &tags); err != nil {
-		t.Fatalf("decode listTags: %v", err)
+	var m wms.TagManifest
+	if err := json.Unmarshal([]byte(resultText(t, r)), &m); err != nil {
+		t.Fatalf("decode listTags manifest: %v", err)
 	}
-	for _, tg := range tags {
-		if tg.Key == key {
-			return tg.Required
+	for _, k := range m.Required {
+		if k == key {
+			return true
 		}
 	}
-	t.Fatalf("listTags returned no %s rows", key)
 	return false
 }
 

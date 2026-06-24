@@ -31,3 +31,25 @@ func TestHookObserverSessionIDKey(t *testing.T) {
 		t.Errorf("session_id = %v, want test-sid", v)
 	}
 }
+
+func TestHookObserverPrefersChangeSessionID(t *testing.T) {
+	var got map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		json.Unmarshal(body, &got)
+	}))
+	defer srv.Close()
+
+	h := &HookObserver{serverURL: srv.URL, sessionID: "stale-cached", host: "testhost"}
+	h.OnStatusChange(StatusChange{
+		EntityType: "workunit",
+		EntityID:   "wu-1",
+		OldStatus:  "active",
+		NewStatus:  "done",
+		SessionID:  "actual-session-abc123",
+	})
+
+	if v, ok := got["session_id"]; !ok || v != "actual-session-abc123" {
+		t.Errorf("session_id = %v, want actual-session-abc123 (should prefer change.SessionID over cached)", v)
+	}
+}

@@ -1,0 +1,10 @@
+[Unit]
+Description=Teamster data backup (every __SCHEDULE__)
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=__SCHEDULE__
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

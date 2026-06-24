@@ -1,17 +1,18 @@
 ---
 name: start
-description: The Teamster front door. Gathers the session objective, recommends an operating model (team vs subagent), and on your confirmation dispatches to the right setup — team mode or /teamster:solo for a single-agent session. Use this at the start of any session.
+description: The Teamster front door. Gathers the session objective, recommends an operating model and proposes context tags in a single batched prompt, then dispatches to team or solo setup. Use this at the start of any session.
 disable-model-invocation: true
 argument-hint: "[focus slug — what this session is working on]"
 ---
 
 # Start a Teamster Session
 
-This is the recommending front door. It runs the shared focus interview **once**,
-reads the objective, **recommends** an operating model with a one-line rationale,
-and — once the operator confirms — dispatches to the committed path:
+This is the recommending front door. It gathers the objective, pre-computes a
+mode recommendation and context-tag proposals, then presents **both questions in
+a single batched AskUserQuestion** — one round-trip instead of a serial
+interview. On confirmation it dispatches to the committed path:
 
-- **Team** → the team-mode flow (TeamCreate, persistent named teammates, WMS
+- **Team** → the team-mode flow (persistent named teammates, WMS
   tracking, dispatch routing).
 - **Subagent (solo)** → the solo-mode flow (one primary agent, strategic Outcome
   + context-tag interview inline, ephemeral review subagents).
@@ -39,16 +40,36 @@ the dispatched skill does not re-ask.
   - options: one per plausible focus you can infer from the conversation, recent
     files, and the working directory (2–3 max). The operator can pick "Other".
 
+**Load WMS tools needed for context gathering** (deferred — load before first
+use). The dispatched skill loads the full set; start only needs these for the
+interview:
+
+```
+ToolSearch("select:mcp__wms__wms_listTags,mcp__wms__wms_listOutcomes")
+```
+
 **Context (best-effort, skip any step that fails).** Gather what the dispatched
 skill would otherwise gather, so it inherits it:
 - `git remote -v` and `git branch --show-current` (integration keys + branch).
 - The project's CLAUDE.md (declared product, version, components, trackers).
 - The conversation so far and recently-touched files.
+- Call `mcp__wms__wms_listTags` to inspect the tag vocabulary (needed for Step 2b).
 
-Keep this context — you pass it to the dispatched skill in Step 4 so it skips its
-own redundant gather. One interview, not two.
+**Outcome search.** Extract 2–3 keywords from the focus slug (e.g., "fix the
+auth timeout bug in the login flow" → `"auth timeout"`) and call
+`wms_listOutcomes(status="open", query="<keywords>")` to check for existing
+open outcomes that match the session's focus. Note any matches — they'll be
+presented in Step 3 if found. If more than 3 outcomes match, keep only the 3
+most recently updated.
 
-## Step 2 — Form a mode recommendation
+Keep this context — you pass it to the dispatched skill in Step 4 so it skips
+its own redundant gather. One interview, not two.
+
+## Step 2 — Pre-compute the batched interview (internal, no output)
+
+Before presenting questions, do the internal work silently:
+
+### 2a — Form a mode recommendation
 
 Read the objective and the gathered context and **reason** toward team or
 subagent. This is judgment in prose — there is no score, weight, or threshold.
@@ -56,54 +77,129 @@ Match the objective's shape to the signals below.
 
 **Signals that lean TEAM** (breadth / parallelism / coordination value):
 - the objective spans **multiple subsystems** or files that can progress
-  independently ("rework the dashboard *and* the migration *and* the hook");
-- it is **multi-phase with handoffs** where fresh-context separation pays
-  (implement → adversarial review → integrate across components);
+  independently;
+- it is **multi-phase with handoffs** where fresh-context separation pays;
 - it is **broad / parallelizable** — decomposes into 2–5 pieces with little
   shared mutable state;
 - it explicitly wants **adversarial review by a different agent** as a hard gate.
 
 **Signals that lean SUBAGENT** (focus / tight coupling / exploration):
-- a **single tightly-coupled change** — one file or one cohesive unit where
-  parallel agents would just contend on the same lines;
-- **exploratory / investigative** work where the path isn't yet decomposable
-  ("figure out why cost-by-work-type is empty");
-- **short-horizon** work that wouldn't amortize the team setup (field-guide
-  lesson 1: "if the work fits one agent, skip the team");
-- the operator signals they want to **drive it themselves** with occasional
-  fresh-context review subagents, not run a dispatch loop.
+- a **single tightly-coupled change** — one file or one cohesive unit;
+- **exploratory / investigative** work where the path isn't yet decomposable;
+- **short-horizon** work that wouldn't amortize the team setup;
+- the operator signals they want to **drive it themselves**.
 
 **When signals conflict or are thin, recommend TEAM** — the enforcing default
-that preserves the no-bare-agents rail and review separation. Say so plainly.
+that preserves the no-bare-agents rail and review separation. Say so plainly
+in the rationale.
 
-## Step 3 — Present the recommendation; operator confirms or overrides
+### 2b — Pre-compute context-tag proposals (from manifest)
 
-Present it as an AskUserQuestion with the recommended option **pre-marked** and a
-**one-line, falsifiable rationale** tied to the stated objective (so the operator
-can correct a bad read by restating the goal). Example:
+Call `wms_listTags` (no args) to get the role-shaped manifest. The response
+groups keys by role — no interpretation needed:
+
+- **`propose`** — keys to offer the operator. For each key, `values` lists
+  available options (when present); `n` means drill down with
+  `wms_listTags(tagKey=...)` to see values. Respect `exclusive`: propose at
+  most one key per exclusion group (e.g., `feature` and `bug` share
+  `work-scope` — propose only the one that fits). Apply `scope: "outcome"`
+  keys to the Outcome; keys without scope can go on either.
+- **`autoExtract`** — extract these keys silently from the environment (git
+  remotes, branch) and apply without asking. The value is the extraction
+  source (`git`, `env`).
+- **`required`** — keys that must be set on every WorkUnit before close-out.
+  Note these for dispatch time, not the interview.
+- **`engineManaged`** — do not propose, set, or modify these keys.
+
+**Split into interview buckets:**
+- Auto-apply: everything from `autoExtract` (extract values, apply silently)
+- Confirm via multiSelect: up to 4 keys from `propose`
+
+**Reuse existing values:** Check `wms_listTags` results for existing
+`(tag_key, tag_value)` pairs — reuse (case-insensitive slug match), don't
+duplicate.
+
+## Step 3 — Present the batched interview
+
+Present **one AskUserQuestion** with both questions. This is the single
+round-trip that replaces the old serial mode-then-tags interview.
+
+Write a short introductory sentence with the mode rationale tied to the focus
+slug, then call AskUserQuestion. If matching outcomes were found in Step 1,
+include Q0 before the mode and tag questions; otherwise skip Q0 entirely:
 
 ```
-Based on your focus "investigate why solo cost-by-work-type is empty" and that
-this is a single-subsystem exploratory trace, I'd run this as a SUBAGENT session
-— one primary agent, spawning a fresh review subagent for the eventual fix. (A
-team would add coordination overhead with nothing to parallelize.)
+AskUserQuestion with questions:
+  Q0 (single-select, header "Outcome") — ONLY if matching outcomes were found:
+    question: "Found open outcomes that may match your focus. Resume an existing
+               outcome or start new work?"
+    options (up to 3 matches + "New outcome"):
+      - label: "<outcome-id>: <title> (<status>)"
+        description: "<description snippet or focus string>"
+      - ... (up to 3 most recent matches)
+      - label: "New outcome"
+        description: "Create a fresh strategic Outcome for this session"
 
-  ▸ Subagent (recommended)   — one primary agent, ephemeral review subagents
-    Team                     — persistent named teammates, lead owns dispatch
+  Q1 (single-select, header "Mode"):
+    question: "<rationale tied to the focus slug — why you recommend this mode>"
+    options (3):
+      - label: "<Recommended mode> (Recommended)"
+        description: "<what this mode means + why it fits>"
+      - label: "<Other mode>"
+        description: "<what this mode means>"
+      - label: "Let's discuss this"
+        description: "I want to talk through the mode choice before deciding"
+
+  Q2 (multiSelect, header "Tags"):
+    question: "Which context tags for the strategic Outcome?
+               (I'll also auto-apply <list auto-apply tags>.)"
+    options (up to 4, each with source attribution in description):
+      - label: "product:<value>"    description: "from CLAUDE.md / repo name"
+      - label: "feature:<slug>"     description: "from your focus slug"
+      - label: "priority:<level>"   description: "defaulting <level>"
+      - label: "<other tag>"        description: "<source>"
 ```
 
-- header: "Operating model"
-- options: "Team" and "Subagent", with the recommended one marked and carrying
-  the rationale. Override is just picking the other option — no re-justification.
+**Notes on the tag multiSelect:**
+- Mention the `autoExtract` tags in the question text so the operator knows
+  they're being set, but don't waste a multiSelect slot on them.
+- Only include keys from the `propose` group in the multiSelect options.
+  Respect `exclusive` — propose at most one key per exclusion group.
+- The operator can add tags via "Other" (free text) — parse additions and apply
+  them alongside the selected tags.
 
-If the recommendation was team-by-default-from-ambiguity, say that in the
-rationale ("not obviously parallel, but defaulting to team for the enforcement +
-review separation; pick Subagent if you'd rather drive it solo").
+### Handling "Let's discuss this"
 
-## Step 4 — Set the mode, then dispatch
+If the operator selects **"Let's discuss this"** on the mode question:
+1. Ignore the tag selections from this batch (they may change after discussion).
+2. Engage conversationally on the mode choice — explain the tradeoffs, ask what
+   aspect they want to explore.
+3. Once the mode is resolved, re-present the tag question alone (a single
+   AskUserQuestion) so the operator can confirm tags.
 
-Once the operator has confirmed a mode, set the session mode marker, then hand
-the gathered context to the committed skill.
+If the operator uses "Other" on the tag question with discussion-like text
+("let's talk about this", "not sure", "what do you recommend for X"):
+1. Treat it as a request to discuss tags conversationally.
+2. Engage on the specific concern, then re-present the tag confirmation.
+
+If neither escape is triggered, proceed directly to Step 4.
+
+## Step 4 — Set the mode, apply tags, and dispatch
+
+Once all answers are confirmed:
+
+**If the operator selected an existing outcome (Q0):**
+- Do NOT create a new Outcome in the dispatched skill — use the selected one.
+- Set focus on the selected outcome (`wms_setFocus`).
+- If the outcome's status is `done`, reactivate it (`wms_updateOutcomeStatus`
+  to `active`).
+- Apply any confirmed tags that aren't already on the outcome (call
+  `wms_getOutcome` to check existing tags first).
+- Carry the selected outcome forward to the dispatched skill so it skips its
+  own creation step.
+
+If the operator selected "New outcome" or Q0 was not shown (no matches),
+proceed as today — the dispatched skill creates the Outcome.
 
 **Set the mode.** Load and call the mode signal (deferred MCP tool — load once):
 
@@ -120,26 +216,34 @@ Call it **once**, before dispatching, so the marker is in place before any work 
 not every turn; the hook keeps the marker fresh on its own while the session is
 active.
 
+**Apply the confirmed tags.** Using `mcp__wms__wms_tagEntity` on the strategic
+Outcome (source `manual`), after the dispatched skill creates it:
+- Apply the tags the operator selected in the multiSelect.
+- Apply the auto-apply integration keys (git.branch, github.owner, etc.).
+- For tags added via "Other", parse and apply them.
+- Reuse existing `(tag_key, tag_value)` pairs (case-insensitive). For genuinely
+  new values, pass a `description`. For genuinely new keys, seed with
+  `wms_defineTag` before applying.
+
 **Dispatch by following the chosen skill INLINE — do NOT call the Skill tool.**
 `/teamster:solo` and the bootstrap skill both set `disable-model-invocation`,
-so a `Skill(teamster:solo)` / `Skill(teamster:bootstrap)` call **errors** — they
-are user-typed slash commands, not model-invocable. To dispatch, **Read the
-chosen skill's file and follow its steps yourself, inline, in this same session**,
-reusing the focus slug + Step-1 context (skip the skill's own focus re-ask).
-Reading the file is fine; only invoking it via the Skill tool is blocked.
+so a `Skill(teamster:solo)` / `Skill(teamster:bootstrap)` call **errors**. To
+dispatch, **Read the chosen skill's file and follow its steps yourself, inline,
+in this same session**, reusing the focus slug + Step-1 context AND the
+confirmed tag set.
 
 - **Subagent** → Read `../solo/SKILL.md` and follow its steps inline: create the
-  strategic Outcome, run the context-tag interview (reusing the context you
-  gathered), set focus, and work — spawning ephemeral review subagents for the
-  verification gate. (You already called `setMode("solo")` above; solo's own
-  "set the session mode" step is then a harmless idempotent repeat.)
+  strategic Outcome, **skip Step 4 (the context-tag interview)** — tags were
+  already confirmed here, apply them after the Outcome is created — then set
+  focus and work. (You already called `setMode("solo")`.)
 - **Team** → Read `../bootstrap/SKILL.md` and follow its steps inline: generate a
-  team name from the slug, TeamCreate, load WMS tools, create the strategic
-  Outcome, run the context-tag interview, dispatch. (You already called
-  `setMode("team")` above.)
+  team name from the slug, load WMS tools, create the strategic Outcome,
+  **skip Step 6 (the context-tag interview)** — tags were already confirmed
+  here, apply them after the Outcome is created — then dispatch. (You already
+  called `setMode("team")`.)
 
-Carry the context forward — do **not** re-ask the focus slug, and do **not** call
-the Skill tool to enter the sibling skill.
+Carry the context forward — do **not** re-ask the focus slug, do **not** re-run
+the tag interview, and do **not** call the Skill tool to enter the sibling skill.
 
 ## Notes
 

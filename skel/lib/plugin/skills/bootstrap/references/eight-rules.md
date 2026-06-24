@@ -8,23 +8,18 @@ and being completely opaque to the human operator.
 > **Solo sessions.** These rules govern **multi-agent** (agent-teams) work. In a
 > **solo session** — one primary agent, no teammates, `TEAMSTER_SOLO=1` set in
 > the project's `.claude/settings.json` — Rules I, III, V, VII and the
-> shared-worktree section do not apply: there is no team to create, no peer to
-> route to, no idle teammate to keep alive, no peer to message. You ARE the
-> agent. Rules IV (right model for the job), VI (consistent entity naming), and
+> shared-worktree section do not apply: the implicit team requires no setup,
+> there is no peer to route to, no idle teammate to keep alive, no peer to message.
+> You ARE the agent. Rules IV (right model for the job), VI (consistent entity naming), and
 > VIII (verify autonomously before presenting) still apply. A solo session may
 > spawn ephemeral subagents for bounded work — including a fresh review subagent
 > for the verification gate — without standing up a team.
 
-**I. Thou shalt use one persistent team per project.**
+**I. Thou shalt work within the session's implicit team.**
 
-Create the team ONCE at project start. It lives for the entire project. Never
-create and destroy teams per dispatch.
-
-```
-WRONG:  TeamCreate("fix-auth") -> agent -> TeamDelete
-        TeamCreate("add-tests") -> agent -> TeamDelete
-RIGHT:  TeamCreate("myproject") -> agents -> tasks -> more tasks -> ...
-```
+Every session with Agent Teams enabled has one implicit team — no creation step
+needed. Name your session's work via the WMS Outcome. Don't fight the implicit
+team or try to create/destroy teams per dispatch.
 
 **II. Thou shalt name agents for their domain, not their role.**
 
@@ -80,7 +75,9 @@ reports it — no re-reading, no re-briefing.
 **VIII. Thou shalt verify autonomously and deliver results.**
 
 The default bias is autonomous delivery. The human reviews outcomes, not every
-step. Before presenting work as done:
+step. The lead verifies results but does not author the implementation — that
+is what teammates are for. A lead that implements cannot review its own work
+with fresh context. Before presenting work as done:
 
 1. **Build and test.** `go build`, `go test`, `go vet` (or project equivalent).
    Code that doesn't compile is never done.
@@ -118,10 +115,9 @@ coordinate with them via SendMessage before editing shared files."
 
 | Violation | Consequence |
 |-----------|-------------|
-| Agent tool without team_name | Hook blocks the call — you must use TeamCreate first |
+| Unnamed agents (no name parameter) | No addressability, no affinity routing, invisible to monitoring |
 | New agent for work an idle peer owns | Wasted tokens, lost context, invisible to monitoring |
 | Shutting down agents between tasks | Lost context, cold start on next task |
-| Creating/destroying teams per dispatch | Overhead with zero benefit |
 | Generic role names (@builder) | No affinity, no context advantage |
 | Shutdown before human acceptance | Human hasn't reviewed — rework may be needed |
 | Lead relaying between peers | Agents message each other directly |

@@ -1037,7 +1037,7 @@ WHERE NOT EXISTS (
 		},
 	},
 	{
-		// Mark phase and product as required (system-expected tags). The nightly
+		// Mark phase and product as required (system-expected tags). The
 		// sweep, classifier, and cost-by-product/phase dashboards depend on these.
 		// work-type was already required since v30. Users can retire these via
 		// wms_retireTag if they accept the dashboard/recovery consequences.
@@ -1128,6 +1128,69 @@ WHERE NOT EXISTS (
 			`ALTER TABLE outcome_cost_rollup ADD COLUMN bucket_hour DATETIME NOT NULL DEFAULT '1970-01-01' AFTER bucket_day`,
 			`UPDATE outcome_cost_rollup SET bucket_hour = bucket_day`,
 			`ALTER TABLE outcome_cost_rollup DROP PRIMARY KEY, ADD PRIMARY KEY (bucket_hour, outcome_id, source_type, source_id, model, agent_name)`,
+		},
+	},
+	{
+		Version: 44,
+		Name:    "tag-conventions",
+		Stmts: []string{
+			`ALTER TABLE tags ADD COLUMN scope VARCHAR(16) NOT NULL DEFAULT ''`,
+			`ALTER TABLE tags ADD COLUMN exclusion_group VARCHAR(64) NOT NULL DEFAULT ''`,
+			`ALTER TABLE tags ADD COLUMN auto_extract VARCHAR(32) NOT NULL DEFAULT ''`,
+			`ALTER TABLE tags ADD COLUMN interview VARCHAR(16) NOT NULL DEFAULT 'propose'`,
+			`UPDATE tags SET scope = 'outcome' WHERE tag_key IN ('product','priority','product-version','feature','bug')`,
+			`UPDATE tags SET scope = 'workunit' WHERE tag_key IN ('component','phase','work-type','resolution')`,
+			`UPDATE tags SET exclusion_group = 'work-scope' WHERE tag_key IN ('feature','bug')`,
+			`UPDATE tags SET auto_extract = 'git' WHERE tag_key LIKE 'github.%' OR tag_key LIKE 'gitlab.%' OR tag_key LIKE 'git.%' OR tag_key LIKE 'jira.%' OR tag_key LIKE 'linear.%'`,
+			`UPDATE tags SET interview = 'auto' WHERE tag_key LIKE 'github.%' OR tag_key LIKE 'gitlab.%' OR tag_key LIKE 'git.%'`,
+			`UPDATE tags SET interview = 'skip' WHERE tag_key IN ('phase','work-type','resolution','lifecycle','component','user','source')`,
+		},
+	},
+	{
+		// Brief-directive recovery: attribute a focus-less remote TEAMMATE's cost
+		// to the entity its dispatch brief told it to focus on (the mandated
+		// wms_setFocus directive the teammate never executed). The remote scraper
+		// ships the directive to /focus-timeline as a kind='focus' interval with
+		// identity_source='brief_directive'; rollup --recover-directives resolves
+		// it to an outcome and re-attributes the session's unallocated/skipped
+		// messages with method='brief_directive_recovery'. Reversible via
+		// --unrecover-directives. directive_evidence records the provenance.
+		Version: 45,
+		Name:    "brief-directive-recovery",
+		Stmts: []string{
+			`CREATE TABLE IF NOT EXISTS directive_evidence (
+				message_id    VARCHAR(128) NOT NULL,
+				entity_type   VARCHAR(32)  NOT NULL DEFAULT '',
+				entity_id     VARCHAR(128) NOT NULL DEFAULT '',
+				session_id    VARCHAR(64)  NOT NULL DEFAULT '',
+				agent_name    VARCHAR(128) NOT NULL DEFAULT '',
+				directive_type VARCHAR(32) NOT NULL DEFAULT '',
+				directive_id  VARCHAR(128) NOT NULL DEFAULT '',
+				recovered_at  DATETIME(6)  NOT NULL,
+				PRIMARY KEY (message_id),
+				INDEX idx_de_entity (entity_type, entity_id),
+				INDEX idx_de_session (session_id)
+			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+		},
+	},
+	{
+		// focus-interval-repair: provenance for the one-time repair of negative-width
+		// focus intervals (ended_at < started_at) produced by the dual-writer / async
+		// race before the focus-interval-dual-writer fix. rollup --repair-focus-intervals
+		// recomputes each inverted row's ended_at from its successor in the
+		// (session, agent) focus chain and records the prior (bad) ended_at here so the
+		// repair is reversible via --unrepair-focus-intervals. interval_id is the PK of
+		// the repaired wms_intervals row.
+		Version: 46,
+		Name:    "focus-interval-repair",
+		Stmts: []string{
+			`CREATE TABLE IF NOT EXISTS focus_interval_repair (
+				interval_id     BIGINT UNSIGNED NOT NULL,
+				prior_ended_at  DATETIME(6)  NULL,
+				new_ended_at    DATETIME(6)  NULL,
+				repaired_at     DATETIME(6)  NOT NULL,
+				PRIMARY KEY (interval_id)
+			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 		},
 	},
 }

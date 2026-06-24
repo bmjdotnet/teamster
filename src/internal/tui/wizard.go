@@ -6,13 +6,23 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
-const totalScreens = 8
+const totalScreens = 9
 
-// WizardModel is the bubbletea Model for the 8-screen setup wizard.
+// conventionEntry holds editable convention metadata for one context-tag key.
+type conventionEntry struct {
+	key            string
+	scope          string // "outcome" | "workunit" | ""
+	interview      string // "propose" | "auto" | "skip"
+	exclusionGroup string // free-text slug
+	autoExtract    string // "git" | "env" | ""
+}
+
+// WizardModel is the bubbletea Model for the 9-screen setup wizard.
 type WizardModel struct {
 	screen  int
 	width   int
@@ -30,10 +40,17 @@ type WizardModel struct {
 	// Screen 5: universal key review cursor
 	screen5Cursor int
 
+	// Screen 5b: tag conventions
+	conventions     []conventionEntry
+	convCursor      int
+	convCol         int // 0=scope, 1=interview, 2=exclusionGroup, 3=autoExtract
+	convEditing     bool // true when typing into exclusionGroup field
+	convEditInput   textinput.Model
+
 	// Screen 6: integration key review (only if integrations selected)
 	keyList FlatKeyList
 
-	// Applied state (written on screen 8)
+	// Applied state (written on screen 9)
 	applyDone    bool
 	applyResults []string
 }
@@ -51,11 +68,17 @@ func NewWizardModel(db *sql.DB) WizardModel {
 	cl := NewCheckboxList(items)
 	cl.Focused = true
 
+	cei := textinput.New()
+	cei.Placeholder = "e.g. work-scope"
+	cei.CharLimit = 64
+	cei.Width = 20
+
 	return WizardModel{
 		screen:          0,
 		db:              db,
 		integrationList: cl,
 		productModel:    NewProductListModel(),
+		convEditInput:   cei,
 	}
 }
 
@@ -76,15 +99,20 @@ func (m WizardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 
 		case "q":
-			if m.screen != 7 { // screen 8 uses Enter to finish
+			if m.screen != 8 { // screen 9 uses Enter to finish
 				return m, tea.Quit
 			}
 
 		case "esc":
+			if m.screen == 5 && m.convEditing {
+				m.convEditing = false
+				m.convEditInput.Blur()
+				return m, nil
+			}
 			if m.screen > 0 {
 				m.screen--
-				if m.screen == 5 && !m.hasIntegrations() {
-					// skip screen 6 backwards too
+				if m.screen == 6 && !m.hasIntegrations() {
+					// skip screen 7 backwards too
 					m.screen--
 				}
 			}
@@ -126,6 +154,13 @@ func (m WizardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.productModel.Input, cmd = m.productModel.Input.Update(msg)
 			return m, cmd
 		}
+
+		// Route text input to convention exclusion group editor on screen 5
+		if m.screen == 5 && m.convEditing {
+			var cmd tea.Cmd
+			m.convEditInput, cmd = m.convEditInput.Update(msg)
+			return m, cmd
+		}
 	}
 
 	return m, nil
@@ -133,7 +168,7 @@ func (m WizardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *WizardModel) handleEnter() (tea.Model, tea.Cmd) {
 	switch m.screen {
-	case 0, 1, 2, 6:
+	case 0, 1, 2, 7:
 		// Advance
 		m.advance()
 	case 3: // product screen
@@ -151,9 +186,17 @@ func (m *WizardModel) handleEnter() (tea.Model, tea.Cmd) {
 		}
 	case 4: // key editor (Screen 5) — advance
 		m.advance()
-	case 5: // integration key review (Screen 6) — advance
+	case 5: // conventions screen — advance (unless editing exclusion group)
+		if m.convEditing {
+			m.conventions[m.convCursor].exclusionGroup = strings.TrimSpace(m.convEditInput.Value())
+			m.convEditing = false
+			m.convEditInput.Blur()
+		} else {
+			m.advance()
+		}
+	case 6: // integration key review (Screen 7) — advance
 		m.advance()
-	case 7: // Summary screen — apply and finish
+	case 8: // Summary screen — apply and finish
 		if !m.applyDone {
 			m.applySetup()
 		} else {
@@ -166,15 +209,19 @@ func (m *WizardModel) handleEnter() (tea.Model, tea.Cmd) {
 
 func (m *WizardModel) advance() {
 	m.screen++
-	// Skip screen 6 (index 5) if no integrations selected
-	if m.screen == 5 && !m.hasIntegrations() {
+	// Build conventions list when entering screen 5b (index 5)
+	if m.screen == 5 {
+		m.buildConventions()
+	}
+	// Skip screen 7 (index 6) if no integrations selected
+	if m.screen == 6 && !m.hasIntegrations() {
 		m.screen++
 	}
 	if m.screen >= totalScreens {
 		m.screen = totalScreens - 1
 	}
-	// Build key list when entering screen 6
-	if m.screen == 5 {
+	// Build key list when entering screen 7
+	if m.screen == 6 {
 		m.buildKeyList()
 	}
 }
@@ -188,6 +235,10 @@ func (m *WizardModel) handleUp() {
 			m.screen5Cursor--
 		}
 	case 5:
+		if !m.convEditing && m.convCursor > 0 {
+			m.convCursor--
+		}
+	case 6:
 		m.keyList.Up()
 	case 3:
 		if m.productModel.Focus == 1 && m.productModel.Cursor > 0 {
@@ -205,6 +256,10 @@ func (m *WizardModel) handleDown() {
 			m.screen5Cursor++
 		}
 	case 5:
+		if !m.convEditing && m.convCursor < len(m.conventions)-1 {
+			m.convCursor++
+		}
+	case 6:
 		m.keyList.Down()
 	case 3:
 		if m.productModel.Focus == 1 {
@@ -235,6 +290,24 @@ func (m *WizardModel) handleTab(reverse bool) {
 			}
 		}
 	}
+	if m.screen == 5 {
+		if m.convEditing {
+			m.conventions[m.convCursor].exclusionGroup = strings.TrimSpace(m.convEditInput.Value())
+			m.convEditing = false
+			m.convEditInput.Blur()
+		}
+		cols := 4 // scope, interview, exclusionGroup, autoExtract
+		if !reverse {
+			m.convCol = (m.convCol + 1) % cols
+		} else {
+			m.convCol = (m.convCol + cols - 1) % cols
+		}
+		if m.convCol == 2 {
+			m.convEditing = true
+			m.convEditInput.SetValue(m.conventions[m.convCursor].exclusionGroup)
+			m.convEditInput.Focus()
+		}
+	}
 }
 
 func (m *WizardModel) handleSpace() {
@@ -242,6 +315,10 @@ func (m *WizardModel) handleSpace() {
 	case 1:
 		m.integrationList.Toggle()
 	case 5:
+		if !m.convEditing {
+			m.cycleConventionValue()
+		}
+	case 6:
 		m.keyList.Toggle()
 	}
 }
@@ -253,6 +330,42 @@ func (m *WizardModel) hasIntegrations() bool {
 		}
 	}
 	return false
+}
+
+func (m *WizardModel) buildConventions() {
+	if len(m.conventions) > 0 {
+		return // already built
+	}
+	for _, uk := range UniversalKeys {
+		ce := conventionEntry{key: uk.Key}
+		switch uk.Key {
+		case "product", "priority", "product-version", "feature", "bug":
+			ce.scope = "outcome"
+			ce.interview = "propose"
+		case "component":
+			ce.scope = "workunit"
+			ce.interview = "skip"
+		}
+		if uk.Key == "feature" || uk.Key == "bug" {
+			ce.exclusionGroup = "work-scope"
+		}
+		m.conventions = append(m.conventions, ce)
+	}
+}
+
+func (m *WizardModel) cycleConventionValue() {
+	if len(m.conventions) == 0 {
+		return
+	}
+	c := &m.conventions[m.convCursor]
+	switch m.convCol {
+	case 0: // scope
+		c.scope = cycleValue(c.scope, scopeValues)
+	case 1: // interview
+		c.interview = cycleValue(c.interview, interviewValues)
+	case 3: // autoExtract
+		c.autoExtract = cycleValue(c.autoExtract, autoExtractValues)
+	}
 }
 
 func (m *WizardModel) buildKeyList() {
@@ -298,6 +411,27 @@ func (m *WizardModel) applySetup() {
 		keysSeeded++
 	}
 	results = append(results, fmt.Sprintf("Seeded %d universal keys", keysSeeded))
+
+	// Apply conventions to universal keys.
+	convApplied := 0
+	for _, ce := range m.conventions {
+		interview := ce.interview
+		if interview == "" {
+			interview = "propose"
+		}
+		_, err := m.db.ExecContext(ctx,
+			`UPDATE tags SET scope = ?, exclusion_group = ?, auto_extract = ?, interview = ? WHERE tag_key = ?`,
+			ce.scope, ce.exclusionGroup, ce.autoExtract, interview, ce.key,
+		)
+		if err != nil {
+			m.errMsg = fmt.Sprintf("error applying convention for %s: %v", ce.key, err)
+			return
+		}
+		convApplied++
+	}
+	if convApplied > 0 {
+		results = append(results, fmt.Sprintf("Applied conventions to %d keys", convApplied))
+	}
 
 	// Seed product values.
 	for _, p := range m.productModel.Products {
@@ -363,10 +497,12 @@ func (m WizardModel) View() string {
 	case 4:
 		content = m.viewScreen5(inner)
 	case 5:
-		content = m.viewScreen6(inner)
+		content = m.viewScreenConventions(inner)
 	case 6:
-		content = m.viewScreen7(inner)
+		content = m.viewScreen6(inner)
 	case 7:
+		content = m.viewScreen7(inner)
+	case 8:
 		content = m.viewScreen8(inner)
 	default:
 		content = "Unknown screen"

@@ -8,6 +8,31 @@
   "links": [],
   "panels": [
     {
+      "type": "text",
+      "title": "",
+      "gridPos": {
+        "h": 2,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 900,
+      "options": {
+        "mode": "html",
+        "content": "<div style=\"display:flex; gap:6px; align-items:center; flex-wrap:wrap; padding:2px 0; margin: -4px 0;\">\n  <a href=\"/d/landing-page?from=${__from}&to=${__to}\" style=\"padding:4px 12px; background:#1e1e2e; color:#8ab4f8; border-radius:4px; text-decoration:none; font-size:13px; font-weight:600; border:1px solid #333;\">Home</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/activity-feed?from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Activity</a>\n  <a href=\"/d/fd-ai-spend-overview-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Spend</a>\n  <a href=\"/d/fd-cost-explorer-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Trace</a>\n  <a href=\"/d/fd-usage-effectiveness-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Usage</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/cost-by-tag-value?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Simple Cost</a>\n  <a href=\"/d/tag-stack-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Multidim</a>\n  <a href=\"/d/entity-cost-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Work</a>\n  <a href=\"/d/fd-outcome-accounting-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Outcomes</a>\n  <a href=\"/d/outcome-cost-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#2a2a4a; color:#8ab4f8; border-radius:4px; text-decoration:none; font-size:12px; font-weight:600; border:1px solid #4a4a6a;\">Outcome Cost</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/fd-data-quality-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Health</a>\n</div>",
+        "code": {
+          "language": "html",
+          "showLineNumbers": false,
+          "showMiniMap": false
+        }
+      },
+      "transparent": true,
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
       "datasource": {
         "type": "mysql",
         "uid": "teamster-mysql"
@@ -23,7 +48,7 @@
         "h": 4,
         "w": 6,
         "x": 0,
-        "y": 0
+        "y": 2
       },
       "id": 1,
       "options": {
@@ -69,7 +94,7 @@
         "h": 4,
         "w": 6,
         "x": 6,
-        "y": 0
+        "y": 2
       },
       "id": 2,
       "options": {
@@ -115,7 +140,7 @@
         "h": 4,
         "w": 6,
         "x": 12,
-        "y": 0
+        "y": 2
       },
       "id": 3,
       "options": {
@@ -160,7 +185,7 @@
         "h": 4,
         "w": 6,
         "x": 18,
-        "y": 0
+        "y": 2
       },
       "id": 4,
       "options": {
@@ -223,7 +248,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 4
+        "y": 6
       },
       "id": 5,
       "options": {
@@ -249,7 +274,7 @@
           },
           "format": "time_series",
           "refId": "A",
-          "rawSql": "SELECT\n  $__timeGroupAlias(ocr.bucket_hour, $agg),\n  CONCAT(ocr.outcome_id, ' \u2014 ', COALESCE(o.title, ocr.outcome_id)) AS metric,\n  ROUND(SUM(ocr.cost_usd), 4) AS value\nFROM outcome_cost_rollup ocr\nLEFT JOIN outcomes o ON o.id = ocr.outcome_id\nWHERE ocr.bucket_hour BETWEEN $__timeFrom() AND $__timeTo()\n  AND (('${filter_value:raw}' = 'All' OR '${filter_value:raw}' = '\\$__all' OR '${filter_value:raw}' = '') OR EXISTS (SELECT 1 FROM entity_tags ef JOIN tags tf ON tf.id = ef.tag_id WHERE ef.entity_type = 'outcome' AND ef.entity_id = ocr.outcome_id AND tf.tag_key = '${filter_key:raw}' AND tf.tag_value = '${filter_value:raw}'))\nGROUP BY 1, ocr.outcome_id, o.title\nORDER BY 1"
+          "rawSql": "SELECT\n  $__timeGroupAlias(ocr.bucket_hour, $agg),\n  COALESCE(o.title, ocr.outcome_id) AS metric,\n  ROUND(SUM(ocr.cost_usd), 4) AS value\nFROM outcome_cost_rollup ocr\nLEFT JOIN outcomes o ON o.id = ocr.outcome_id\nWHERE ocr.bucket_hour BETWEEN $__timeFrom() AND $__timeTo()\n  AND (('${filter_value:raw}' = 'All' OR '${filter_value:raw}' = '\\$__all' OR '${filter_value:raw}' = '') OR EXISTS (SELECT 1 FROM entity_tags ef JOIN tags tf ON tf.id = ef.tag_id WHERE ef.entity_type = 'outcome' AND ef.entity_id = ocr.outcome_id AND tf.tag_key = '${filter_key:raw}' AND tf.tag_value = '${filter_value:raw}'))\nGROUP BY 1, ocr.outcome_id, o.title\nORDER BY 1"
         }
       ],
       "title": "Cost by Outcome",
@@ -288,7 +313,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 14
+        "y": 16
       },
       "id": 6,
       "options": {
@@ -314,7 +339,7 @@
           },
           "format": "time_series",
           "refId": "A",
-          "rawSql": "SELECT\n  $__timeGroupAlias(ocr.bucket_hour, $agg),\n  CASE\n    WHEN ocr.source_type = 'direct' THEN '(direct outcome)'\n    ELSE CONCAT(ocr.source_id, ' \u2014 ', COALESCE(w.title, ocr.source_id))\n  END AS metric,\n  ROUND(SUM(ocr.cost_usd), 4) AS value\nFROM outcome_cost_rollup ocr\nLEFT JOIN workunits w ON w.id = ocr.source_id AND ocr.source_type = 'workunit'\nWHERE ocr.bucket_hour BETWEEN $__timeFrom() AND $__timeTo()\n  AND (('${filter_value:raw}' = 'All' OR '${filter_value:raw}' = '\\$__all' OR '${filter_value:raw}' = '') OR EXISTS (SELECT 1 FROM entity_tags ef JOIN tags tf ON tf.id = ef.tag_id WHERE ef.entity_type = 'outcome' AND ef.entity_id = ocr.outcome_id AND tf.tag_key = '${filter_key:raw}' AND tf.tag_value = '${filter_value:raw}'))\nGROUP BY 1, ocr.source_type, ocr.source_id, w.title\nORDER BY 1"
+          "rawSql": "SELECT\n  $__timeGroupAlias(ocr.bucket_hour, $agg),\n  CASE\n    WHEN ocr.source_type = 'direct' THEN '(direct outcome)'\n    ELSE COALESCE(w.title, ocr.source_id)\n  END AS metric,\n  ROUND(SUM(ocr.cost_usd), 4) AS value\nFROM outcome_cost_rollup ocr\nLEFT JOIN workunits w ON w.id = ocr.source_id AND ocr.source_type = 'workunit'\nWHERE ocr.bucket_hour BETWEEN $__timeFrom() AND $__timeTo()\n  AND (('${filter_value:raw}' = 'All' OR '${filter_value:raw}' = '\\$__all' OR '${filter_value:raw}' = '') OR EXISTS (SELECT 1 FROM entity_tags ef JOIN tags tf ON tf.id = ef.tag_id WHERE ef.entity_type = 'outcome' AND ef.entity_id = ocr.outcome_id AND tf.tag_key = '${filter_key:raw}' AND tf.tag_value = '${filter_value:raw}'))\nGROUP BY 1, ocr.source_type, ocr.source_id, w.title\nORDER BY 1"
         }
       ],
       "title": "Cost Decomposition (Direct + WorkUnits)",
@@ -356,7 +381,7 @@
         "h": 12,
         "w": 24,
         "x": 0,
-        "y": 24
+        "y": 26
       },
       "id": 7,
       "pluginVersion": "12.1.1",
@@ -387,10 +412,10 @@
           },
           "format": "table",
           "refId": "A",
-          "rawSql": "SELECT\n  CONCAT(ocr.outcome_id, ' \u2014 ', COALESCE(o.title, ocr.outcome_id)) AS outcome,\n  CASE\n    WHEN ocr.source_type = 'direct' THEN '  \u21b3 (direct)'\n    ELSE CONCAT('  \u21b3 ', ocr.source_id, ' \u2014 ', COALESCE(w.title, ocr.source_id))\n  END AS source,\n  ocr.source_type,\n  ROUND(SUM(ocr.cost_usd), 2) AS cost_usd,\n  ROUND(SUM(ocr.tokens)) AS tokens\nFROM outcome_cost_rollup ocr\nLEFT JOIN outcomes o ON o.id = ocr.outcome_id\nLEFT JOIN workunits w ON w.id = ocr.source_id AND ocr.source_type = 'workunit'\nWHERE ocr.bucket_hour BETWEEN $__timeFrom() AND $__timeTo()\n  AND (('${filter_value:raw}' = 'All' OR '${filter_value:raw}' = '\\$__all' OR '${filter_value:raw}' = '') OR EXISTS (SELECT 1 FROM entity_tags ef JOIN tags tf ON tf.id = ef.tag_id WHERE ef.entity_type = 'outcome' AND ef.entity_id = ocr.outcome_id AND tf.tag_key = '${filter_key:raw}' AND tf.tag_value = '${filter_value:raw}'))\nGROUP BY ocr.outcome_id, o.title, ocr.source_type, ocr.source_id, w.title\nORDER BY ocr.outcome_id, ocr.source_type DESC, cost_usd DESC"
+          "rawSql": "SELECT\n  COALESCE(o.title, ocr.outcome_id) AS outcome,\n  CASE\n    WHEN ocr.source_type = 'direct' THEN '  ↳ (direct)'\n    ELSE CONCAT('  ↳ ', COALESCE(w.title, ocr.source_id))\n  END AS source,\n  ocr.source_type,\n  ROUND(SUM(ocr.cost_usd), 2) AS cost_usd,\n  ROUND(SUM(ocr.tokens)) AS tokens\nFROM outcome_cost_rollup ocr\nLEFT JOIN outcomes o ON o.id = ocr.outcome_id\nLEFT JOIN workunits w ON w.id = ocr.source_id AND ocr.source_type = 'workunit'\nWHERE ocr.bucket_hour BETWEEN $__timeFrom() AND $__timeTo()\n  AND (('${filter_value:raw}' = 'All' OR '${filter_value:raw}' = '\\$__all' OR '${filter_value:raw}' = '') OR EXISTS (SELECT 1 FROM entity_tags ef JOIN tags tf ON tf.id = ef.tag_id WHERE ef.entity_type = 'outcome' AND ef.entity_id = ocr.outcome_id AND tf.tag_key = '${filter_key:raw}' AND tf.tag_value = '${filter_value:raw}'))\nGROUP BY ocr.outcome_id, o.title, ocr.source_type, ocr.source_id, w.title\nORDER BY ocr.outcome_id, ocr.source_type DESC, cost_usd DESC"
         }
       ],
-      "title": "Outcome \u2192 Source Breakdown",
+      "title": "Outcome → Source Breakdown",
       "type": "table"
     },
     {
@@ -465,7 +490,7 @@
         "h": 12,
         "w": 24,
         "x": 0,
-        "y": 36
+        "y": 38
       },
       "id": 8,
       "pluginVersion": "12.1.1",
@@ -498,7 +523,7 @@
           },
           "format": "table",
           "refId": "A",
-          "rawSql": "SELECT\n  CONCAT(ocr.outcome_id, ' \u2014 ', COALESCE(o.title, ocr.outcome_id)) AS outcome,\n  COALESCE(o.status, '') AS status,\n  COUNT(DISTINCT CASE WHEN ocr.source_type = 'workunit' THEN ocr.source_id END) AS workunits,\n  ROUND(SUM(ocr.cost_usd), 2) AS total_cost,\n  ROUND(SUM(CASE WHEN ocr.source_type = 'direct' THEN ocr.cost_usd ELSE 0 END), 2) AS direct_cost,\n  ROUND(SUM(CASE WHEN ocr.source_type = 'workunit' THEN ocr.cost_usd ELSE 0 END), 2) AS workunit_cost,\n  ROUND(SUM(CASE WHEN ocr.source_type = 'direct' THEN ocr.cost_usd ELSE 0 END) / NULLIF(SUM(ocr.cost_usd), 0), 4) AS direct_pct\nFROM outcome_cost_rollup ocr\nLEFT JOIN outcomes o ON o.id = ocr.outcome_id\nWHERE ocr.bucket_hour BETWEEN $__timeFrom() AND $__timeTo()\n  AND (('${filter_value:raw}' = 'All' OR '${filter_value:raw}' = '\\$__all' OR '${filter_value:raw}' = '') OR EXISTS (SELECT 1 FROM entity_tags ef JOIN tags tf ON tf.id = ef.tag_id WHERE ef.entity_type = 'outcome' AND ef.entity_id = ocr.outcome_id AND tf.tag_key = '${filter_key:raw}' AND tf.tag_value = '${filter_value:raw}'))\nGROUP BY ocr.outcome_id, o.title, o.status\nORDER BY total_cost DESC\nLIMIT 100"
+          "rawSql": "SELECT\n  COALESCE(o.title, ocr.outcome_id) AS outcome,\n  COALESCE(o.status, '') AS status,\n  COUNT(DISTINCT CASE WHEN ocr.source_type = 'workunit' THEN ocr.source_id END) AS workunits,\n  ROUND(SUM(ocr.cost_usd), 2) AS total_cost,\n  ROUND(SUM(CASE WHEN ocr.source_type = 'direct' THEN ocr.cost_usd ELSE 0 END), 2) AS direct_cost,\n  ROUND(SUM(CASE WHEN ocr.source_type = 'workunit' THEN ocr.cost_usd ELSE 0 END), 2) AS workunit_cost,\n  ROUND(SUM(CASE WHEN ocr.source_type = 'direct' THEN ocr.cost_usd ELSE 0 END) / NULLIF(SUM(ocr.cost_usd), 0), 4) AS direct_pct\nFROM outcome_cost_rollup ocr\nLEFT JOIN outcomes o ON o.id = ocr.outcome_id\nWHERE ocr.bucket_hour BETWEEN $__timeFrom() AND $__timeTo()\n  AND (('${filter_value:raw}' = 'All' OR '${filter_value:raw}' = '\\$__all' OR '${filter_value:raw}' = '') OR EXISTS (SELECT 1 FROM entity_tags ef JOIN tags tf ON tf.id = ef.tag_id WHERE ef.entity_type = 'outcome' AND ef.entity_id = ocr.outcome_id AND tf.tag_key = '${filter_key:raw}' AND tf.tag_value = '${filter_value:raw}'))\nGROUP BY ocr.outcome_id, o.title, o.status\nORDER BY total_cost DESC\nLIMIT 100"
         }
       ],
       "title": "Outcome Summary",
@@ -507,21 +532,44 @@
   ],
   "schemaVersion": 39,
   "tags": [
-    "teamster"
+    "teamster",
+    "work-cost"
   ],
   "templating": {
     "list": [
       {
         "auto": true,
         "auto_count": 50,
-        "auto_min": "1h",
+        "auto_min": "1m",
         "current": {
-          "text": "$__auto",
-          "value": "$__auto"
+          "selected": true,
+          "text": "auto",
+          "value": "$__auto_interval_agg"
         },
+        "hide": 0,
         "label": "Aggregation",
         "name": "agg",
         "options": [
+          {
+            "selected": true,
+            "text": "auto",
+            "value": "$__auto_interval_agg"
+          },
+          {
+            "selected": false,
+            "text": "1m",
+            "value": "1m"
+          },
+          {
+            "selected": false,
+            "text": "5m",
+            "value": "5m"
+          },
+          {
+            "selected": false,
+            "text": "15m",
+            "value": "15m"
+          },
           {
             "selected": false,
             "text": "1h",
@@ -536,20 +584,10 @@
             "selected": false,
             "text": "1d",
             "value": "1d"
-          },
-          {
-            "selected": false,
-            "text": "1w",
-            "value": "1w"
-          },
-          {
-            "selected": false,
-            "text": "1M",
-            "value": "1M"
           }
         ],
-        "query": "1h,6h,1d,1w,1M",
-        "refresh": 2,
+        "query": "1m,5m,15m,1h,6h,1d",
+        "skipUrlSync": false,
         "type": "interval"
       },
       {
@@ -588,7 +626,7 @@
     ]
   },
   "time": {
-    "from": "now-30d",
+    "from": "now-7d",
     "to": "now"
   },
   "timepicker": {},

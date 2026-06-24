@@ -169,6 +169,113 @@ func TestWriteReadRoundTrip(t *testing.T) {
 	}
 }
 
+// TestBuildYAMLConfig_PreservesRelayOnUpgrade verifies that relay config
+// persists across upgrade installs when no relay flags are re-specified.
+func TestBuildYAMLConfig_PreservesRelayOnUpgrade(t *testing.T) {
+	basedir := t.TempDir()
+	writePriorYAML(t, basedir, teamsterYAML{
+		Hookd: yamlHookd{Mode: "systemd", Port: 9125},
+		Relay: yamlRelay{
+			Mode:           "install",
+			Target:         "http://replica:9125/event",
+			ReplPushRemote: "user@replica",
+		},
+	})
+
+	got := buildYAMLConfig(yamlParams{basedir: basedir})
+
+	if got.Relay.Mode != "install" {
+		t.Errorf("relay mode = %q; want install", got.Relay.Mode)
+	}
+	if got.Relay.Target != "http://replica:9125/event" {
+		t.Errorf("relay target = %q; want http://replica:9125/event", got.Relay.Target)
+	}
+	if got.Relay.ReplPushRemote != "user@replica" {
+		t.Errorf("repl_push_remote = %q; want user@replica", got.Relay.ReplPushRemote)
+	}
+}
+
+// TestBuildYAMLConfig_RelayFlagsOverridePrior verifies that explicit relay
+// flags take precedence over prior yaml values.
+func TestBuildYAMLConfig_RelayFlagsOverridePrior(t *testing.T) {
+	basedir := t.TempDir()
+	writePriorYAML(t, basedir, teamsterYAML{
+		Hookd: yamlHookd{Mode: "systemd", Port: 9125},
+		Relay: yamlRelay{
+			Mode:           "install",
+			Target:         "http://old-host:9125/event",
+			ReplPushRemote: "user@old-host",
+		},
+	})
+
+	got := buildYAMLConfig(yamlParams{
+		basedir:        basedir,
+		relayMode:      "install",
+		relayTarget:    "http://new-host:9125/event",
+		replPushRemote: "user@new-host",
+	})
+
+	if got.Relay.Target != "http://new-host:9125/event" {
+		t.Errorf("relay target = %q; want http://new-host:9125/event", got.Relay.Target)
+	}
+	if got.Relay.ReplPushRemote != "user@new-host" {
+		t.Errorf("repl_push_remote = %q; want user@new-host", got.Relay.ReplPushRemote)
+	}
+}
+
+// TestBuildYAMLConfig_PreservesHealthHostnameOnUpgrade verifies that an upgrade
+// install without --prometheus-endpoint / --grafana-endpoint preserves the
+// hostname from the prior yaml's health URLs, not regressing to "localhost".
+func TestBuildYAMLConfig_PreservesHealthHostnameOnUpgrade(t *testing.T) {
+	basedir := t.TempDir()
+	writePriorYAML(t, basedir, teamsterYAML{
+		Hookd: yamlHookd{Mode: "systemd", Port: 9125},
+		Prometheus: yamlService{
+			Mode:   "external",
+			Port:   9090,
+			Health: "http://hub-host:9090/-/healthy",
+		},
+		Grafana: yamlService{
+			Mode:   "external",
+			Port:   3000,
+			Health: "http://hub-host:3000/api/health",
+		},
+	})
+
+	got := buildYAMLConfig(yamlParams{basedir: basedir})
+
+	if got.Prometheus.Health != "http://hub-host:9090/-/healthy" {
+		t.Errorf("prometheus health = %q; want http://hub-host:9090/-/healthy", got.Prometheus.Health)
+	}
+	if got.Grafana.Health != "http://hub-host:3000/api/health" {
+		t.Errorf("grafana health = %q; want http://hub-host:3000/api/health", got.Grafana.Health)
+	}
+}
+
+// TestBuildYAMLConfig_ExplicitEndpointOverridesHostname verifies that when
+// --prometheus-endpoint or --grafana-endpoint is explicitly provided, its
+// hostname takes precedence over any prior yaml health URL.
+func TestBuildYAMLConfig_ExplicitEndpointOverridesHostname(t *testing.T) {
+	basedir := t.TempDir()
+	writePriorYAML(t, basedir, teamsterYAML{
+		Hookd: yamlHookd{Mode: "systemd", Port: 9125},
+		Prometheus: yamlService{
+			Mode:   "external",
+			Port:   9090,
+			Health: "http://old-host:9090/-/healthy",
+		},
+	})
+
+	got := buildYAMLConfig(yamlParams{
+		basedir:            basedir,
+		prometheusEndpoint: "http://new-host:9090",
+	})
+
+	if got.Prometheus.Health != "http://new-host:9090/-/healthy" {
+		t.Errorf("prometheus health = %q; want http://new-host:9090/-/healthy", got.Prometheus.Health)
+	}
+}
+
 // TestWriteYAMLConfigPerms0600 proves teamster.yaml is written owner-only (0600)
 // — it carries the store DSN inline as a CLI fallback, same credential-hygiene
 // class as the secrets EnvironmentFile. Also proves a re-install narrows a

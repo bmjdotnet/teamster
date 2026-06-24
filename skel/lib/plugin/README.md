@@ -14,7 +14,7 @@ Claude Code plugin providing Agent Teams workflow orchestration.
 | plan | `/teamster:plan` | Decompose work into WMS entities and team composition |
 | review | `/teamster:review` | Readiness assessment before presenting work |
 | seasoning | `/teamster:seasoning` | Iterative spec refinement |
-| sweep | `/teamster:sweep` | Autonomous nightly attribution sweep (headless, `claude --print`) |
+| sweep | `/teamster:sweep` | Autonomous attribution sweep (headless, `claude --print`) |
 
 ## Install
 

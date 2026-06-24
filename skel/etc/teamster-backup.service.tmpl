@@ -1,0 +1,8 @@
+[Unit]
+Description=Teamster data backup
+After=network.target
+
+[Service]
+Type=oneshot
+User=__USER__
+ExecStart=__BASEDIR__/bin/backup --config __BASEDIR__/etc/teamster.yaml

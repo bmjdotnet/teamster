@@ -51,6 +51,10 @@ func main() {
 			os.Exit(runTags(os.Args[2:]))
 		case "wms":
 			os.Exit(runWMS(os.Args[2:]))
+		case "backup":
+			os.Exit(runBackup(os.Args[2:]))
+		case "restore":
+			os.Exit(runRestore(os.Args[2:]))
 		case "setup":
 			os.Exit(runSetup(os.Args[2:]))
 		case "install-remote":
@@ -101,12 +105,14 @@ func printUsage() {
 	fmt.Fprintf(os.Stderr, "Subcommands:\n")
 	fmt.Fprintf(os.Stderr, "  start       Start all supervised services (daemonizes)\n")
 	fmt.Fprintf(os.Stderr, "  stop        Stop all services\n")
-	fmt.Fprintf(os.Stderr, "  status      Show service status\n")
+	fmt.Fprintf(os.Stderr, "  status      Show service status (--live for interactive dashboard)\n")
 	fmt.Fprintf(os.Stderr, "  wms-reset   Reset WMS database (stop → delete → start)\n")
 	fmt.Fprintf(os.Stderr, "  store       Store management commands\n")
 	fmt.Fprintf(os.Stderr, "  sql         Run SQL via $TEAMSTER_STORE_DSN (password stays off argv)\n")
 	fmt.Fprintf(os.Stderr, "  tags        Tag vocabulary management\n")
 	fmt.Fprintf(os.Stderr, "  wms         WMS entity management (list, drain, close, gc)\n")
+	fmt.Fprintf(os.Stderr, "  backup      Take a backup (or: backup list, backup status)\n")
+	fmt.Fprintf(os.Stderr, "  restore     Restore from a backup directory\n")
 	fmt.Fprintf(os.Stderr, "  setup       Guided setup and configuration\n")
 	fmt.Fprintf(os.Stderr, "  install-remote  Install Teamster remote client on another host\n")
 	fmt.Fprintf(os.Stderr, "  version     Print build version and exit\n")

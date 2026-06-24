@@ -106,8 +106,8 @@ func TestSolo_UserPromptSubmit_TeamHalfSuppressed(t *testing.T) {
 }
 
 // TestSolo_PreToolUse_BareAgentAllowed covers gate (c): a bare Agent (no
-// team_name) is silently allowed in solo mode (empty output, no block), and
-// still blocked in team mode (byte-identical to pre-solo).
+// name field) is silently allowed in all modes — the bare-Agent block was
+// removed in the implicit-teams migration.
 func TestSolo_PreToolUse_BareAgentAllowed(t *testing.T) {
 	srv := discardServer(t)
 	defer srv.Close()
@@ -124,31 +124,14 @@ func TestSolo_PreToolUse_BareAgentAllowed(t *testing.T) {
 		t.Errorf("solo bare-Agent must produce no output (silent allow), got %q", soloOut)
 	}
 
-	// Team: blocked with the enforcement reason.
+	// Team: also silently allowed — bare-Agent blocking was removed.
 	teamEvent := HookEvent{HookEventName: "PreToolUse", ToolName: "Agent", SessionID: "teamsess0002", ToolInput: bareInput}
 	teamRaw := map[string]interface{}{
 		"hook_event_name": "PreToolUse", "tool_name": "Agent", "session_id": "teamsess0002", "tool_input": bareInput,
 	}
 	teamOut := ProcessEvent(teamEvent, teamRaw, srv.URL, t.TempDir(), false)
-	dec, reason := decision(t, teamOut)
-	if dec != "block" {
-		t.Errorf("team bare-Agent must be blocked, got decision=%q output=%q", dec, teamOut)
-	}
-	if reason != AGENT_TEAMS_ENFORCEMENT {
-		t.Errorf("team bare-Agent block reason mismatch\n got=%q\nwant=%q", reason, AGENT_TEAMS_ENFORCEMENT)
-	}
-
-	// A teamed Agent (team_name present) is never blocked, in either mode.
-	teamedInput := map[string]interface{}{"description": "do a thing", "name": "scout", "team_name": "sq"}
-	for _, solo := range []bool{true, false} {
-		ev := HookEvent{HookEventName: "PreToolUse", ToolName: "Agent", SessionID: "sess0003", ToolInput: teamedInput}
-		raw := map[string]interface{}{
-			"hook_event_name": "PreToolUse", "tool_name": "Agent", "session_id": "sess0003", "tool_input": teamedInput,
-		}
-		out := ProcessEvent(ev, raw, srv.URL, t.TempDir(), solo)
-		if dec, _ := decision(t, out); dec == "block" {
-			t.Errorf("teamed Agent (solo=%v) must not be blocked, got %q", solo, out)
-		}
+	if dec, _ := decision(t, teamOut); dec == "block" {
+		t.Errorf("team bare-Agent must not be blocked (implicit-teams migration), got output=%q", teamOut)
 	}
 }
 
@@ -163,8 +146,8 @@ func TestSolo_TeamMode_ContextByteIdentical(t *testing.T) {
 		"Call completeActivity(message) when you finish a task or turn's objective. " +
 		"If working on a WMS-tracked entity and you haven't called wms_setFocus yet this session, " +
 		"do so now — it's the cost-bearing focus (reportActivity is cosmetic only).\n\n" +
-		"When dispatching parallel work, you MUST use Agent Teams (TeamCreate + Agent with team_name), " +
-		"never bare Agent calls. Route follow-up tasks to existing idle teammates via SendMessage — " +
+		"When dispatching parallel work, spawn named teammates (give each a `name` for addressability) " +
+		"and route follow-up tasks to existing idle teammates via SendMessage — " +
 		"do not spawn replacements. Teammates collaborate directly: @tester messages @store about a " +
 		"bug, @store fixes, @tester re-tests. The lead monitors but does not relay. Keep all " +
 		"teammates alive until the human operator reviews and accepts the work."

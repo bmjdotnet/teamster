@@ -40,13 +40,16 @@ func (f *fakeCloseoutStore) ListEventRecords(context.Context, string, string, in
 	panic("unexpected")
 }
 func (f *fakeCloseoutStore) ListTags(context.Context) ([]Tag, error) { panic("unexpected") }
+func (f *fakeCloseoutStore) SearchTags(context.Context, string, string) ([]Tag, error) {
+	panic("unexpected")
+}
 func (f *fakeCloseoutStore) ListRequiredTagKeys(context.Context) ([]string, error) {
 	panic("unexpected")
 }
 func (f *fakeCloseoutStore) GetOutcome(context.Context, string) (*Outcome, error) {
 	panic("unexpected")
 }
-func (f *fakeCloseoutStore) ListOutcomes(context.Context, string, map[string]string, string) ([]*Outcome, error) {
+func (f *fakeCloseoutStore) ListOutcomes(context.Context, string, map[string]string, string, string) ([]*Outcome, error) {
 	panic("unexpected")
 }
 func (f *fakeCloseoutStore) GetWorkUnit(context.Context, string) (*WorkUnit, error) {

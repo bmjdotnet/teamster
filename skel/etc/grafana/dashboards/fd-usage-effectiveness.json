@@ -22,12 +22,37 @@
   "links": [],
   "panels": [
     {
+      "type": "text",
+      "title": "",
+      "gridPos": {
+        "h": 2,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 900,
+      "options": {
+        "mode": "html",
+        "content": "<div style=\"display:flex; gap:6px; align-items:center; flex-wrap:wrap; padding:2px 0; margin: -4px 0;\">\n  <a href=\"/d/landing-page?from=${__from}&to=${__to}\" style=\"padding:4px 12px; background:#1e1e2e; color:#8ab4f8; border-radius:4px; text-decoration:none; font-size:13px; font-weight:600; border:1px solid #333;\">Home</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/activity-feed?from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Activity</a>\n  <a href=\"/d/fd-ai-spend-overview-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Spend</a>\n  <a href=\"/d/fd-cost-explorer-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Trace</a>\n  <a href=\"/d/fd-usage-effectiveness-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#2a2a4a; color:#8ab4f8; border-radius:4px; text-decoration:none; font-size:12px; font-weight:600; border:1px solid #4a4a6a;\">Usage</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/cost-by-tag-value?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Simple Cost</a>\n  <a href=\"/d/tag-stack-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Multidim</a>\n  <a href=\"/d/entity-cost-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Work</a>\n  <a href=\"/d/fd-outcome-accounting-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Outcomes</a>\n  <a href=\"/d/outcome-cost-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Outcome Cost</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/fd-data-quality-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Health</a>\n</div>",
+        "code": {
+          "language": "html",
+          "showLineNumbers": false,
+          "showMiniMap": false
+        }
+      },
+      "transparent": true,
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 0
+        "y": 2
       },
       "id": 300,
       "panels": [],
@@ -39,7 +64,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "Cost share by model family over time \u2014 watch for expensive models displacing cheaper ones on routine work.\nscope: immediate ledger (attribution pending)",
+      "description": "Cost share by model family over time — watch for expensive models displacing cheaper ones on routine work.\nscope: immediate ledger (attribution pending)",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -157,7 +182,7 @@
         "h": 9,
         "w": 19,
         "x": 0,
-        "y": 1
+        "y": 3
       },
       "id": 302,
       "options": {
@@ -197,7 +222,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "Fable/Opus cost on work-type=docs or test, as % of all Fable/Opus cost. High values are a model-fit review prompt \u2014 not a verdict.\nscope: attributed spend (cost_facts + entity_tags_resolved + fractional weighting per A2)",
+      "description": "Fable/Opus cost on work-type=docs or test, as % of all Fable/Opus cost. High values are a model-fit review prompt — not a verdict.\nscope: attributed spend (cost_facts + entity_tags_resolved + fractional weighting per A2)",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -231,7 +256,7 @@
         "h": 9,
         "w": 5,
         "x": 19,
-        "y": 1
+        "y": 3
       },
       "id": 303,
       "options": {
@@ -322,7 +347,7 @@
         "h": 7,
         "w": 24,
         "x": 0,
-        "y": 10
+        "y": 12
       },
       "id": 301,
       "options": {
@@ -370,7 +395,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 17
+        "y": 19
       },
       "id": 100,
       "panels": [],
@@ -439,7 +464,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 18
+        "y": 20
       },
       "id": 101,
       "options": {
@@ -471,7 +496,7 @@
           "refId": "A"
         }
       ],
-      "title": "Spend by Engineer, daily",
+      "title": "Spend by Engineer",
       "type": "timeseries"
     },
     {
@@ -567,7 +592,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 18
+        "y": 20
       },
       "id": 102,
       "options": {
@@ -599,7 +624,7 @@
           "refId": "A"
         }
       ],
-      "title": "Lead vs Teammates Cost, daily",
+      "title": "Lead vs Teammates Cost",
       "type": "timeseries"
     },
     {
@@ -641,7 +666,7 @@
         "h": 4,
         "w": 4,
         "x": 0,
-        "y": 26
+        "y": 28
       },
       "id": 103,
       "options": {
@@ -748,7 +773,7 @@
         "h": 4,
         "w": 5,
         "x": 4,
-        "y": 26
+        "y": 28
       },
       "id": 106,
       "options": {
@@ -844,7 +869,7 @@
         "h": 4,
         "w": 5,
         "x": 9,
-        "y": 26
+        "y": 28
       },
       "id": 105,
       "options": {
@@ -874,7 +899,7 @@
           "refId": "A"
         }
       ],
-      "title": "Distinct Active Agents / Day",
+      "title": "Distinct Active Agents",
       "type": "timeseries"
     },
     {
@@ -940,7 +965,7 @@
         "h": 4,
         "w": 5,
         "x": 14,
-        "y": 26
+        "y": 28
       },
       "id": 107,
       "options": {
@@ -970,7 +995,7 @@
           "refId": "A"
         }
       ],
-      "title": "Sessions / Day",
+      "title": "Sessions",
       "type": "timeseries"
     },
     {
@@ -1036,7 +1061,7 @@
         "h": 4,
         "w": 5,
         "x": 19,
-        "y": 26
+        "y": 28
       },
       "id": 104,
       "options": {
@@ -1066,7 +1091,7 @@
           "refId": "A"
         }
       ],
-      "title": "Teammate Tool Calls / Day",
+      "title": "Teammate Tool Calls",
       "type": "timeseries"
     },
     {
@@ -1075,7 +1100,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 30
+        "y": 32
       },
       "id": 400,
       "panels": [],
@@ -1144,7 +1169,7 @@
         "h": 7,
         "w": 24,
         "x": 0,
-        "y": 31
+        "y": 33
       },
       "id": 404,
       "options": {
@@ -1174,7 +1199,7 @@
           "refId": "A"
         }
       ],
-      "title": "Status Transitions / Day",
+      "title": "Status Transitions",
       "type": "timeseries"
     },
     {
@@ -1270,7 +1295,7 @@
         "h": 7,
         "w": 10,
         "x": 0,
-        "y": 38
+        "y": 40
       },
       "id": 401,
       "options": {
@@ -1366,7 +1391,7 @@
         "h": 7,
         "w": 14,
         "x": 10,
-        "y": 38
+        "y": 40
       },
       "id": 403,
       "options": {
@@ -1396,7 +1421,7 @@
           "refId": "A"
         }
       ],
-      "title": "Outcomes Completed / Day",
+      "title": "Outcomes Completed",
       "type": "timeseries"
     },
     {
@@ -1404,7 +1429,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "Active and review-state workunits open longer than 24 hours. Actionable stalls \u2014 check focus and agent assignment.\nscope: WMS v2 workunits (open state intervals)",
+      "description": "Active and review-state workunits open longer than 24 hours. Actionable stalls — check focus and agent assignment.\nscope: WMS v2 workunits (open state intervals)",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1441,10 +1466,6 @@
                 "value": "h"
               },
               {
-                "id": "custom.width",
-                "value": 120
-              },
-              {
                 "id": "custom.cellOptions",
                 "value": {
                   "mode": "gradient",
@@ -1479,7 +1500,7 @@
         "h": 5,
         "w": 24,
         "x": 0,
-        "y": 45
+        "y": 47
       },
       "id": 402,
       "options": {
@@ -1514,7 +1535,7 @@
           "refId": "A"
         }
       ],
-      "title": "Stall Table \u2014 Active/Review WUs Age >24h",
+      "title": "Stall Table — Active/Review WUs Age >24h",
       "type": "table"
     },
     {
@@ -1523,7 +1544,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 50
+        "y": 52
       },
       "id": 500,
       "panels": [],
@@ -1638,7 +1659,7 @@
         "h": 8,
         "w": 14,
         "x": 0,
-        "y": 51
+        "y": 53
       },
       "id": 501,
       "options": {
@@ -1668,7 +1689,7 @@
           "refId": "A"
         }
       ],
-      "title": "Rework Tax \u2014 Rework + Review Share of Attributed Cost",
+      "title": "Rework Tax — Rework + Review Share of Attributed Cost",
       "type": "timeseries"
     },
     {
@@ -1732,7 +1753,7 @@
         "h": 8,
         "w": 10,
         "x": 14,
-        "y": 51
+        "y": 53
       },
       "id": 502,
       "options": {
@@ -1780,7 +1801,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 59
+        "y": 61
       },
       "id": 200,
       "panels": [],
@@ -1792,7 +1813,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "Top 20 agents by cost. cache_read/msg is the context-bloat signal \u2014 heat-colored (higher = more bloated context). Agents may use multiple models; model column shows the most-used by cost.\nscope: attributed spend (cost_facts joined to token_ledger)",
+      "description": "Top 20 agents by cost. cache_read/msg is the context-bloat signal — heat-colored (higher = more bloated context). Agents may use multiple models; model column shows the most-used by cost.\nscope: attributed spend (cost_facts joined to token_ledger)",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1827,10 +1848,6 @@
               {
                 "id": "unit",
                 "value": "currencyUSD"
-              },
-              {
-                "id": "custom.width",
-                "value": 90
               }
             ]
           },
@@ -1843,10 +1860,6 @@
               {
                 "id": "unit",
                 "value": "currencyUSD"
-              },
-              {
-                "id": "custom.width",
-                "value": 80
               }
             ]
           },
@@ -1859,10 +1872,6 @@
               {
                 "id": "unit",
                 "value": "short"
-              },
-              {
-                "id": "custom.width",
-                "value": 100
               }
             ]
           },
@@ -1875,10 +1884,6 @@
               {
                 "id": "unit",
                 "value": "short"
-              },
-              {
-                "id": "custom.width",
-                "value": 120
               },
               {
                 "id": "custom.cellOptions",
@@ -1919,7 +1924,7 @@
         "h": 10,
         "w": 14,
         "x": 0,
-        "y": 60
+        "y": 62
       },
       "id": 201,
       "options": {
@@ -1962,7 +1967,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "Average cache-read tokens per message by outcome \u2014 higher values mean context is growing without pruning.\nscope: attributed spend (cost_facts)",
+      "description": "Average cache-read tokens per message by outcome — higher values mean context is growing without pruning.\nscope: attributed spend (cost_facts)",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1994,10 +1999,6 @@
               "options": "avg_cache_read"
             },
             "properties": [
-              {
-                "id": "custom.width",
-                "value": 130
-              },
               {
                 "id": "custom.cellOptions",
                 "value": {
@@ -2049,7 +2050,7 @@
         "h": 10,
         "w": 10,
         "x": 14,
-        "y": 60
+        "y": 62
       },
       "id": 202,
       "options": {
@@ -2092,7 +2093,8 @@
   "refresh": "5m",
   "schemaVersion": 41,
   "tags": [
-    "teamster"
+    "teamster",
+    "overview"
   ],
   "templating": {
     "list": [
@@ -2101,12 +2103,19 @@
         "auto_count": 50,
         "auto_min": "1m",
         "current": {
-          "text": "$__auto",
-          "value": "$__auto"
+          "selected": true,
+          "text": "auto",
+          "value": "$__auto_interval_agg"
         },
+        "hide": 0,
         "label": "Aggregation",
         "name": "agg",
         "options": [
+          {
+            "selected": true,
+            "text": "auto",
+            "value": "$__auto_interval_agg"
+          },
           {
             "selected": false,
             "text": "1m",
@@ -2139,7 +2148,7 @@
           }
         ],
         "query": "1m,5m,15m,1h,6h,1d",
-        "refresh": 2,
+        "skipUrlSync": false,
         "type": "interval"
       },
       {
@@ -2187,7 +2196,7 @@
     ]
   },
   "time": {
-    "from": "now-30d",
+    "from": "now-7d",
     "to": "now"
   },
   "timepicker": {},

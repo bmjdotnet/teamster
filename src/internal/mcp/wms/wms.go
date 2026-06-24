@@ -308,17 +308,23 @@ func HandleToolCall(store wms.Store, eng wms.Engine, rawParams json.RawMessage) 
 		return TextResult(fmt.Sprintf("Tagged %s %s: %s=%s", entityType, entityID, tagKey, tagValue)), nil
 
 	case ToolListTags, "wms.listTags":
-		tags, err := store.ListTags(ctx)
+		tagKey := strArg("tagKey")
+		query := strArg("query")
+
+		if tagKey == "" && query == "" {
+			tags, err := store.ListTags(ctx)
+			if err != nil {
+				return Result{}, &CallError{Code: -32000, Message: err.Error()}
+			}
+			manifest := buildTagManifest(tags)
+			return JSONResult(manifest), nil
+		}
+
+		tags, err := store.SearchTags(ctx, tagKey, query)
 		if err != nil {
 			return Result{}, &CallError{Code: -32000, Message: err.Error()}
 		}
-		filtered := tags[:0]
-		for _, t := range tags {
-			if !t.Retired {
-				filtered = append(filtered, t)
-			}
-		}
-		return JSONResult(filtered), nil
+		return JSONResult(tags), nil
 
 	case ToolDefineTag, "wms.defineTag":
 		spec := wms.TagSpec{
@@ -334,11 +340,20 @@ func HandleToolCall(store wms.Store, eng wms.Engine, rawParams json.RawMessage) 
 				}
 			}
 		}
-		// Optional required flag: only set when the caller passes it, so an
-		// unspecified value stays nil (DefineTag leaves the key's required flag
-		// untouched) rather than forcing it to not-required.
 		if req, ok := p.Arguments["required"].(bool); ok {
 			spec.Required = &req
+		}
+		if v := strArg("scope"); v != "" {
+			spec.Scope = &v
+		}
+		if v := strArg("exclusionGroup"); v != "" {
+			spec.ExclusionGroup = &v
+		}
+		if v := strArg("autoExtract"); v != "" {
+			spec.AutoExtract = &v
+		}
+		if v := strArg("interview"); v != "" {
+			spec.Interview = &v
 		}
 		if err := store.DefineTag(ctx, spec); err != nil {
 			return Result{}, &CallError{Code: -32000, Message: err.Error()}
@@ -460,7 +475,7 @@ func HandleToolCall(store wms.Store, eng wms.Engine, rawParams json.RawMessage) 
 				}
 			}
 		}
-		outcomes, err := store.ListOutcomes(ctx, strArg("parentOutcomeID"), tagFilters, strArg("status"))
+		outcomes, err := store.ListOutcomes(ctx, strArg("parentOutcomeID"), tagFilters, strArg("status"), strArg("query"))
 		if err != nil {
 			return Result{}, &CallError{Code: -32000, Message: err.Error()}
 		}
@@ -1014,6 +1029,78 @@ func rollbackTags(ctx context.Context, store wms.Store, batchID string) (reverte
 	return reverted, skipped, failed, nil
 }
 
+func buildTagManifest(tags []wms.Tag) wms.TagManifest {
+	const inlineThreshold = 10
+
+	type keyInfo struct {
+		first  wms.Tag
+		values []string
+	}
+	keys := make(map[string]*keyInfo)
+	var order []string
+
+	for _, t := range tags {
+		if t.Retired {
+			continue
+		}
+		ki, ok := keys[t.Key]
+		if !ok {
+			ki = &keyInfo{first: t}
+			keys[t.Key] = ki
+			order = append(order, t.Key)
+		}
+		if t.Value != "" {
+			ki.values = append(ki.values, t.Value)
+		}
+	}
+
+	m := wms.TagManifest{
+		Propose:     make(map[string]wms.ProposeEntry),
+		AutoExtract: make(map[string]string),
+	}
+
+	for _, key := range order {
+		ki := keys[key]
+		f := ki.first
+
+		switch f.Interview {
+		case "propose":
+			entry := wms.ProposeEntry{Desc: f.Description}
+			if len(ki.values) <= inlineThreshold {
+				entry.Values = ki.values
+			} else {
+				entry.N = len(ki.values)
+			}
+			if f.Scope == "outcome" {
+				entry.Scope = "outcome"
+			}
+			if f.ExclusionGroup != "" {
+				entry.Exclusive = f.ExclusionGroup
+			}
+			if f.Cardinality == "single" {
+				entry.Cardinality = "single"
+			}
+			m.Propose[key] = entry
+
+		case "auto":
+			source := f.AutoExtract
+			if source == "" {
+				source = "manual"
+			}
+			m.AutoExtract[key] = source
+
+		case "skip":
+			m.EngineManaged = append(m.EngineManaged, key)
+		}
+
+		if f.Required {
+			m.Required = append(m.Required, key)
+		}
+	}
+
+	return m
+}
+
 // ToolDefs is the MCP tools/list payload for this server.
 // Tool names use underscore form (wms_*) matching the MCP tool name convention,
 // but the handler also accepts dot form (wms.*) for backwards compat with the
@@ -1124,7 +1211,7 @@ var ToolDefs = []map[string]interface{}{
 	},
 	{
 		"name":        ToolTagEntity,
-		"description": "Apply a key:value classifier tag to an entity (outcome or workunit). FIRST call wms_listTags to see existing classifiers and their meanings; reuse an existing (tagKey, tagValue) rather than inventing near-duplicates. The vocabulary is dynamic: applying a NEW (tagKey, tagValue) creates it — pass `description` to record what it means and when to apply it, so the next caller's wms_listTags sees it. An existing tag's description is never overwritten.",
+		"description": "Apply a key:value classifier tag to an entity (outcome or workunit). FIRST call wms_listTags to see the key manifest; for the key you intend to tag, call wms_listTags(tagKey=<key>) to see existing values (unless the manifest already includes them). Reuse an existing (tagKey, tagValue) rather than inventing near-duplicates. The vocabulary is dynamic: applying a NEW (tagKey, tagValue) creates it — pass `description` to record what it means and when to apply it, so the next caller's wms_listTags sees it. An existing tag's description is never overwritten.",
 		"inputSchema": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -1140,10 +1227,19 @@ var ToolDefs = []map[string]interface{}{
 	},
 	{
 		"name":        ToolListTags,
-		"description": "Discover the tag vocabulary before tagging: returns active classifiers as {tag_key, tag_value, category, cardinality, description, is_seed}, grouped by tag_key. Retired values are excluded. The description is the 'when to apply' guidance — read it to pick the right tag and to avoid creating near-duplicate values. The category is the tag's behavior class: 'context' (durable metadata set once, inherited down the DAG) or 'lifecycle' (execution tracking, per-entity, engine/classifier-managed). The cardinality is 'single' (the key holds at most one value per entity; a new value replaces the old) or 'multi' (values accumulate).",
+		"description": "Discover the tag vocabulary. Default (no args): returns a role-shaped manifest — propose (keys to offer the operator, with values/scope/exclusion), autoExtract (key→source map for silent extraction), required (must be set on workunits before close-out), engineManaged (do not touch). Within propose, respect exclusive (at most one key per group) and scope. With tagKey: returns all values for that key. With query: case-insensitive substring search across values and descriptions.",
 		"inputSchema": map[string]interface{}{
-			"type":       "object",
-			"properties": map[string]interface{}{},
+			"type": "object",
+			"properties": map[string]interface{}{
+				"tagKey": map[string]interface{}{
+					"type":        "string",
+					"description": "Drill into one key's values instead of the key manifest.",
+				},
+				"query": map[string]interface{}{
+					"type":        "string",
+					"description": "Case-insensitive substring search across tag_value and description. Use to find tags matching a concept or check for near-duplicates before creating.",
+				},
+			},
 		},
 	},
 	{
@@ -1156,8 +1252,12 @@ var ToolDefs = []map[string]interface{}{
 				"category":    map[string]interface{}{"type": "string", "description": "'context' (durable metadata, inherited down the DAG) or 'lifecycle' (execution tracking). Defaults to context."},
 				"cardinality": map[string]interface{}{"type": "string", "description": "'single' (key holds at most one value per entity; a new value replaces the old) or 'multi' (values accumulate). Defaults to multi."},
 				"values":      map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Optional enumerated values to pre-seed (e.g. p0, p1, p2, p3). Omit for create-on-apply keys whose values are minted on first use."},
-				"description": map[string]interface{}{"type": "string", "description": "Semantics — what this key means and when to apply it."},
-				"required":    map[string]interface{}{"type": "boolean", "description": "Optional. When true, marks this key as required on every workunit (set across all the key's values). When false, clears the required flag. Omit to leave the key's required flag unchanged."},
+				"description":    map[string]interface{}{"type": "string", "description": "Semantics — what this key means and when to apply it."},
+				"required":       map[string]interface{}{"type": "boolean", "description": "Optional. When true, marks this key as required on every workunit (set across all the key's values). When false, clears the required flag. Omit to leave the key's required flag unchanged."},
+				"scope":          map[string]interface{}{"type": "string", "description": "'outcome' | 'workunit' | '' — where this key should be applied."},
+				"exclusionGroup": map[string]interface{}{"type": "string", "description": "Mutual exclusion group slug. Keys sharing a group are exclusive on an entity."},
+				"autoExtract":    map[string]interface{}{"type": "string", "description": "'git' | 'env' | '' — source for auto-extraction (skip interview)."},
+				"interview":      map[string]interface{}{"type": "string", "description": "'propose' | 'auto' | 'skip' — how this key behaves in the context-tag interview."},
 			},
 			"required": []string{"tagKey"},
 		},
@@ -1255,13 +1355,14 @@ var ToolDefs = []map[string]interface{}{
 	},
 	{
 		"name":        ToolListOutcomes,
-		"description": "List outcomes. Omit parentOutcomeID for root outcomes; set it to list children. Use tagFilters for AND-filtered tag lookup. Use status to filter by lifecycle state; the special value \"open\" returns non-terminal outcomes (pending, active, review, blocked).",
+		"description": "List outcomes. Omit parentOutcomeID for root outcomes; set it to list children. Use tagFilters for AND-filtered tag lookup. Use status to filter by lifecycle state; the special value \"open\" returns non-terminal outcomes (pending, active, review, blocked). Use query for case-insensitive substring search on title and description — combine with status=\"open\" to find existing outcomes matching a focus.",
 		"inputSchema": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"parentOutcomeID": map[string]interface{}{"type": "string", "description": "Filter to children of this outcome. Omit or empty for root outcomes."},
 				"tagFilters":      map[string]interface{}{"type": "object", "additionalProperties": map[string]interface{}{"type": "string"}, "description": "Key-value tag filters (AND semantics). E.g. {\"project\": \"teamster\"}."},
 				"status":          map[string]interface{}{"type": "string", "description": "Filter by status. Pass a specific status (pending, active, review, done, blocked) or \"open\" to return all non-terminal outcomes (status != done)."},
+				"query":           map[string]interface{}{"type": "string", "description": "Case-insensitive substring search on outcome title and description. Combine with status=\"open\" to find resumable outcomes."},
 			},
 		},
 	},

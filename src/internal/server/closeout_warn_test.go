@@ -147,6 +147,9 @@ func TestEmitCloseOutWarning_WMSStatusChange(t *testing.T) {
 	if len(missing) != 1 || missing[0] != "work-type" {
 		t.Errorf("missing = %v, want [work-type]", rec["missing"])
 	}
+	if got := rec["session"]; got != "s1" {
+		t.Errorf("session = %v, want %q (should carry triggering session, not hardcoded 'wms')", got, "s1")
+	}
 }
 
 // TestEmitCloseOutWarning_NoWarnWhenSatisfied is the negative case: a workunit

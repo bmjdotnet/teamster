@@ -34,11 +34,10 @@ type Store struct {
 	// when true, a workunit's 'done' transition is rejected if a required tag key
 	// has no value bound. Set via WithRequireTagsOnDone; default false.
 	requireTagsOnDone bool
+	skipMigrate       bool
 }
 
-// Option configures a Store at construction. Options are applied after the
-// connection is opened and migrated, so they only set behavior flags — they
-// never touch the pool or schema.
+// Option configures a Store at construction.
 type Option func(*Store)
 
 // WithRequireTagsOnDone enables hard close-out enforcement: when set, the store
@@ -47,6 +46,12 @@ type Option func(*Store)
 // the option leaves enforcement off, byte-identical to pre-feature behavior.
 func WithRequireTagsOnDone(v bool) Option {
 	return func(s *Store) { s.requireTagsOnDone = v }
+}
+
+// WithSkipMigrate skips the auto-migration step. Use for read-only callers
+// (e.g. teamster status) that should never modify schema.
+func WithSkipMigrate() Option {
+	return func(s *Store) { s.skipMigrate = true }
 }
 
 // New opens a MySQL connection from a TEAMSTER_STORE_DSN value (mysql://...)
@@ -69,20 +74,17 @@ func New(dsn string, opts ...Option) (*Store, error) {
 		db.Close() //nolint:errcheck
 		return nil, fmt.Errorf("ping mysql: %w", err)
 	}
-	// migrate gets its own, larger budget. A losing caller can block on the
-	// GET_LOCK advisory lock for up to migrateLockTimeout while the winner runs;
-	// the 5s ping budget would expire mid-wait and surface as a spurious
-	// "context deadline exceeded" even though the lock serialization is working.
-	// Allow the full lock wait plus headroom for the winner's actual DDL/backfill.
-	migrateCtx, migrateCancel := context.WithTimeout(context.Background(), migrateLockTimeout+30*time.Second)
-	defer migrateCancel()
-	if err := migrate(migrateCtx, db); err != nil {
-		db.Close() //nolint:errcheck
-		return nil, fmt.Errorf("migrate: %w", err)
-	}
 	s := &Store{db: db}
 	for _, opt := range opts {
 		opt(s)
+	}
+	if !s.skipMigrate {
+		migrateCtx, migrateCancel := context.WithTimeout(context.Background(), migrateLockTimeout+30*time.Second)
+		defer migrateCancel()
+		if err := migrate(migrateCtx, db); err != nil {
+			db.Close() //nolint:errcheck
+			return nil, fmt.Errorf("migrate: %w", err)
+		}
 	}
 	return s, nil
 }
@@ -680,16 +682,22 @@ func (s *Store) EarliestClosureByEntity(ctx context.Context, keys [][2]string) (
 }
 
 // ListWorkUnitsWithActivity returns the distinct workunit ids that have at
-// least one kind='state' interval in wms_intervals — the workunits that have
-// actually accrued execution signals and are therefore worth re-deriving
-// work-type for. This scopes the async work-type pass to entities with activity
-// without walking the outcome DAG, and naturally skips empty/never-run workunits.
+// least one kind='state' interval in wms_intervals AND do not already carry a
+// manually-set work-type tag. Workunits with source='manual' work-type are
+// excluded because the classifier defers to manual tags anyway — scanning them
+// is pure waste when the set is large (772 → ~100 on typical installs).
 func (s *Store) ListWorkUnitsWithActivity(ctx context.Context) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT DISTINCT entity_id
-		FROM wms_intervals
-		WHERE kind = 'state' AND entity_type = ?
-		ORDER BY entity_id ASC`, wms.EntityWorkUnit)
+		SELECT DISTINCT wi.entity_id
+		FROM wms_intervals wi
+		WHERE wi.kind = 'state' AND wi.entity_type = ?
+		  AND NOT EXISTS (
+		    SELECT 1 FROM entity_tags et
+		    JOIN tags t ON t.id = et.tag_id
+		    WHERE et.entity_type = 'workunit' AND et.entity_id = wi.entity_id
+		      AND t.tag_key = 'work-type' AND et.source = 'manual'
+		  )
+		ORDER BY wi.entity_id ASC`, wms.EntityWorkUnit)
 	if err != nil {
 		return nil, err
 	}
@@ -874,7 +882,7 @@ func (s *Store) TagEntity(ctx context.Context, entityType, entityID, tagKey, tag
 // ListTags returns all known tags ordered by key then value.
 func (s *Store) ListTags(ctx context.Context) ([]wms.Tag, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT tag_key, tag_value, is_seed, category, cardinality, description, retired, required FROM tags ORDER BY tag_key, tag_value`)
+		`SELECT tag_key, tag_value, is_seed, category, cardinality, description, retired, required, scope, exclusion_group, auto_extract, interview FROM tags ORDER BY tag_key, tag_value`)
 	if err != nil {
 		return nil, err
 	}
@@ -883,7 +891,42 @@ func (s *Store) ListTags(ctx context.Context) ([]wms.Tag, error) {
 	for rows.Next() {
 		var t wms.Tag
 		var isSeed, retired, required int
-		if err := rows.Scan(&t.Key, &t.Value, &isSeed, &t.Category, &t.Cardinality, &t.Description, &retired, &required); err != nil {
+		if err := rows.Scan(&t.Key, &t.Value, &isSeed, &t.Category, &t.Cardinality, &t.Description, &retired, &required, &t.Scope, &t.ExclusionGroup, &t.AutoExtract, &t.Interview); err != nil {
+			return nil, err
+		}
+		t.IsSeed = isSeed != 0
+		t.Retired = retired != 0
+		t.Required = required != 0
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// SearchTags returns non-retired tags matching the given filters.
+func (s *Store) SearchTags(ctx context.Context, tagKey, query string) ([]wms.Tag, error) {
+	q := `SELECT tag_key, tag_value, is_seed, category, cardinality, description, retired, required, scope, exclusion_group, auto_extract, interview FROM tags WHERE retired = 0`
+	var args []interface{}
+	if tagKey != "" {
+		q += ` AND tag_key = ?`
+		args = append(args, tagKey)
+	}
+	if query != "" {
+		q += ` AND (tag_value LIKE ? OR description LIKE ?)`
+		esc := strings.NewReplacer("%", `\%`, "_", `\_`)
+		pattern := "%" + esc.Replace(query) + "%"
+		args = append(args, pattern, pattern)
+	}
+	q += ` ORDER BY tag_key, tag_value`
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close() //nolint:errcheck
+	out := make([]wms.Tag, 0)
+	for rows.Next() {
+		var t wms.Tag
+		var isSeed, retired, required int
+		if err := rows.Scan(&t.Key, &t.Value, &isSeed, &t.Category, &t.Cardinality, &t.Description, &retired, &required, &t.Scope, &t.ExclusionGroup, &t.AutoExtract, &t.Interview); err != nil {
 			return nil, err
 		}
 		t.IsSeed = isSeed != 0
@@ -1162,6 +1205,34 @@ func (s *Store) DefineTag(ctx context.Context, spec wms.TagSpec) error {
 			return err
 		}
 	}
+	if spec.Scope != nil {
+		if _, err := s.db.ExecContext(ctx,
+			`UPDATE tags SET scope = ? WHERE tag_key = ?`, *spec.Scope, spec.Key,
+		); err != nil {
+			return err
+		}
+	}
+	if spec.ExclusionGroup != nil {
+		if _, err := s.db.ExecContext(ctx,
+			`UPDATE tags SET exclusion_group = ? WHERE tag_key = ?`, *spec.ExclusionGroup, spec.Key,
+		); err != nil {
+			return err
+		}
+	}
+	if spec.AutoExtract != nil {
+		if _, err := s.db.ExecContext(ctx,
+			`UPDATE tags SET auto_extract = ? WHERE tag_key = ?`, *spec.AutoExtract, spec.Key,
+		); err != nil {
+			return err
+		}
+	}
+	if spec.Interview != nil {
+		if _, err := s.db.ExecContext(ctx,
+			`UPDATE tags SET interview = ? WHERE tag_key = ?`, *spec.Interview, spec.Key,
+		); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -1331,27 +1402,40 @@ func (s *Store) SetSessionWorkItem(ctx context.Context, key store.SessionKey, wo
 // Same-entity guard: if the current open interval is already this exact
 // (entityType, entityID), it is a no-op — avoids a degenerate zero-duration
 // interval when e.g. createTask and setFocus both fire for the same task.
+//
+// The guard runs INSIDE the transaction with FOR UPDATE (focus-interval-dual-writer
+// fix): on a remote, this 'direct' writer and the scraper's writeFocusInterval
+// both write the SAME logical setFocus, possibly concurrently. Re-checking under
+// a row lock means that WHEN an open interval already exists, whichever writer
+// committed it wins and the other sees it here and no-ops (one open interval per
+// logical focus). In the rarer race where both find no open row, two open rows
+// for the same entity result — harmless (focusAt resolves them identically;
+// neither is negative-width). The no-negative-width invariant is held
+// unconditionally by closeOpenFocusIntervals' ordering-safe `started_at <= at`
+// guard, not by this dedup. On the hub (single writer) the lock is uncontended —
+// behavior is unchanged.
 func (s *Store) OpenFocusInterval(ctx context.Context, key store.SessionKey, entityType, entityID string) error {
-	var curType, curID string
-	err := s.db.QueryRowContext(ctx,
-		`SELECT entity_type, entity_id FROM wms_intervals
-		 WHERE kind = 'focus' AND session_id = ? AND agent_name = ? AND ended_at IS NULL
-		 ORDER BY started_at DESC LIMIT 1`,
-		key.SessionID, key.AgentName,
-	).Scan(&curType, &curID)
-	if err == nil && curType == entityType && curID == entityID {
-		return nil // already focused on this exact entity
-	}
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return err
-	}
-
 	now := nowUTC()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback() //nolint:errcheck
+
+	var curType, curID string
+	err = tx.QueryRowContext(ctx,
+		`SELECT entity_type, entity_id FROM wms_intervals
+		 WHERE kind = 'focus' AND session_id = ? AND agent_name = ? AND ended_at IS NULL
+		 ORDER BY started_at DESC LIMIT 1 FOR UPDATE`,
+		key.SessionID, key.AgentName,
+	).Scan(&curType, &curID)
+	if err == nil && curType == entityType && curID == entityID {
+		return tx.Commit() // already focused on this exact entity
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+
 	// Close the open focus interval then open the new one. Focus rows carry
 	// identity directly (it's always present on the focus path), so
 	// identity_source='direct'.
@@ -1390,13 +1474,27 @@ func (s *Store) HasOpenFocusInterval(ctx context.Context, key store.SessionKey) 
 
 // closeOpenFocusIntervals closes every open kind='focus' wms_intervals row for
 // (session, agent) at `at`, computing duration_ms.
+//
+// ORDERING-SAFE (dual-writer guard, focus-interval-dual-writer fix): the close is
+// scoped to rows whose `started_at <= at`, so an out-of-order close never sets
+// `ended_at < started_at` (a negative-width interval that `focusAt`'s
+// `started_at <= ts AND ended_at > ts` can never cover, silently dropping cost).
+// On the hub this changes nothing — a single writer always closes the prior open
+// interval at a time after it started. On a REMOTE, the Python scraper
+// (`writeFocusInterval`, transcript ts) and the hub wms-mcp (this path, hub
+// wall-clock ts) both write the SAME logical setFocus with skewed/out-of-order
+// timestamps; without this guard one writer's close stomps the other's open row
+// to a negative width. A close that predates the open is simply ignored — the
+// interval stays open for a later valid close (or for `focusAt`'s open-ended
+// match), which is the correct conservative behavior.
 func closeOpenFocusIntervals(ctx context.Context, tx *sql.Tx, sessionID, agentName string, at time.Time) error {
 	_, err := tx.ExecContext(ctx, `
 		UPDATE wms_intervals
 		SET ended_at = ?,
 		    duration_ms = TIMESTAMPDIFF(MICROSECOND, started_at, ?) / 1000
-		WHERE kind = 'focus' AND session_id = ? AND agent_name = ? AND ended_at IS NULL`,
-		at, at, sessionID, agentName)
+		WHERE kind = 'focus' AND session_id = ? AND agent_name = ? AND ended_at IS NULL
+		  AND started_at <= ?`,
+		at, at, sessionID, agentName, at)
 	return err
 }
 
@@ -1506,8 +1604,8 @@ func (s *Store) CloseIntervalsOnTerminalEntities(ctx context.Context) (int64, er
 		res, err := s.db.ExecContext(ctx, `
 			UPDATE wms_intervals i
 			JOIN `+tbl.table+` e ON e.id = i.entity_id AND e.status = 'done'
-			SET i.ended_at = NOW(6),
-			    i.duration_ms = TIMESTAMPDIFF(MICROSECOND, i.started_at, NOW(6)) / 1000
+			SET i.ended_at = DATE_ADD(NOW(6), INTERVAL i.id MICROSECOND),
+			    i.duration_ms = TIMESTAMPDIFF(MICROSECOND, i.started_at, DATE_ADD(NOW(6), INTERVAL i.id MICROSECOND)) / 1000
 			WHERE i.entity_type = ? AND i.ended_at IS NULL`,
 			tbl.entityType)
 		if err != nil {
@@ -1528,8 +1626,8 @@ func (s *Store) CloseIntervalsForClosedSessions(ctx context.Context) (int64, err
 		JOIN sessions s ON s.session_id = i.session_id
 		                AND s.agent_name = i.agent_name
 		                AND s.status = 'closed'
-		SET i.ended_at = NOW(6),
-		    i.duration_ms = TIMESTAMPDIFF(MICROSECOND, i.started_at, NOW(6)) / 1000
+		SET i.ended_at = DATE_ADD(NOW(6), INTERVAL i.id MICROSECOND),
+		    i.duration_ms = TIMESTAMPDIFF(MICROSECOND, i.started_at, DATE_ADD(NOW(6), INTERVAL i.id MICROSECOND)) / 1000
 		WHERE i.ended_at IS NULL`)
 	if err != nil {
 		return 0, err
@@ -1546,8 +1644,8 @@ func (s *Store) CloseIntervalsForStaleSessions(ctx context.Context, staleThresho
 		UPDATE wms_intervals i
 		JOIN sessions s ON s.session_id = i.session_id
 		                AND s.agent_name = i.agent_name
-		SET i.ended_at = NOW(6),
-		    i.duration_ms = TIMESTAMPDIFF(MICROSECOND, i.started_at, NOW(6)) / 1000
+		SET i.ended_at = DATE_ADD(NOW(6), INTERVAL i.id MICROSECOND),
+		    i.duration_ms = TIMESTAMPDIFF(MICROSECOND, i.started_at, DATE_ADD(NOW(6), INTERVAL i.id MICROSECOND)) / 1000
 		WHERE i.ended_at IS NULL
 		  AND s.last_seen < ?
 		  AND s.status <> 'closed'`,

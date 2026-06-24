@@ -182,12 +182,6 @@ func EnrichRecord(data map[string]interface{}) {
 					}
 				}
 			}
-			if toolName == "TeamCreate" {
-				ti, _ := toolInput.(map[string]interface{})
-				if name := strField(ti, "team_name", 0); name != "" {
-					set("_team", name)
-				}
-			}
 		}
 
 	case "PostToolUse":

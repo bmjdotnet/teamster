@@ -18,7 +18,7 @@ import (
 const (
 	maxLLMSessions  = 10
 	llmPhaseTimeout = 5 * time.Minute
-	sweepOutcomeID  = "out-sweep-nightly"
+	sweepOutcomeID  = "out-sweep"
 )
 
 // SweepLLMStats summarizes one LLM sweep pass.
@@ -377,7 +377,7 @@ func (r *Runner) ensureSweepOutcome(ctx context.Context) {
 	now := time.Now().UTC()
 	_, err := r.db.ExecContext(ctx, `
 		INSERT IGNORE INTO outcomes (id, title, description, status, created_at, updated_at)
-		VALUES (?, 'Nightly Attribution Sweep', 'Standing outcome for the automated sweep process', 'active', ?, ?)`,
+		VALUES (?, 'Attribution Sweep', 'Standing outcome for the automated sweep process', 'active', ?, ?)`,
 		sweepOutcomeID, now, now)
 	if err != nil {
 		r.log.Warn("sweep-llm: failed to ensure sweep outcome (non-fatal)", "error", err)

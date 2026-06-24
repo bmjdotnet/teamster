@@ -12,6 +12,12 @@ host for prior installs, port conflicts, and stale config, walks through all
 install choices interactively, then calls the build backend
 (`lib/installrunner.sh`) to compile and install.
 
+**Linux only.** `install.sh` (and `lib/installrunner.sh`) hard-fail on macOS:
+the hub requires apt-based Linux. macOS is supported as a **remote only** — do
+not run this installer on the Mac. To enroll a Mac, run
+`teamster install-remote <user>@<mac>` from your Linux hub over SSH. See
+[specs/REMOTE-INSTALL.md](specs/REMOTE-INSTALL.md).
+
 ## Guided mode vs flags
 
 - Run `./install.sh` with no flags for a guided first install or when you

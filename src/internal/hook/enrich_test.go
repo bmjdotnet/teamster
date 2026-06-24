@@ -125,36 +125,13 @@ func TestEnrichRecord_Tags(t *testing.T) {
 			wantDisplay: "Adding dependency: wu-1 → wu-2",
 		},
 		{
-			name: "Agent with team_name → TEAM tag",
+			name: "Agent with name → TEAM tag",
 			data: mkEvent("PreToolUse", "Agent", map[string]interface{}{
 				"name":        "store",
 				"description": "Handle the sqlite layer",
 			}),
 			wantTag:     "TEAM",
 			wantDisplay: "Spawning @store: Handle the sqlite layer",
-		},
-		{
-			name: "TeamCreate → TEAM tag",
-			data: mkEvent("PreToolUse", "TeamCreate", map[string]interface{}{
-				"team_name": "myproject",
-			}),
-			wantTag:     "TEAM",
-			wantDisplay: "Created team #myproject",
-		},
-		{
-			name: "TeamCreate → _team field set",
-			data: mkEvent("PreToolUse", "TeamCreate", map[string]interface{}{
-				"team_name": "test-team",
-			}),
-			wantTag:     "TEAM",
-			wantDisplay: "Created team #test-team",
-			wantTeam:    "test-team",
-		},
-		{
-			name:        "TeamDelete → TEAM tag",
-			data:        mkEvent("PreToolUse", "TeamDelete", map[string]interface{}{}),
-			wantTag:     "TEAM",
-			wantDisplay: "Dissolved team",
 		},
 		{
 			name: "SendMessage → COMM tag",
@@ -529,6 +506,36 @@ func TestEnrichRecord_EdgeCases(t *testing.T) {
 		EnrichRecord(data)
 		if _, exists := data["_tool_tag"]; exists {
 			t.Errorf("_tool_tag should not be set for PostToolUse Read")
+		}
+	})
+}
+
+func TestTrimLargeInput(t *testing.T) {
+	t.Run("string over limit is capped", func(t *testing.T) {
+		big := strings.Repeat("x", 64<<10)
+		data := map[string]interface{}{"tool_input": big}
+		trimLargeInput(data)
+		got := data["tool_input"].(string)
+		if len(got) != 32<<10 {
+			t.Errorf("len = %d, want %d", len(got), 32<<10)
+		}
+	})
+
+	t.Run("string under limit untouched", func(t *testing.T) {
+		small := "echo hello"
+		data := map[string]interface{}{"tool_input": small}
+		trimLargeInput(data)
+		if data["tool_input"] != small {
+			t.Error("small string was modified")
+		}
+	})
+
+	t.Run("map input untouched", func(t *testing.T) {
+		m := map[string]interface{}{"command": "ls"}
+		data := map[string]interface{}{"tool_input": m}
+		trimLargeInput(data)
+		if _, ok := data["tool_input"].(map[string]interface{}); !ok {
+			t.Error("map was replaced")
 		}
 	})
 }

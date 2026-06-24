@@ -132,7 +132,7 @@ func TruncateLine(line string, width int) string {
 // Default is BOLD. Override with TEAMSTER_PARAM_STYLE env var.
 var ParamStyle = RESET + "\033[38;5;51m" // cyan (256-color #51)
 
-var paramRe = regexp.MustCompile(`__([^_]+)__`)
+var paramRe = regexp.MustCompile(`__(.+?)__`)
 var nameRe = regexp.MustCompile(`([@#][\w-]+|<[\w.-]+>)`)
 
 func init() {

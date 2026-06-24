@@ -88,7 +88,11 @@ type Tag struct {
 	// Required is a per-key property: when any value of the key has required=1,
 	// the key must be present on every workunit before it can reach 'done'
 	// (outcomes are exempt). Set across all values of a key by DefineTag.
-	Required bool `json:"required"`
+	Required       bool   `json:"required"`
+	Scope          string `json:"scope"`
+	ExclusionGroup string `json:"exclusion_group"`
+	AutoExtract    string `json:"auto_extract"`
+	Interview      string `json:"interview"`
 }
 
 // TagSpec describes one key in the declared tag vocabulary. It is the unit the
@@ -105,7 +109,45 @@ type TagSpec struct {
 	// Required, when non-nil, sets the per-key required flag across all values
 	// of the key (DefineTag). A pointer so "caller did not specify" (nil) is
 	// distinguishable from "explicitly set to not-required" (&false).
-	Required *bool
+	Required       *bool
+	Scope          *string
+	ExclusionGroup *string
+	AutoExtract    *string
+	Interview      *string
+}
+
+// ProposeEntry is one key in the "propose" group of the tag manifest: a key
+// the agent should offer to the operator during the context-tag interview.
+type ProposeEntry struct {
+	Values      []string `json:"values,omitempty"`
+	N           int      `json:"n,omitempty"`
+	Scope       string   `json:"scope,omitempty"`
+	Exclusive   string   `json:"exclusive,omitempty"`
+	Cardinality string   `json:"cardinality,omitempty"`
+	Desc        string   `json:"desc"`
+}
+
+// TagManifest is the role-shaped response for the no-arg wms_listTags call.
+type TagManifest struct {
+	Propose       map[string]ProposeEntry `json:"propose"`
+	AutoExtract   map[string]string       `json:"autoExtract"`
+	Required      []string                `json:"required"`
+	EngineManaged []string                `json:"engineManaged"`
+}
+
+// TagKeySummary is a per-key rollup used by describeTag and the tag browser.
+type TagKeySummary struct {
+	Key            string   `json:"tag_key"`
+	Category       string   `json:"category"`
+	Cardinality    string   `json:"cardinality"`
+	Required       bool     `json:"required"`
+	Description    string   `json:"description"`
+	ValueCount     int      `json:"value_count"`
+	Values         []string `json:"values,omitempty"`
+	Scope          string   `json:"scope"`
+	ExclusionGroup string   `json:"exclusion_group"`
+	AutoExtract    string   `json:"auto_extract"`
+	Interview      string   `json:"interview"`
 }
 
 // EntityTag is a tag binding resolved for one entity: the vocabulary fields
@@ -135,6 +177,11 @@ type Reader interface {
 	// so callers apply existing classifiers rather than inventing values.
 	ListTags(ctx context.Context) ([]Tag, error)
 
+	// SearchTags returns non-retired tags matching the given filters. If tagKey
+	// is non-empty, only that key's values are returned. If query is non-empty,
+	// tag_value and description are substring-matched.
+	SearchTags(ctx context.Context, tagKey, query string) ([]Tag, error)
+
 	// ListRequiredTagKeys returns the distinct, non-retired tag keys marked
 	// required=1. Close-out enforcement uses these to gate a workunit's 'done'
 	// transition: every required key must have a tag bound to the entity.
@@ -147,7 +194,7 @@ type Reader interface {
 
 	// v2 methods
 	GetOutcome(ctx context.Context, id string) (*Outcome, error)
-	ListOutcomes(ctx context.Context, parentOutcomeID string, tagFilters map[string]string, statusFilter string) ([]*Outcome, error)
+	ListOutcomes(ctx context.Context, parentOutcomeID string, tagFilters map[string]string, statusFilter string, query string) ([]*Outcome, error)
 	GetWorkUnit(ctx context.Context, id string) (*WorkUnit, error)
 	ListWorkUnits(ctx context.Context, outcomeID string) ([]*WorkUnit, error)
 	ListReadyWorkUnits(ctx context.Context, outcomeID string) ([]*WorkUnit, error)

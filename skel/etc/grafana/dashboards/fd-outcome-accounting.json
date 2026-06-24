@@ -22,12 +22,37 @@
   "links": [],
   "panels": [
     {
+      "type": "text",
+      "title": "",
+      "gridPos": {
+        "h": 2,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 900,
+      "options": {
+        "mode": "html",
+        "content": "<div style=\"display:flex; gap:6px; align-items:center; flex-wrap:wrap; padding:2px 0; margin: -4px 0;\">\n  <a href=\"/d/landing-page?from=${__from}&to=${__to}\" style=\"padding:4px 12px; background:#1e1e2e; color:#8ab4f8; border-radius:4px; text-decoration:none; font-size:13px; font-weight:600; border:1px solid #333;\">Home</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/activity-feed?from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Activity</a>\n  <a href=\"/d/fd-ai-spend-overview-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Spend</a>\n  <a href=\"/d/fd-cost-explorer-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Trace</a>\n  <a href=\"/d/fd-usage-effectiveness-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Usage</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/cost-by-tag-value?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Simple Cost</a>\n  <a href=\"/d/tag-stack-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Multidim</a>\n  <a href=\"/d/entity-cost-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Work</a>\n  <a href=\"/d/fd-outcome-accounting-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#2a2a4a; color:#8ab4f8; border-radius:4px; text-decoration:none; font-size:12px; font-weight:600; border:1px solid #4a4a6a;\">Outcomes</a>\n  <a href=\"/d/outcome-cost-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Outcome Cost</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/fd-data-quality-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Health</a>\n</div>",
+        "code": {
+          "language": "html",
+          "showLineNumbers": false,
+          "showMiniMap": false
+        }
+      },
+      "transparent": true,
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 0
+        "y": 2
       },
       "id": 1,
       "panels": [],
@@ -39,7 +64,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: all spend incl. unallocated \u2014 cost_facts for the period. Includes outcome, workunit, and unallocated entity types. Note: includes legacy v1 entities (project/goal/task/workitem) not shown in the Outcome Ledger below.",
+      "description": "scope: all spend incl. unallocated — cost_facts for the period. Includes outcome, workunit, and unallocated entity types. Note: includes legacy v1 entities (project/goal/task/workitem) not shown in the Outcome Ledger below.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -64,7 +89,7 @@
         "h": 5,
         "w": 5,
         "x": 0,
-        "y": 1
+        "y": 3
       },
       "id": 2,
       "options": {
@@ -127,7 +152,7 @@
         "h": 5,
         "w": 4,
         "x": 5,
-        "y": 1
+        "y": 3
       },
       "id": 3,
       "options": {
@@ -190,7 +215,7 @@
         "h": 5,
         "w": 5,
         "x": 9,
-        "y": 1
+        "y": 3
       },
       "id": 4,
       "options": {
@@ -228,7 +253,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: cost_facts rows with entity_type='' (no WMS entity) \u2014 the disclosed residual",
+      "description": "scope: cost_facts rows with entity_type='' (no WMS entity) — the disclosed residual",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -261,7 +286,7 @@
         "h": 5,
         "w": 5,
         "x": 14,
-        "y": 1
+        "y": 3
       },
       "id": 5,
       "options": {
@@ -383,7 +408,7 @@
         "h": 5,
         "w": 5,
         "x": 19,
-        "y": 1
+        "y": 3
       },
       "id": 6,
       "options": {
@@ -430,11 +455,11 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 6
+        "y": 8
       },
       "id": 30,
       "panels": [],
-      "title": "Attestation \u2014 Work Mix & Attribution Methods",
+      "title": "Attestation — Work Mix & Attribution Methods",
       "type": "row"
     },
     {
@@ -442,7 +467,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: all spend incl. unallocated \u2014 cost by work-type tag using canonical facet query with fractional weighting. (untagged)=entity with no work-type tag. (unallocated)=no WMS entity.",
+      "description": "scope: all spend incl. unallocated — cost by work-type tag using canonical facet query with fractional weighting. (untagged)=entity with no work-type tag. (unallocated)=no WMS entity.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -643,7 +668,7 @@
         "h": 9,
         "w": 8,
         "x": 0,
-        "y": 7
+        "y": 9
       },
       "id": 31,
       "options": {
@@ -690,7 +715,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: all spend incl. unallocated \u2014 cost by phase tag using canonical facet query with fractional weighting. Consistent cost basis with work-type mix.",
+      "description": "scope: all spend incl. unallocated — cost by phase tag using canonical facet query with fractional weighting. Consistent cost basis with work-type mix.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -861,7 +886,7 @@
         "h": 9,
         "w": 8,
         "x": 8,
-        "y": 7
+        "y": 9
       },
       "id": 32,
       "options": {
@@ -938,30 +963,6 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "confidence"
-            },
-            "properties": [
-              {
-                "id": "custom.width",
-                "value": 100
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "method"
-            },
-            "properties": [
-              {
-                "id": "custom.width",
-                "value": 220
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
               "options": "messages"
             },
             "properties": [
@@ -1033,7 +1034,7 @@
         "h": 9,
         "w": 8,
         "x": 16,
-        "y": 7
+        "y": 9
       },
       "id": 33,
       "options": {
@@ -1066,7 +1067,7 @@
           "refId": "A"
         }
       ],
-      "title": "Attribution Method Mix \u2014 Defensibility Statement",
+      "title": "Attribution Method Mix — Defensibility Statement",
       "type": "table"
     },
     {
@@ -1075,11 +1076,11 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 16
+        "y": 18
       },
       "id": 20,
       "panels": [],
-      "title": "Workunit Drill \u2014 $outcome",
+      "title": "Workunit Drill — $outcome",
       "type": "row"
     },
     {
@@ -1148,7 +1149,7 @@
         "h": 11,
         "w": 24,
         "x": 0,
-        "y": 17
+        "y": 19
       },
       "id": 22,
       "options": {
@@ -1176,7 +1177,7 @@
           "refId": "A"
         }
       ],
-      "title": "Outcome Cost Over Time \u2014 $outcome",
+      "title": "Outcome Cost Over Time — $outcome",
       "type": "timeseries"
     },
     {
@@ -1285,7 +1286,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 28
+        "y": 30
       },
       "id": 21,
       "options": {
@@ -1314,7 +1315,7 @@
             "uid": "teamster-mysql"
           },
           "format": "table",
-          "rawSql": "WITH wu_cost AS (\n  SELECT\n    cf.entity_id,\n    COUNT(DISTINCT cf.message_id) AS messages,\n    ROUND(SUM(cf.cost_usd), 4) AS cost_usd\n  FROM cost_facts cf\n  JOIN workunits wu ON wu.id = cf.entity_id AND cf.entity_type = 'workunit'\n  WHERE cf.timestamp BETWEEN $__timeFrom() AND $__timeTo()\n    AND ('$outcome' = 'All' OR wu.outcome_id = '$outcome')\n  GROUP BY cf.entity_id\n),\nwu_intervals AS (\n  SELECT entity_id,\n    GROUP_CONCAT(DISTINCT phase ORDER BY phase SEPARATOR '/') AS phase_str,\n    ROUND(SUM(duration_ms) / 3600000.0, 1) AS duration_hrs\n  FROM wms_intervals\n  WHERE entity_type = 'workunit' AND assembled_at IS NOT NULL\n  GROUP BY entity_id\n),\nwu_engineer AS (\n  SELECT cf.entity_id,\n    GROUP_CONCAT(DISTINCT CASE WHEN tl.username = '' THEN '(unstamped)' ELSE tl.username END SEPARATOR ', ') AS engineer\n  FROM cost_facts cf\n  JOIN token_ledger tl ON tl.message_id = cf.message_id\n  WHERE cf.entity_type = 'workunit'\n    AND cf.timestamp BETWEEN $__timeFrom() AND $__timeTo()\n  GROUP BY cf.entity_id\n)\nSELECT\n  wc.entity_id AS wu_id,\n  wu.title,\n  COALESCE(we.engineer, '(unstamped)') AS engineer,\n  CASE WHEN wu.agent_id = '' THEN '(lead)' ELSE wu.agent_id END AS agent,\n  wu.status,\n  COALESCE(wi.phase_str, '') AS phase_mix,\n  COALESCE(wi.duration_hrs, 0) AS duration_hrs,\n  wc.messages,\n  wc.cost_usd\nFROM wu_cost wc\nJOIN workunits wu ON wu.id = wc.entity_id\nLEFT JOIN wu_intervals wi ON wi.entity_id = wc.entity_id\nLEFT JOIN wu_engineer we ON we.entity_id = wc.entity_id\nORDER BY wc.cost_usd DESC\nLIMIT 50",
+          "rawSql": "WITH wu_cost AS (\n  SELECT\n    cf.entity_id,\n    COUNT(DISTINCT cf.message_id) AS messages,\n    ROUND(SUM(cf.cost_usd), 4) AS cost_usd\n  FROM cost_facts cf\n  JOIN workunits wu ON wu.id = cf.entity_id AND cf.entity_type = 'workunit'\n  WHERE cf.timestamp BETWEEN $__timeFrom() AND $__timeTo()\n    AND ('$outcome' = 'All' OR wu.outcome_id = '$outcome')\n  GROUP BY cf.entity_id\n),\nwu_intervals AS (\n  SELECT entity_id,\n    GROUP_CONCAT(DISTINCT phase ORDER BY phase SEPARATOR '/') AS phase_str,\n    ROUND(SUM(duration_ms) / 3600000.0, 1) AS duration_hrs\n  FROM wms_intervals\n  WHERE entity_type = 'workunit' AND assembled_at IS NOT NULL\n  GROUP BY entity_id\n),\nwu_engineer AS (\n  SELECT cf.entity_id,\n    GROUP_CONCAT(DISTINCT CASE WHEN tl.username = '' THEN '(unstamped)' ELSE tl.username END SEPARATOR ', ') AS engineer\n  FROM cost_facts cf\n  JOIN token_ledger tl ON tl.message_id = cf.message_id\n  WHERE cf.entity_type = 'workunit'\n    AND cf.timestamp BETWEEN $__timeFrom() AND $__timeTo()\n  GROUP BY cf.entity_id\n)\nSELECT\n  COALESCE(wu.title, wc.entity_id) AS work_unit,\n  COALESCE(we.engineer, '(unstamped)') AS engineer,\n  CASE WHEN wu.agent_id = '' THEN '(lead)' ELSE wu.agent_id END AS agent,\n  wu.status,\n  COALESCE(wi.phase_str, '') AS phase_mix,\n  COALESCE(wi.duration_hrs, 0) AS duration_hrs,\n  wc.messages,\n  wc.cost_usd\nFROM wu_cost wc\nJOIN workunits wu ON wu.id = wc.entity_id\nLEFT JOIN wu_intervals wi ON wi.entity_id = wc.entity_id\nLEFT JOIN wu_engineer we ON we.entity_id = wc.entity_id\nORDER BY wc.cost_usd DESC\nLIMIT 50",
           "refId": "A"
         }
       ],
@@ -1327,7 +1328,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 36
+        "y": 38
       },
       "id": 10,
       "panels": [],
@@ -1339,7 +1340,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: attributed only \u2014 one row per outcome with cost activity in the window. CTE-based aggregate-first query (<1s for 30d). Confidence % = (direct + inferred) share of messages. Designed for invoice/budget review export.",
+      "description": "scope: attributed only — one row per outcome with cost activity in the window. CTE-based aggregate-first query (<1s for 30d). Confidence % = (direct + inferred) share of messages. Designed for invoice/budget review export.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -1480,78 +1481,6 @@
                 }
               }
             ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "status"
-            },
-            "properties": [
-              {
-                "id": "custom.width",
-                "value": 80
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "product"
-            },
-            "properties": [
-              {
-                "id": "custom.width",
-                "value": 100
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "outcome_id"
-            },
-            "properties": [
-              {
-                "id": "custom.width",
-                "value": 200
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "first_activity"
-            },
-            "properties": [
-              {
-                "id": "custom.width",
-                "value": 100
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "last_activity"
-            },
-            "properties": [
-              {
-                "id": "custom.width",
-                "value": 100
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "resolution"
-            },
-            "properties": [
-              {
-                "id": "custom.width",
-                "value": 90
-              }
-            ]
           }
         ]
       },
@@ -1559,7 +1488,7 @@
         "h": 16,
         "w": 24,
         "x": 0,
-        "y": 37
+        "y": 39
       },
       "id": 11,
       "options": {
@@ -1588,7 +1517,7 @@
             "uid": "teamster-mysql"
           },
           "format": "table",
-          "rawSql": "WITH cost_agg AS (\n  SELECT\n    cf.entity_id,\n    COUNT(DISTINCT cf.message_id) AS messages,\n    SUM(cf.tokens) AS tokens,\n    ROUND(SUM(cf.cost_usd), 4) AS cost_usd,\n    MIN(DATE(cf.timestamp)) AS first_activity,\n    MAX(DATE(cf.timestamp)) AS last_activity\n  FROM cost_facts cf\n  WHERE cf.timestamp BETWEEN $__timeFrom() AND $__timeTo()\n    AND cf.entity_type = 'outcome'\n  GROUP BY cf.entity_id\n),\nconf AS (\n  SELECT\n    ua.entity_id,\n    ROUND(100.0 * SUM(CASE WHEN ua.method LIKE 'temporal_join%' THEN 1 ELSE 0 END) / COUNT(*), 1) AS confidence_pct\n  FROM usage_attribution ua\n  JOIN token_ledger tl ON tl.message_id = ua.message_id\n  WHERE tl.timestamp BETWEEN $__timeFrom() AND $__timeTo()\n    AND ua.entity_type = 'outcome'\n  GROUP BY ua.entity_id\n),\nprod AS (\n  SELECT etr.entity_id, MAX(t.tag_value) AS product\n  FROM entity_tags_resolved etr\n  JOIN tags t ON t.id = etr.tag_id AND t.tag_key = 'product'\n  WHERE etr.entity_type = 'outcome'\n  GROUP BY etr.entity_id\n),\nres AS (\n  SELECT etr.entity_id, MAX(t.tag_value) AS resolution\n  FROM entity_tags_resolved etr\n  JOIN tags t ON t.id = etr.tag_id AND t.tag_key = 'resolution'\n  WHERE etr.entity_type = 'outcome'\n  GROUP BY etr.entity_id\n)\nSELECT\n  ca.entity_id AS outcome_id,\n  o.title,\n  COALESCE(p.product, '(untagged)') AS product,\n  o.status,\n  COALESCE(r.resolution, '') AS resolution,\n  ca.first_activity,\n  ca.last_activity,\n  ca.messages,\n  ca.tokens,\n  ca.cost_usd,\n  COALESCE(c.confidence_pct, 0) AS confidence_pct\nFROM cost_agg ca\nJOIN outcomes o ON o.id = ca.entity_id\nLEFT JOIN prod p ON p.entity_id = ca.entity_id\nLEFT JOIN res r ON r.entity_id = ca.entity_id\nLEFT JOIN conf c ON c.entity_id = ca.entity_id\nWHERE COALESCE(p.product, '(untagged)') IN (${product:sqlstring})\n  AND o.status IN (${status:sqlstring})\nORDER BY ca.cost_usd DESC\nLIMIT 200",
+          "rawSql": "WITH cost_agg AS (\n  SELECT\n    cf.entity_id,\n    COUNT(DISTINCT cf.message_id) AS messages,\n    SUM(cf.tokens) AS tokens,\n    ROUND(SUM(cf.cost_usd), 4) AS cost_usd,\n    MIN(DATE(cf.timestamp)) AS first_activity,\n    MAX(DATE(cf.timestamp)) AS last_activity\n  FROM cost_facts cf\n  WHERE cf.timestamp BETWEEN $__timeFrom() AND $__timeTo()\n    AND cf.entity_type = 'outcome'\n  GROUP BY cf.entity_id\n),\nconf AS (\n  SELECT\n    ua.entity_id,\n    ROUND(100.0 * SUM(CASE WHEN ua.method LIKE 'temporal_join%' THEN 1 ELSE 0 END) / COUNT(*), 1) AS confidence_pct\n  FROM usage_attribution ua\n  JOIN token_ledger tl ON tl.message_id = ua.message_id\n  WHERE tl.timestamp BETWEEN $__timeFrom() AND $__timeTo()\n    AND ua.entity_type = 'outcome'\n  GROUP BY ua.entity_id\n),\nprod AS (\n  SELECT etr.entity_id, MAX(t.tag_value) AS product\n  FROM entity_tags_resolved etr\n  JOIN tags t ON t.id = etr.tag_id AND t.tag_key = 'product'\n  WHERE etr.entity_type = 'outcome'\n  GROUP BY etr.entity_id\n),\nres AS (\n  SELECT etr.entity_id, MAX(t.tag_value) AS resolution\n  FROM entity_tags_resolved etr\n  JOIN tags t ON t.id = etr.tag_id AND t.tag_key = 'resolution'\n  WHERE etr.entity_type = 'outcome'\n  GROUP BY etr.entity_id\n)\nSELECT\n  COALESCE(o.title, ca.entity_id) AS outcome,\n  COALESCE(p.product, '(untagged)') AS product,\n  o.status,\n  COALESCE(r.resolution, '') AS resolution,\n  ca.first_activity,\n  ca.last_activity,\n  ca.messages,\n  ca.tokens,\n  ca.cost_usd,\n  COALESCE(c.confidence_pct, 0) AS confidence_pct\nFROM cost_agg ca\nJOIN outcomes o ON o.id = ca.entity_id\nLEFT JOIN prod p ON p.entity_id = ca.entity_id\nLEFT JOIN res r ON r.entity_id = ca.entity_id\nLEFT JOIN conf c ON c.entity_id = ca.entity_id\nWHERE COALESCE(p.product, '(untagged)') IN (${product:sqlstring})\n  AND o.status IN (${status:sqlstring})\nORDER BY ca.cost_usd DESC\nLIMIT 200",
           "refId": "A"
         }
       ],
@@ -1600,7 +1529,8 @@
   "refresh": "5m",
   "schemaVersion": 41,
   "tags": [
-    "teamster"
+    "teamster",
+    "work-cost"
   ],
   "templating": {
     "list": [
@@ -1609,12 +1539,19 @@
         "auto_count": 50,
         "auto_min": "1m",
         "current": {
-          "text": "$__auto",
-          "value": "$__auto"
+          "selected": true,
+          "text": "auto",
+          "value": "$__auto_interval_agg"
         },
+        "hide": 0,
         "label": "Aggregation",
         "name": "agg",
         "options": [
+          {
+            "selected": true,
+            "text": "auto",
+            "value": "$__auto_interval_agg"
+          },
           {
             "selected": false,
             "text": "1m",
@@ -1647,7 +1584,7 @@
           }
         ],
         "query": "1m,5m,15m,1h,6h,1d",
-        "refresh": 2,
+        "skipUrlSync": false,
         "type": "interval"
       },
       {
@@ -1703,14 +1640,14 @@
         "includeAll": true,
         "label": "Outcome (drill)",
         "name": "outcome",
-        "query": "SELECT CONCAT(o.id, ' \u2014 ', o.title) AS __text, o.id AS __value FROM outcomes o ORDER BY o.created_at DESC LIMIT 200",
+        "query": "SELECT CONCAT(o.id, ' — ', o.title) AS __text, o.id AS __value FROM outcomes o ORDER BY o.created_at DESC LIMIT 200",
         "refresh": 2,
         "type": "query"
       }
     ]
   },
   "time": {
-    "from": "now-30d",
+    "from": "now-7d",
     "to": "now"
   },
   "timepicker": {},

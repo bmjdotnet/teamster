@@ -252,7 +252,7 @@ When the cycle exits cleanly:
    downgrade to sonnet for pure lookup with low cognitive load, but
    default to opus for any work that requires synthesis.
 
-6. **The orchestrator's writable surface is small.** TeamCreate, Agent
+6. **The orchestrator's writable surface is small.** Agent
    (spawn), SendMessage, TaskCreate, AskUserQuestion, Read, and
    Write/Edit ONLY on these files:
    - `<topic-slug>-INPUT.md` (initial capture; frozen thereafter)

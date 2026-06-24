@@ -36,16 +36,26 @@ type yamlTokenScraper struct {
 	Mode string `yaml:"mode"`
 }
 
+type yamlRelay struct {
+	Mode           string `yaml:"mode"`
+	Target         string `yaml:"target,omitempty"`
+	ReplPushRemote string `yaml:"repl_push_remote,omitempty"`
+}
+
 // yamlTagConfig declares one key in the work-item tag vocabulary. Field names
 // and yaml tags MUST stay identical to config.TagConfig
 // (src/internal/config/yaml.go) or the installer round-trip drifts lossy: the
 // runtime read-side reconciles from config.TagConfig, the installer preserves
 // it through this struct. Keep the two in lock-step.
 type yamlTagConfig struct {
-	Category    string   `yaml:"category"`    // "context" | "lifecycle"
-	Cardinality string   `yaml:"cardinality"` // "single" | "multi"
-	Values      []string `yaml:"values"`      // explicit value list; empty for create-on-apply keys
-	Description string   `yaml:"description"`
+	Category       string   `yaml:"category"`        // "context" | "lifecycle"
+	Cardinality    string   `yaml:"cardinality"`     // "single" | "multi"
+	Values         []string `yaml:"values"`          // explicit value list; empty for create-on-apply keys
+	Description    string   `yaml:"description"`
+	Scope          string   `yaml:"scope"`           // "outcome" | "workunit" | ""
+	ExclusionGroup string   `yaml:"exclusion_group"` // mutual exclusion group slug
+	AutoExtract    string   `yaml:"auto_extract"`    // "git" | "env" | ""
+	Interview      string   `yaml:"interview"`       // "propose" | "auto" | "skip"
 }
 
 type teamsterYAML struct {
@@ -55,6 +65,7 @@ type teamsterYAML struct {
 	Grafana      yamlService              `yaml:"grafana"`
 	Otelcol      yamlOtelcol              `yaml:"otelcol"`
 	TokenScraper yamlTokenScraper         `yaml:"token-scraper"`
+	Relay        yamlRelay                `yaml:"relay,omitempty"`
 	Env          string                   `yaml:"env"`
 	Tags         map[string]yamlTagConfig `yaml:"tags,omitempty"`
 }
@@ -93,6 +104,9 @@ type yamlParams struct {
 	grafanaMode        string
 	prometheusEndpoint string // --prometheus-endpoint flag value; used to derive health URL hostname
 	grafanaEndpoint    string // --grafana-endpoint flag value; used to derive health URL hostname
+	relayMode          string
+	relayTarget        string
+	replPushRemote     string
 	env                string
 	ports              portConfig
 	otelHTTP           int
@@ -204,6 +218,24 @@ func buildYAMLConfig(p yamlParams) teamsterYAML {
 
 	envLabel := strOr(p.env, strOr(prior.Env, "production"))
 
+	// Relay: preserve prior config on upgrades when flags are absent.
+	relayMode := strOr(p.relayMode, prior.Relay.Mode)
+	relayTarget := strOr(p.relayTarget, prior.Relay.Target)
+	replPushRemote := strOr(p.replPushRemote, prior.Relay.ReplPushRemote)
+
+	// Health URL hostname: when an endpoint flag was explicitly provided, use
+	// it; otherwise preserve the hostname from the prior yaml's health URL so
+	// an upgrade that doesn't re-specify the endpoint doesn't regress a
+	// user-provided hostname to "localhost".
+	promHost := endpointHost(p.prometheusEndpoint)
+	if p.prometheusEndpoint == "" {
+		promHost = strOr(endpointHost(prior.Prometheus.Health), "localhost")
+	}
+	grafHost := endpointHost(p.grafanaEndpoint)
+	if p.grafanaEndpoint == "" {
+		grafHost = strOr(endpointHost(prior.Grafana.Health), "localhost")
+	}
+
 	// Round-trip the operator's tag vocabulary. readExistingYAML preserves the
 	// prior tags: block (the struct now carries it), so an upgrade install never
 	// clobbers operator edits. Inject the default vocabulary ONLY on first
@@ -226,12 +258,12 @@ func buildYAMLConfig(p yamlParams) teamsterYAML {
 		Prometheus: yamlService{
 			Mode:   promMode,
 			Port:   promPort,
-			Health: fmt.Sprintf("http://%s:%d/-/healthy", endpointHost(p.prometheusEndpoint), promPort),
+			Health: fmt.Sprintf("http://%s:%d/-/healthy", promHost, promPort),
 		},
 		Grafana: yamlService{
 			Mode:   grafanaMode,
 			Port:   grafanaPort,
-			Health: fmt.Sprintf("http://%s:%d/api/health", endpointHost(p.grafanaEndpoint), grafanaPort),
+			Health: fmt.Sprintf("http://%s:%d/api/health", grafHost, grafanaPort),
 		},
 		Otelcol: yamlOtelcol{
 			Mode:     otelcolMode,
@@ -240,6 +272,11 @@ func buildYAMLConfig(p yamlParams) teamsterYAML {
 		},
 		TokenScraper: yamlTokenScraper{
 			Mode: ccusageMode,
+		},
+		Relay: yamlRelay{
+			Mode:           relayMode,
+			Target:         relayTarget,
+			ReplPushRemote: replPushRemote,
 		},
 		Env:  envLabel,
 		Tags: tags,

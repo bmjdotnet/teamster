@@ -213,6 +213,10 @@ DETECTED_PROMETHEUS_MODE=""
 DETECTED_GRAFANA_MODE=""
 DETECTED_OTEL_MODE=""
 
+# Detected relay config (from systemd units, staged files, or teamster.yaml)
+DETECTED_RELAY_TARGET=""
+DETECTED_REPL_PUSH_REMOTE=""
+
 # JSON tool selection. Prefer jq, fall back to python3.
 JSON_TOOL=""
 
@@ -484,9 +488,9 @@ probe_settings() {
 
     if [[ -n "$DETECTED_TEAMSTER_HOOK_URL" ]]; then
         info "env.TEAMSTER_HOOK_SERVER_URL = ${C_GREEN}$DETECTED_TEAMSTER_HOOK_URL${C_RESET}"
-        if [[ "$DETECTED_TEAMSTER_HOOK_URL" != http://localhost:*/event \
-           && "$DETECTED_TEAMSTER_HOOK_URL" != http://127.0.0.1:*/event ]]; then
-            warn "  ↑ not pointing at localhost — will block hub-mode local hookd"
+        if [[ "$DETECTED_TEAMSTER_HOOK_URL" == http://localhost:*/event \
+           || "$DETECTED_TEAMSTER_HOOK_URL" == http://127.0.0.1:*/event ]]; then
+            warn "  ↑ pointing at localhost — remote clients will fail (hookd binds all interfaces; a hostname URL is the correct hub value)"
         fi
     else
         info "env.TEAMSTER_HOOK_SERVER_URL = (unset)"
@@ -494,9 +498,9 @@ probe_settings() {
 
     if [[ -n "$DETECTED_CLAUDE_HOOK_SERVER" ]]; then
         info "env.CLAUDE_HOOK_SERVER = ${C_GREEN}$DETECTED_CLAUDE_HOOK_SERVER${C_RESET}"
-        if [[ "$DETECTED_CLAUDE_HOOK_SERVER" != http://localhost:* \
-           && "$DETECTED_CLAUDE_HOOK_SERVER" != http://127.0.0.1:* ]]; then
-            warn "  ↑ not pointing at localhost — will block hub-mode local hookd"
+        if [[ "$DETECTED_CLAUDE_HOOK_SERVER" == http://localhost:* \
+           || "$DETECTED_CLAUDE_HOOK_SERVER" == http://127.0.0.1:* ]]; then
+            warn "  ↑ pointing at localhost — remote clients will fail (hookd binds all interfaces; a hostname URL is the correct hub value)"
         fi
     else
         info "env.CLAUDE_HOOK_SERVER = (unset)"
@@ -624,7 +628,9 @@ PY
     }
 
     local yaml_store_dsn yaml_hookd_port yaml_prom_mode yaml_prom_port
+    local yaml_prom_health="" yaml_graf_health=""
     local yaml_graf_mode yaml_graf_port yaml_otel_mode yaml_otel_grpc yaml_otel_http
+    local yaml_relay_mode="" yaml_relay_target="" yaml_repl_push=""
 
     yaml_store_dsn="$(_yaml_get dsn)"
     yaml_hookd_port="$(_yaml_get port)"
@@ -661,10 +667,14 @@ try:
     emit('prom_health', sections.get('prometheus', {}).get('health', ''))
     emit('graf_mode',   sections.get('grafana', {}).get('mode', ''))
     emit('graf_port',   sections.get('grafana', {}).get('port', ''))
+    emit('graf_health', sections.get('grafana', {}).get('health', ''))
     emit('otel_mode',   sections.get('otelcol', {}).get('mode', ''))
     emit('otel_grpc',   sections.get('otelcol', {}).get('grpc_port', ''))
     emit('otel_http',   sections.get('otelcol', {}).get('http_port', ''))
     emit('scraper_mode',sections.get('token-scraper', {}).get('mode', ''))
+    emit('relay_mode',   sections.get('relay', {}).get('mode', ''))
+    emit('relay_target', sections.get('relay', {}).get('target', ''))
+    emit('repl_push',    sections.get('relay', {}).get('repl_push_remote', ''))
 except Exception as e:
     import sys as _s; print(f'err={e}', file=_s.stderr)
 PY
@@ -675,27 +685,44 @@ PY
         while IFS='=' read -r _k _v; do
             [[ -z "$_k" ]] && continue
             case "$_k" in
-                store_dsn)   yaml_store_dsn="$_v" ;;
-                hookd_port)  yaml_hookd_port="$_v" ;;
-                prom_mode)   yaml_prom_mode="$_v" ;;
-                prom_port)   yaml_prom_port="$_v" ;;
-                graf_mode)   yaml_graf_mode="$_v" ;;
-                graf_port)   yaml_graf_port="$_v" ;;
-                otel_mode)   yaml_otel_mode="$_v" ;;
-                otel_grpc)   yaml_otel_grpc="$_v" ;;
-                otel_http)   yaml_otel_http="$_v" ;;
+                store_dsn)    yaml_store_dsn="$_v" ;;
+                hookd_port)   yaml_hookd_port="$_v" ;;
+                prom_mode)    yaml_prom_mode="$_v" ;;
+                prom_port)    yaml_prom_port="$_v" ;;
+                prom_health)  yaml_prom_health="$_v" ;;
+                graf_mode)    yaml_graf_mode="$_v" ;;
+                graf_port)    yaml_graf_port="$_v" ;;
+                graf_health)  yaml_graf_health="$_v" ;;
+                otel_mode)    yaml_otel_mode="$_v" ;;
+                otel_grpc)    yaml_otel_grpc="$_v" ;;
+                otel_http)    yaml_otel_http="$_v" ;;
+                relay_mode)   yaml_relay_mode="$_v" ;;
+                relay_target) yaml_relay_target="$_v" ;;
+                repl_push)    yaml_repl_push="$_v" ;;
             esac
         done <<< "$_parsed"
     fi
 
+    # _host_from_url URL — extract hostname from a URL, default to "localhost"
+    _host_from_url() {
+        local url="$1"
+        if [[ -n "$url" ]]; then
+            echo "$url" | sed -n 's|https\?://\([^:/]*\).*|\1|p'
+        fi
+    }
+
     # Seed DETECTED_* globals — yaml wins over probe results (more authoritative).
+    # Use hostnames from health URLs when available, not hardcoded "localhost".
     if [[ -n "$yaml_store_dsn" && -z "$DETECTED_STORE_DSN" ]]; then
         DETECTED_STORE_DSN="$yaml_store_dsn"
         info "store DSN from yaml: $DETECTED_STORE_DSN"
         dlog INFO wizard.probe "yaml seeded DETECTED_STORE_DSN=\"$yaml_store_dsn\""
     fi
     if [[ -n "$yaml_prom_port" && -z "$DETECTED_PROMETHEUS_URL" ]]; then
-        DETECTED_PROMETHEUS_URL="http://localhost:${yaml_prom_port}"
+        local _prom_host
+        _prom_host="$(_host_from_url "$yaml_prom_health")"
+        _prom_host="${_prom_host:-localhost}"
+        DETECTED_PROMETHEUS_URL="http://${_prom_host}:${yaml_prom_port}"
         info "prometheus from yaml: $DETECTED_PROMETHEUS_URL (mode=${yaml_prom_mode:-?})"
         dlog INFO wizard.probe "yaml seeded DETECTED_PROMETHEUS_URL=\"$DETECTED_PROMETHEUS_URL\" mode=$yaml_prom_mode"
     fi
@@ -704,7 +731,10 @@ PY
         dlog INFO wizard.probe "yaml seeded DETECTED_PROMETHEUS_MODE=$yaml_prom_mode"
     fi
     if [[ -n "$yaml_graf_port" && -z "$DETECTED_GRAFANA_URL" ]]; then
-        DETECTED_GRAFANA_URL="http://localhost:${yaml_graf_port}"
+        local _graf_host
+        _graf_host="$(_host_from_url "$yaml_graf_health")"
+        _graf_host="${_graf_host:-localhost}"
+        DETECTED_GRAFANA_URL="http://${_graf_host}:${yaml_graf_port}"
         info "grafana from yaml: $DETECTED_GRAFANA_URL (mode=${yaml_graf_mode:-?})"
         dlog INFO wizard.probe "yaml seeded DETECTED_GRAFANA_URL=\"$DETECTED_GRAFANA_URL\" mode=$yaml_graf_mode"
     fi
@@ -723,6 +753,18 @@ PY
     if [[ -n "$yaml_otel_mode" && -z "$DETECTED_OTEL_MODE" ]]; then
         DETECTED_OTEL_MODE="$yaml_otel_mode"
         dlog INFO wizard.probe "yaml seeded DETECTED_OTEL_MODE=$yaml_otel_mode"
+    fi
+
+    # Seed relay detected globals from yaml
+    if [[ -n "$yaml_relay_target" && -z "$DETECTED_RELAY_TARGET" ]]; then
+        DETECTED_RELAY_TARGET="$yaml_relay_target"
+        info "relay target from yaml: $DETECTED_RELAY_TARGET"
+        dlog INFO wizard.probe "yaml seeded DETECTED_RELAY_TARGET=\"$yaml_relay_target\""
+    fi
+    if [[ -n "$yaml_repl_push" && -z "$DETECTED_REPL_PUSH_REMOTE" ]]; then
+        DETECTED_REPL_PUSH_REMOTE="$yaml_repl_push"
+        info "repl-push remote from yaml: $DETECTED_REPL_PUSH_REMOTE"
+        dlog INFO wizard.probe "yaml seeded DETECTED_REPL_PUSH_REMOTE=\"$yaml_repl_push\""
     fi
 
     dlog INFO wizard.probe "yaml done"
@@ -858,6 +900,71 @@ probe_sudo() {
         PROBE_SUDO="prompt"
     fi
     dlog INFO  wizard.probe "sudo result=$PROBE_SUDO"
+}
+
+probe_relay() {
+    local _DTRACE_FN="probe_relay"
+    dtrace_enter "$_DTRACE_FN" probe
+    trap 'dtrace_exit "$_DTRACE_FN" probe' RETURN
+    local dir="${1:-$HOME/teamster}"
+
+    # Already seeded from yaml — skip systemd extraction
+    if [[ -n "$DETECTED_RELAY_TARGET" && -n "$DETECTED_REPL_PUSH_REMOTE" ]]; then
+        dlog INFO  wizard.probe "relay already_seeded target=\"$DETECTED_RELAY_TARGET\" remote=\"$DETECTED_REPL_PUSH_REMOTE\""
+        return
+    fi
+
+    # Try systemd unit file on disk
+    local relay_svc="/etc/systemd/system/teamster-relay.service"
+    if [[ -r "$relay_svc" && -z "$DETECTED_RELAY_TARGET" ]]; then
+        local _target
+        _target=$(grep -oP '(?<=--target )\S+' "$relay_svc" 2>/dev/null || true)
+        if [[ -n "$_target" ]]; then
+            DETECTED_RELAY_TARGET="$_target"
+            info "relay target from systemd: $DETECTED_RELAY_TARGET"
+            dlog INFO wizard.probe "relay seeded from systemd target=\"$_target\""
+        fi
+    fi
+
+    local repl_svc="/etc/systemd/system/teamster-repl-push.service"
+    if [[ -r "$repl_svc" && -z "$DETECTED_REPL_PUSH_REMOTE" ]]; then
+        local _remote
+        _remote=$(grep -oP '(?<=REPL_PUSH_REMOTE=)\S+' "$repl_svc" 2>/dev/null || true)
+        if [[ -n "$_remote" ]]; then
+            DETECTED_REPL_PUSH_REMOTE="$_remote"
+            info "repl-push remote from systemd: $DETECTED_REPL_PUSH_REMOTE"
+            dlog INFO wizard.probe "relay seeded from systemd repl_push_remote=\"$_remote\""
+        fi
+    fi
+
+    # Fallback: staged service files in BASEDIR/etc/
+    local staged_relay="$dir/etc/teamster-relay.service"
+    if [[ -r "$staged_relay" && -z "$DETECTED_RELAY_TARGET" ]]; then
+        local _target
+        _target=$(grep -oP '(?<=--target )\S+' "$staged_relay" 2>/dev/null || true)
+        if [[ -n "$_target" ]]; then
+            DETECTED_RELAY_TARGET="$_target"
+            info "relay target from staged config: $DETECTED_RELAY_TARGET"
+            dlog INFO wizard.probe "relay seeded from staged target=\"$_target\""
+        fi
+    fi
+    local staged_repl="$dir/etc/teamster-repl-push.service"
+    if [[ -r "$staged_repl" && -z "$DETECTED_REPL_PUSH_REMOTE" ]]; then
+        local _remote
+        _remote=$(grep -oP '(?<=REPL_PUSH_REMOTE=)\S+' "$staged_repl" 2>/dev/null || true)
+        if [[ -n "$_remote" ]]; then
+            DETECTED_REPL_PUSH_REMOTE="$_remote"
+            info "repl-push remote from staged config: $DETECTED_REPL_PUSH_REMOTE"
+            dlog INFO wizard.probe "relay seeded from staged repl_push_remote=\"$_remote\""
+        fi
+    fi
+
+    if [[ -n "$DETECTED_RELAY_TARGET" || -n "$DETECTED_REPL_PUSH_REMOTE" ]]; then
+        section "State check: relay configuration"
+        [[ -n "$DETECTED_RELAY_TARGET" ]] && info "relay target:     $DETECTED_RELAY_TARGET"
+        [[ -n "$DETECTED_REPL_PUSH_REMOTE" ]] && info "repl-push remote: $DETECTED_REPL_PUSH_REMOTE"
+    fi
+    dlog INFO  wizard.probe "relay result target=\"${DETECTED_RELAY_TARGET:-<none>}\" remote=\"${DETECTED_REPL_PUSH_REMOTE:-<none>}\""
 }
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -1011,29 +1118,44 @@ interview() {
     info "Set up event relay to mirror this hub's data to a replica host."
     info "The relay tails events.jsonl and POSTs each line to a remote hookd."
     local _relay_yn=0
-    ask_yn _relay_yn "Set up event relay to a replica?" N
+    local _relay_default="N"
+    if [[ -n "$DETECTED_RELAY_TARGET" || -n "$DETECTED_REPL_PUSH_REMOTE" ]]; then
+        _relay_default="Y"
+        info ""
+        info "Existing relay configuration detected:"
+        [[ -n "$DETECTED_RELAY_TARGET" ]]     && info "  relay target:     ${C_GREEN}$DETECTED_RELAY_TARGET${C_RESET}"
+        [[ -n "$DETECTED_REPL_PUSH_REMOTE" ]] && info "  repl-push remote: ${C_GREEN}$DETECTED_REPL_PUSH_REMOTE${C_RESET}"
+        info ""
+    fi
+    ask_yn _relay_yn "Set up event relay to a replica?" "$_relay_default"
     if [[ "$_relay_yn" -eq 1 ]]; then
         RELAY_MODE="install"
-        ask RELAY_TARGET "Replica hookd URL (e.g. http://replica:9125/event)" ""
-        ask REPL_PUSH_REMOTE "Repl-push SCP destination (e.g. user@replica)" ""
+        ask RELAY_TARGET "Replica hookd URL (e.g. http://replica:9125/event)" "${DETECTED_RELAY_TARGET}"
+        ask REPL_PUSH_REMOTE "Repl-push SCP destination (e.g. user@replica)" "${DETECTED_REPL_PUSH_REMOTE}"
         dlog INFO wizard.interview "relay_integration RELAY_MODE=install RELAY_TARGET=\"$RELAY_TARGET\" REPL_PUSH_REMOTE=\"$REPL_PUSH_REMOTE\""
     else
         RELAY_MODE="none"
         dlog INFO wizard.interview "relay_integration skipped"
     fi
 
-    # Replica mode (optional) — read-only hookd for hosts that receive data
-    section "Replica mode (optional)"
-    info "If this host is a read-only replica (receives data from a hub),"
-    info "hookd should run in read-only mode (rejects MCP/telemetry/drain)."
-    local _ro_yn=0
-    ask_yn _ro_yn "Run hookd in read-only mode?" N
-    if [[ "$_ro_yn" -eq 1 ]]; then
-        HOOKD_READ_ONLY=1
-        dlog INFO wizard.interview "hookd_read_only=1"
-    else
+    # Replica mode (optional) — read-only hookd for hosts that receive data.
+    # A host that relays events to a replica is a hub, not a replica itself.
+    if [[ "$RELAY_MODE" == "install" ]]; then
         HOOKD_READ_ONLY=0
-        dlog INFO wizard.interview "hookd_read_only=0"
+        dlog INFO wizard.interview "hookd_read_only=0 reason=relay_active (hub cannot be replica)"
+    else
+        section "Replica mode (optional)"
+        info "If this host is a read-only replica (receives data from a hub),"
+        info "hookd should run in read-only mode (rejects MCP/telemetry/drain)."
+        local _ro_yn=0
+        ask_yn _ro_yn "Run hookd in read-only mode?" N
+        if [[ "$_ro_yn" -eq 1 ]]; then
+            HOOKD_READ_ONLY=1
+            dlog INFO wizard.interview "hookd_read_only=1"
+        else
+            HOOKD_READ_ONLY=0
+            dlog INFO wizard.interview "hookd_read_only=0"
+        fi
     fi
 
     # Build-from-source and retention — only when mode=install for that service
@@ -1492,6 +1614,21 @@ main() {
     trap 'dtrace_exit "$_DTRACE_FN" main' RETURN
     dlog INFO  wizard.main "start REPO_DIR=$REPO_DIR SETTINGS_FILE=$SETTINGS_FILE bash=$BASH_VERSION user=${USER:-?} host=$(hostname 2>/dev/null || echo ?)"
 
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+        printf -- '\033[1;31mERROR: macOS is not supported as a Teamster hub.\033[0m\n' >&2
+        printf -- 'This installer only runs on apt-based Linux (Debian/Ubuntu); do not run it on the Mac.\n' >&2
+        printf -- '\n' >&2
+        printf -- 'macOS is supported as a Teamster *remote* only. To enroll this Mac, go to your\n' >&2
+        printf -- 'Teamster server (the Linux hub) and run the remote installer there, pointing it\n' >&2
+        printf -- 'at this Mac over SSH:\n' >&2
+        printf -- '\n' >&2
+        printf -- '    # on the Teamster server (NOT on the Mac):\n' >&2
+        printf -- '    teamster install-remote <user>@<this-mac>\n' >&2
+        printf -- '\n' >&2
+        printf -- 'See docs/specs/REMOTE-INSTALL.md for details.\n' >&2
+        exit 1
+    fi
+
     banner "Teamster installer"
     info "Repo:      $REPO_DIR"
     info "Settings:  $SETTINGS_FILE"
@@ -1505,6 +1642,7 @@ main() {
     probe_settings
     probe_basedir "$HOME/teamster"
     probe_yaml "$HOME/teamster"
+    probe_relay "$HOME/teamster"
     probe_ports
     probe_systemd
     probe_prereqs

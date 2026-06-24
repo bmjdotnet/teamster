@@ -349,10 +349,15 @@ func (r *Runner) Reallocate(ctx context.Context) (int, error) {
 // normalizing here means a future namespace drift can't silently re-route all
 // attribution to the unallocated bucket. We compare on the bare name.
 func (r *Runner) focusAt(ctx context.Context, sessionID, agentName string, ts time.Time) (etype, eid string, ok bool, err error) {
+	// Exclude brief_directive intervals: those are a focus-less teammate's
+	// INTENDED focus, recovered separately (and reversibly) by RecoverDirective
+	// with method='brief_directive_recovery'. Letting Allocate's focusAt consume
+	// them would write indistinguishable, non-reversible temporal_join rows.
 	const q = `
 		SELECT entity_type, entity_id
 		FROM wms_intervals
 		WHERE kind = 'focus'
+		  AND identity_source <> 'brief_directive'
 		  AND session_id = ?
 		  AND TRIM(LEADING '@' FROM agent_name) = ?
 		  AND started_at <= ?
@@ -400,6 +405,7 @@ func (r *Runner) focusInSession(ctx context.Context, sessionID string, ts time.T
 		SELECT entity_type, entity_id
 		FROM wms_intervals
 		WHERE kind = 'focus'
+		  AND identity_source <> 'brief_directive'
 		  AND session_id = ?
 		  AND started_at <= ?
 		  AND (ended_at IS NULL OR ended_at > ?)

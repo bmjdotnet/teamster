@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import pathlib
+import shutil
 import signal
 import socket
 import sys
@@ -150,6 +151,65 @@ def _log_error(msg: str, **extra) -> None:
             f.write(json.dumps(entry) + "\n")
     except Exception:
         pass  # logging must never crash the scraper
+
+
+# ---------------------------------------------------------------------------
+# agentName resolution from transcript (macOS top-level teammate sessions)
+# ---------------------------------------------------------------------------
+
+# On macOS, teammate sessions are top-level JSONL files with no .meta.json
+# sidecar, so _agent_name_for() returns "". Scan the transcript itself for the
+# first top-level "agentName" record and use it as the agent identity.
+# Bounded to _AGENTNAME_SCAN_LIMIT bytes; agentName appears near the top.
+_AGENTNAME_SCAN_LIMIT = 256 * 1024  # 256 KB — matches teamster.py constant
+
+# Per-process memo: file path -> "@agentName" or "" (lead sessions).
+# The scraper is long-running in daemon mode; this avoids re-scanning on
+# every poll interval for sessions whose agentName is already known.
+_agentname_cache: dict[str, str] = {}
+
+
+def _agent_name_from_transcript(path: str) -> str:
+    """Scan the head of a session transcript for a top-level agentName field.
+
+    On macOS, dispatched teammates run as top-level sessions whose transcript
+    contains an early record like {"agentName":"PizzaDude",...}. Lead sessions
+    have no agentName. Returns "@<agentName>" or "" (not found / any error).
+
+    Results are memoised in _agentname_cache keyed by file path so repeated
+    poll() calls skip re-reading known-identified files. Empty results are NOT
+    cached — if agentName hasn't been written yet (race between scraper poll
+    and transcript write), the next poll will retry. Never raises.
+    """
+    if path in _agentname_cache:
+        return _agentname_cache[path]
+    result = ""
+    try:
+        bytes_read = 0
+        with open(path, "rb") as f:
+            for raw_line in f:
+                bytes_read += len(raw_line)
+                if bytes_read > _AGENTNAME_SCAN_LIMIT:
+                    break
+                if b"agentName" not in raw_line:
+                    continue
+                try:
+                    rec = json.loads(raw_line)
+                    name = rec.get("agentName", "")
+                    if name and isinstance(name, str):
+                        result = "@" + name
+                        break
+                except (json.JSONDecodeError, TypeError, AttributeError):
+                    continue
+    except Exception:
+        pass  # unreadable transcript → leave agent_name empty
+    # Only cache non-empty results. If agentName hasn't been written yet
+    # (race: scraper polls the transcript before the first agentName record
+    # appears), a miss here lets the next poll retry rather than permanently
+    # misattributing this teammate's cost to the lead session.
+    if result:
+        _agentname_cache[path] = result
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -296,18 +356,176 @@ def _extract_focus_events(line: dict, session_id: str, agent_name: str,
 
 
 # ---------------------------------------------------------------------------
+# Brief-directive extraction (focus-less teammate fallback)
+# ---------------------------------------------------------------------------
+#
+# A teammate dispatched by a lead receives a `teammate-message` brief whose
+# FIRST instruction is the Teamster-mandated dispatch directive (see
+# skel/lib/plugin/skills/bootstrap/SKILL.md §"Write the technical brief"):
+#
+#     wms_setFocus(entityType="workunit", entityID="<id>", focus="<short what>")
+#
+# A teammate that does its work but NEVER actually calls wms_setFocus produces a
+# focus-less session whose cost would otherwise stay unallocated forever (the
+# hub can't read the Mac's transcript). The brief, however, deterministically
+# names the entity the teammate WAS told to focus on — a protocol-grounded link,
+# not a heuristic guess. We parse that directive from the teammate's own
+# transcript head and ship it to the hub as the session's INTENDED focus.
+#
+# This is emitted ONLY for sessions with no real setFocus (a real call always
+# wins — see poll()), and the hub treats it as subordinate to any real focus
+# interval (identity_source='brief_directive', never overrides 'remote_scraper'
+# or 'direct'). The directive's timestamp is the session's first-message ts, so
+# the intended focus covers the whole session.
+
+# The directive may appear with single or double quotes, or unquoted, and the
+# two fields may be in either order. We match each field independently within
+# the brief rather than assuming a fixed call shape, so reformatting the brief
+# (line wraps, extra args) does not break extraction.
+_DIRECTIVE_ENTITY_TYPE_RE = None
+_DIRECTIVE_ENTITY_ID_RE = None
+_DIRECTIVE_FOCUS_RE = None
+
+
+def _directive_res():
+    """Lazily compile the brief-directive regexes (py3.6-safe; no module-scope
+    typed globals)."""
+    global _DIRECTIVE_ENTITY_TYPE_RE, _DIRECTIVE_ENTITY_ID_RE, _DIRECTIVE_FOCUS_RE
+    if _DIRECTIVE_ENTITY_TYPE_RE is None:
+        import re
+        _DIRECTIVE_ENTITY_TYPE_RE = re.compile(
+            r"entityType\s*[=:]\s*[\"']?([A-Za-z]+)")
+        _DIRECTIVE_ENTITY_ID_RE = re.compile(
+            r"entityID\s*[=:]\s*[\"']?([A-Za-z0-9._-]+)")
+        _DIRECTIVE_FOCUS_RE = re.compile(
+            r"focus\s*[=:]\s*[\"']([^\"']{1,200})[\"']")
+    return _DIRECTIVE_ENTITY_TYPE_RE, _DIRECTIVE_ENTITY_ID_RE, _DIRECTIVE_FOCUS_RE
+
+
+# Per-process memo: file path -> directive event dict, or "" when the head has
+# been scanned and holds no usable directive. Mirrors _agentname_cache so the
+# daemon does not re-scan known files every poll. A None (absent) entry means
+# "not yet scanned"; a "" entry means "scanned, no directive" (cached so we
+# stop re-reading briefless sessions).
+_directive_cache: dict = {}
+
+
+def _line_text(line: dict) -> str:
+    """Flatten a user/assistant message's content into a single string.
+
+    Content may be a plain string or a list of blocks; we concatenate the text
+    of any string blocks. Never raises.
+    """
+    msg = line.get("message") or {}
+    content = msg.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict):
+                t = block.get("text")
+                if isinstance(t, str):
+                    parts.append(t)
+            elif isinstance(block, str):
+                parts.append(block)
+        return "".join(parts)
+    return ""
+
+
+def _extract_brief_directive(path: str, agent_name: str, host: str,
+                             username: str) -> dict:
+    """Scan a transcript head for a focus-less teammate's brief directive.
+
+    Returns a single 'focus_timeline' event dict carrying the entity the brief
+    told the teammate to focus on (with type='brief_directive'), or "" when the
+    head holds no parseable directive. The event's timestamp is the session's
+    first record timestamp so the intended focus covers the whole session.
+
+    Bounded to _AGENTNAME_SCAN_LIMIT bytes (the brief is the first user message).
+    Memoised per path. Never raises.
+    """
+    cached = _directive_cache.get(path)
+    if cached is not None:
+        return cached or ""
+
+    result = ""
+    try:
+        et_re, eid_re, focus_re = _directive_res()
+        session_id = ""
+        first_ts = ""
+        bytes_read = 0
+        with open(path, "rb") as f:
+            for raw_line in f:
+                bytes_read += len(raw_line)
+                if bytes_read > _AGENTNAME_SCAN_LIMIT:
+                    break
+                try:
+                    line = json.loads(raw_line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if not isinstance(line, dict):
+                    continue
+                if not session_id:
+                    session_id = line.get("sessionId", "")
+                if not first_ts:
+                    ts = line.get("timestamp", "")
+                    if ts:
+                        first_ts = ts
+                # The directive lives in the first teammate-message user record.
+                if line.get("type") != "user":
+                    continue
+                text = _line_text(line)
+                if "teammate-message" not in text and "setFocus" not in text:
+                    continue
+                et_m = et_re.search(text)
+                eid_m = eid_re.search(text)
+                if not et_m or not eid_m:
+                    continue
+                focus_m = focus_re.search(text)
+                line_agent = agent_name
+                if not line_agent:
+                    at = line.get("agentType", "")
+                    if at:
+                        line_agent = "@" + at
+                result = {
+                    "type": "focus_timeline",
+                    "directive": True,
+                    "session_id": session_id or line.get("sessionId", ""),
+                    "host": host,
+                    "username": username,
+                    "agent_name": line_agent,
+                    "entity_type": et_m.group(1),
+                    "entity_id": eid_m.group(1),
+                    "focus": focus_m.group(1) if focus_m else "",
+                    "timestamp": first_ts or line.get("timestamp", ""),
+                }
+                break
+    except Exception:
+        result = ""  # unreadable transcript → no directive
+
+    # Cache both hits and clean misses so the daemon stops re-scanning. An
+    # exception path leaves result="" but we still cache it: a transcript that
+    # raises once will keep raising, and re-scanning it every poll is wasteful.
+    _directive_cache[path] = result
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Scraper
 # ---------------------------------------------------------------------------
 
 class Scraper:
     def __init__(self, *, telemetry_url: str, host: str, username: str,
-                 session_glob: str, cursor_path: str, dry_run: bool):
+                 session_glob: str, cursor_path: str, dry_run: bool,
+                 data_dir: str):
         self.telemetry_url = telemetry_url
         self.host = host
         self.username = username
         self.session_glob = session_glob
         self.cursor_path = cursor_path
         self.dry_run = dry_run
+        self.data_dir = data_dir
         # cursors: {filepath: {"offset": int}}
         self.cursors: dict[str, dict] = {}
         self._http_timeout = 5
@@ -316,6 +534,13 @@ class Scraper:
         if base.endswith("/telemetry"):
             base = base[:-len("/telemetry")]
         self._focus_url = base + "/focus-timeline"
+        # Transcript cache directory.
+        self._cache_dir = os.path.join(data_dir, "transcript-cache")
+        # Killswitch path: touch this file to disable enhanced extraction.
+        self._killswitch_path = os.path.join(data_dir, ".no-sweep")
+        # Track paths whose brief directive has already been emitted this
+        # process lifetime, avoiding redundant POSTs on subsequent polls.
+        self._directives_emitted: set = set()
 
     # ------------------------------------------------------------------
     # Cursor persistence
@@ -345,29 +570,143 @@ class Scraper:
             logging.error("save_cursors failed: %s", exc)
 
     # ------------------------------------------------------------------
+    # Killswitch
+    # ------------------------------------------------------------------
+
+    def _killswitch_active(self) -> bool:
+        """Check if the .no-sweep killswitch file exists."""
+        return os.path.exists(self._killswitch_path)
+
+    # ------------------------------------------------------------------
+    # Transcript cache
+    # ------------------------------------------------------------------
+
+    def _cache_transcript(self, path: str) -> None:
+        """Copy a transcript file to the local cache directory.
+
+        Uses the session directory name as the cache key. Skips the copy when
+        the cache is already at least as fresh as the source (mtime check).
+        If the copy fails (permissions, disk full), log and continue.
+        """
+        try:
+            session_dir = os.path.basename(os.path.dirname(path))
+            if not session_dir or session_dir == ".":
+                session_dir = os.path.basename(path)
+            cache_path = os.path.join(self._cache_dir, session_dir + ".jsonl")
+            try:
+                src_stat = os.stat(path)
+                dst_stat = os.stat(cache_path)
+                if dst_stat.st_mtime >= src_stat.st_mtime:
+                    return
+            except OSError:
+                pass  # cache doesn't exist yet, proceed with copy
+            os.makedirs(self._cache_dir, exist_ok=True)
+            shutil.copy2(path, cache_path)
+        except Exception as exc:
+            _log_error("transcript cache failed", path=path, error=str(exc))
+            logging.warning("transcript cache failed path=%s: %s", path, exc)
+
+    def _cached_path_for(self, path: str) -> str | None:
+        """Return the cached transcript path if it exists, else None."""
+        session_dir = os.path.basename(os.path.dirname(path))
+        if not session_dir or session_dir == ".":
+            session_dir = os.path.basename(path)
+        cache_path = os.path.join(self._cache_dir, session_dir + ".jsonl")
+        if os.path.exists(cache_path):
+            return cache_path
+        return None
+
+    # ------------------------------------------------------------------
     # Poll
     # ------------------------------------------------------------------
 
     def poll(self, stop_event=None) -> None:
+        killswitch = self._killswitch_active()
+        if killswitch:
+            logging.info("killswitch active (.no-sweep exists), "
+                         "skipping enhanced extraction")
+
         all_focus: list[dict] = []
         paths = sorted(glob.glob(self.session_glob))
+        seen_cursor_keys = set()
+
         for path in paths:
             if stop_event is not None and stop_event.is_set():
                 break
-            try:
-                focus = self._process_file(path, "")
-                all_focus.extend(focus)
-            except Exception as exc:
-                _log_error("process_file error", path=path, error=str(exc))
-                logging.error("process file error path=%s: %s", path, exc)
-            sub_focus = self._process_subagents(path, stop_event)
-            all_focus.extend(sub_focus)
+            seen_cursor_keys.add(path)
+
+            if not killswitch:
+                self._cache_transcript(path)
+
+            all_focus.extend(
+                self._poll_one(path, path, killswitch, stop_event))
+
+        # Cache recovery: process transcripts whose originals were deleted
+        # between scraper polls. Only runs when killswitch is off (caching
+        # is an enhanced feature). Check cursor keys we already know about
+        # that didn't appear in the glob — the original is gone.
+        if not killswitch:
+            for cursor_key in list(self.cursors):
+                if stop_event is not None and stop_event.is_set():
+                    break
+                if cursor_key in seen_cursor_keys:
+                    continue
+                cached = self._cached_path_for(cursor_key)
+                if not cached:
+                    continue
+                logging.warning(
+                    "transcript deleted, processing from cache "
+                    "path=%s cache=%s", cursor_key, cached)
+                all_focus.extend(
+                    self._poll_one(cached, cursor_key, killswitch,
+                                   stop_event))
 
         if all_focus:
             self._post_focus_events(all_focus)
 
         if not self.dry_run:
             self.save_cursors()
+
+    def _poll_one(self, effective_path: str, cursor_key: str,
+                  killswitch: bool, stop_event) -> list[dict]:
+        """Process a single session transcript and return focus events."""
+        focus: list[dict] = []
+
+        agent_name = _agent_name_from_transcript(effective_path)
+        try:
+            file_focus = self._process_file(
+                effective_path, cursor_key, agent_name)
+            if not killswitch:
+                focus.extend(file_focus)
+        except Exception as exc:
+            _log_error("process_file error", path=cursor_key,
+                       error=str(exc))
+            logging.error("process file error path=%s: %s",
+                          cursor_key, exc)
+
+        # Subagent walking always runs (token telemetry is basic), but
+        # focus events from subagents are only collected when killswitch
+        # is off.
+        sub_focus = self._process_subagents(effective_path, stop_event)
+        if not killswitch:
+            focus.extend(sub_focus)
+
+        if not killswitch:
+            if effective_path not in self._directives_emitted:
+                try:
+                    directive = _extract_brief_directive(
+                        effective_path, agent_name, self.host,
+                        self.username)
+                    if directive:
+                        focus.append(directive)
+                        self._directives_emitted.add(effective_path)
+                except Exception as exc:
+                    _log_error("brief_directive error", path=cursor_key,
+                               error=str(exc))
+                    logging.error("brief directive error path=%s: %s",
+                                  cursor_key, exc)
+
+        return focus
 
     # ------------------------------------------------------------------
     # Subagent walking
@@ -390,7 +729,7 @@ class Scraper:
                 return focus_events
             agent_name = self._agent_name_for(sub)
             try:
-                focus = self._process_file(sub, agent_name)
+                focus = self._process_file(sub, sub, agent_name)
                 focus_events.extend(focus)
             except Exception as exc:
                 _log_error("process_subagent error", path=sub, error=str(exc))
@@ -419,9 +758,12 @@ class Scraper:
     # File processing — faithful port of Go processFile()
     # ------------------------------------------------------------------
 
-    def _process_file(self, path: str, agent_name: str) -> list[dict]:
+    def _process_file(self, path: str, cursor_key: str,
+                       agent_name: str) -> list[dict]:
         """Ingest one session JSONL file from its current cursor offset.
 
+        path: the file to actually read (may be a cache copy).
+        cursor_key: the key to track in self.cursors (always the original path).
         Returns any focus events extracted from new bytes.
         """
         try:
@@ -429,7 +771,7 @@ class Scraper:
         except OSError:
             return []  # file disappeared between glob and stat
 
-        cursor = self.cursors.setdefault(path, {"offset": 0})
+        cursor = self.cursors.setdefault(cursor_key, {"offset": 0})
 
         # Reset if file was truncated/rotated.
         if file_size < cursor["offset"]:
@@ -681,7 +1023,8 @@ class Scraper:
         if self.dry_run:
             logging.info("dry-run focus_events count=%d", len(events))
             for ev in events:
-                logging.info("  focus: session=%s agent=%s entity=%s/%s focus=%s",
+                logging.info("  focus%s: session=%s agent=%s entity=%s/%s focus=%s",
+                             " (brief_directive)" if ev.get("directive") else "",
                              ev.get("session_id"), ev.get("agent_name"),
                              ev.get("entity_type"), ev.get("entity_id"),
                              ev.get("focus"))
@@ -799,6 +1142,9 @@ def main() -> int:
         except ValueError:
             pass
 
+    # On macOS, Claude Code also uses ~/.claude/projects/ (same path as Linux).
+    # If a future macOS Claude Code release moves transcripts under
+    # ~/Library/Application Support/, this glob would need a fallback for that path.
     session_glob = os.path.join(
         os.path.expanduser("~"), ".claude", "projects", "*", "*.jsonl")
     if v := os.environ.get("SCRAPER_SESSION_GLOB", ""):
@@ -837,6 +1183,7 @@ def main() -> int:
         session_glob=session_glob,
         cursor_path=cursor_path,
         dry_run=dry_run,
+        data_dir=data_dir,
     )
     scraper.load_cursors()
 

@@ -5,6 +5,15 @@ import (
 	"strings"
 )
 
+// isStaleLocalhostURL reports whether v is a localhost or 127.0.0.1 URL —
+// the signal that a prior install baked in the old default that must be
+// replaced with a hostname-based URL on reinstall. A real hostname or FQDN
+// the operator deliberately set is preserved (returns false).
+func isStaleLocalhostURL(v string) bool {
+	return strings.HasPrefix(v, "http://localhost:") ||
+		strings.HasPrefix(v, "http://127.0.0.1:")
+}
+
 // domainConfig carries the domain-named server flags from the CLI to the
 // merge step. Empty string = flag not given.
 type domainConfig struct {
@@ -225,6 +234,20 @@ func applyDomainServer(env map[string]interface{}, spec domainServiceSpec) {
 				"flag_value", "<absent>",
 				"final", existingStr,
 				"action", "install-deferred",
+			)
+			return
+		}
+		// Preserve a non-stale existing value: if the operator already has a
+		// real hostname or FQDN set (not localhost/127.0.0.1), keep it.
+		// Replace stale localhost values so reinstall heals the old default.
+		if exists && !isStaleLocalhostURL(existingStr) {
+			dlog("INFO", "teamster-install.merge", "domain server",
+				"service", spec.name,
+				"key", spec.settingsKey,
+				"existing", existingStr,
+				"flag_value", "<absent>",
+				"final", existingStr,
+				"action", "install-preserve",
 			)
 			return
 		}

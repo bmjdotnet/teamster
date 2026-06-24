@@ -193,7 +193,7 @@ simple to conditional to hierarchical:
 - Simple: "title mentions a panel or the SSE feed → `component:dashboard`"
 - Conditional on other tags / dates: "`product-version:v1.0` when
   `git.branch=main` and created before 2026-06-05"
-- Hierarchical: "anything under outcome `out-installer` is `component:install`"
+- Hierarchical: "anything under outcome `installer` is `component:install`"
 
 Write the rule into the value's `description` so the next session reads it back.
 Example for `component:dashboard`:

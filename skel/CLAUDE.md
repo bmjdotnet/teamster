@@ -29,6 +29,8 @@ workflow enforcement, and work management for Claude Code Agent Teams.
 | `teamster wms drain` | Close dangling focus intervals |
 | `teamster wms list` | List open outcomes and work units |
 | `teamster wms close` | Close an outcome or work unit |
+| `teamster backup` / `list` / `status` | Take a backup, list backups, show timer status |
+| `teamster restore <path>` | Restore from a backup directory |
 | `feed` | Real-time terminal activity stream |
 
 ## Architecture at a glance
@@ -41,6 +43,7 @@ workflow enforcement, and work management for Claude Code Agent Teams.
 | `feed` | Terminal activity viewer (tails JSONL, colorizes). |
 | `rollup` | Cost-attribution pipeline. Allocates token spend to WMS entities. Runs on a systemd timer. |
 | `classify` | Phase and work-type classifier. Derives tags from activity signals. Runs every 5 minutes. |
+| `backup` | Backup engine. Snapshots MySQL, OTel config, and teamster state to timestamped directories. Runs on systemd timer. |
 | `teamster` | Hook client + CLI. Forked per hook event; also the CLI entry point for status/tags/wms/sql. |
 
 Configuration lives in `etc/teamster.yaml`. Systemd units and timers are in `etc/`.

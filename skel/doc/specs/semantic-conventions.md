@@ -20,13 +20,68 @@ the record is POSTed to hookd.
 | `tool_input` | object\|string | Raw tool input as provided by Claude Code. May be a JSON object or a string-encoded JSON object. | Claude Code | stable |
 | `tool_response` | string | Tool output returned to Claude Code. Present on `PostToolUse` only. | Claude Code | stable |
 | `agent_id` | string | Opaque agent identifier assigned by Claude Code to a teammate. | Claude Code | stable |
-| `agent_type` | string | Human-readable agent name as set when the agent was spawned (e.g. `store`, `engine`). Used to derive `_agent_name`. | Claude Code | stable |
+| `agent_type` | string | Human-readable agent name as set when the agent was spawned (e.g. `store`, `engine`). Used to derive `_agent_name`. On the hub/Linux this is inline in the payload; on macOS teammate payloads it is **absent** and the Python hook client backfills it from the transcript's `agentName` (see §1.1). | Claude Code / teamster.py | stable |
 | `cwd` | string | Working directory of the Claude Code process at the time of the hook event. | Claude Code | stable |
 | `transcript_path` | string | Filesystem path to the JSONL transcript for this session. Present on `Stop` events. | Claude Code | stable |
 | `stop_response` | string | Final assistant message from a `Stop` event, if available. | Claude Code | stable |
 | `last_assistant_message` | string | Fallback final message used when `stop_response` is empty. | Claude Code | stable |
 | `host` | string | Originating hostname, set by the Python hook client on remote installs. The Go client uses `_host` instead. | Python hook client | stable |
 | `ts` | string | RFC3339 UTC timestamp of the event (`2006-01-02T15:04:05Z`). Set by WMS synthetic events; Claude Code events carry their own timestamps. | hookobserver / hookd | stable |
+
+### 1.1 Agent identity: `agent_type` derivation (Linux vs macOS)
+
+How a teammate's identity reaches the stream differs by platform, because
+Claude Code's Agent-Teams runtime structures teammate sessions differently:
+
+- **Hub / Linux.** Dispatched teammates share the **lead's `session_id`**, and
+  each teammate's hook payload carries an inline **`agent_type`** field. The
+  lead has no `agent_type`. `_agent_name` is derived directly:
+  `"@" + agent_type` (empty for the lead).
+
+- **macOS (remote).** Each teammate runs as a **separate top-level session** —
+  its own `session_id`, its own transcript at
+  `~/.claude/projects/<proj>/<session>.jsonl` (**not** under a `subagents/`
+  subdirectory) — and its hook payloads carry **no `agent_type`**. The teammate
+  name lives only in the transcript's top-level **`agentName`** field
+  (e.g. `{"agentName":"PizzaDude",...}` near the head of the file). Lead
+  sessions have no `agentName`.
+
+  To keep the stream and cost attribution correct, the Python clients derive
+  identity from the transcript:
+
+  - **`teamster.py`** (hook client): when a payload has no `agent_type` but
+    carries `transcript_path`, it scans the transcript head (bounded to
+    256 KB) for the first non-empty `agentName` and sets `event["agent_type"]`
+    to it — so hookd's `EnrichRecord` then produces `_agent_name = "@<name>"`
+    as usual. Fork-per-event, so no caching.
+  - **`token-scraper.py`**: for each top-level session transcript it scans the
+    head for `agentName` and attributes that session's cost to `@<agentName>`
+    rather than the lead. Memoised per process **only when non-empty** — an
+    empty result (the `agentName` record not yet written when the scraper
+    polls) is not cached, so the next poll retries instead of permanently
+    misattributing the teammate's cost to the lead.
+
+  Both scans are best-effort and never raise. Use `TEAMSTER_DEBUG_RAW=1`
+  (which makes `teamster.py` dump verbatim hook stdin to
+  `~/teamster/var/raw-hook-debug.jsonl`) to confirm what a macOS payload
+  actually contains.
+
+### 1.2 UserPromptSubmit `additionalContext` (nudge parity for remotes)
+
+On the hub, the Go hook client injects the activity-reporting reminder and the
+team-dispatch mandate locally from constants. The remote Python client has no
+copy of that text, so **hookd returns it in the HTTP response**: on a
+`UserPromptSubmit` event, hookd sets `additionalContext` in its JSON response to
+`ACTIVITY_INSTRUCTION + TEAM_DISPATCH_INSTRUCTION`, and `teamster.py` echoes it
+back as `hookSpecificOutput.additionalContext` (it echoes `additionalContext`
+on both `PreToolUse` and `UserPromptSubmit`). The hub Go client ignores this
+response field — no double-injection.
+
+**Limitation:** hookd cannot observe a remote session's solo/team marker (it is
+client-local state, never sent over the wire), so hookd always returns the
+**team** context on `UserPromptSubmit`. A solo remote session will still see the
+team-dispatch text; this is the least-harm default since the common remote case
+is team work and the text is guidance, not enforcement.
 
 ---
 
@@ -42,7 +97,7 @@ enrichment), the hub does not overwrite it.
 
 | Field | Type | Description | Source | Stability |
 |-------|------|-------------|--------|-----------|
-| `_agent_name` | string | Display-ready agent identity: `"@" + agent_type`. Example: `@store`. Empty for the lead (no `agent_type`). | hook client / EnrichRecord | stable |
+| `_agent_name` | string | Display-ready agent identity: `"@" + agent_type`. Example: `@store`. Empty for the lead (no `agent_type`). On macOS the `agent_type` is backfilled from the transcript's `agentName` before this is derived (see §1.1). | hook client / EnrichRecord | stable |
 | `_host` | string | Canonical hostname for the originating machine. Derived from `os.Hostname()` on the hub client; WSL hosts append `-wsl`. On remotes, copied from the `host` field. | hook client / EnrichRecord | stable |
 | `_session_id` | string | Copy of `session_id`, normalized to `"unknown"` if blank. Written to `~/.claude/current-session-id` so wms-mcp can read it. | Go hook client | stable |
 | `_model` | string | Model identifier read from `~/.claude/settings.json`, or extracted from the session transcript on `Stop`. | hook client / EnrichRecord | stable |
@@ -52,7 +107,7 @@ enrichment), the hub does not overwrite it.
 | `_thought` | string | Activity message from `reportActivity` MCP tool. Represents what the agent is doing right now. | hook client / EnrichRecord | stable |
 | `_focus` | string | Mission text from `setOverallIntent` MCP tool, or from `wms_setFocus`. See note on two-focus distinction below. | hook client / EnrichRecord | stable |
 | `_done` | string | Completion message from `completeActivity` MCP tool. | hook client / EnrichRecord | stable |
-| `_team` | string | Team name extracted from a `TeamCreate` tool call. Value of the `team_name` parameter. | hook client / EnrichRecord | stable |
+| `_team` | string | Team identifier for the session. Implicit in Claude Code v2.1.178+; one team per session. | hook client / EnrichRecord | stable |
 | `_usage` | object | Token usage summary extracted from the session transcript on `Stop`. Fields: `input_tokens` (int), `output_tokens` (int), `cache_creation_tokens` (int), `cache_read_tokens` (int), `model` (string). | hook client / EnrichRecord | stable |
 | `_warn_msg` | string | Operator warning message. Emitted for orphan dispatch events (no WMS task tracked for the session). Rendered as `[WARN]` display line in feed. | server (dispatchObservability) | stable |
 | `cost_details` | object | Per-model USD cost breakdown computed from token counts via `knownModelPricing` / `computeCostDetails`. Fields: `input_cost_usd`, `output_cost_usd`, `cache_read_cost_usd`, `cache_write_cost_usd` (all float64). Written to WMS entities via `SetCost` on `Stop` events. | server (writeCostForSession) | stable |
@@ -111,7 +166,7 @@ fallback.
 | `GREP` | 4 | (reserved; `Grep` maps to `READ`) | Search variant — reserved in color table | 120,140,200 (periwinkle) | experimental |
 | ` ACT` | 4 | `Bash` (with description) | Bash tool with intent description — human-readable action | 230,150,50 (amber) | stable |
 | `EXEC` | 4 | `Monitor` | Background process monitoring | 180,160,60 (olive dim) | stable |
-| `TEAM` | 4 | `Agent`, `TeamCreate`, `TeamDelete` | Agent lifecycle — spawning or managing teammates | 180,120,220 (purple) | stable |
+| `TEAM` | 4 | `Agent` | Agent lifecycle — spawning teammates | 180,120,220 (purple) | stable |
 | `COMM` | 4 | `SendMessage` | Inter-agent or agent-to-human communication | 150,140,210 (lavender) | stable |
 | `TASK` | 4 | `TaskCreate`, `TaskGet`, `TaskList`, `TaskUpdate`; all `mcp__wms__*` tools | Work management operations | 240,110,170 (vivid pink) | stable |
 | ` WEB` | 4 | `WebSearch`, `WebFetch` | External web access | 210,130,180 (dusty rose) | stable |
@@ -320,6 +375,9 @@ value in `usage_attribution.method` for every attributed message:
 | `admin_warmup` | Pre-first-`setFocus` warmup cost re-attributed to the session's resolved Outcome under `phase=admin`. Covers the `[session start, first setFocus)` interval. Provenance in `warmup_evidence`. Reversible via `--unrecover-warmup` |
 | `synthesized_outcome` | No-focus session cost re-attributed to an LLM-synthesized Outcome (produced by the orchestrator, consumed by `--synthesize-focus <mapping-file>`). Lower fidelity than `transcript_focus_recovery`. Provenance in `synthesis_evidence`. Reversible via `--unsynthesize` |
 | `gap_recovery` | Lead/teammate thread gap attributed to the session's strategic Outcome by inference from other attributed messages in the same session. Provenance in `gap_evidence`. Reversible via `--unrecover-gaps` |
+| `brief_directive_recovery` | Focus-less **remote teammate** cost attributed to the exact entity its dispatch brief named — the mandated `wms_setFocus(entityType, entityID)` directive the teammate was told to call first but never did. The remote scraper parses the directive from the teammate's own transcript head and ships it to `/focus-timeline` as a `brief_directive` focus interval; `--recover-directives` resolves it and re-attributes the session's `unallocated`/`sweep_skipped` cost. Deterministic (no LLM, protocol-grounded link), so higher fidelity than `synthesized_outcome`. Provenance in `directive_evidence`. Reversible via `--unrecover-directives` |
+| `synthesized_remote_floor` | Remote-orphan session cost attributed by **temporal correlation** — the session had no focus interval, no brief directive, and no accessible transcript, so the hub attributed it to whatever WMS entity concurrent sessions on the same host were focused on. Lowest-fidelity deterministic method (Step 8, after `brief_directive_recovery`). Provenance in `synthesis_evidence` with `mapping_source='temporal_correlation'`. Reversible via `--unsynthesize-remote-floor` |
+| `sweep_skipped` | LLM sweep examined the session and determined it cannot be attributed (e.g. no user objective, trivial session). Reason recorded in `synthesis_evidence.evidence_excerpt`. Excluded from future `--count-orphans`. Reclaimable by `brief_directive_recovery` or `synthesized_remote_floor` when a directive or concurrent focus is later found; otherwise not reversible — re-examine manually if needed |
 | `unallocated` | No covering interval found anywhere |
 
 `temporal_join_lead_fallback` fires only when `agentName != ""` (so the lead's
@@ -371,6 +429,7 @@ one residual: `RecoverStats.Deferred` / `DeferredMessages`, counted and logged
 The residual categories the operator observes: **recovered** (transcript-
 based), **admin_warmup** (warmup interval attributed to session Outcome under
 `phase=admin`), **synthesized_outcome** (LLM-mapped no-focus sessions),
+**sweep_skipped** (LLM examined, no attributable objective),
 **unallocated** (no attribution source available), and **deferred** (other
 host, or same host with a different non-empty user).
 **Provenance:** each recovered row has a corresponding entry in the
@@ -380,9 +439,58 @@ $0.16 on outcome X" with the exact transcript signal that placed it there.
 Similarly, `warmup_evidence` records the warmup interval bounds
 (`warmup_start`, `first_focus_at`) per `admin_warmup` message,
 `synthesis_evidence` records the mapping source, confidence level, and
-evidence excerpt per `synthesized_outcome` message, and `gap_evidence`
+evidence excerpt per `synthesized_outcome` message, `gap_evidence`
 records the inferred entity, thread context, and evidence count per
-`gap_recovery` message.
+`gap_recovery` message, and `directive_evidence` records the brief-named
+entity per `brief_directive_recovery` message.
+
+**Brief-directive recovery (focus-less remote teammates).** A teammate
+dispatched by a lead receives a `teammate-message` brief whose first
+instruction is the protocol-mandated `wms_setFocus(entityType, entityID, …)`
+directive (see the bootstrap skill, §"Write the technical brief"). A teammate
+that does work but never actually calls `wms_setFocus` produces a focus-less
+session; on a **remote** host the hub can't read its transcript, so its cost
+would stay `unallocated` forever (`--recover-focus`/`--recover-warmup` defer it,
+and the LLM sweep — also host-local — marks it `sweep_skipped`). The remote
+`token-scraper` closes this gap deterministically: when a session has **no**
+real `setFocus` but its brief carries the directive, the scraper parses the
+named entity from its own transcript head and POSTs it to `/focus-timeline`
+with `directive: true`. The hub writes it as a `kind='focus'` interval with
+`identity_source='brief_directive'`, **subordinate** to any real focus (it is
+inserted only when the session+agent has no focus interval of any source, and
+the allocator's `focusAt`/`focusInSession` and `--recover-warmup`'s DB-interval
+reader all **exclude** `brief_directive`, so a real `setFocus` always wins).
+`rollup --recover-directives` then resolves the directive's named entity
+(skipping a dangling entity) and re-attributes the whole session's
+`unallocated`/`sweep_skipped` cost to it with method
+`brief_directive_recovery`. It needs no transcript and is host-neutral, so it
+runs on the hub for remote sessions. Reversible via `--unrecover-directives`
+(deletes the attribution + `directive_evidence`; the durable `brief_directive`
+interval is retained as provenance, and a follow-up allocate leaves the rows
+`unallocated` because the allocator never consults directive intervals).
+
+**Focus-interval ordering safety (dual-writer fix).** A focus interval is
+written by up to two paths: the hub wms-mcp (`OpenFocusInterval`,
+`identity_source='direct'`, hub wall-clock ts) and — for remotes — the
+token-scraper via `/focus-timeline` (`writeFocusInterval`,
+`identity_source='remote_scraper'`, transcript ts). Both formerly ran an
+unconditional "close any open focus interval for (session, agent) at MY ts",
+so when the two ts were skewed/out-of-order (dual-writer remote) — or when the
+hub's own async focus opens raced (single-writer) — one close could stamp
+`ended_at < started_at`, a negative-width interval `focusAt` can never cover,
+silently dropping the session's cost. The fix: (1) both closes are scoped
+`AND started_at <= <close-ts>`, so a close that predates an interval's start is
+ignored (the interval stays open for a later valid close) — never negative
+width; (2) both writers re-check the latest open interval under `FOR UPDATE` and
+no-op when it is already the same entity, so one logical setFocus yields one
+open interval regardless of writer/arrival order. Hub single-writer behavior is
+unchanged (the lock is uncontended; closes always follow the prior open's
+start). The already-corrupted rows are healed once by
+`rollup --repair-focus-intervals`, which recomputes each inverted interval's
+`ended_at` from its successor in the `(session, agent)` focus chain (last one
+reopened), releases the affected sessions' dropped `unallocated`/`sweep_skipped`
+cost, and reallocates — idempotent, and reversible via
+`--unrepair-focus-intervals` (prior `ended_at` saved in `focus_interval_repair`).
 
 **Attribution weight vs tag fractional weight.** `usage_attribution.weight`
 (always 1.0 per message today) conserves cost *across entities per message*.
@@ -421,7 +529,7 @@ removed before being promoted to stable.
 |-------|------|-------------|--------|-----------|
 | `duration_ms` | int | Wall-clock duration of a tool call in milliseconds, measured from `PreToolUse` timestamp to `PostToolUse` timestamp for the same tool invocation. Requires the hook client to correlate Pre/Post events by tool invocation ID, which it does not currently do. | hook client | experimental |
 | `agent_model` | string | Model ID of the agent that made the tool call (e.g. `claude-sonnet-4-6`). Disambiguates when multiple teammates with different models share a session. Derived from `settings.json` at startup, scoped to the individual agent rather than the session (cf. `_model`). | hook client / EnrichRecord | experimental |
-| `agent_kind` | string enum | Whether the issuing agent is the session lead or a teammate. Values: `lead` (no `agent_type` in payload), `teammate` (`agent_type` present). Purely derived — no new payload field is needed from Claude Code. | hook client / EnrichRecord | experimental |
+| `agent_kind` | string enum | Whether the issuing agent is the session lead or a teammate. Values: `lead` (no `agent_type` in payload), `teammate` (`agent_type` present). Purely derived — no new payload field is needed from Claude Code. **Caveat:** on macOS, teammate payloads also lack `agent_type` until backfilled from the transcript `agentName` (§1.1), so this derivation must run *after* that backfill, not directly off the raw payload. | hook client / EnrichRecord | experimental |
 | `entity_phase` | string enum | The agent's current execution-loop phase. Values: `implement`, `validate`, `review`, `commit`. Intended to be set explicitly via an MCP tool call, or inferred from surrounding activity patterns. Provides coarser rollup state than `_thought` for dashboard aggregation. | MCP tool (proposed) / inferred | experimental |
 | `sync_source` | string enum | How a WMS state change was triggered. Values: `wms` (via wms-mcp tool call), `manual` (direct database write). Present on `WMSStatusChange` events only. Allows consumers to distinguish agent-driven transitions from administrative ones. | hookobserver | experimental |
 
@@ -437,21 +545,21 @@ attached via `entity_tags`.
 ### 9.0 System-Expected Tags (required)
 
 Three tag keys are marked **required** (`required=1` in the tags table). The
-nightly sweep, classifier, cost dashboards, and recovery pipeline depend on
+sweep, classifier, cost dashboards, and recovery pipeline depend on
 them. A fresh install seeds all three as required. Users can retire them via
 `wms_retireTag` but should understand the consequences:
 
 | Key | Category | What depends on it |
 |-----|----------|-------------------|
 | `work-type` | lifecycle | Cost-by-work-type dashboards, classifier derivation, bootstrap dispatch tagging. Without it, cost cannot be faceted by kind of work. |
-| `phase` | lifecycle | Cost-by-phase dashboards, classifier phase derivation, `admin` warmup phase, nightly sweep phase reporting. Without it, cost-by-phase views are empty. |
+| `phase` | lifecycle | Cost-by-phase dashboards, classifier phase derivation, `admin` warmup phase, sweep phase reporting. Without it, cost-by-phase views are empty. |
 | `product` | context | Cost-by-product dashboards, bootstrap interview, the primary faceting dimension for "how much did product X cost." Without it, all cost appears product-less. |
 
 The `required` flag is a **soft constraint**: the WMS engine warns when a
 required tag is missing on a workunit (`warnings` field in createWorkUnit
 response) but does not block creation. The intent is to guide agents toward
 complete tagging, not to hard-block work. The bootstrap skill and the
-focus-nudge hook reinforce these expectations at session time; the nightly
+focus-nudge hook reinforce these expectations at session time; the scheduled
 sweep catches and classifies anything the classifier can still derive.
 
 ### 9.1 Core Context Keys

@@ -1,4 +1,4 @@
-// Package llm provides prompt construction and response parsing for the nightly
+// Package llm provides prompt construction and response parsing for the
 // attribution sweep. The actual LLM invocation uses claude --print (Claude Code
 // headless mode), not the Anthropic API directly.
 package llm

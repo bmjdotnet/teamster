@@ -158,7 +158,7 @@ stops — it's a safety net, not infinite nagging. The nudge is the system enfor
 this lesson automatically, so agents that miss focus at session start get
 corrected early.
 
-**The nightly sweep recovers what the nudge missed.** A systemd timer runs
+**The scheduled sweep recovers what the nudge missed.** A systemd timer runs
 `rollup --sweep` (deterministic passes: allocate, recover-focus, recover-warmup,
 recover-gaps) followed by `/teamster:sweep` (LLM-assisted: synthesize WMS
 Outcomes for orphan sessions by reading transcript heads). Between them, three
@@ -173,7 +173,7 @@ attribution methods fill in what agents failed to declare:
 
 The sweep is automated and reversible (each method has an `--un*` flag). But
 prevention is cheaper than recovery: setting focus on your first action costs one
-tool call; recovering it later costs a nightly LLM pass.
+tool call; recovering it later costs an LLM sweep pass.
 
 ---
 

@@ -22,6 +22,31 @@
   "links": [],
   "panels": [
     {
+      "type": "text",
+      "title": "",
+      "gridPos": {
+        "h": 2,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 900,
+      "options": {
+        "mode": "html",
+        "content": "<div style=\"display:flex; gap:6px; align-items:center; flex-wrap:wrap; padding:2px 0; margin: -4px 0;\">\n  <a href=\"/d/landing-page?from=${__from}&to=${__to}\" style=\"padding:4px 12px; background:#1e1e2e; color:#8ab4f8; border-radius:4px; text-decoration:none; font-size:13px; font-weight:600; border:1px solid #333;\">Home</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/activity-feed?from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Activity</a>\n  <a href=\"/d/fd-ai-spend-overview-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Spend</a>\n  <a href=\"/d/fd-cost-explorer-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Trace</a>\n  <a href=\"/d/fd-usage-effectiveness-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Usage</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/cost-by-tag-value?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#2a2a4a; color:#8ab4f8; border-radius:4px; text-decoration:none; font-size:12px; font-weight:600; border:1px solid #4a4a6a;\">Simple Cost</a>\n  <a href=\"/d/tag-stack-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Multidim</a>\n  <a href=\"/d/entity-cost-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Work</a>\n  <a href=\"/d/fd-outcome-accounting-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Outcomes</a>\n  <a href=\"/d/outcome-cost-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Outcome Cost</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/fd-data-quality-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Health</a>\n</div>",
+        "code": {
+          "language": "html",
+          "showLineNumbers": false,
+          "showMiniMap": false
+        }
+      },
+      "transparent": true,
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
       "datasource": {
         "type": "mysql",
         "uid": "teamster-mysql"
@@ -48,7 +73,7 @@
         "h": 12,
         "w": 7,
         "x": 0,
-        "y": 0
+        "y": 2
       },
       "id": 1,
       "options": {
@@ -64,13 +89,17 @@
           "values": [
             "value",
             "percent"
-          ]
+          ],
+          "sortBy": "Total",
+          "sortDesc": true
         },
         "pieType": "pie",
         "reduceOptions": {
-          "calcs": [],
+          "calcs": [
+            "sum"
+          ],
           "fields": "",
-          "values": true
+          "values": false
         },
         "tooltip": {
           "hideZeros": false,
@@ -85,8 +114,8 @@
             "type": "mysql",
             "uid": "teamster-mysql"
           },
-          "format": "table",
-          "rawSql": "SELECT\n  COALESCE(x.tag_value, 'untagged') AS metric,\n  ROUND(SUM(cr.cost_usd), 4) AS \"cost_usd\"\nFROM cost_facts cr\nINNER JOIN (\n  SELECT entity_type, entity_id, tag_value FROM (\n    SELECT er.entity_type, er.entity_id, t.tag_value,\n           ROW_NUMBER() OVER (PARTITION BY er.entity_type, er.entity_id ORDER BY t.tag_value) rn\n    FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n    WHERE t.tag_key = '$tag_key'\n  ) z WHERE rn = 1\n) x ON x.entity_type = cr.entity_type AND x.entity_id = cr.entity_id\nWHERE $__timeFilter(cr.timestamp)\nGROUP BY x.tag_value\nORDER BY x.tag_value",
+          "format": "time_series",
+          "rawSql": "SELECT\n  $__timeGroupAlias(cr.timestamp, $agg),\n  COALESCE(x.tag_value, 'untagged') AS metric,\n  ROUND(SUM(cr.cost_usd), 4) AS cost_usd\nFROM cost_facts cr\nINNER JOIN (\n  SELECT entity_type, entity_id, tag_value FROM (\n    SELECT er.entity_type, er.entity_id, t.tag_value,\n           ROW_NUMBER() OVER (PARTITION BY er.entity_type, er.entity_id ORDER BY t.tag_value) rn\n    FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n    WHERE t.tag_key = '$tag_key'\n  ) z WHERE rn = 1\n) x ON x.entity_type = cr.entity_type AND x.entity_id = cr.entity_id\nWHERE $__timeFilter(cr.timestamp)\nGROUP BY 1, x.tag_value\nORDER BY 1, x.tag_value",
           "refId": "A"
         }
       ],
@@ -159,7 +188,7 @@
         "h": 12,
         "w": 17,
         "x": 7,
-        "y": 0
+        "y": 2
       },
       "id": 2,
       "options": {
@@ -169,7 +198,9 @@
           ],
           "displayMode": "table",
           "placement": "right",
-          "showLegend": true
+          "showLegend": true,
+          "sortBy": "Total",
+          "sortDesc": true
         },
         "tooltip": {
           "hideZeros": false,
@@ -197,7 +228,8 @@
   "refresh": "5m",
   "schemaVersion": 41,
   "tags": [
-    "teamster"
+    "teamster",
+    "work-cost"
   ],
   "templating": {
     "list": [
@@ -225,12 +257,19 @@
         "auto_count": 50,
         "auto_min": "1m",
         "current": {
-          "text": "$__auto",
-          "value": "$__auto"
+          "selected": true,
+          "text": "auto",
+          "value": "$__auto_interval_agg"
         },
+        "hide": 0,
         "label": "Aggregation",
         "name": "agg",
         "options": [
+          {
+            "selected": true,
+            "text": "auto",
+            "value": "$__auto_interval_agg"
+          },
           {
             "selected": false,
             "text": "1m",
@@ -263,13 +302,13 @@
           }
         ],
         "query": "1m,5m,15m,1h,6h,1d",
-        "refresh": 2,
+        "skipUrlSync": false,
         "type": "interval"
       }
     ]
   },
   "time": {
-    "from": "now-30d",
+    "from": "now-7d",
     "to": "now"
   },
   "timepicker": {},

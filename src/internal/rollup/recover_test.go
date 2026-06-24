@@ -919,3 +919,197 @@ func TestRecoverWarmup_ConservationInvariant(t *testing.T) {
 	}
 	assertNoDoubleAttribution(t, db, ctx)
 }
+
+// ---------------------------------------------------------------------------
+// Remote warmup recovery tests (DB-interval path, Objective 1 remote branch)
+// ---------------------------------------------------------------------------
+
+// seedRemoteFocus inserts a wms_intervals focus row with identity_source='remote_scraper',
+// exactly as the remote token-scraper ships to the hub via /focus-timeline.
+func seedRemoteFocus(t *testing.T, db *sql.DB, ctx context.Context, session, agent, etype, eid string, start time.Time) {
+	t.Helper()
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO wms_intervals (kind, identity_source, session_id, agent_name, entity_type, entity_id, started_at)
+		 VALUES ('focus','remote_scraper',?,?,?,?,?)`,
+		session, agent, etype, eid, start); err != nil {
+		t.Fatalf("seed remote focus %s/%s: %v", etype, eid, err)
+	}
+}
+
+// TestRecoverWarmup_RemoteSessionWithDBIntervals verifies the primary remote path:
+// a session on a different host (normally deferred) is recovered via its
+// wms_intervals focus rows when the DB has at least one focus interval for it.
+// The transcript FocusTimelineSource must NOT be called for the remote session.
+func TestRecoverWarmup_RemoteSessionWithDBIntervals(t *testing.T) {
+	db := rollupTestDB(t)
+	ctx := context.Background()
+	base := time.Date(2026, 6, 9, 20, 0, 0, 0, time.UTC)
+
+	seedOutcome(t, db, ctx, "o-remote")
+	seedWorkunit(t, db, ctx, "wu-remote", "o-remote")
+
+	// Two warmup messages on a remote host. seedLedger defaults to host='testhost';
+	// override via seedLedgerHostUser so the scope filter sees them as remote.
+	seedLedgerHostUser(t, db, ctx, "rm_early", "s-remote", "", "mac-host", "alice", base.Add(1*time.Minute), 10.0, 1000)
+	seedLedgerHostUser(t, db, ctx, "rm_mid", "s-remote", "", "mac-host", "alice", base.Add(3*time.Minute), 15.0, 1500)
+	// A post-focus message — should NOT be recovered.
+	seedLedgerHostUser(t, db, ctx, "rm_late", "s-remote", "", "mac-host", "alice", base.Add(10*time.Minute), 20.0, 2000)
+
+	// The remote scraper shipped a focus interval at 20:05 → workunit wu-remote.
+	seedRemoteFocus(t, db, ctx, "s-remote", "", "workunit", "wu-remote", base.Add(5*time.Minute))
+
+	r := newTestRunner(db)
+	if err := r.Run(ctx, false); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	// rm_early and rm_mid predate the focus → unallocated (warmup candidates).
+	// rm_late is post-focus → temporal_join (Run() attributes it normally).
+	for _, m := range []string{"rm_early", "rm_mid"} {
+		if _, _, method := attributionOf(t, db, ctx, m); method != "unallocated" {
+			t.Fatalf("%s pre-recovery method=%q, want unallocated", m, method)
+		}
+	}
+
+	// Source panics if called — proves the remote session does NOT use the
+	// transcript path.
+	panicSrc := FocusTimelineSource(func(sessionID, _ string) (*transcript.FocusTimeline, error) {
+		panic("transcript source must not be called for remote session: " + sessionID)
+	})
+
+	stats, err := r.RecoverWarmup(ctx, RecoverOptions{
+		Source: panicSrc,
+		Host:   "hub-host",
+		User:   "alice",
+	})
+	if err != nil {
+		t.Fatalf("recover-warmup: %v", err)
+	}
+
+	// rm_early and rm_mid predate the focus at 20:05 → warmup → recovered to o-remote.
+	if stats.Recovered != 2 {
+		t.Fatalf("stats.Recovered=%d, want 2 (rm_early + rm_mid)", stats.Recovered)
+	}
+	if stats.Deferred != 0 {
+		t.Fatalf("stats.Deferred=%d, want 0 (remote session with DB intervals is NOT deferred)", stats.Deferred)
+	}
+	for _, m := range []string{"rm_early", "rm_mid"} {
+		et, ei, method := attributionOf(t, db, ctx, m)
+		if method != warmupMethod || et != "outcome" || ei != "o-remote" {
+			t.Fatalf("%s → (%q,%q) method=%q, want (outcome,o-remote) %s", m, et, ei, method, warmupMethod)
+		}
+	}
+	// rm_late is post-first-focus — warmup recovery must not touch it.
+	// (Run() already attributed it via temporal_join using the same focus interval.)
+	if _, _, method := attributionOf(t, db, ctx, "rm_late"); method == warmupMethod {
+		t.Fatalf("rm_late method=%q, must not be %s (post-first-setFocus)", method, warmupMethod)
+	}
+
+	// Conservation.
+	if l, f := sumLedger(t, db, ctx), sumCostFacts(t, db, ctx); math.Abs(l-f) > eps {
+		t.Fatalf("conservation violated: ledger=%.6f cost_facts=%.6f", l, f)
+	}
+	assertNoDoubleAttribution(t, db, ctx)
+
+	// A synthetic admin interval must exist for the remote session.
+	var adminCount int
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM wms_intervals WHERE kind='state' AND phase='admin' AND phase_source='warmup_recovery' AND session_id='s-remote'`).
+		Scan(&adminCount); err != nil {
+		t.Fatalf("count admin intervals: %v", err)
+	}
+	if adminCount != 1 {
+		t.Fatalf("admin intervals=%d, want 1 (remote warmup recovery must create synthetic admin interval)", adminCount)
+	}
+}
+
+// TestRecoverWarmup_RemoteSessionNoDBIntervals verifies that a remote session
+// with NO wms_intervals focus rows is still deferred (Objective 2 territory —
+// the agent never called wms_setFocus, or the scraper hasn't shipped yet).
+func TestRecoverWarmup_RemoteSessionNoDBIntervals(t *testing.T) {
+	db := rollupTestDB(t)
+	ctx := context.Background()
+	base := time.Date(2026, 6, 9, 20, 0, 0, 0, time.UTC)
+
+	// Remote ledger rows — no focus intervals in DB for this session.
+	seedLedgerHostUser(t, db, ctx, "nf1", "s-nofocus", "", "mac-host", "alice", base.Add(1*time.Minute), 5.0, 500)
+	seedLedgerHostUser(t, db, ctx, "nf2", "s-nofocus", "", "mac-host", "alice", base.Add(2*time.Minute), 5.0, 500)
+
+	r := newTestRunner(db)
+	if err := r.Run(ctx, false); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	stats, err := r.RecoverWarmup(ctx, RecoverOptions{
+		Source: nil, // production source — must not be called for remote
+		Host:   "hub-host",
+		User:   "alice",
+	})
+	if err != nil {
+		t.Fatalf("recover-warmup: %v", err)
+	}
+
+	if stats.Deferred != 1 {
+		t.Fatalf("stats.Deferred=%d, want 1 (remote session with no DB intervals deferred)", stats.Deferred)
+	}
+	if stats.DeferredMessages != 2 {
+		t.Fatalf("stats.DeferredMessages=%d, want 2", stats.DeferredMessages)
+	}
+	if stats.Recovered != 0 {
+		t.Fatalf("stats.Recovered=%d, want 0", stats.Recovered)
+	}
+	// Messages still unallocated.
+	for _, m := range []string{"nf1", "nf2"} {
+		if _, _, method := attributionOf(t, db, ctx, m); method != "unallocated" {
+			t.Fatalf("%s method=%q, want unallocated (no focus → deferred)", m, method)
+		}
+	}
+}
+
+// TestRecoverWarmup_LocalSessionUsesTranscript verifies that a LOCAL session
+// (same host+user) still uses the transcript FocusTimelineSource and is NOT
+// routed through the DB interval path — the existing behaviour is unchanged.
+func TestRecoverWarmup_LocalSessionUsesTranscript(t *testing.T) {
+	db := rollupTestDB(t)
+	ctx := context.Background()
+	base := time.Date(2026, 6, 9, 20, 0, 0, 0, time.UTC)
+
+	seedOutcome(t, db, ctx, "o-local")
+
+	// Local ledger row (host=testhost matches opts.Host).
+	seedLedger(t, db, ctx, "loc1", "s-local", "", base.Add(1*time.Minute), 10.0, 1000)
+
+	r := newTestRunner(db)
+	if err := r.Run(ctx, false); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	transcriptCalled := false
+	src := FocusTimelineSource(func(sessionID, _ string) (*transcript.FocusTimeline, error) {
+		transcriptCalled = true
+		tl := &transcript.FocusTimeline{
+			SessionID: sessionID,
+			Events: map[string][]transcript.FocusEvent{
+				"": {{Timestamp: base.Add(5 * time.Minute), EntityType: "outcome", EntityID: "o-local"}},
+			},
+		}
+		return tl, nil
+	})
+
+	stats, err := r.RecoverWarmup(ctx, RecoverOptions{
+		Source: src,
+		Host:   "testhost",
+		User:   "alice",
+	})
+	if err != nil {
+		t.Fatalf("recover-warmup: %v", err)
+	}
+	if !transcriptCalled {
+		t.Fatal("transcript source was not called for local session — local path broken")
+	}
+	if stats.Recovered != 1 {
+		t.Fatalf("stats.Recovered=%d, want 1 (local warmup via transcript)", stats.Recovered)
+	}
+	if et, ei, method := attributionOf(t, db, ctx, "loc1"); method != warmupMethod || et != "outcome" || ei != "o-local" {
+		t.Fatalf("loc1 → (%q,%q) method=%q, want (outcome,o-local) %s", et, ei, method, warmupMethod)
+	}
+}
