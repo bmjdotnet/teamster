@@ -3,16 +3,14 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![Platform: Linux](https://img.shields.io/badge/platform-linux-lightgrey.svg)
 
-Claude Code is great, but **using subagents and agent-teams effectively requires too much effort**
-and you have almost **no visibility into what the agents are doing**.  What is worse, it is
-nearly impossible to trustably link AI costs to business outcomes or to know if AI is being used effectively.
-
 Teamster is a self-hosted observability and cost-attribution system for
 Claude Code. It records what every agent does in real time, attributes
 per-message token spend to declared work items, and presents both through
 Grafana dashboards and a terminal activity feed. Every dollar lands somewhere
 visible: attributed cost carries its attribution method, and whatever cannot
 be attributed is shown as a residual, not hidden.
+
+See the creator's personal Teamster dashboard at [teamster.bmj.net](https://teamster.bmj.net).
 
 ![AI Spend Overview](img/where_spend_goes.png)
 
