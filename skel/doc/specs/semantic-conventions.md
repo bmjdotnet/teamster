@@ -469,28 +469,30 @@ runs on the hub for remote sessions. Reversible via `--unrecover-directives`
 interval is retained as provenance, and a follow-up allocate leaves the rows
 `unallocated` because the allocator never consults directive intervals).
 
-**Focus-interval ordering safety (dual-writer fix).** A focus interval is
-written by up to two paths: the hub wms-mcp (`OpenFocusInterval`,
-`identity_source='direct'`, hub wall-clock ts) and — for remotes — the
-token-scraper via `/focus-timeline` (`writeFocusInterval`,
+**Focus-interval ordering safety (dual-writer fix, extended to all closers).**
+A focus interval is written by up to two paths: the hub wms-mcp
+(`OpenFocusInterval`, `identity_source='direct'`, hub wall-clock ts) and — for
+remotes — the token-scraper via `/focus-timeline` (`writeFocusInterval`,
 `identity_source='remote_scraper'`, transcript ts). Both formerly ran an
 unconditional "close any open focus interval for (session, agent) at MY ts",
 so when the two ts were skewed/out-of-order (dual-writer remote) — or when the
 hub's own async focus opens raced (single-writer) — one close could stamp
 `ended_at < started_at`, a negative-width interval `focusAt` can never cover,
-silently dropping the session's cost. The fix: (1) both closes are scoped
-`AND started_at <= <close-ts>`, so a close that predates an interval's start is
-ignored (the interval stays open for a later valid close) — never negative
-width; (2) both writers re-check the latest open interval under `FOR UPDATE` and
-no-op when it is already the same entity, so one logical setFocus yields one
-open interval regardless of writer/arrival order. Hub single-writer behavior is
-unchanged (the lock is uncontended; closes always follow the prior open's
-start). The already-corrupted rows are healed once by
-`rollup --repair-focus-intervals`, which recomputes each inverted interval's
-`ended_at` from its successor in the `(session, agent)` focus chain (last one
-reopened), releases the affected sessions' dropped `unallocated`/`sweep_skipped`
-cost, and reallocates — idempotent, and reversible via
-`--unrepair-focus-intervals` (prior `ended_at` saved in `focus_interval_repair`).
+silently dropping the session's cost. The fix: (1) **all** focus-interval
+closers (`closeOpenFocusIntervals`, `CloseFocusIntervalForEntity`,
+`CloseSessionIntervals`) are now scoped `AND started_at <= <close-ts>`, so a
+close that predates an interval's start is ignored (the interval stays open for
+a later valid close) — never negative width; (2) both writers re-check the
+latest open interval under `FOR UPDATE` and no-op when it is already the same
+entity, so one logical setFocus yields one open interval regardless of
+writer/arrival order. Hub single-writer behavior is unchanged (the lock is
+uncontended; closes always follow the prior open's start). The
+already-corrupted rows are healed once by `rollup --repair-focus-intervals`,
+which recomputes each inverted interval's `ended_at` from its successor in the
+`(session, agent)` focus chain (last one reopened), releases the affected
+sessions' dropped `unallocated`/`sweep_skipped` cost, and reallocates —
+idempotent, and reversible via `--unrepair-focus-intervals` (prior `ended_at`
+saved in `focus_interval_repair`).
 
 **Attribution weight vs tag fractional weight.** `usage_attribution.weight`
 (always 1.0 per message today) conserves cost *across entities per message*.
@@ -567,8 +569,14 @@ sweep catches and classifies anything the classifier can still derive.
 | Key | Category | Cardinality | Required | Description |
 |-----|----------|-------------|----------|-------------|
 | `product` | context | single | **yes** | The ongoing product or area of work (e.g. teamster, homelab). Durable — rarely changes. Set on the strategic Outcome at bootstrap; inherited by WorkUnits. |
-| `feature` | context | single | no | The specific feature being built within a product. Mutually exclusive with `bug`. |
-| `bug` | context | single | no | The specific bug being fixed within a product. Mutually exclusive with `feature`. |
+| `feature` | context | single | no | The specific feature being built. Facet of `work-type`; exclusion group `work-scope`. |
+| `bug` | context | single | no | The specific bug being fixed. Facet of `work-type`; exclusion group `work-scope`. |
+| `refactor` | context | single | no | The specific refactoring purpose. Facet of `work-type`; exclusion group `work-scope`. |
+| `infra` | context | single | no | The specific infrastructure work. Facet of `work-type`; exclusion group `work-scope`. |
+| `docs` | context | single | no | The specific documentation effort. Facet of `work-type`; exclusion group `work-scope`. |
+| `research` | context | single | no | The specific investigation or exploration. Facet of `work-type`; exclusion group `work-scope`. |
+| `test` | context | single | no | The specific validation target. Facet of `work-type`; exclusion group `work-scope`. |
+| `admin` | context | single | no | The specific admin task. Facet of `work-type`; exclusion group `work-scope`. |
 | `component` | context | multi | no | Architectural component touched (e.g. installer, wms, dashboard). |
 | `product-version` | context | single | no | Version of the product being targeted (e.g. v1.0, v2.0). |
 | `user` | context | single | no | OS user that created the WMS entity. Auto-applied at creation by the wms-mcp handler (source=classifier, best-effort). |

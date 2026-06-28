@@ -198,8 +198,13 @@ response groups keys by role — no interpretation needed:
   `exclusive` (at most one key per exclusion group). Apply `scope: "outcome"`
   keys to the Outcome; keys without scope can go on either.
 - **`autoExtract`** — extract silently from the environment (git, env).
-- **`required`** — must be set on every WorkUnit before close-out.
-- **`engineManaged`** — do not propose, set, or modify.
+- **`requiredLifecycle`** — lifecycle keys the lead MUST apply to every
+  WorkUnit at dispatch time. Values are included (e.g. `phase`:
+  design/build/test/review/rework; `work-type`: feature/bug/refactor/…).
+  Do NOT propose these at the Outcome interview — apply them in Step 7.1.
+- **`required`** — non-lifecycle keys required on every WorkUnit before
+  close-out. Note for dispatch time.
+- **`engineManaged`** — engine-only keys: do not propose, set, or modify.
 
 ### Step 6b — Extract and propose
 
@@ -212,6 +217,17 @@ CLAUDE.md, repo name, and existing vocabulary. For keys with `values`, reuse
 existing options (case-insensitive slug match); for keys with only `n`, call
 `wms_listTags(tagKey=...)` to drill down before proposing. Respect `exclusive`
 — propose only one key per exclusion group.
+
+**Work-scope slug convention.** The `propose` group includes slug keys that
+parallel `work-type` values: `feature:<slug>`, `bug:<slug>`, `refactor:<slug>`,
+`infra:<slug>`, `docs:<slug>`, `research:<slug>`, `test:<slug>`,
+`admin:<slug>`. These identify WHICH specific feature/bug/refactor/etc. the
+Outcome is about. When you can infer the work type from the focus slug, propose
+the matching slug key with a value derived from the slug. All share the
+`work-scope` exclusion group — propose at most one. If no existing value fits,
+mint a new one (pass a `description` to `wms_tagEntity`). Not every Outcome
+needs a work-scope slug — omit it when the work is too generic or cross-cutting
+to have a single identity.
 
 Present the full set conversationally with source attribution:
 
@@ -253,10 +269,10 @@ dispatch (Step 7) carrying the context you just established.
 Context tags on the Outcome are inherited down the DAG automatically — you
 do NOT re-apply them per WorkUnit. The manifest's `scope` on each key tells
 you where it belongs: `scope: "outcome"` keys go on the Outcome and inherit
-down; `required` keys (e.g., `component`) must be set per-WorkUnit before
-close-out. When a session mixes values from both sides of an `exclusive`
-group, apply the specific value to each WorkUnit rather than picking one for
-the Outcome.
+down; `requiredLifecycle` keys (phase, work-type) must be set per-WorkUnit
+at dispatch time; `required` keys must be set per-WorkUnit before close-out.
+When a session mixes values from both sides of an `exclusive` group, apply
+the specific value to each WorkUnit rather than picking one for the Outcome.
 
 **Reuse existing values.** Always call `wms_listTags` before inventing new
 tag values. If an existing value fits (case-insensitive), use it. New values
@@ -291,17 +307,27 @@ As the lead, you own the full dispatch cycle. For each piece of work:
 
 **1. Create the WMS work unit and apply its required tags BEFORE dispatching.**
 Call `mcp__wms__wms_createWorkUnit` with a clear title, linked to the
-appropriate outcome (`outcomeID`). Then **immediately** apply the required tags
-with `mcp__wms__wms_tagEntity` — at minimum `work-type`
-(feature|bug|refactor|infra|research|docs|test) plus `phase=design` (or whatever
-phase the work starts in).
+appropriate outcome (`outcomeID`). Then **immediately** apply every key from
+`requiredLifecycle` in the manifest: at minimum `work-type`
+(feature|bug|refactor|infra|research|docs|test) and `phase=design` (or whatever
+phase the work starts in). Use the values from `requiredLifecycle` in the
+manifest — no drill-down needed.
 
 `work-type` is a **required** tag: a work unit must carry it before it goes out.
-If you haven't already this session, call `mcp__wms__wms_listTags` to see which
-keys are marked `required` and set every one of them now. The lead knows the
-work type at dispatch time — the agent's brief should never say "figure out what
-kind of work this is." Applying required tags up front (not at close-out) is also
-what keeps the cost-by-work-type dashboards honest from the first token.
+The lead knows the work type at dispatch time — the agent's brief should never
+say "figure out what kind of work this is." Applying required tags up front (not
+at close-out) is what keeps the cost-by-work-type dashboards honest from the
+first token.
+
+**Work-scope slug on the Outcome.** If the strategic Outcome does not yet carry
+a work-scope slug tag (`feature:<slug>`, `bug:<slug>`, `refactor:<slug>`, etc.),
+and the work type is clear, apply one now with `wms_tagEntity` on the Outcome.
+The slug key must match the `work-type` you're setting on the WorkUnit — if the
+WorkUnit is `work-type:bug`, the Outcome should have `bug:<slug>`. This is the
+"which specific bug/feature/etc." tag that the context-tag interview may have
+already set; if it did, this step is a no-op. If the Outcome already has a
+different work-scope slug (e.g., `feature:auto-tag`), do NOT override it — the
+Outcome's scope was set at interview time.
 
 **2. Route by affinity.**
 Check your idle teammates: which agent already has context on the files this
@@ -344,14 +370,17 @@ source. The grouping IS the instruction:
   `exclusive` marks mutual-exclusion groups (e.g., `feature` + `bug` share
   `work-scope`).
 - **`autoExtract`** — key → source map. Extract silently from git/env.
-- **`required`** — must be set per-WorkUnit before close-out (applied at
-  dispatch time, see Step 7.1).
+- **`requiredLifecycle`** — must be applied per-WorkUnit at dispatch time
+  (Step 7.1). Values are included — use them directly (e.g. `phase`:
+  design/build/test/review/rework; `work-type`: feature/bug/refactor/…).
+- **`required`** — non-lifecycle required keys, set per-WorkUnit before
+  close-out.
 - **`engineManaged`** — do not touch.
 
 **Tag inheritance.** Context tags on the strategic Outcome are inherited
 automatically by the WMS engine at read time — you do NOT need to re-apply
-them to each WorkUnit. `required` and `engineManaged` keys are per-entity
-and must be applied explicitly to each WorkUnit.
+them to each WorkUnit. `requiredLifecycle`, `required`, and `engineManaged`
+keys are per-entity and must be applied explicitly to each WorkUnit.
 
 ## Step 8 — Close-out ritual (end of session)
 

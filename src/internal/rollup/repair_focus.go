@@ -284,6 +284,163 @@ func isDuplicateKeyError(err error) bool {
 	return strings.Contains(s, "Duplicate entry") || strings.Contains(s, "1062")
 }
 
+// RepairStateStats summarizes one state-interval repair pass.
+type RepairStateStats struct {
+	Inverted  int // negative-width state intervals found
+	Repaired  int // intervals whose ended_at was set to successor's started_at
+	Collapsed int // intervals collapsed to zero-width (no valid successor)
+	Deleted   int // intervals deleted because zero-width collapse collided on uq_open
+}
+
+// RepairStateIntervals fixes state intervals whose ended_at < started_at.
+// These are produced when closeOpenStateIntervals was called without the
+// started_at <= ? guard (before the ordering-safe fix). State intervals track
+// entity status durations and do not affect cost attribution, so no audit table
+// or cost reattribution is needed — repair is applied in-place.
+//
+// REPAIR RULE: for each inverted interval, the correct ended_at is the next
+// state interval's started_at for the same entity (entity_type + entity_id).
+// When no later interval exists, the row is collapsed to zero-width
+// (ended_at = started_at) — conservative and unambiguous.
+//
+// IDEMPOTENT: a re-run finds no inverted rows (all repaired rows now have
+// ended_at >= started_at), so it is a no-op.
+//
+// DryRun performs ZERO writes (logs the plan + counts only).
+func (r *Runner) RepairStateIntervals(ctx context.Context, dryRun bool) (RepairStateStats, error) {
+	type invertedState struct {
+		id         uint64
+		entityType string
+		entityID   string
+		startedAt  time.Time
+		badEndedAt time.Time
+	}
+
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id, entity_type, entity_id, started_at, ended_at
+		FROM wms_intervals
+		WHERE kind = 'state' AND ended_at IS NOT NULL AND ended_at < started_at
+		ORDER BY entity_type, entity_id, started_at`)
+	if err != nil {
+		return RepairStateStats{}, fmt.Errorf("list inverted state intervals: %w", err)
+	}
+	var inverted []invertedState
+	for rows.Next() {
+		var iv invertedState
+		if err := rows.Scan(&iv.id, &iv.entityType, &iv.entityID, &iv.startedAt, &iv.badEndedAt); err != nil {
+			rows.Close() //nolint:errcheck
+			return RepairStateStats{}, fmt.Errorf("scan inverted state interval: %w", err)
+		}
+		inverted = append(inverted, iv)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close() //nolint:errcheck
+		return RepairStateStats{}, err
+	}
+	rows.Close() //nolint:errcheck
+
+	var stats RepairStateStats
+	stats.Inverted = len(inverted)
+
+	for _, iv := range inverted {
+		var successor sql.NullTime
+		err := r.db.QueryRowContext(ctx, `
+			SELECT MIN(started_at)
+			FROM wms_intervals
+			WHERE kind = 'state' AND entity_type = ? AND entity_id = ?
+			  AND started_at > ?`,
+			iv.entityType, iv.entityID, iv.startedAt).Scan(&successor)
+		if err != nil && err != sql.ErrNoRows {
+			return stats, fmt.Errorf("state interval %d: find successor: %w", iv.id, err)
+		}
+
+		var newEnd time.Time
+		collapsed := false
+		if successor.Valid && successor.Time.After(iv.startedAt) {
+			newEnd = successor.Time
+		} else {
+			newEnd = iv.startedAt // zero-width: ended_at = started_at
+			collapsed = true
+		}
+
+		if dryRun {
+			if collapsed {
+				stats.Collapsed++
+			} else {
+				stats.Repaired++
+			}
+			r.log.Info("repair-state-intervals (dry-run): would fix inverted interval",
+				"interval_id", iv.id, "entity_type", iv.entityType, "entity_id", iv.entityID,
+				"started_at", iv.startedAt, "bad_ended_at", iv.badEndedAt,
+				"new_ended_at", newEnd, "collapsed", collapsed)
+			continue
+		}
+
+		var durationMS *int64
+		if !collapsed {
+			d := successor.Time.Sub(iv.startedAt).Microseconds() / 1000
+			durationMS = &d
+		}
+		if durationMS != nil {
+			_, err := r.db.ExecContext(ctx, `
+				UPDATE wms_intervals
+				SET ended_at = ?, duration_ms = ?
+				WHERE id = ? AND kind = 'state' AND ended_at IS NOT NULL AND ended_at < started_at`,
+				newEnd, *durationMS, iv.id)
+			if err != nil {
+				if !isDuplicateKeyError(err) {
+					return stats, fmt.Errorf("state interval %d: repair: %w", iv.id, err)
+				}
+				// uq_open collision: a valid closed row already exists at successor.started_at.
+				// The inverted row is corrupted — delete it.
+				if _, err := r.db.ExecContext(ctx,
+					`DELETE FROM wms_intervals WHERE id = ? AND kind = 'state' AND ended_at < started_at`,
+					iv.id); err != nil {
+					return stats, fmt.Errorf("state interval %d: delete after collision: %w", iv.id, err)
+				}
+				r.log.Info("repair-state-intervals: deleted inverted interval after uq_open collision",
+					"interval_id", iv.id, "entity_type", iv.entityType, "entity_id", iv.entityID,
+					"started_at", iv.startedAt)
+				stats.Deleted++
+				continue
+			}
+		} else {
+			_, err := r.db.ExecContext(ctx, `
+				UPDATE wms_intervals
+				SET ended_at = ?, duration_ms = 0
+				WHERE id = ? AND kind = 'state' AND ended_at IS NOT NULL AND ended_at < started_at`,
+				newEnd, iv.id)
+			if err != nil {
+				if !isDuplicateKeyError(err) {
+					return stats, fmt.Errorf("state interval %d: collapse: %w", iv.id, err)
+				}
+				// uq_open collision: a valid row already exists at ended_at=started_at for
+				// this entity. The inverted row is zero-information — delete it.
+				if _, err := r.db.ExecContext(ctx,
+					`DELETE FROM wms_intervals WHERE id = ? AND kind = 'state' AND ended_at < started_at`,
+					iv.id); err != nil {
+					return stats, fmt.Errorf("state interval %d: delete after collision: %w", iv.id, err)
+				}
+				r.log.Info("repair-state-intervals: deleted inverted interval after uq_open collision",
+					"interval_id", iv.id, "entity_type", iv.entityType, "entity_id", iv.entityID,
+					"started_at", iv.startedAt)
+				stats.Deleted++
+				continue
+			}
+		}
+		if collapsed {
+			stats.Collapsed++
+		} else {
+			stats.Repaired++
+		}
+	}
+
+	r.log.Info("repair-state-intervals pass complete",
+		"inverted", stats.Inverted, "repaired", stats.Repaired, "collapsed", stats.Collapsed,
+		"deleted", stats.Deleted, "dry_run", dryRun)
+	return stats, nil
+}
+
 // UnrepairFocusIntervals reverses a repair pass: restores each repaired interval's
 // prior ended_at from focus_interval_repair and clears the evidence. Returns the
 // number of intervals reverted. After unrepair the rows are inverted again (the

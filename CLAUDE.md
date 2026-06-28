@@ -237,12 +237,12 @@ Agent-Teams teammates run as separate top-level sessions (see Pitfalls).
 |--------|---------|-------|
 | `teamster` (Go) | Hook client + CLI on the hub | Forked per hook event. Reads JSON from stdin, enriches, POSTs to hookd. Must exit 0 always. Also serves as the CLI: `start`/`stop`/`status`/`wms-reset`/`tags`/`setup tags`/`wms drain`/`wms list`/`wms close`/`install-remote`/`backup`/`restore`. |
 | `teamster.py` (Python) | Hook client on remotes | Pure stdlib, no third-party deps. Same wire contract as Go version. On macOS, derives teammate identity from the transcript's `agentName` (sets `agent_type` when the payload lacks one) and echoes hookd's `additionalContext` on PreToolUse **and** UserPromptSubmit. `TEAMSTER_DEBUG_RAW=1` dumps raw hook stdin to `var/raw-hook-debug.jsonl`. |
-| `hookd` | HTTP event server | POST `/event` → JSONL append. Serves dashboard at `/`, WMS at `/wms`, SSE at `/events/stream`. Focus-absent nudge on PreToolUse (max 3 per session+agent). Returns activity + team-dispatch `additionalContext` on UserPromptSubmit so remote Python clients get the nudge (the hub Go client ignores it — no double-inject; hookd can't see a remote's solo/team marker, so it always sends team context). |
+| `hookd` | HTTP event server | POST `/event` → JSONL append. Serves dashboard at `/`, WMS at `/wms`, SSE at `/events/stream`. Focus-absent nudge on PreToolUse (max 1 per session+agent per turn). Returns activity + team-dispatch `additionalContext` on UserPromptSubmit so remote Python clients get the nudge (the hub Go client ignores it — no double-inject; hookd can't see a remote's solo/team marker, so it always sends team context). |
 | `feed` | Terminal activity viewer | Tails JSONL, ANSI colorizes. Built from `cmd/feed/`. |
 | `activity-mcp` | MCP stdio (activity) | **No-op.** Tools just return confirmation strings. Real data extraction happens in the hook from PreToolUse payloads — that's how we get `agent_type` for teammate attribution. Includes `setMode` for session mode switching. |
 | `wms-mcp` | MCP stdio (WMS) | Outcome/WorkUnit CRUD, tags, focus, dependencies over MySQL/MariaDB via `TEAMSTER_STORE_DSN`. State changes posted to hookd via `HookObserver` when `TEAMSTER_HOOK_SERVER_URL` is set. |
 | `rollup` | Cost-attribution pipeline | Allocates token spend to WMS entities via focus intervals. Flags: `--reallocate`, `--recover-focus`, `--recover-warmup`, `--recover-gaps`, `--recover-directives` (focus-less remote teammates → entity named in their dispatch brief), `--repair-focus-intervals` (one-time fix of negative-width focus intervals from the dual-writer/async race), `--synthesize-remote-orphans` (remote sessions with no focus/directive/transcript → temporal correlation with concurrent focused sessions on the same host), `--synthesize-focus <file>`, `--sweep` (chains all deterministic passes), `--sweep-llm` (adds LLM-assisted synthesis), `--count-orphans` (print processable orphan count; checks local transcript existence). Reversible: `--unrecover`, `--unrecover-warmup`, `--unrecover-gaps`, `--unrecover-directives`, `--unrepair-focus-intervals`, `--unsynthesize-remote-floor`, `--unsynthesize`. |
-| `classify` | Interval phase + work-type classifier | Derives `phase` and `work-type` tags on intervals/workunits from rule-based signals. Run by systemd timer every 5 min. `--reclassify` re-derives from scratch. |
+| `classify` | Interval phase + work-type classifier | Derives `phase` and `work-type` tags on intervals/workunits from rule-based signals. Recovers missing required lifecycle tags on work units (safety net for dispatch gaps). Run by systemd timer every 5 min. `--reclassify` re-derives from scratch. `--dry-run` logs lifecycle recovery intent without writing. |
 | `token-scraper` | Session transcript scraper | Reads Claude Code session JSONL transcripts and POSTs per-message token usage to hookd's `/telemetry` endpoint. |
 | `teamster-install` | Installer | Called by `lib/installrunner.sh`. Explicit `--basedir/--repo/--builddir` flags — no path inference. |
 | `demogen` | Synthetic data generator | Creates correlated demo data across token_ledger/wms_intervals/usage_attribution/entity_tags/cost_rollup. `--clean` for teardown. |
@@ -278,12 +278,12 @@ Agent-Teams teammates run as separate top-level sessions (see Pitfalls).
   be kept in sync across both sides of any change.
 - **WMS entity model**: Outcome → WorkUnit (two-level). Both share
   statuses: `pending`, `active`, `review`, `done`, `blocked`.
-- **Tag keyspace** uses `product`, `feature`, `bug` as core context keys.
+- **Tag keyspace** uses `product` and 8 work-scope slug keys (`feature`, `bug`, `refactor`, `infra`, `docs`, `research`, `test`, `admin`) as core context keys. Slug keys are facets of `work-type` and share the `work-scope` exclusion group.
   Integration key namespaces (`github.*`, `jira.*`, etc.) are seeded at setup time via
   `teamster setup tags`. Phase/resolution/lifecycle keys have single cardinality.
-- **Focus nudge**: hookd checks for an open focus interval on PreToolUse
-  and injects `additionalContext` if missing. Max 3 nudges per
-  (session, agent). Cache-backed (`src/internal/server/nudge.go`).
+- **Focus nudge**: hookd checks for any focus interval (open or closed) on
+  PreToolUse and injects `additionalContext` if missing. Max 1 nudge per
+  (session, agent) per turn. Cache-backed (`src/internal/server/nudge.go`).
 - **The protocol lives in the plugin**, not in code. The Eight Rules and
   Field Guide at `skel/lib/plugin/skills/bootstrap/references/` are the canonical
   source. `/teamster:start` is the front door; `/teamster:bootstrap` boots

@@ -32,6 +32,8 @@ func main() {
 func run() int {
 	reclassify := flag.Bool("reclassify", false,
 		"clear classifier-derived interval phases and re-derive them with the current rules (declared phases are never touched)")
+	dryRun := flag.Bool("dry-run", false,
+		"with lifecycle tag recovery: log what would be applied but perform no writes")
 	flag.Parse()
 
 	logger := logging.Init("classify")
@@ -66,7 +68,7 @@ func run() int {
 	defer cancel()
 
 	r := classify.New(st, wms.NewJSONLSignalReader(), cfg.LogFile, logger)
-	if err := r.Run(ctx, *reclassify, reclassifyLimit); err != nil {
+	if err := r.Run(ctx, *reclassify, reclassifyLimit, *dryRun); err != nil {
 		logger.Error("classify pass failed", "error", err)
 		return 1
 	}

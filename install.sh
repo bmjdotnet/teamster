@@ -179,6 +179,14 @@ GRAFANA_BUILD_FROM_SRC=0
 AUTO_START=0             # run `teamster start` after install
 WIRE=1                   # default: wire (the whole point of install.sh is a real install)
 
+# Backup settings (hub mode only)
+BACKUP_DIR=""            # --backup-dir
+BACKUP_SCHEDULE=""       # --backup-schedule
+
+# Detected backup config (from teamster.yaml on upgrade)
+DETECTED_BACKUP_DIR=""
+DETECTED_BACKUP_SCHEDULE=""
+
 # Per-service endpoint URLs (only set when mode=external or managed with custom URL)
 OTELCOL_ENDPOINT=""      # --otelcol-endpoint=URL
 PROMETHEUS_ENDPOINT=""   # --prometheus-endpoint=URL
@@ -672,9 +680,11 @@ try:
     emit('otel_grpc',   sections.get('otelcol', {}).get('grpc_port', ''))
     emit('otel_http',   sections.get('otelcol', {}).get('http_port', ''))
     emit('scraper_mode',sections.get('token-scraper', {}).get('mode', ''))
-    emit('relay_mode',   sections.get('relay', {}).get('mode', ''))
-    emit('relay_target', sections.get('relay', {}).get('target', ''))
-    emit('repl_push',    sections.get('relay', {}).get('repl_push_remote', ''))
+    emit('relay_mode',        sections.get('relay', {}).get('mode', ''))
+    emit('relay_target',      sections.get('relay', {}).get('target', ''))
+    emit('repl_push',         sections.get('relay', {}).get('repl_push_remote', ''))
+    emit('backup_dir',        sections.get('backup', {}).get('backup_dir', ''))
+    emit('backup_schedule',   sections.get('backup', {}).get('schedule', ''))
 except Exception as e:
     import sys as _s; print(f'err={e}', file=_s.stderr)
 PY
@@ -696,9 +706,11 @@ PY
                 otel_mode)    yaml_otel_mode="$_v" ;;
                 otel_grpc)    yaml_otel_grpc="$_v" ;;
                 otel_http)    yaml_otel_http="$_v" ;;
-                relay_mode)   yaml_relay_mode="$_v" ;;
-                relay_target) yaml_relay_target="$_v" ;;
-                repl_push)    yaml_repl_push="$_v" ;;
+                relay_mode)       yaml_relay_mode="$_v" ;;
+                relay_target)     yaml_relay_target="$_v" ;;
+                repl_push)        yaml_repl_push="$_v" ;;
+                backup_dir)       DETECTED_BACKUP_DIR="$_v" ;;
+                backup_schedule)  DETECTED_BACKUP_SCHEDULE="$_v" ;;
             esac
         done <<< "$_parsed"
     fi
@@ -1158,6 +1170,15 @@ interview() {
         fi
     fi
 
+    # Backup configuration (hub mode only)
+    section "Backup"
+    info "Teamster's backup service snapshots MySQL, OTel config, and Teamster state"
+    info "to a local directory on a schedule. Press Enter to accept the shown default."
+    local _backup_dir_default="${DETECTED_BACKUP_DIR:-$BASEDIR/var/backups}"
+    ask BACKUP_DIR "Backup directory" "$_backup_dir_default"
+    ask BACKUP_SCHEDULE "Backup schedule (e.g. 1h, 30m, 6h)" "${DETECTED_BACKUP_SCHEDULE:-1h}"
+    dlog INFO  wizard.interview "decided BACKUP_DIR=\"$BACKUP_DIR\" BACKUP_SCHEDULE=\"$BACKUP_SCHEDULE\""
+
     # Build-from-source and retention — only when mode=install for that service
     if [[ "$PROMETHEUS_MODE" == "install" ]]; then
         ask RETENTION "Prometheus retention" "7d"
@@ -1429,11 +1450,13 @@ build_install_args() {
     [[ -n "$REPL_PUSH_REMOTE" ]]  && INSTALL_ARGS+=("--repl-push-remote=$REPL_PUSH_REMOTE")
     [[ "$HOOKD_READ_ONLY" -eq 1 ]] && INSTALL_ARGS+=("--hookd-read-only")
 
-    [[ -n "$RETENTION" ]]     && INSTALL_ARGS+=("--prometheus-retention=$RETENTION")
-    [[ -n "$ENV_LABEL" ]]     && INSTALL_ARGS+=("--env=$ENV_LABEL")
-    [[ -n "$PLANE_URL" ]]     && INSTALL_ARGS+=("--plane-url=$PLANE_URL")
-    [[ -n "$PLANE_API_KEY" ]] && INSTALL_ARGS+=("--plane-api-key=$PLANE_API_KEY")
-    [[ $WIRE -eq 1 ]]         && INSTALL_ARGS+=("--wire")
+    [[ -n "$RETENTION" ]]       && INSTALL_ARGS+=("--prometheus-retention=$RETENTION")
+    [[ -n "$ENV_LABEL" ]]       && INSTALL_ARGS+=("--env=$ENV_LABEL")
+    [[ -n "$PLANE_URL" ]]       && INSTALL_ARGS+=("--plane-url=$PLANE_URL")
+    [[ -n "$PLANE_API_KEY" ]]   && INSTALL_ARGS+=("--plane-api-key=$PLANE_API_KEY")
+    [[ -n "$BACKUP_DIR" ]]      && INSTALL_ARGS+=("--backup-dir=$BACKUP_DIR")
+    [[ -n "$BACKUP_SCHEDULE" ]] && INSTALL_ARGS+=("--backup-schedule=$BACKUP_SCHEDULE")
+    [[ $WIRE -eq 1 ]]           && INSTALL_ARGS+=("--wire")
     dlog INFO  wizard.build "args_built mode=hub argv=[${INSTALL_ARGS[*]}]"
 }
 
@@ -1469,6 +1492,8 @@ show_summary() {
         info "  grafana mode:    ${GRAFANA_MODE:-<unset>}${GRAFANA_ENDPOINT:+ ($GRAFANA_ENDPOINT)}"
         info "  relay mode:      ${RELAY_MODE:-none}${RELAY_TARGET:+ ($RELAY_TARGET)}"
         info "  hookd read-only: $([[ "$HOOKD_READ_ONLY" -eq 1 ]] && echo yes || echo no)"
+        info "  backup dir:      ${BACKUP_DIR:-<not configured>}"
+        info "  backup schedule: ${BACKUP_SCHEDULE:-1h}"
         info ""
         info "Env label:       $ENV_LABEL"
         [[ -n "$RETENTION" ]] && info "Retention:       $RETENTION"

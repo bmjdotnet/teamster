@@ -355,6 +355,9 @@ func HandleToolCall(store wms.Store, eng wms.Engine, rawParams json.RawMessage) 
 		if v := strArg("interview"); v != "" {
 			spec.Interview = &v
 		}
+		if v := strArg("facetSource"); v != "" {
+			spec.FacetSource = &v
+		}
 		if err := store.DefineTag(ctx, spec); err != nil {
 			return Result{}, &CallError{Code: -32000, Message: err.Error()}
 		}
@@ -1055,8 +1058,9 @@ func buildTagManifest(tags []wms.Tag) wms.TagManifest {
 	}
 
 	m := wms.TagManifest{
-		Propose:     make(map[string]wms.ProposeEntry),
-		AutoExtract: make(map[string]string),
+		Propose:           make(map[string]wms.ProposeEntry),
+		AutoExtract:       make(map[string]string),
+		RequiredLifecycle: make(map[string]wms.ProposeEntry),
 	}
 
 	for _, key := range order {
@@ -1080,7 +1084,13 @@ func buildTagManifest(tags []wms.Tag) wms.TagManifest {
 			if f.Cardinality == "single" {
 				entry.Cardinality = "single"
 			}
+			if f.FacetSource != "" {
+				entry.FacetOf = f.FacetSource
+			}
 			m.Propose[key] = entry
+			if f.Required {
+				m.Required = append(m.Required, key)
+			}
 
 		case "auto":
 			source := f.AutoExtract
@@ -1088,13 +1098,31 @@ func buildTagManifest(tags []wms.Tag) wms.TagManifest {
 				source = "manual"
 			}
 			m.AutoExtract[key] = source
+			if f.Required {
+				m.Required = append(m.Required, key)
+			}
 
 		case "skip":
-			m.EngineManaged = append(m.EngineManaged, key)
+			if f.Required {
+				// Required lifecycle key: expose full values so the lead knows valid
+				// options at dispatch time without a separate drill-down call.
+				entry := wms.ProposeEntry{Desc: f.Description, Values: ki.values}
+				if f.Cardinality == "single" {
+					entry.Cardinality = "single"
+				}
+				m.RequiredLifecycle[key] = entry
+			} else {
+				m.EngineManaged = append(m.EngineManaged, key)
+			}
 		}
+	}
 
-		if f.Required {
-			m.Required = append(m.Required, key)
+	for key, entry := range m.Propose {
+		if entry.FacetOf != "" {
+			if src, ok := m.RequiredLifecycle[entry.FacetOf]; ok {
+				src.FacetKeys = append(src.FacetKeys, key)
+				m.RequiredLifecycle[entry.FacetOf] = src
+			}
 		}
 	}
 
@@ -1227,7 +1255,7 @@ var ToolDefs = []map[string]interface{}{
 	},
 	{
 		"name":        ToolListTags,
-		"description": "Discover the tag vocabulary. Default (no args): returns a role-shaped manifest — propose (keys to offer the operator, with values/scope/exclusion), autoExtract (key→source map for silent extraction), required (must be set on workunits before close-out), engineManaged (do not touch). Within propose, respect exclusive (at most one key per group) and scope. With tagKey: returns all values for that key. With query: case-insensitive substring search across values and descriptions.",
+		"description": "Discover the tag vocabulary. Default (no args): returns a role-shaped manifest — propose (keys to offer the operator, with values/scope/exclusion), autoExtract (key→source map for silent extraction), requiredLifecycle (lifecycle keys the lead MUST apply to every WorkUnit at dispatch time; values included), required (non-lifecycle required keys), engineManaged (engine-only, do not set). Within propose, respect exclusive (at most one key per group) and scope. With tagKey: returns all values for that key. With query: case-insensitive substring search across values and descriptions.",
 		"inputSchema": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -1258,6 +1286,7 @@ var ToolDefs = []map[string]interface{}{
 				"exclusionGroup": map[string]interface{}{"type": "string", "description": "Mutual exclusion group slug. Keys sharing a group are exclusive on an entity."},
 				"autoExtract":    map[string]interface{}{"type": "string", "description": "'git' | 'env' | '' — source for auto-extraction (skip interview)."},
 				"interview":      map[string]interface{}{"type": "string", "description": "'propose' | 'auto' | 'skip' — how this key behaves in the context-tag interview."},
+				"facetSource":    map[string]interface{}{"type": "string", "description": "The key this tag is a facet of (e.g. 'work-type'). Facet keys dynamically track their source's values."},
 			},
 			"required": []string{"tagKey"},
 		},

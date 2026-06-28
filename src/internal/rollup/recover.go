@@ -214,6 +214,33 @@ func (r *Runner) RecoverFocus(ctx context.Context, opts RecoverOptions) (Recover
 				continue
 			}
 
+			// Cross-check wms_intervals for a more specific concurrent focus
+			// interval. The transcript timeline returns the most-recent setFocus
+			// call, but when an outcome and its child workunit have concurrent
+			// open focus intervals, the live Allocate path (via focusAt +
+			// mostSpecific) correctly prefers the workunit. Mirror that here so
+			// recovery and live allocation agree on precedence.
+			crossCheckAgent := m.agentName
+			if viaLead {
+				crossCheckAgent = ""
+			}
+			if wmsType, wmsID, wmsOK, wmsErr := r.focusAt(ctx, sid, crossCheckAgent, m.ts); wmsErr != nil {
+				r.log.Warn("recover: wms_intervals cross-check failed; using transcript entity",
+					"message_id", m.messageID, "session_id", sid, "error", wmsErr)
+			} else if wmsOK && entitySpecificity[wmsType] > entitySpecificity[ev.EntityType] {
+				// Strict > means same-type disagreements (e.g., different outcomes) keep the transcript's choice.
+				r.log.Info("recover: wms_intervals override — more specific entity",
+					"message_id", m.messageID, "session_id", sid,
+					"transcript_entity", ev.EntityType+"/"+ev.EntityID,
+					"wms_entity", wmsType+"/"+wmsID)
+				// ev.Timestamp retains the transcript event's time, not the
+				// wms_intervals started_at. The INFO log above captures the full
+				// override provenance; the evidence row records the transcript
+				// starting point + final resolved entity.
+				ev.EntityType = wmsType
+				ev.EntityID = wmsID
+			}
+
 			stats.Recovered++
 			if viaLead {
 				stats.RecoveredLead++

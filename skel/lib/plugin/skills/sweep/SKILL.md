@@ -199,12 +199,16 @@ with descriptions. Each tag value has a `description` field that tells you
 - `docs` — documentation as the deliverable
 - `test` — validation run producing a pass/fail verdict
 
-**`feature` or `bug`** (context, single — pick ONE or neither):
-- Mutually exclusive. Set `feature:<slug>` for feature/refactor/infra work
-- Set `bug:<slug>` for bug work
-- The slug should be short, kebab-case, reusable (e.g. `monitoring-stack`,
-  `remote-installer-path`, NOT `fix-the-thing-john-asked-about`)
+**Work-scope slug** (context, single — pick ONE or omit):
+- All slug keys (`feature`, `bug`, `refactor`, `infra`, `docs`, `research`,
+  `test`, `admin`) share the `work-scope` exclusion group — set at most one.
+- The slug key should match the `work-type` you chose above:
+  `work-type:bug` → `bug:<slug>`, `work-type:feature` → `feature:<slug>`,
+  `work-type:infra` → `infra:<slug>`, etc.
+- The slug value should be short, kebab-case, reusable (e.g. `monitoring-stack`,
+  `auth-timeout`, NOT `fix-the-thing-john-asked-about`)
 - Check existing values first — reuse if one fits
+- Omit the slug when the work is too generic to have a specific identity
 
 **`component`** (context, single — optional):
 - The architectural component touched (e.g. `wms`, `dashboard`, `monitoring`,
@@ -253,7 +257,7 @@ wms_tagEntity(entityType="outcome", entityID="synth-<slug>",
 wms_tagEntity(entityType="outcome", entityID="synth-<slug>",
               tagKey="work-type", tagValue="<work-type>", source="manual")
 wms_tagEntity(entityType="outcome", entityID="synth-<slug>",
-              tagKey="<feature|bug>", tagValue="<slug>", source="manual")
+              tagKey="<feature|bug|refactor|infra|docs|research|test|admin>", tagValue="<slug>", source="manual")
 wms_tagEntity(entityType="outcome", entityID="synth-<slug>",
               tagKey="priority", tagValue="<priority>", source="manual")
 wms_tagEntity(entityType="outcome", entityID="synth-<slug>",
@@ -394,7 +398,7 @@ Synthesis:
 - title: "Anchor IRC Harness — Initial Spec Review"
 - product: `anchor`
 - work-type: `research`
-- feature: `anchor-design`
+- research: `anchor-spec-review`
 - priority: `p2`
 - confidence: `high`
 - evidence: "User: Read the anchor-initial-spec.rtf"
@@ -412,7 +416,7 @@ Synthesis:
 - title: "Homelab Monitoring Stack Setup"
 - product: `homelab`
 - work-type: `infra`
-- feature: `monitoring-stack`
+- infra: `monitoring-stack`
 - priority: `p2`
 - confidence: `high`
 

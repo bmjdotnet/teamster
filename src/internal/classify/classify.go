@@ -51,6 +51,13 @@ type Store interface {
 	// EarliestClosureByEntity returns each entity's first review/done start time,
 	// keyed by [entity_type, entity_id], so cross-batch rework is detectable.
 	EarliestClosureByEntity(ctx context.Context, keys [][2]string) (map[[2]string]time.Time, error)
+	// ListWorkUnitsNeedingLifecycleTags returns [workunitID, missingKey,
+	// existingWorkType] triples for work units missing any required lifecycle
+	// tag (category='lifecycle' AND required=1 in the tags table).
+	// existingWorkType carries the work unit's current work-type value (empty
+	// when unset) so the caller can derive the right phase default without a
+	// second query.
+	ListWorkUnitsNeedingLifecycleTags(ctx context.Context) ([][3]string, error)
 }
 
 // intervalBatch caps how many intervals one phase pass derives, so a single run
@@ -86,12 +93,16 @@ func New(store Store, sr wms.SignalReader, logFile string, log *slog.Logger) *Ru
 // reclassify draining loop when no override is provided.
 const DefaultReclassifyLimit = 5000
 
-// Run executes one pass: derive work-type on workunits, then phase on closed
-// intervals. When reclassify is true it first clears classifier-derived phases
-// and then loops classifyPhases until the backlog is drained or the circuit
-// breaker (reclassifyLimit total intervals) trips. reclassifyLimit is ignored
-// on the normal (non-reclassify) path, which always processes one batch.
-func (r *Runner) Run(ctx context.Context, reclassify bool, reclassifyLimit int) error {
+// Run executes one pass: derive work-type on workunits, recover missing
+// required lifecycle tags on work units, then phase on closed intervals. When
+// reclassify is true it first clears classifier-derived phases and then loops
+// classifyPhases until the backlog is drained or the circuit breaker
+// (reclassifyLimit total intervals) trips. reclassifyLimit is ignored on the
+// normal (non-reclassify) path, which always processes one batch.
+//
+// dryRun suppresses all writes in the recoverRequiredTags pass and logs what
+// would be applied instead; other passes are unaffected.
+func (r *Runner) Run(ctx context.Context, reclassify bool, reclassifyLimit int, dryRun bool) error {
 	if reclassify {
 		n, err := r.store.ClearClassifierPhases(ctx)
 		if err != nil {
@@ -107,7 +118,11 @@ func (r *Runner) Run(ctx context.Context, reclassify bool, reclassifyLimit int) 
 	}
 
 	if err := r.classifyOutcomePhases(ctx); err != nil {
-		r.log.Error("outcome-phase safety-net failed (continuing to interval phase pass)", "error", err)
+		r.log.Error("outcome-phase safety-net failed (continuing to lifecycle recovery pass)", "error", err)
+	}
+
+	if err := r.recoverRequiredTags(ctx, dryRun); err != nil {
+		r.log.Error("lifecycle tag recovery failed (continuing to interval phase pass)", "error", err)
 	}
 
 	if reclassify {
@@ -207,6 +222,62 @@ func (r *Runner) classifyOutcomePhases(ctx context.Context) error {
 		applied++
 	}
 	r.log.Info("outcome-phase safety-net complete", "candidates", len(candidates), "applied", applied)
+	return nil
+}
+
+// recoverRequiredTags is the safety net for work units created without required
+// lifecycle tags. It finds each (workunit, missing-key) gap and applies a
+// rule-based default. Only lifecycle-category required keys are targeted —
+// context keys (product, component, etc.) require operator knowledge and are
+// left to the dispatch lead.
+//
+// Current defaults:
+//   - phase: derived from the work unit's existing work-type via workTypeToPhase;
+//     falls back to "build" when work-type is absent or unrecognised.
+//   - work-type: skipped — classifyWorkTypes already handles work units with
+//     activity, and work units with no activity cannot be rule-classified.
+//
+// dryRun suppresses all writes and logs what WOULD be applied instead.
+func (r *Runner) recoverRequiredTags(ctx context.Context, dryRun bool) error {
+	triples, err := r.store.ListWorkUnitsNeedingLifecycleTags(ctx)
+	if err != nil {
+		return fmt.Errorf("list workunits needing lifecycle tags: %w", err)
+	}
+	if len(triples) == 0 {
+		return nil
+	}
+	applied, skipped := 0, 0
+	for _, triple := range triples {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		workunitID, missingKey, workType := triple[0], triple[1], triple[2]
+		switch missingKey {
+		case "phase":
+			phase := workTypeToPhase[workType]
+			if phase == "" {
+				phase = "build"
+			}
+			if dryRun {
+				r.log.Info("recover-required-tags (dry-run): would apply",
+					"workunit", workunitID, "key", missingKey, "value", phase)
+				applied++
+				continue
+			}
+			if err := r.store.TagEntity(ctx, "workunit", workunitID, missingKey, phase, "classifier", ""); err != nil {
+				r.log.Warn("recover-required-tags: tag failed",
+					"workunit", workunitID, "key", missingKey, "error", err)
+				continue
+			}
+			applied++
+		default:
+			// All other required lifecycle keys (work-type, etc.) are handled
+			// elsewhere or cannot be inferred without activity signals.
+			skipped++
+		}
+	}
+	r.log.Info("recover-required-tags complete",
+		"candidates", len(triples), "applied", applied, "skipped", skipped, "dry_run", dryRun)
 	return nil
 }
 

@@ -106,10 +106,11 @@ type Store interface {
 	// methods, which keep only the last-write-wins current pointer on sessions.
 	OpenFocusInterval(ctx context.Context, key SessionKey, entityType, entityID string) error
 
-	// HasOpenFocusInterval returns true when (session, agent) has at least one
-	// open kind='focus' interval. Used by the focus-absent nudge cache on a
-	// cache miss to avoid a DB query on every subsequent tool call.
-	HasOpenFocusInterval(ctx context.Context, key SessionKey) (bool, error)
+	// HasAnyFocusInterval returns true when (session, agent) has any kind='focus'
+	// interval row, open or closed. Answers "has this session ever set focus?"
+	// rather than "is focus open right now?" — intervals are closed at turn end
+	// so an ended interval still means the agent legitimately called setFocus.
+	HasAnyFocusInterval(ctx context.Context, key SessionKey) (bool, error)
 
 	// CloseFocusInterval ends the currently-open focus interval for (session,
 	// agent) without opening a new one. Used when an entity reaches a terminal

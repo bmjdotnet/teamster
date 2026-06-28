@@ -31,8 +31,8 @@ type SynthesisResponse struct {
 	Product         string `json:"product"`
 	WorkType        string `json:"work_type"`
 	Phase           string `json:"phase"`
-	FeatureOrBug    string `json:"feature_or_bug"`
-	FeatureBugSlug  string `json:"feature_bug_slug"`
+	SlugKey         string `json:"work_scope_key"`
+	SlugValue       string `json:"work_scope_slug"`
 	Component       string `json:"component"`
 	Priority        string `json:"priority"`
 	Confidence      string `json:"confidence"`
@@ -105,8 +105,8 @@ Respond with ONLY a JSON object (no markdown fencing, no explanation):
   "product": "<existing product tag value, e.g. 'Teamster'>",
   "work_type": "<feature|bug|refactor|infra|research|docs|test>",
   "phase": "<design|build|test|review|rework — the lifecycle phase: design=investigation/planning, build=implementation/fixing/deploying, test=testing/validation, review=auditing/evaluating existing work, rework=redoing previously completed work>",
-  "feature_or_bug": "<'feature' or 'bug' — which context key to use>",
-  "feature_bug_slug": "<the value for the feature or bug tag>",
+  "work_scope_key": "<'feature'|'bug'|'refactor'|'infra'|'docs'|'research'|'test'|'admin' — which slug key matches the work_type, or empty if too generic>",
+  "work_scope_slug": "<short kebab-case slug value identifying the specific feature/bug/etc., or empty if too generic>",
   "component": "<component if identifiable, else empty string>",
   "priority": "<p0|p1|p2|p3>",
   "confidence": "<high|medium|low>",

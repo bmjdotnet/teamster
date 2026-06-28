@@ -23,8 +23,8 @@ import (
 // --------------------------------------------------------------------------
 
 const (
-	priceOpusInputPer1M  = 15.00
-	priceOpusOutputPer1M = 75.00
+	priceOpusInputPer1M  = 5.00
+	priceOpusOutputPer1M = 25.00
 	priceSonnetInput     = 3.00
 	priceSonnetOutput    = 15.00
 	priceHaikuInput      = 0.80

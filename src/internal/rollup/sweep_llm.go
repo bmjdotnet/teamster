@@ -21,6 +21,11 @@ const (
 	sweepOutcomeID  = "out-sweep"
 )
 
+var defaultFacetKeys = map[string]bool{
+	"feature": true, "bug": true, "refactor": true, "infra": true,
+	"docs": true, "research": true, "test": true, "admin": true,
+}
+
 // SweepLLMStats summarizes one LLM sweep pass.
 type SweepLLMStats struct {
 	OrphansSynthesized int
@@ -43,12 +48,21 @@ func (r *Runner) SweepLLM(ctx context.Context, opts RecoverOptions) (SweepLLMSta
 		r.log.Warn("sweep-llm: failed to load tag vocabulary; proceeding without", "error", err)
 	}
 
+	facetKeys, err := r.loadFacetKeys(ctx, "work-type")
+	if err != nil {
+		r.log.Warn("sweep-llm: failed to load facet keys, using defaults", "error", err)
+		facetKeys = defaultFacetKeys
+	}
+	if len(facetKeys) == 0 {
+		facetKeys = defaultFacetKeys
+	}
+
 	r.ensureSweepOutcome(ctx)
 
 	var stats SweepLLMStats
 	var mappings []SynthesisMapping
 
-	orphanMappings, orphanStats := r.synthesizeOrphans(llmCtx, opts, tagVocab)
+	orphanMappings, orphanStats := r.synthesizeOrphans(llmCtx, opts, tagVocab, facetKeys)
 	mappings = append(mappings, orphanMappings...)
 	stats.OrphansSynthesized = orphanStats.synthesized
 	stats.Skipped += orphanStats.skipped
@@ -56,7 +70,7 @@ func (r *Runner) SweepLLM(ctx context.Context, opts RecoverOptions) (SweepLLMSta
 
 	remaining := maxLLMSessions - len(orphanMappings)
 	if remaining > 0 {
-		gapMappings, gapStats := r.synthesizeGapFallback(llmCtx, opts, tagVocab, remaining)
+		gapMappings, gapStats := r.synthesizeGapFallback(llmCtx, opts, tagVocab, remaining, facetKeys)
 		mappings = append(mappings, gapMappings...)
 		stats.GapsSynthesized = gapStats.synthesized
 		stats.Skipped += gapStats.skipped
@@ -99,7 +113,7 @@ type synthesisPassStats struct {
 	errors      int
 }
 
-func (r *Runner) synthesizeOrphans(ctx context.Context, opts RecoverOptions, tagVocab string) ([]SynthesisMapping, synthesisPassStats) {
+func (r *Runner) synthesizeOrphans(ctx context.Context, opts RecoverOptions, tagVocab string, facetKeys map[string]bool) ([]SynthesisMapping, synthesisPassStats) {
 	var stats synthesisPassStats
 	var mappings []SynthesisMapping
 
@@ -134,7 +148,7 @@ func (r *Runner) synthesizeOrphans(ctx context.Context, opts RecoverOptions, tag
 		}
 
 		if !opts.DryRun {
-			if err := r.createSynthesizedOutcome(ctx, mapping); err != nil {
+			if err := r.createSynthesizedOutcome(ctx, mapping, facetKeys); err != nil {
 				r.log.Warn("sweep-llm: create outcome failed; skipping",
 					"session_id", orphan.SessionID, "outcome_id", mapping.outcomeID, "error", err)
 				stats.errors++
@@ -160,7 +174,7 @@ func (r *Runner) synthesizeOrphans(ctx context.Context, opts RecoverOptions, tag
 	return mappings, stats
 }
 
-func (r *Runner) synthesizeGapFallback(ctx context.Context, opts RecoverOptions, tagVocab string, remaining int) ([]SynthesisMapping, synthesisPassStats) {
+func (r *Runner) synthesizeGapFallback(ctx context.Context, opts RecoverOptions, tagVocab string, remaining int, facetKeys map[string]bool) ([]SynthesisMapping, synthesisPassStats) {
 	var stats synthesisPassStats
 	var mappings []SynthesisMapping
 
@@ -192,7 +206,7 @@ func (r *Runner) synthesizeGapFallback(ctx context.Context, opts RecoverOptions,
 		}
 
 		if !opts.DryRun {
-			if err := r.createSynthesizedOutcome(ctx, mapping); err != nil {
+			if err := r.createSynthesizedOutcome(ctx, mapping, facetKeys); err != nil {
 				r.log.Warn("sweep-llm: create gap outcome failed; skipping",
 					"session_id", gt.sessionID, "outcome_id", mapping.outcomeID, "error", err)
 				stats.errors++
@@ -225,8 +239,8 @@ type synthesizedMapping struct {
 	product         string
 	workType        string
 	phase           string
-	featureOrBug    string
-	featureBugSlug  string
+	slugKey         string
+	slugValue       string
 	component       string
 	priority        string
 	confidence      string
@@ -258,8 +272,8 @@ func (r *Runner) synthesizeSession(ctx context.Context, sessionID, projectsDir, 
 		product:         resp.Product,
 		workType:        resp.WorkType,
 		phase:           resp.Phase,
-		featureOrBug:    resp.FeatureOrBug,
-		featureBugSlug:  resp.FeatureBugSlug,
+		slugKey:         resp.SlugKey,
+		slugValue:       resp.SlugValue,
 		component:       resp.Component,
 		priority:        resp.Priority,
 		confidence:      resp.Confidence,
@@ -267,7 +281,7 @@ func (r *Runner) synthesizeSession(ctx context.Context, sessionID, projectsDir, 
 	}, nil
 }
 
-func (r *Runner) createSynthesizedOutcome(ctx context.Context, m *synthesizedMapping) error {
+func (r *Runner) createSynthesizedOutcome(ctx context.Context, m *synthesizedMapping, facetKeys map[string]bool) error {
 	now := time.Now().UTC()
 
 	_, err := r.db.ExecContext(ctx, `
@@ -287,10 +301,8 @@ func (r *Runner) createSynthesizedOutcome(ctx context.Context, m *synthesizedMap
 	if m.workType != "" {
 		tags = append(tags, struct{ key, value string }{"work-type", m.workType})
 	}
-	if m.featureOrBug == "feature" && m.featureBugSlug != "" {
-		tags = append(tags, struct{ key, value string }{"feature", m.featureBugSlug})
-	} else if m.featureOrBug == "bug" && m.featureBugSlug != "" {
-		tags = append(tags, struct{ key, value string }{"bug", m.featureBugSlug})
+	if m.slugKey != "" && m.slugValue != "" && facetKeys[m.slugKey] {
+		tags = append(tags, struct{ key, value string }{m.slugKey, m.slugValue})
 	}
 	if m.component != "" {
 		tags = append(tags, struct{ key, value string }{"component", m.component})
@@ -322,9 +334,23 @@ func (r *Runner) applyTag(ctx context.Context, entityType, entityID, tagKey, tag
 		`SELECT id FROM tags WHERE tag_key = ? AND tag_value = ?`,
 		tagKey, tagValue).Scan(&tagID)
 	if err == sql.ErrNoRows {
+		// Inherit the key's existing category so lifecycle keys (phase, work-type,
+		// resolution, lifecycle) don't drift to the column DEFAULT 'context'.
+		category := "context"
+		var foundCat string
+		switch catErr := r.db.QueryRowContext(ctx,
+			`SELECT category FROM tags WHERE tag_key = ? AND category != 'context' LIMIT 1`, tagKey,
+		).Scan(&foundCat); catErr {
+		case nil:
+			category = foundCat
+		case sql.ErrNoRows:
+			// new or all-context key — default 'context'
+		default:
+			return fmt.Errorf("lookup category %s: %w", tagKey, catErr)
+		}
 		res, err := r.db.ExecContext(ctx,
-			`INSERT INTO tags (tag_key, tag_value, is_seed, category, cardinality) VALUES (?, ?, 0, 'context', 'single')`,
-			tagKey, tagValue)
+			`INSERT INTO tags (tag_key, tag_value, is_seed, category, cardinality) VALUES (?, ?, 0, ?, 'single')`,
+			tagKey, tagValue, category)
 		if err != nil {
 			return fmt.Errorf("create tag %s:%s: %w", tagKey, tagValue, err)
 		}
@@ -343,19 +369,24 @@ func (r *Runner) applyTag(ctx context.Context, entityType, entityID, tagKey, tag
 
 func (r *Runner) loadTagVocab(ctx context.Context) (string, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT tag_key, tag_value FROM tags WHERE category = 'context' AND tag_value != '' ORDER BY tag_key, tag_value`)
+		`SELECT tag_key, tag_value, facet_source FROM tags WHERE category = 'context' AND tag_value != '' ORDER BY tag_key, tag_value`)
 	if err != nil {
 		return "", err
 	}
 	defer rows.Close() //nolint:errcheck
 
 	byKey := map[string][]string{}
+	facetOf := map[string]string{}
 	for rows.Next() {
 		var k, v string
-		if err := rows.Scan(&k, &v); err != nil {
+		var fs sql.NullString
+		if err := rows.Scan(&k, &v, &fs); err != nil {
 			return "", err
 		}
 		byKey[k] = append(byKey[k], v)
+		if fs.Valid && fs.String != "" {
+			facetOf[k] = fs.String
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return "", err
@@ -368,9 +399,32 @@ func (r *Runner) loadTagVocab(ctx context.Context) (string, error) {
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		fmt.Fprintf(&sb, "%s: %s\n", k, strings.Join(byKey[k], ", "))
+		annotation := ""
+		if facetOf[k] != "" {
+			annotation = fmt.Sprintf(" (facet of %s)", facetOf[k])
+		}
+		fmt.Fprintf(&sb, "%s%s: %s\n", k, annotation, strings.Join(byKey[k], ", "))
 	}
 	return sb.String(), nil
+}
+
+func (r *Runner) loadFacetKeys(ctx context.Context, source string) (map[string]bool, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT DISTINCT tag_key FROM tags WHERE facet_source = ? AND retired = 0`, source)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close() //nolint:errcheck
+
+	keys := make(map[string]bool)
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			return nil, err
+		}
+		keys[k] = true
+	}
+	return keys, rows.Err()
 }
 
 func (r *Runner) ensureSweepOutcome(ctx context.Context) {
@@ -384,7 +438,13 @@ func (r *Runner) ensureSweepOutcome(ctx context.Context) {
 		return
 	}
 	_ = r.applyTag(ctx, "outcome", sweepOutcomeID, "product", "Teamster", "sweep-llm")
-	_ = r.applyTag(ctx, "outcome", sweepOutcomeID, "feature", "data-cleanup", "sweep-llm")
+	_ = r.applyTag(ctx, "outcome", sweepOutcomeID, "admin", "data-cleanup", "sweep-llm")
+	// Clean up stale pre-v49 binding.
+	_, _ = r.db.ExecContext(ctx,
+		`DELETE et FROM entity_tags et
+		 JOIN tags t ON et.tag_id = t.id
+		 WHERE et.entity_type = 'outcome' AND et.entity_id = ? AND t.tag_key = 'feature' AND t.tag_value = 'data-cleanup'`,
+		sweepOutcomeID)
 }
 
 // unresolvedGapThreads returns gap threads that RecoverGaps skipped (no entity

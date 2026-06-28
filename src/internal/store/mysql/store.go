@@ -497,13 +497,18 @@ func (s *Store) TransitionEventRecord(ctx context.Context, entityType, entityID,
 // the entity at `at`, computing duration_ms from started_at. Closing all open
 // rows (not just one) also reconciles any stale double-open, keeping the
 // single-open-after-transition shape.
+//
+// ORDERING-SAFE: the AND started_at <= ? guard ensures a close whose timestamp
+// predates an interval's own start is ignored — same class of protection as
+// closeOpenFocusIntervals — preventing negative-width state intervals.
 func closeOpenStateIntervals(ctx context.Context, tx *sql.Tx, entityType, entityID string, at time.Time) error {
 	_, err := tx.ExecContext(ctx, `
 		UPDATE wms_intervals
 		SET ended_at = ?,
 		    duration_ms = TIMESTAMPDIFF(MICROSECOND, started_at, ?) / 1000
-		WHERE kind = 'state' AND entity_type = ? AND entity_id = ? AND ended_at IS NULL`,
-		at, at, entityType, entityID)
+		WHERE kind = 'state' AND entity_type = ? AND entity_id = ? AND ended_at IS NULL
+		  AND started_at <= ?`,
+		at, at, entityType, entityID, at)
 	return err
 }
 
@@ -753,6 +758,53 @@ func (s *Store) ListOutcomesNeedingPhase(ctx context.Context) ([][2]string, erro
 	return out, rows.Err()
 }
 
+// ListWorkUnitsNeedingLifecycleTags returns [workunitID, missingKey,
+// existingWorkType] triples for work units that are missing at least one
+// required lifecycle tag (required=1 AND category='lifecycle' in the tags
+// table). existingWorkType is the work unit's current work-type value (empty
+// string when unset), pre-fetched so the caller can derive a phase default
+// without a second query.
+func (s *Store) ListWorkUnitsNeedingLifecycleTags(ctx context.Context) ([][3]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT wu.id, rk.tag_key,
+		  COALESCE(
+		    (SELECT t2.tag_value
+		     FROM entity_tags et2
+		     JOIN tags t2 ON t2.id = et2.tag_id
+		     WHERE et2.entity_type = 'workunit' AND et2.entity_id = wu.id
+		       AND t2.tag_key = 'work-type'
+		     LIMIT 1),
+		    ''
+		  ) AS work_type
+		FROM workunits wu
+		CROSS JOIN (
+		  SELECT DISTINCT tag_key
+		  FROM tags
+		  WHERE required = 1 AND category = 'lifecycle' AND retired = 0
+		) rk
+		WHERE NOT EXISTS (
+		  SELECT 1 FROM entity_tags et
+		  JOIN tags t ON t.id = et.tag_id
+		  WHERE et.entity_type = 'workunit'
+		    AND et.entity_id = wu.id
+		    AND t.tag_key = rk.tag_key
+		)
+		ORDER BY wu.id, rk.tag_key`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out [][3]string
+	for rows.Next() {
+		var triple [3]string
+		if err := rows.Scan(&triple[0], &triple[1], &triple[2]); err != nil {
+			return nil, err
+		}
+		out = append(out, triple)
+	}
+	return out, rows.Err()
+}
+
 // --- Tags ---
 
 // TagEntity applies a key:value tag to an entity. It upserts the tag (creating
@@ -808,16 +860,34 @@ func (s *Store) TagEntity(ctx context.Context, entityType, entityID, tagKey, tag
 	default:
 		return err
 	}
+	// Resolve the key's category at KEY grain BEFORE upserting the value row.
+	// Category is a per-key attribute stored denormalized on every value row, so
+	// a create-on-apply value minted here must inherit the KEY's category rather
+	// than taking the column DEFAULT 'context'. Lifecycle keys (phase, work-type,
+	// resolution, lifecycle) are system-managed and always have category='lifecycle'
+	// on their existing rows; inheriting here prevents new agent-created values
+	// (e.g. phase:exec) from silently drifting to 'context' and breaking the tag
+	// editor's lifecycle-vs-context classification. Same pattern as cardinality above.
+	category := "context"
+	var foundCat string
+	switch err := s.db.QueryRowContext(ctx,
+		`SELECT category FROM tags WHERE tag_key = ? AND category != 'context' LIMIT 1`, tagKey,
+	).Scan(&foundCat); err {
+	case nil:
+		category = foundCat
+	case sql.ErrNoRows:
+		// key is new or all-context — default 'context'
+	default:
+		return err
+	}
 	// Upsert the value row (non-seed when newly created), stamping it with the
-	// key's cardinality so all of a key's values stay consistent. A fresh insert
-	// keeps the caller's description and the DEFAULT 'context' category; new
-	// operator keys are multi-value context tags (single-value is opt-in via the
-	// vocabulary). The ON DUPLICATE branch sets only LAST_INSERT_ID, so an
-	// existing tag's category/cardinality/is_seed are never clobbered.
+	// key's cardinality and category so all of a key's values stay consistent.
+	// The ON DUPLICATE branch sets only LAST_INSERT_ID, so an existing tag's
+	// category/cardinality/is_seed are never clobbered.
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO tags (tag_key, tag_value, is_seed, cardinality, description) VALUES (?, ?, 0, ?, ?)
+		`INSERT INTO tags (tag_key, tag_value, is_seed, category, cardinality, description) VALUES (?, ?, 0, ?, ?, ?)
 		 ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)`,
-		tagKey, tagValue, cardinality, description,
+		tagKey, tagValue, category, cardinality, description,
 	)
 	if err != nil {
 		return err
@@ -882,7 +952,7 @@ func (s *Store) TagEntity(ctx context.Context, entityType, entityID, tagKey, tag
 // ListTags returns all known tags ordered by key then value.
 func (s *Store) ListTags(ctx context.Context) ([]wms.Tag, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT tag_key, tag_value, is_seed, category, cardinality, description, retired, required, scope, exclusion_group, auto_extract, interview FROM tags ORDER BY tag_key, tag_value`)
+		`SELECT tag_key, tag_value, is_seed, category, cardinality, description, retired, required, scope, exclusion_group, auto_extract, interview, facet_source FROM tags ORDER BY tag_key, tag_value`)
 	if err != nil {
 		return nil, err
 	}
@@ -891,7 +961,7 @@ func (s *Store) ListTags(ctx context.Context) ([]wms.Tag, error) {
 	for rows.Next() {
 		var t wms.Tag
 		var isSeed, retired, required int
-		if err := rows.Scan(&t.Key, &t.Value, &isSeed, &t.Category, &t.Cardinality, &t.Description, &retired, &required, &t.Scope, &t.ExclusionGroup, &t.AutoExtract, &t.Interview); err != nil {
+		if err := rows.Scan(&t.Key, &t.Value, &isSeed, &t.Category, &t.Cardinality, &t.Description, &retired, &required, &t.Scope, &t.ExclusionGroup, &t.AutoExtract, &t.Interview, &t.FacetSource); err != nil {
 			return nil, err
 		}
 		t.IsSeed = isSeed != 0
@@ -904,7 +974,7 @@ func (s *Store) ListTags(ctx context.Context) ([]wms.Tag, error) {
 
 // SearchTags returns non-retired tags matching the given filters.
 func (s *Store) SearchTags(ctx context.Context, tagKey, query string) ([]wms.Tag, error) {
-	q := `SELECT tag_key, tag_value, is_seed, category, cardinality, description, retired, required, scope, exclusion_group, auto_extract, interview FROM tags WHERE retired = 0`
+	q := `SELECT tag_key, tag_value, is_seed, category, cardinality, description, retired, required, scope, exclusion_group, auto_extract, interview, facet_source FROM tags WHERE retired = 0`
 	var args []interface{}
 	if tagKey != "" {
 		q += ` AND tag_key = ?`
@@ -926,7 +996,7 @@ func (s *Store) SearchTags(ctx context.Context, tagKey, query string) ([]wms.Tag
 	for rows.Next() {
 		var t wms.Tag
 		var isSeed, retired, required int
-		if err := rows.Scan(&t.Key, &t.Value, &isSeed, &t.Category, &t.Cardinality, &t.Description, &retired, &required, &t.Scope, &t.ExclusionGroup, &t.AutoExtract, &t.Interview); err != nil {
+		if err := rows.Scan(&t.Key, &t.Value, &isSeed, &t.Category, &t.Cardinality, &t.Description, &retired, &required, &t.Scope, &t.ExclusionGroup, &t.AutoExtract, &t.Interview, &t.FacetSource); err != nil {
 			return nil, err
 		}
 		t.IsSeed = isSeed != 0
@@ -1233,6 +1303,13 @@ func (s *Store) DefineTag(ctx context.Context, spec wms.TagSpec) error {
 			return err
 		}
 	}
+	if spec.FacetSource != nil {
+		if _, err := s.db.ExecContext(ctx,
+			`UPDATE tags SET facet_source = ? WHERE tag_key = ?`, *spec.FacetSource, spec.Key,
+		); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -1453,13 +1530,13 @@ func (s *Store) OpenFocusInterval(ctx context.Context, key store.SessionKey, ent
 	return tx.Commit()
 }
 
-// HasOpenFocusInterval returns true when (session, agent) has at least one open
-// kind='focus' interval row.
-func (s *Store) HasOpenFocusInterval(ctx context.Context, key store.SessionKey) (bool, error) {
+// HasAnyFocusInterval returns true when (session, agent) has any kind='focus'
+// interval row, open or closed.
+func (s *Store) HasAnyFocusInterval(ctx context.Context, key store.SessionKey) (bool, error) {
 	var exists int
 	err := s.db.QueryRowContext(ctx,
 		`SELECT 1 FROM wms_intervals
-		 WHERE kind = 'focus' AND session_id = ? AND agent_name = ? AND ended_at IS NULL
+		 WHERE kind = 'focus' AND session_id = ? AND agent_name = ?
 		 LIMIT 1`,
 		key.SessionID, key.AgentName,
 	).Scan(&exists)
@@ -1524,6 +1601,9 @@ func (s *Store) CloseFocusInterval(ctx context.Context, key store.SessionKey) er
 // focus. Used by the WMSStatusChange→done handler in place of the unconditional
 // CloseFocusInterval, which closed whatever the agent had open and could orphan
 // a lead's parent-Outcome focus when a child WorkUnit completed.
+//
+// ORDERING-SAFE: the `started_at <= ?` guard means an out-of-order close never
+// sets ended_at < started_at. Same invariant as closeOpenFocusIntervals.
 func (s *Store) CloseFocusIntervalForEntity(ctx context.Context, key store.SessionKey, entityType, entityID string) error {
 	now := nowUTC()
 	_, err := s.db.ExecContext(ctx, `
@@ -1531,8 +1611,9 @@ func (s *Store) CloseFocusIntervalForEntity(ctx context.Context, key store.Sessi
 		SET ended_at = ?,
 		    duration_ms = TIMESTAMPDIFF(MICROSECOND, started_at, ?) / 1000
 		WHERE kind = 'focus' AND session_id = ? AND agent_name = ?
-		  AND entity_type = ? AND entity_id = ? AND ended_at IS NULL`,
-		now, now, key.SessionID, key.AgentName, entityType, entityID)
+		  AND entity_type = ? AND entity_id = ? AND ended_at IS NULL
+		  AND started_at <= ?`,
+		now, now, key.SessionID, key.AgentName, entityType, entityID, now)
 	return err
 }
 
@@ -1570,6 +1651,11 @@ func (s *Store) ResolveSessionEnd(ctx context.Context, sessionID string, fallbac
 // only that agent's intervals are closed; when empty, ALL intervals for the
 // session are closed (used by CLI drain and API). Returns the number of rows
 // closed. No-op when nothing is open.
+//
+// ORDERING-SAFE: the `started_at <= ?` guard prevents negative-width intervals
+// when `at` (e.g. MAX(token_ledger.ts), ms-precision) lags behind a hub µs
+// clock that already wrote a later started_at. Out-of-order rows stay open for
+// the next valid close or the reaper. Same invariant as closeOpenFocusIntervals.
 func (s *Store) CloseSessionIntervals(ctx context.Context, sessionID, agentName string, at time.Time) (int64, error) {
 	if at.IsZero() {
 		at = nowUTC()
@@ -1578,8 +1664,9 @@ func (s *Store) CloseSessionIntervals(ctx context.Context, sessionID, agentName 
 		UPDATE wms_intervals
 		SET ended_at = ?,
 		    duration_ms = TIMESTAMPDIFF(MICROSECOND, started_at, ?) / 1000
-		WHERE session_id = ? AND ended_at IS NULL`
-	args := []any{at, at, sessionID}
+		WHERE session_id = ? AND ended_at IS NULL
+		  AND started_at <= ?`
+	args := []any{at, at, sessionID, at}
 	if agentName != "" {
 		query += ` AND agent_name = ?`
 		args = append(args, agentName)

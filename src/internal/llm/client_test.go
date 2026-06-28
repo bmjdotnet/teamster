@@ -58,8 +58,8 @@ func TestParseResponse_ValidJSON(t *testing.T) {
 		"description": "Fixed the authentication module",
 		"product": "Teamster",
 		"work_type": "bug",
-		"feature_or_bug": "bug",
-		"feature_bug_slug": "auth-failure",
+		"work_scope_key": "bug",
+		"work_scope_slug": "auth-failure",
 		"component": "auth",
 		"priority": "p1",
 		"confidence": "high",
@@ -81,6 +81,12 @@ func TestParseResponse_ValidJSON(t *testing.T) {
 	}
 	if resp.Confidence != "high" {
 		t.Fatalf("confidence=%q, want high", resp.Confidence)
+	}
+	if resp.SlugKey != "bug" {
+		t.Fatalf("slug_key=%q, want bug", resp.SlugKey)
+	}
+	if resp.SlugValue != "auth-failure" {
+		t.Fatalf("slug_value=%q, want auth-failure", resp.SlugValue)
 	}
 }
 

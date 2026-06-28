@@ -61,11 +61,11 @@ __version__ = _read_version()
 
 # ModelPricing: (input, output, cache_read, cache_write) — USD per token.
 _KNOWN: dict[str, tuple[float, float, float, float]] = {
-    "claude-opus-4-5":  (0.000015,  0.000075,  0.0000015,  0.00001875),
-    "claude-opus-4-6":  (0.000015,  0.000075,  0.0000015,  0.00001875),
-    "claude-opus-4-7":  (0.000015,  0.000075,  0.0000015,  0.00001875),
-    # opus-4-8 is a new, cheaper tier ($5/$25 per Mtok), NOT the $15/$75 of
-    # opus-4-5..4-7.  Derived from COMPLETED anchor session a856fa7e.
+    "claude-opus-4-5":  (0.000005,  0.000025,  0.0000005,  0.00000625),
+    "claude-opus-4-6":  (0.000005,  0.000025,  0.0000005,  0.00000625),
+    "claude-opus-4-7":  (0.000005,  0.000025,  0.0000005,  0.00000625),
+    # opus-4-8 explicit entry: all opus 4.5+ are $5/$25 per Mtok; only
+    # opus 4.0/4.1 were $15/$75.  Derived from COMPLETED anchor session a856fa7e.
     "claude-opus-4-8":   (0.000005,  0.000025,  0.0000005,  0.00000625),
     "claude-sonnet-4-5": (0.000003,  0.000015,  0.0000003,  0.00000375),
     "claude-sonnet-4-6": (0.000003,  0.000015,  0.0000003,  0.00000375),
@@ -77,7 +77,7 @@ _KNOWN: dict[str, tuple[float, float, float, float]] = {
 
 # Same-class fallback rates (most-recent known rate per class).
 _CLASS_RATES: dict[str, tuple[float, float, float, float]] = {
-    "opus":   (0.000015,  0.000075,  0.0000015,  0.00001875),
+    "opus":   (0.000005,  0.000025,  0.0000005,  0.00000625),
     "sonnet": (0.000003,  0.000015,  0.0000003,  0.00000375),
     "haiku":  (0.0000008, 0.000004,  0.00000008, 0.000001),
     "fable":  (0.00001,   0.00005,   0.000001,   0.0000125),

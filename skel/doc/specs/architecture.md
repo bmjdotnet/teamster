@@ -200,7 +200,7 @@ Claude Code session (remote)
   │                          → SSE publish to dashboard subscribers
   │                          → session tracker / entity count updates
   │                          → focus-nudge check (injects additionalContext
-  │                            if agent has no open focus interval, max 3/session+agent)
+  │                            if agent has no focus interval (open or closed), max 1/session+agent/turn)
   ├─ GET  /health          → {"status":"ok"}
   ├─ GET  /                → SSE activity dashboard (htmx, streaming HTML)
   ├─ GET  /events/stream   → SSE feed (raw JSONL rendered as HTML divs)
@@ -251,8 +251,8 @@ Claude Code hook fires
   → additionalContext injection (activity reminder)
   → POST http://localhost:9125/event  (enriched JSON)
   → hookd enriches (if needed), appends JSONL line to var/events.jsonl
-  → hookd focus-nudge check: if PreToolUse + no open focus interval,
-    injects additionalContext nudge (max 3 per session+agent)
+  → hookd focus-nudge check: if PreToolUse + no focus interval (open or closed),
+    injects additionalContext nudge (max 1 per session+agent per turn)
   → hookd SSE-pushes rendered HTML div to dashboard subscribers
   → feed reads new JSONL line, renders ANSI to terminal
 ```

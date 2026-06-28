@@ -12,8 +12,13 @@ import (
 const manifestVersion = "1"
 
 // Run executes a full backup according to cfg. Returns an error if any store
-// failed (but continues running all stores before returning).
+// failed (but continues running all stores before returning). When backup_dir
+// is unset, logs a warning and skips — the service is not considered failed.
 func Run(ctx context.Context, cfg *Config, configPath string, dryRun bool, logger *slog.Logger) error {
+	if cfg.BackupDir == "" {
+		logger.Warn("backup_dir is not configured — skipping backup (set backup.backup_dir in teamster.yaml to enable)")
+		return nil
+	}
 	ts := time.Now().UTC()
 	tsDir := ts.Format("2006-01-02T150405Z")
 	destDir := filepath.Join(cfg.BackupDir, tsDir)

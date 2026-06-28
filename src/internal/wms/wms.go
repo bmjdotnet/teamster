@@ -93,6 +93,7 @@ type Tag struct {
 	ExclusionGroup string `json:"exclusion_group"`
 	AutoExtract    string `json:"auto_extract"`
 	Interview      string `json:"interview"`
+	FacetSource    string `json:"facet_source"`
 }
 
 // TagSpec describes one key in the declared tag vocabulary. It is the unit the
@@ -114,6 +115,7 @@ type TagSpec struct {
 	ExclusionGroup *string
 	AutoExtract    *string
 	Interview      *string
+	FacetSource    *string
 }
 
 // ProposeEntry is one key in the "propose" group of the tag manifest: a key
@@ -124,15 +126,18 @@ type ProposeEntry struct {
 	Scope       string   `json:"scope,omitempty"`
 	Exclusive   string   `json:"exclusive,omitempty"`
 	Cardinality string   `json:"cardinality,omitempty"`
+	FacetOf     string   `json:"facetOf,omitempty"`
+	FacetKeys   []string `json:"facetKeys,omitempty"`
 	Desc        string   `json:"desc"`
 }
 
 // TagManifest is the role-shaped response for the no-arg wms_listTags call.
 type TagManifest struct {
-	Propose       map[string]ProposeEntry `json:"propose"`
-	AutoExtract   map[string]string       `json:"autoExtract"`
-	Required      []string                `json:"required"`
-	EngineManaged []string                `json:"engineManaged"`
+	Propose           map[string]ProposeEntry `json:"propose"`
+	AutoExtract       map[string]string       `json:"autoExtract"`
+	RequiredLifecycle map[string]ProposeEntry `json:"requiredLifecycle"`
+	Required          []string                `json:"required"`
+	EngineManaged     []string                `json:"engineManaged"`
 }
 
 // TagKeySummary is a per-key rollup used by describeTag and the tag browser.
@@ -148,6 +153,7 @@ type TagKeySummary struct {
 	ExclusionGroup string   `json:"exclusion_group"`
 	AutoExtract    string   `json:"auto_extract"`
 	Interview      string   `json:"interview"`
+	FacetSource    string   `json:"facet_source"`
 }
 
 // EntityTag is a tag binding resolved for one entity: the vocabulary fields

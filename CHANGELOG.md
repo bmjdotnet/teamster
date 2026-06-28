@@ -3,6 +3,16 @@
 All notable changes to Teamster are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## v0.2.1 (2026-06-28)
+
+### Fixed
+- Addressed various tagging bugs introduced in v0.2.0
+- Installer now prompts for `backup_dir` and schedule; backup service degrades gracefully when unconfigured instead of crashing
+- Fixed a bug causing rollup crashes
+- Fixed a bug causing unnecessary agent focus nudges
+- Fixed a bug causing inflated cost displays
+- Fixed a bug causing negative-duration intervals
+
 ## v0.2.0 (2026-06-24)
 
 ### Added

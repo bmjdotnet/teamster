@@ -142,10 +142,7 @@ func LoadConfig(path string, restoreMode bool) (*Config, error) {
 		}
 	}
 
-	if !restoreMode {
-		if cfg.BackupDir == "" {
-			return nil, fmt.Errorf("backup_dir is required")
-		}
+	if !restoreMode && cfg.BackupDir != "" {
 		if err := requireAbsolute("backup_dir", cfg.BackupDir); err != nil {
 			return nil, err
 		}

@@ -233,7 +233,7 @@ func TestClassify_EndToEnd(t *testing.T) {
 	})
 
 	r := New(st, wms.NewJSONLSignalReader(), logFile, nil)
-	if err := r.Run(ctx, false, DefaultReclassifyLimit); err != nil {
+	if err := r.Run(ctx, false, DefaultReclassifyLimit, false); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
@@ -265,7 +265,7 @@ func TestClassify_EndToEnd(t *testing.T) {
 		t.Errorf("after first pass, %d intervals still need phase (want 0 — not idempotent)", len(needing))
 	}
 	assembledBefore := assembledAtOf(t, db, idBuild)
-	if err := r.Run(ctx, false, DefaultReclassifyLimit); err != nil {
+	if err := r.Run(ctx, false, DefaultReclassifyLimit, false); err != nil {
 		t.Fatalf("idempotent Run: %v", err)
 	}
 	check(idBuild, "build", "classifier") // unchanged
@@ -283,7 +283,7 @@ func TestClassify_EndToEnd(t *testing.T) {
 		p, s := phaseOf(t, db, id)
 		before[id] = [2]string{p, s}
 	}
-	if err := r.Run(ctx, true, DefaultReclassifyLimit); err != nil {
+	if err := r.Run(ctx, true, DefaultReclassifyLimit, false); err != nil {
 		t.Fatalf("reclassify Run: %v", err)
 	}
 	for _, id := range classifierIDs {
@@ -334,7 +334,7 @@ func TestClassify_SessionlessCostedIntervalIsBuild(t *testing.T) {
 	})
 
 	r := New(st, wms.NewJSONLSignalReader(), logFile, nil)
-	if err := r.Run(ctx, false, DefaultReclassifyLimit); err != nil {
+	if err := r.Run(ctx, false, DefaultReclassifyLimit, false); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
@@ -385,7 +385,7 @@ func TestClassify_CrossBatchRework(t *testing.T) {
 
 	r := New(st, wms.NewJSONLSignalReader(), logFile, nil)
 	// First pass: assembles active1=build and review=review.
-	if err := r.Run(ctx, false, DefaultReclassifyLimit); err != nil {
+	if err := r.Run(ctx, false, DefaultReclassifyLimit, false); err != nil {
 		t.Fatalf("pass 1 Run: %v", err)
 	}
 	if p, _ := phaseOf(t, db, idActive1); p != "build" {
@@ -407,7 +407,7 @@ func TestClassify_CrossBatchRework(t *testing.T) {
 	// Second forward pass (NOT --reclassify). The batch contains ONLY active2;
 	// the predecessor review is out of batch, but EarliestClosureByEntity still
 	// sees it, so active2 must derive rework.
-	if err := r.Run(ctx, false, DefaultReclassifyLimit); err != nil {
+	if err := r.Run(ctx, false, DefaultReclassifyLimit, false); err != nil {
 		t.Fatalf("pass 2 Run: %v", err)
 	}
 	if p, s := phaseOf(t, db, idActive2); p != "rework" || s != "classifier" {
@@ -476,7 +476,7 @@ func TestClassify_OutOfBatchPredecessorRework(t *testing.T) {
 
 	// SINGLE normal forward pass (reclassify=false).
 	r := New(st, wms.NewJSONLSignalReader(), logFile, nil)
-	if err := r.Run(ctx, false, DefaultReclassifyLimit); err != nil {
+	if err := r.Run(ctx, false, DefaultReclassifyLimit, false); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
@@ -533,7 +533,7 @@ func TestClassify_WorkTypeLandsOnWorkunit(t *testing.T) {
 	})
 
 	r := New(st, wms.NewJSONLSignalReader(), logFile, nil)
-	if err := r.Run(ctx, false, DefaultReclassifyLimit); err != nil {
+	if err := r.Run(ctx, false, DefaultReclassifyLimit, false); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 

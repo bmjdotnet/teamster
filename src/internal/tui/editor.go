@@ -250,7 +250,7 @@ func loadKeyGroups(db *sql.DB) ([]keyGroup, error) {
 		GROUP BY t.tag_key, t.category, t.cardinality, t.is_seed, t.required, t.description,
 		         t.scope, t.exclusion_group, t.auto_extract, t.interview
 		ORDER BY
-		    CASE t.category WHEN 'context' THEN 0 ELSE 1 END,
+		    CASE t.category WHEN 'lifecycle' THEN 0 ELSE 1 END,
 		    t.tag_key`)
 	if err != nil {
 		return nil, err

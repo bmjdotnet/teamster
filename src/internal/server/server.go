@@ -344,15 +344,17 @@ func (s *Server) handleEvent(w http.ResponseWriter, r *http.Request) {
 	// Focus-absent nudge: on PreToolUse, check whether (session, agent) has an
 	// open focus interval. If not, return additionalContext asking the agent to
 	// call wms_setFocus. Nudge up to nudgeMaxCount times then stop.
-	// Skip activity MCP tools (always called first) and ToolSearch (needed to
-	// load deferred tools like wms_setFocus) — nudging on these is unreasonable.
+	// Skip activity MCP tools (always called first), ToolSearch (needed to load
+	// deferred tools like wms_setFocus), and WMS MCP tools — nudging during
+	// wms_setFocus itself is unreasonable and produces same-event false nudges.
 	resp := map[string]interface{}{"status": "ok"}
 	if event.HookEventName == "PreToolUse" && s.obsStore != nil &&
 		!strings.HasPrefix(event.ToolName, "mcp__activity__") &&
+		!strings.HasPrefix(event.ToolName, "mcp__wms__") &&
 		event.ToolName != "ToolSearch" {
 		agent := agentNameFor(event.AgentType)
 		if msg, shouldNudge := s.focusNudge.check(event.SessionID, agent, func() bool {
-			return s.hasOpenFocusInterval(event.SessionID, agent)
+			return s.hasAnyFocusInterval(event.SessionID, agent)
 		}); shouldNudge {
 			resp["additionalContext"] = msg
 		}
@@ -728,13 +730,15 @@ func (s *Server) emitCloseOutWarning(id, agentName string, missing []string, ses
 	s.bus.publish([]byte(web.FormatEventHTML(record)))
 }
 
-// hasOpenFocusInterval queries the DB for an open focus interval for
-// (session, agent). Used as the cache-miss fallback in the nudge cache.
-func (s *Server) hasOpenFocusInterval(sessionID, agentName string) bool {
+// hasAnyFocusInterval queries the DB to answer "has this session/agent ever
+// set focus?" Used as the cache-miss fallback in the nudge cache. Checks for
+// any focus interval (open OR closed) because intervals are closed at turn
+// end — an ended interval still means the agent legitimately called setFocus.
+func (s *Server) hasAnyFocusInterval(sessionID, agentName string) bool {
 	if s.obsStore == nil {
 		return false
 	}
-	has, err := s.obsStore.HasOpenFocusInterval(context.Background(),
+	has, err := s.obsStore.HasAnyFocusInterval(context.Background(),
 		store.SessionKey{SessionID: sessionID, AgentName: agentName})
 	if err != nil {
 		return false

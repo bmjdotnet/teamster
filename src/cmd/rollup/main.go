@@ -65,6 +65,8 @@ func run() int {
 		"one-time repair of negative-width focus intervals (ended_at < started_at) from the dual-writer/async race: recompute ended_at from the (session,agent) focus chain, then reallocate; reversible with --unrepair-focus-intervals")
 	unrepairFocusIntervals := flag.Bool("unrepair-focus-intervals", false,
 		"reverse a --repair-focus-intervals pass: restore each repaired interval's prior ended_at from focus_interval_repair")
+	repairStateIntervals := flag.Bool("repair-state-intervals", false,
+		"one-time repair of negative-width state intervals (ended_at < started_at) from the missing started_at guard: set ended_at to next interval's started_at (or zero-width when no successor); idempotent")
 	sweep := flag.Bool("sweep", false,
 		"deep-clean: entity hygiene (drain, reclassify) + full attribution pipeline (allocate, recover-focus, recover-warmup, recover-gaps) + aggregation + reconciliation")
 	sweepLLM := flag.Bool("sweep-llm", false,
@@ -265,6 +267,16 @@ func run() int {
 			"inverted", stats.Inverted, "repaired", stats.Repaired,
 			"reopened", stats.Reopened, "dry_run", *dryRun)
 	}
+	if *repairStateIntervals {
+		stats, err := r.RepairStateIntervals(ctx, *dryRun)
+		if err != nil {
+			logger.Error("repair-state-intervals failed", "error", err)
+			return 1
+		}
+		logger.Info("repair-state-intervals complete",
+			"inverted", stats.Inverted, "repaired", stats.Repaired,
+			"collapsed", stats.Collapsed, "deleted", stats.Deleted, "dry_run", *dryRun)
+	}
 
 	if err := r.Run(ctx, *reallocate); err != nil {
 		logger.Error("rollup pass failed", "error", err)
@@ -440,6 +452,20 @@ func runSweep(ctx context.Context, st *mysql.Store, r *rollup.Runner, cfg config
 	// Step 2: classify pass — skipped. The standalone teamster-classify timer
 	// handles phase/work-type classification on a 10-min cadence; running it
 	// again here doubled the CPU cost with no benefit (both are idempotent).
+
+	// Step 2.5: Focus interval repair — fix negative-width focus intervals
+	// (ended_at < started_at) before the allocation pass sees them. Idempotent:
+	// when there are no inverted rows this is a cheap SELECT returning 0.
+	repairStats, err := r.RepairFocusIntervals(ctx, dryRun)
+	if err != nil {
+		logger.Error("sweep: repair-focus-intervals failed", "error", err)
+		return 1
+	}
+	if repairStats.Inverted > 0 {
+		logger.Info("sweep: repair-focus-intervals: healed corrupted intervals",
+			"inverted", repairStats.Inverted, "repaired", repairStats.Repaired,
+			"reopened", repairStats.Reopened, "dry_run", dryRun)
+	}
 
 	// --- Tier 2: Cost attribution (deterministic) ---
 

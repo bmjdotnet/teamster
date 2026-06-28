@@ -152,8 +152,13 @@ response groups keys by role — no interpretation needed:
   `exclusive` (at most one key per exclusion group). Apply `scope: "outcome"`
   keys to the Outcome; keys without scope can go on either.
 - **`autoExtract`** — extract silently from the environment (git, env).
-- **`required`** — must be set on every WorkUnit before close-out.
-- **`engineManaged`** — do not propose, set, or modify.
+- **`requiredLifecycle`** — lifecycle keys you MUST apply to every WorkUnit
+  before starting it. Values are included (e.g. `phase`:
+  design/build/test/review/rework; `work-type`: feature/bug/refactor/…).
+  Do NOT propose these at the Outcome interview — apply them per-WorkUnit.
+- **`required`** — non-lifecycle keys required on every WorkUnit before
+  close-out.
+- **`engineManaged`** — engine-only keys: do not propose, set, or modify.
 
 ### 4b — Extract and propose
 
@@ -179,8 +184,8 @@ Sound right?
 ```
 
 Respect `exclusive` — propose only one key per exclusion group. Apply
-`scope: "outcome"` keys to the Outcome; note `required` keys for WorkUnit
-dispatch time.
+`scope: "outcome"` keys to the Outcome; note `requiredLifecycle` and
+`required` keys for WorkUnit dispatch time.
 
 ### 4c — Confirm and apply
 
@@ -269,16 +274,21 @@ Before you begin a WorkUnit (or dispatch a subagent for it):
    (Step 5's table) — not just a `reportActivity` narration. Until you do this,
    your spend still attributes to the previous entity (or to the Outcome, or to
    nothing).
-4. **Tag the required keys for THIS WorkUnit BEFORE you start it** —
+4. **Tag the `requiredLifecycle` keys for THIS WorkUnit BEFORE you start it** —
    `mcp__wms__wms_tagEntity` with `work-type` (e.g. `feature`/`docs`/`test`) and
-   `phase` (`build`). `work-type` is a **required** tag — set it up front, not at
-   close-out; if you haven't already this session, call `mcp__wms__wms_listTags`
-   to see which keys are marked `required` and set every one of them on this
-   WorkUnit now. Tag the WorkUnit you're on, not a stale one. (Context tags from
-   the Outcome are inherited automatically by the engine — you only need to set
-   lifecycle tags per WorkUnit.) Applying required tags as you begin each piece
-   is what keeps the cost-by-work-type trail honest; deferring them to the end is
-   the most common way the trail ends up patchy.
+   `phase` (`build`). Check the `requiredLifecycle` map in the manifest for valid
+   values — no extra lookup needed. Tag the WorkUnit you're on, not a stale one.
+   (Context tags from the Outcome are inherited automatically by the engine — you
+   only need to set lifecycle tags per WorkUnit.) Applying required tags as you
+   begin each piece is what keeps the cost-by-work-type trail honest; deferring
+   them to the end is the most common way the trail ends up patchy.
+
+   **Work-scope slug on the Outcome.** If the strategic Outcome does not yet
+   carry a work-scope slug tag and the work type is clear, apply one now with
+   `wms_tagEntity` on the Outcome. The slug key matches the `work-type` you're
+   setting on the WorkUnit (e.g., `work-type:bug` → `bug:<slug>` on the
+   Outcome). Skip if the Outcome already has a work-scope slug from the
+   interview.
 
 As the piece moves through the loop, **update the phase tag** to match what
 you're actually doing — `build` → `test` → `review` — with `wms_tagEntity` on

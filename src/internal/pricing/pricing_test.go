@@ -13,7 +13,7 @@ func TestComputeCostUnknownModel(t *testing.T) {
 
 func TestComputeCostOpus(t *testing.T) {
 	got := ComputeCost("claude-opus-4-7", 1000, 500, 200, 100)
-	want := 1000*0.000015 + 500*0.000075 + 200*0.0000015 + 100*0.00001875
+	want := 1000*0.000005 + 500*0.000025 + 200*0.0000005 + 100*0.00000625
 	if math.Abs(got-want) > 1e-12 {
 		t.Errorf("got %v want %v", got, want)
 	}
@@ -25,18 +25,19 @@ func TestComputeCostZeroTokens(t *testing.T) {
 	}
 }
 
-// claude-opus-4-8 is a known model at its own (cheaper) tier — $5/$25 per Mtok,
-// NOT the $15/$75 opus-class fallback. Derived empirically from production OTel.
+// claude-opus-4-8 is a known model at $5/$25 per Mtok (all opus 4.5+ are this tier).
+// Derived empirically from production OTel. Must NOT equal the legacy opus 4.0/4.1
+// rate of $15/$75.
 func TestComputeCostOpus48(t *testing.T) {
 	got := ComputeCost("claude-opus-4-8", 1000, 500, 200, 100)
 	want := 1000*0.000005 + 500*0.000025 + 200*0.0000005 + 100*0.00000625
 	if math.Abs(got-want) > 1e-12 {
 		t.Errorf("got %v want %v", got, want)
 	}
-	// must NOT equal the old opus-list fallback
-	oldFallback := 1000*0.000015 + 500*0.000075 + 200*0.0000015 + 100*0.00001875
-	if math.Abs(got-oldFallback) < 1e-12 {
-		t.Errorf("opus-4-8 priced at old opus-list fallback %v, expected own tier", got)
+	// must NOT equal the legacy opus 4.0/4.1 rate ($15/$75)
+	legacyRate := 1000*0.000015 + 500*0.000075 + 200*0.0000015 + 100*0.00001875
+	if math.Abs(got-legacyRate) < 1e-12 {
+		t.Errorf("opus-4-8 priced at legacy opus 4.0/4.1 rate %v, expected $5/$25 tier", got)
 	}
 }
 
@@ -75,7 +76,7 @@ func TestComputeCostFutureModelClassFallback(t *testing.T) {
 		t.Errorf("haiku-5-0 class fallback got %v, want haiku-tier", haiku)
 	}
 	opus := ComputeCost("claude-opus-9-9", 1_000_000, 0, 0, 0)
-	if math.Abs(opus-1_000_000*0.000015) > 1e-6 {
+	if math.Abs(opus-1_000_000*0.000005) > 1e-6 {
 		t.Errorf("opus-9-9 class fallback got %v, want opus-tier", opus)
 	}
 }
@@ -109,7 +110,7 @@ func TestComputeCostDatedSuffix(t *testing.T) {
 // the class fallback is ever consulted: claude-opus-4-7-20251101 → opus-4-7.
 func TestComputeCostPrefixBeforeClassFallback(t *testing.T) {
 	got := ComputeCost("claude-opus-4-7-20251101", 1_000_000, 0, 0, 0)
-	want := 1_000_000 * 0.000015
+	want := 1_000_000 * 0.000005
 	if math.Abs(got-want) > 1e-9 {
 		t.Errorf("got %v want %v", got, want)
 	}

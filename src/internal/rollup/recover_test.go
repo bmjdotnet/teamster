@@ -367,6 +367,170 @@ func TestRecoverFocus_HalfSpecifiedFocusLeftUnallocated(t *testing.T) {
 	}
 }
 
+// TestRecoverFocus_PrefersMoreSpecificFromIntervals exercises the mostSpecific
+// cross-check: when the transcript timeline returns an outcome (the most-recent
+// setFocus) but wms_intervals has both the outcome AND its child workunit with
+// concurrent focus intervals covering the message timestamp, recovery must prefer
+// the workunit (rank 4) over the outcome (rank 2) — matching the live Allocate
+// path's behavior via mostSpecific.
+func TestRecoverFocus_PrefersMoreSpecificFromIntervals(t *testing.T) {
+	db := rollupTestDB(t)
+	ctx := context.Background()
+	base := time.Date(2026, 6, 9, 20, 0, 0, 0, time.UTC)
+
+	// The lead opened focus on workunit w1 at 20:03, then on outcome o1 at 20:07.
+	// In the transcript timeline, FocusAt at 20:10 returns the most-recent setFocus
+	// → outcome o1. But in wms_intervals, BOTH the workunit and the outcome have
+	// open (concurrent) focus intervals covering 20:10. The live path's focusAt +
+	// mostSpecific would pick the workunit; recovery must do the same.
+	seedFocus(t, db, ctx, "s1", "", "workunit", "w1", base.Add(3*time.Minute), nil)
+	seedFocus(t, db, ctx, "s1", "", "outcome", "o1", base.Add(7*time.Minute), nil)
+	seedLedger(t, db, ctx, "m1", "s1", "", base.Add(10*time.Minute), 25.0, 2500)
+
+	r := newTestRunner(db)
+	if err := r.Run(ctx, false); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	// Precondition: the live Allocate already attributed m1 via temporal_join to
+	// the workunit (mostSpecific picks it). But we want to test recovery, so
+	// force the row back to unallocated.
+	if _, err := db.ExecContext(ctx,
+		`UPDATE usage_attribution SET entity_type='', entity_id='', method='unallocated' WHERE message_id='m1'`); err != nil {
+		t.Fatalf("force unallocated: %v", err)
+	}
+
+	// The transcript timeline says the most-recent setFocus at 20:10 is o1 (set
+	// at 20:07, after w1 at 20:03). Without the cross-check, recovery would
+	// attribute m1 to o1; WITH the cross-check, it must prefer w1.
+	src := stubTimeline(map[string]map[string][]transcript.FocusEvent{
+		"s1": {"": {
+			{Timestamp: base.Add(3 * time.Minute), EntityType: "workunit", EntityID: "w1"},
+			{Timestamp: base.Add(7 * time.Minute), EntityType: "outcome", EntityID: "o1"},
+		}},
+	})
+	stats, err := r.RecoverFocus(ctx, RecoverOptions{Source: src})
+	if err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if stats.Recovered != 1 {
+		t.Fatalf("stats.Recovered=%d, want 1", stats.Recovered)
+	}
+
+	// The key assertion: m1 must be attributed to workunit/w1 (more specific),
+	// NOT outcome/o1 (which the transcript alone would have chosen).
+	if et, ei, method := attributionOf(t, db, ctx, "m1"); method != recoveryMethod || et != "workunit" || ei != "w1" {
+		t.Fatalf("m1 → (%q,%q) method=%q, want (workunit,w1) %s — cross-check must prefer more specific entity", et, ei, method, recoveryMethod)
+	}
+
+	// Conservation.
+	if l, f := sumLedger(t, db, ctx), sumCostFacts(t, db, ctx); math.Abs(l-f) > eps {
+		t.Fatalf("conservation violated: ledger=%.6f, cost_facts=%.6f", l, f)
+	}
+	assertNoDoubleAttribution(t, db, ctx)
+}
+
+// TestRecoverFocus_NoOverrideWhenTranscriptIsMoreSpecific is the converse guard:
+// when the transcript already picked a more specific entity than what
+// wms_intervals covers, the cross-check must NOT downgrade it.
+func TestRecoverFocus_NoOverrideWhenTranscriptIsMoreSpecific(t *testing.T) {
+	db := rollupTestDB(t)
+	ctx := context.Background()
+	base := time.Date(2026, 6, 9, 20, 0, 0, 0, time.UTC)
+
+	// Only the outcome has a wms_intervals focus interval; the workunit does not.
+	// But the transcript says the most-recent setFocus is the workunit.
+	seedFocus(t, db, ctx, "s1", "", "outcome", "o1", base, nil)
+	seedLedger(t, db, ctx, "m1", "s1", "", base.Add(10*time.Minute), 15.0, 1500)
+
+	r := newTestRunner(db)
+	if err := r.Run(ctx, false); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		`UPDATE usage_attribution SET entity_type='', entity_id='', method='unallocated' WHERE message_id='m1'`); err != nil {
+		t.Fatalf("force unallocated: %v", err)
+	}
+
+	// Transcript says workunit w1 (more specific than the outcome in wms_intervals).
+	src := stubTimeline(map[string]map[string][]transcript.FocusEvent{
+		"s1": {"": {
+			{Timestamp: base.Add(5 * time.Minute), EntityType: "workunit", EntityID: "w1"},
+		}},
+	})
+	stats, err := r.RecoverFocus(ctx, RecoverOptions{Source: src})
+	if err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if stats.Recovered != 1 {
+		t.Fatalf("stats.Recovered=%d, want 1", stats.Recovered)
+	}
+
+	// m1 stays on the transcript's workunit — the cross-check found an outcome
+	// (less specific) and did NOT override.
+	if et, ei, method := attributionOf(t, db, ctx, "m1"); method != recoveryMethod || et != "workunit" || ei != "w1" {
+		t.Fatalf("m1 → (%q,%q) method=%q, want (workunit,w1) %s — must not downgrade", et, ei, method, recoveryMethod)
+	}
+	if l, f := sumLedger(t, db, ctx), sumCostFacts(t, db, ctx); math.Abs(l-f) > eps {
+		t.Fatalf("conservation violated: ledger=%.6f, cost_facts=%.6f", l, f)
+	}
+}
+
+// TestRecoverFocus_ViaLeadCrossCheck exercises the crossCheckAgent="" path: a
+// teammate has no transcript focus (falls through to viaLead), and the lead's
+// wms_intervals have both an outcome and a workunit with concurrent focus. The
+// cross-check must query the lead's wms_intervals (crossCheckAgent="") and
+// prefer the workunit over the outcome the transcript returned.
+func TestRecoverFocus_ViaLeadCrossCheck(t *testing.T) {
+	db := rollupTestDB(t)
+	ctx := context.Background()
+	base := time.Date(2026, 6, 9, 20, 0, 0, 0, time.UTC)
+
+	// The lead has concurrent focus intervals on both outcome o1 and workunit w1.
+	seedFocus(t, db, ctx, "s1", "", "outcome", "o1", base, nil)
+	seedFocus(t, db, ctx, "s1", "", "workunit", "w1", base.Add(3*time.Minute), nil)
+	// A teammate message — the teammate NEVER set its own focus.
+	seedLedger(t, db, ctx, "tm1", "s1", "@worker", base.Add(10*time.Minute), 20.0, 2000)
+
+	r := newTestRunner(db)
+	if err := r.Run(ctx, false); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	// Force to unallocated so recovery processes it.
+	if _, err := db.ExecContext(ctx,
+		`UPDATE usage_attribution SET entity_type='', entity_id='', method='unallocated' WHERE message_id='tm1'`); err != nil {
+		t.Fatalf("force unallocated: %v", err)
+	}
+
+	// Transcript: the teammate has no setFocus; the lead's most-recent setFocus
+	// at 20:10 is the outcome o1 (set at 20:07, after w1 at 20:03). viaLead fires
+	// and returns o1. The cross-check must then query the lead's wms_intervals
+	// (agent="") and find that w1 (rank 4) beats o1 (rank 2).
+	src := stubTimeline(map[string]map[string][]transcript.FocusEvent{
+		"s1": {"": {
+			{Timestamp: base.Add(3 * time.Minute), EntityType: "workunit", EntityID: "w1"},
+			{Timestamp: base.Add(7 * time.Minute), EntityType: "outcome", EntityID: "o1"},
+		}},
+	})
+	stats, err := r.RecoverFocus(ctx, RecoverOptions{Source: src})
+	if err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if stats.Recovered != 1 || stats.RecoveredLead != 1 {
+		t.Fatalf("stats recovered=%d via_lead=%d, want 1 and 1", stats.Recovered, stats.RecoveredLead)
+	}
+
+	// The key assertion: the teammate's message is attributed to workunit/w1
+	// (more specific from the lead's wms_intervals), not outcome/o1 (which the
+	// transcript's viaLead path returned).
+	if et, ei, method := attributionOf(t, db, ctx, "tm1"); method != recoveryMethod || et != "workunit" || ei != "w1" {
+		t.Fatalf("tm1 → (%q,%q) method=%q, want (workunit,w1) %s — viaLead cross-check must prefer more specific", et, ei, method, recoveryMethod)
+	}
+	if l, f := sumLedger(t, db, ctx), sumCostFacts(t, db, ctx); math.Abs(l-f) > eps {
+		t.Fatalf("conservation violated: ledger=%.6f, cost_facts=%.6f", l, f)
+	}
+	assertNoDoubleAttribution(t, db, ctx)
+}
+
 // assertNoDoubleAttribution is the §6.3 invariant check: no message_id carries
 // >1 attribution row whose weights deviate from 1.0 (today every message has
 // exactly one row, weight 1.0; recovery must keep it so).

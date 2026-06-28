@@ -1193,6 +1193,62 @@ WHERE NOT EXISTS (
 			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 		},
 	},
+	{
+		// lifecycle-category-backfill: repair tag value rows for system-managed
+		// lifecycle keys (phase, work-type, resolution, lifecycle) that were
+		// created with category='context' by the TagEntity / sweep_llm applyTag
+		// code paths before the category-inheritance fix. Those code paths omitted
+		// the category column in their INSERT, so new agent-created values (e.g.
+		// phase:exec, phase:investigate) inherited the column DEFAULT 'context'
+		// instead of the key's lifecycle category. The tag editor's loadKeyGroups
+		// query sorts context-category rows first, so a single misclassified value
+		// caused the entire key to appear in the context panel rather than the
+		// lifecycle panel (L hotkey). This UPDATE is idempotent — safe on fresh
+		// installs (no rows match) and heals any drifted instance.
+		Version: 47,
+		Name:    "lifecycle-category-backfill",
+		Stmts: []string{
+			`UPDATE tags SET category = 'lifecycle'
+				WHERE tag_key IN ('phase', 'work-type', 'resolution', 'lifecycle')
+				  AND category != 'lifecycle'`,
+		},
+	},
+	{
+		// Widen synthesis_evidence.confidence varchar(16)→varchar(32). The value
+		// "temporal_correlation" (21 chars) written by synthesize_remote.go exceeds
+		// the current limit, producing Error 1406 on every rollup sweep. MODIFY
+		// COLUMN to a wider VARCHAR is supported and idempotent on MySQL 8.0 and
+		// MariaDB 11.8 (re-run is a no-op), exactly as v31/v33 widened other columns.
+		Version: 48,
+		Name:    "widen-synthesis-confidence",
+		Stmts: []string{
+			`ALTER TABLE synthesis_evidence MODIFY confidence VARCHAR(32) NOT NULL DEFAULT ''`,
+		},
+	},
+	{
+		Version: 49,
+		Name:    "add-facet-source",
+		Stmts: []string{
+			`ALTER TABLE tags ADD COLUMN facet_source VARCHAR(64) NOT NULL DEFAULT '' AFTER interview`,
+			// Set facet_source on existing feature/bug rows.
+			`UPDATE tags SET facet_source = 'work-type' WHERE tag_key IN ('feature', 'bug') AND facet_source = ''`,
+			// Seed the 6 new facet keys with full metadata.
+			// INSERT IGNORE so this is idempotent if the keys already exist from create-on-apply or DefineTag.
+			`INSERT IGNORE INTO tags (tag_key, tag_value, is_seed, category, cardinality, description, scope, exclusion_group, interview, facet_source)
+			 VALUES
+			 ('refactor', '', 1, 'context', 'single', 'Refactor slug — identifies the specific refactoring purpose', 'outcome', 'work-scope', 'propose', 'work-type'),
+			 ('infra', '', 1, 'context', 'single', 'Infrastructure slug — identifies the specific infra work', 'outcome', 'work-scope', 'propose', 'work-type'),
+			 ('docs', '', 1, 'context', 'single', 'Documentation slug — identifies the specific doc effort', 'outcome', 'work-scope', 'propose', 'work-type'),
+			 ('research', '', 1, 'context', 'single', 'Research slug — identifies the specific investigation', 'outcome', 'work-scope', 'propose', 'work-type'),
+			 ('test', '', 1, 'context', 'single', 'Test slug — identifies the specific validation target', 'outcome', 'work-scope', 'propose', 'work-type'),
+			 ('admin', '', 1, 'context', 'single', 'Admin slug — identifies the specific admin task', 'outcome', 'work-scope', 'propose', 'work-type')`,
+			// For rows that already existed (from create-on-apply or DefineTag), set missing metadata.
+			`UPDATE tags SET facet_source = 'work-type', scope = 'outcome', exclusion_group = 'work-scope', interview = 'propose', cardinality = 'single'
+			 WHERE tag_key IN ('refactor', 'infra', 'docs', 'research', 'test', 'admin') AND facet_source = ''`,
+			// Also ensure feature and bug have exclusion_group and scope (belt-and-suspenders with v44).
+			`UPDATE tags SET exclusion_group = 'work-scope' WHERE tag_key IN ('feature', 'bug') AND exclusion_group = ''`,
+		},
+	},
 }
 
 // mergeProjectToProduct renames `project` tag rows to `product`, handling the

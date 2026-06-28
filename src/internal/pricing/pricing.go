@@ -21,20 +21,15 @@ type ModelPricing struct {
 // sonnet-4-7, …) auto-price at their class's last-known rate until real pricing
 // lands — they are NOT added here.
 var Known = map[string]ModelPricing{
-	"claude-opus-4-5": {Input: 0.000015, Output: 0.000075, CacheRead: 0.0000015, CacheWrite: 0.00001875},
-	"claude-opus-4-6": {Input: 0.000015, Output: 0.000075, CacheRead: 0.0000015, CacheWrite: 0.00001875},
-	"claude-opus-4-7": {Input: 0.000015, Output: 0.000075, CacheRead: 0.0000015, CacheWrite: 0.00001875},
-	// opus-4-8 is a new, cheaper tier ($5/$25 per Mtok), NOT the $15/$75 of
-	// opus-4-5..4-7. Best empirical estimate from production OTel ground truth.
-	// Primary anchor is the COMPLETED team session a856fa7e (OTel $154.69, stable):
-	// pinning every other model at its known rate, opus-4-8's residual lands near
-	// $5 input / $25 output / $0.50 cache-read / $6.25 cache-write per Mtok
-	// (the standard 1 : 5 : 0.1 : 1.25 ratio). These rates must be checked against
-	// the DEDUPED token counts (one row per message.id|requestId — see
-	// token-scraper), not the raw token_ledger sums, which were ~2.6x inflated by
-	// per-content-block duplication. It needs an explicit entry because the
-	// opus-class fallback would otherwise overcharge it 3x (verified: $338.75 vs
-	// $112.92 for opus-4-8 on a856fa7e).
+	"claude-opus-4-5": {Input: 0.000005, Output: 0.000025, CacheRead: 0.0000005, CacheWrite: 0.00000625},
+	"claude-opus-4-6": {Input: 0.000005, Output: 0.000025, CacheRead: 0.0000005, CacheWrite: 0.00000625},
+	"claude-opus-4-7": {Input: 0.000005, Output: 0.000025, CacheRead: 0.0000005, CacheWrite: 0.00000625},
+	// All opus 4.5+ models share the $5/$25 per Mtok rate; only opus 4.0/4.1 were
+	// $15/$75. Explicit entries for each known model avoid the classRates fallback
+	// (which logs a warning for unrecognized models). Rates verified empirically
+	// from COMPLETED anchor session a856fa7e (OTel $154.69) using DEDUPED token
+	// counts (one row per message.id|requestId) — raw token_ledger sums were ~2.6x
+	// inflated by per-content-block duplication.
 	"claude-opus-4-8":   {Input: 0.000005, Output: 0.000025, CacheRead: 0.0000005, CacheWrite: 0.00000625},
 	"claude-sonnet-4-5": {Input: 0.000003, Output: 0.000015, CacheRead: 0.0000003, CacheWrite: 0.00000375},
 	"claude-sonnet-4-6": {Input: 0.000003, Output: 0.000015, CacheRead: 0.0000003, CacheWrite: 0.00000375},
@@ -59,7 +54,7 @@ var Known = map[string]ModelPricing{
 // same-class fallback when a model matches no exact or prefix key. Kept in sync
 // with Known: each class's latest published tier.
 var classRates = map[string]ModelPricing{
-	"opus":   {Input: 0.000015, Output: 0.000075, CacheRead: 0.0000015, CacheWrite: 0.00001875},
+	"opus":   {Input: 0.000005, Output: 0.000025, CacheRead: 0.0000005, CacheWrite: 0.00000625},
 	"sonnet": {Input: 0.000003, Output: 0.000015, CacheRead: 0.0000003, CacheWrite: 0.00000375},
 	"haiku":  {Input: 0.0000008, Output: 0.000004, CacheRead: 0.00000008, CacheWrite: 0.000001},
 	"fable":  {Input: 0.00001, Output: 0.00005, CacheRead: 0.000001, CacheWrite: 0.0000125},

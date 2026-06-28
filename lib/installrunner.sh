@@ -122,6 +122,10 @@ GRAFANA_BUILD_FROM_SRC=0    # --grafana-build-from-src
 # Per-service config flags
 PROMETHEUS_RETENTION=""  # --prometheus-retention=<duration>
 
+# Backup config flags
+BACKUP_DIR=""       # --backup-dir=<path>
+BACKUP_SCHEDULE=""  # --backup-schedule=<duration>
+
 # Relay / replication flags
 RELAY_TARGET=""          # --relay-target=<URL>
 REPL_PUSH_REMOTE=""      # --repl-push-remote=<user@host>
@@ -187,6 +191,11 @@ while [[ $# -gt 0 ]]; do
         # --- per-service config flags ---
         --prometheus-retention=*) PROMETHEUS_RETENTION="${1#--prometheus-retention=}"; shift ;;
         --prometheus-retention)   require_value "$1" "${2-}"; PROMETHEUS_RETENTION="$2"; shift 2 ;;
+        # --- backup config flags ---
+        --backup-dir=*)           BACKUP_DIR="${1#--backup-dir=}"; shift ;;
+        --backup-dir)             require_value "$1" "${2-}"; BACKUP_DIR="$2"; shift 2 ;;
+        --backup-schedule=*)      BACKUP_SCHEDULE="${1#--backup-schedule=}"; shift ;;
+        --backup-schedule)        require_value "$1" "${2-}"; BACKUP_SCHEDULE="$2"; shift 2 ;;
         # --- relay / replication flags ---
         --relay-target=*)       RELAY_TARGET="${1#--relay-target=}"; shift ;;
         --relay-target)         require_value "$1" "${2-}"; RELAY_TARGET="$2"; shift 2 ;;
@@ -1268,6 +1277,8 @@ INSTALL_FLAGS=(--basedir="$BASEDIR" --repo="$REPO" --builddir="$BUILDDIR")
 [[ -n "$GRAFANA_ENDPOINT" ]]     && INSTALL_FLAGS+=(--grafana-endpoint="$GRAFANA_ENDPOINT")
 [[ -n "$PROMETHEUS_RETENTION" ]] && INSTALL_FLAGS+=(--prometheus-retention="$PROMETHEUS_RETENTION")
 [[ -n "$TEAMSTER_ENV" ]]         && INSTALL_FLAGS+=(--env="$TEAMSTER_ENV")
+[[ -n "$BACKUP_DIR" ]]           && INSTALL_FLAGS+=(--backup-dir="$BACKUP_DIR")
+[[ -n "$BACKUP_SCHEDULE" ]]      && INSTALL_FLAGS+=(--backup-schedule="$BACKUP_SCHEDULE")
 [[ -n "$DEBUG_LOG" ]]            && INSTALL_FLAGS+=(--debug-log="$DEBUG_LOG")
 [[ "$HOOKD_READ_ONLY" -eq 1 ]]   && INSTALL_FLAGS+=(--hookd-read-only)
 [[ -n "$RELAY_MODE" && "$RELAY_MODE" != "none" ]] && INSTALL_FLAGS+=(--relay-mode="$RELAY_MODE")

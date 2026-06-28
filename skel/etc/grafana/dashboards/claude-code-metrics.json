@@ -1088,7 +1088,7 @@
         "type": "prometheus",
         "uid": "teamster-prometheus"
       },
-      "description": "Top 10 most expensive sessions in the selected window. Useful for spotting runaway sessions. Once OTEL_RESOURCE_ATTRIBUTES=git.repo=\u2026 is set on the shell that launches Claude, this panel can be repointed to group by `git_repo`.",
+      "description": "Top 10 most expensive sessions in the selected window. Useful for spotting runaway sessions. Once OTEL_RESOURCE_ATTRIBUTES=git.repo=… is set on the shell that launches Claude, this panel can be repointed to group by `git_repo`.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -2581,6 +2581,6 @@
   },
   "timepicker": {},
   "timezone": "browser",
-  "title": "08 - Claude Code Metrics (OTEL)",
+  "title": "08 - Claude Code Metrics",
   "uid": "fc4eb6fe-5a4a-4fe4-80e2-6e338640689a"
 }

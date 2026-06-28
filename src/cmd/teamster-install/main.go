@@ -324,6 +324,8 @@ func run() error {
 	replPushRemote := flag.String("repl-push-remote", "", "repl-push SCP destination user@host (persisted to teamster.yaml)")
 	prometheusRetention := flag.String("prometheus-retention", "", "TEAMSTER_PROMETHEUS_RETENTION value (e.g. 7d)")
 	env := flag.String("env", "", "TEAMSTER_ENV value (e.g. production)")
+	backupDir := flag.String("backup-dir", "", "backup.backup_dir value (absolute path for backup snapshots)")
+	backupSchedule := flag.String("backup-schedule", "", "backup.schedule value (e.g. 1h, 30m)")
 	debugLogPath := flag.String("debug-log", "", "append structured trace events to this file (Round 0 instrumentation)")
 	flag.Parse()
 	// otelcol-build-from-src/prometheus-build-from-src/grafana-build-from-src are informational
@@ -774,10 +776,11 @@ func run() error {
 		otelHTTP:           otelHTTPPort,
 	})
 
-	// Merge default backup: section into teamster.yaml. Runs AFTER writeYAMLConfig
-	// so the file exists. Only adds the key when absent — preserves operator config.
+	// Merge backup: section into teamster.yaml. Runs AFTER writeYAMLConfig so the
+	// file exists. On fresh install, appends a full backup: block with operator-
+	// supplied values. On upgrade, existing backup section is left untouched.
 	teamsterYAMLPath := filepath.Join(*basedir, "etc", "teamster.yaml")
-	if err := mergeBackupSection(teamsterYAMLPath, *basedir); err != nil {
+	if err := mergeBackupSection(teamsterYAMLPath, *basedir, *backupDir, *backupSchedule); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: merging backup section into teamster.yaml: %v\n", err)
 	}
 
@@ -1753,8 +1756,19 @@ func mergeClaudeMD(path string) error {
 }
 
 // mergeBackupSection adds a default backup: section to teamster.yaml when the
-// key is absent. Non-destructive: an existing backup: key is never touched.
-func mergeBackupSection(teamsterYAMLPath, basedir string) error {
+// key is absent. Uses operator-supplied backupDir/backupSchedule; falls back to
+// sensible defaults when empty. Never overwrites an existing backup: key.
+func mergeBackupSection(teamsterYAMLPath, basedir, backupDir, backupSchedule string) error {
+	if backupDir == "" {
+		backupDir = filepath.Join(basedir, "var", "backups")
+	}
+	if backupSchedule == "" {
+		backupSchedule = "1h"
+	}
+	if err := os.MkdirAll(backupDir, 0o755); err != nil {
+		return fmt.Errorf("create backup dir: %w", err)
+	}
+
 	data, err := os.ReadFile(teamsterYAMLPath)
 	if err != nil {
 		return nil // teamster.yaml not written yet; writeYAMLConfig will create it
@@ -1775,9 +1789,9 @@ func mergeBackupSection(teamsterYAMLPath, basedir string) error {
 	hostname, _ := os.Hostname()
 	block := fmt.Sprintf(`
 backup:
-    backup_dir: ""
+    backup_dir: %q
     hostname: %q
-    schedule: "1h"
+    schedule: %q
     retention:
         keep_for: "7d"
         max_count: 0
@@ -1800,7 +1814,7 @@ backup:
             enabled: true
             base_dir: %q
             include_logs: false
-`, hostname, filepath.Join(basedir, "etc", "otelcol.yaml"), basedir)
+`, backupDir, hostname, backupSchedule, filepath.Join(basedir, "etc", "otelcol.yaml"), basedir)
 
 	f, err := os.OpenFile(teamsterYAMLPath, os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {

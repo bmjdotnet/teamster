@@ -107,13 +107,24 @@ groups keys by role — no interpretation needed:
 - **`autoExtract`** — extract these keys silently from the environment (git
   remotes, branch) and apply without asking. The value is the extraction
   source (`git`, `env`).
-- **`required`** — keys that must be set on every WorkUnit before close-out.
+- **`requiredLifecycle`** — lifecycle keys the lead MUST apply to every
+  WorkUnit at dispatch time. Values are included (e.g. `phase`:
+  design/build/test/review/rework; `work-type`: feature/bug/refactor/…).
   Note these for dispatch time, not the interview.
-- **`engineManaged`** — do not propose, set, or modify these keys.
+- **`required`** — non-lifecycle keys that must be set on every WorkUnit
+  before close-out. Note these for dispatch time, not the interview.
+- **`engineManaged`** — engine-only keys: do not propose, set, or modify.
 
 **Split into interview buckets:**
 - Auto-apply: everything from `autoExtract` (extract values, apply silently)
 - Confirm via multiSelect: up to 4 keys from `propose`
+
+**Work-scope slug.** If the focus slug implies a work type (e.g., "fix auth
+timeout" → bug, "add prometheus exporter" → feature), include the matching slug
+key in the multiSelect proposals. Drill down with `wms_listTags(tagKey=...)` to
+find existing values. Propose a new value only if no existing one fits. All slug
+keys (`feature`, `bug`, `refactor`, `infra`, `docs`, `research`, `test`,
+`admin`) share the `work-scope` exclusion group — propose exactly one.
 
 **Reuse existing values:** Check `wms_listTags` results for existing
 `(tag_key, tag_value)` pairs — reuse (case-insensitive slug match), don't
@@ -165,6 +176,8 @@ AskUserQuestion with questions:
   they're being set, but don't waste a multiSelect slot on them.
 - Only include keys from the `propose` group in the multiSelect options.
   Respect `exclusive` — propose at most one key per exclusion group.
+- Do NOT include `requiredLifecycle` keys in the interview — the lead applies
+  them per-WorkUnit at dispatch time (Step 4), not on the strategic Outcome.
 - The operator can add tags via "Other" (free text) — parse additions and apply
   them alongside the selected tags.
 
