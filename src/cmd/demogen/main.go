@@ -826,10 +826,14 @@ func genIntervals(db *sql.DB, wu *workUnit, anchor time.Time, msgs []msgRecord, 
 		if i > 0 {
 			midFrac = (wu.progression[i-1].fraction + step.fraction) / 2
 		}
+		var phaseAssembledAt *time.Time
 		if shouldAssignPhase(step.state, midFrac) {
 			p := phaseForState(step.state, midFrac)
 			phase = &p
 			phaseSource = "classifier"
+			// Mirror the classifier: a derived phase carries its own watermark
+			// (phase_assembled_at), distinct from the rollup's cost assembled_at.
+			phaseAssembledAt = assembledAt
 		}
 
 		// State intervals: identity_source='' for ~90%, 'carried' for ~10%
@@ -847,11 +851,11 @@ func genIntervals(db *sql.DB, wu *workUnit, anchor time.Time, msgs []msgRecord, 
 		_, err := db.Exec(`
 			INSERT IGNORE INTO wms_intervals
 			  (kind, entity_type, entity_id, state, session_id, agent_name, host,
-			   started_at, ended_at, duration_ms, phase, phase_source, assembled_at, cost_usd, cost_tokens, identity_source)
+			   started_at, ended_at, duration_ms, phase, phase_source, assembled_at, phase_assembled_at, cost_usd, cost_tokens, identity_source)
 			VALUES ('state', 'workunit', ?, ?, ?, ?, ?,
-			        ?, ?, ?, ?, ?, ?, NULL, NULL, ?)`,
+			        ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)`,
 			wu.id, step.state, sessID, agentName, host,
-			iStart, iEnd, durMs, phase, phaseSource, assembledAt, identitySource)
+			iStart, iEnd, durMs, phase, phaseSource, assembledAt, phaseAssembledAt, identitySource)
 		if err != nil {
 			return count, fmt.Errorf("insert state interval %s/%s: %w", wu.id, step.state, err)
 		}

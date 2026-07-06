@@ -3,6 +3,18 @@
 All notable changes to Teamster are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## v0.2.2 (2026-07-06)
+
+### Added
+- `teamster search sessions` + `wms_search` MCP tool — find sessions/entities by what they worked on, across hosts and operators (WMS-backed)
+
+### Fixed
+- Fixed a classifier bug causing old intervals to not be processed
+- Fixed an install.sh bug that caused display of 'localhost' instead of hostname
+
+### Changed
+- Changed default prometheus data retention to 365d
+
 ## v0.2.1 (2026-06-28)
 
 ### Fixed

@@ -83,8 +83,11 @@ type Config struct {
 	GrafanaPort    int
 	OtelGRPCPort   int
 	OtelHTTPPort   int
-	// PrometheusRetention is the --storage.tsdb.retention.time value (e.g. "7d").
+	// PrometheusRetention is the --storage.tsdb.retention.time value (e.g. "365d").
 	PrometheusRetention string
+	// PrometheusRetentionSize is the --storage.tsdb.retention.size value (e.g. "50GB").
+	// Empty means no size cap.
+	PrometheusRetentionSize string
 
 	// Per-service modes from teamster.yaml / flags.
 	// install = download+run locally, external = point at remote endpoint,
@@ -183,7 +186,7 @@ func Default() Config {
 		GrafanaPort:          3100,
 		OtelGRPCPort:         4327,
 		OtelHTTPPort:         4328,
-		PrometheusRetention:  "7d",
+		PrometheusRetention:  "365d",
 		Env:                  "production",
 		HookdMode:            "systemd",
 		StoreMode:            "managed",
@@ -383,6 +386,9 @@ func Load() (Config, error) {
 	}
 	if v := os.Getenv("TEAMSTER_PROMETHEUS_RETENTION"); v != "" {
 		cfg.PrometheusRetention = v
+	}
+	if v := os.Getenv("TEAMSTER_PROMETHEUS_RETENTION_SIZE"); v != "" {
+		cfg.PrometheusRetentionSize = v
 	}
 	if v := os.Getenv("TEAMSTER_LOG_LEVEL"); v != "" {
 		cfg.LogLevel = v

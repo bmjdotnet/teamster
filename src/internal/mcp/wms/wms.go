@@ -677,6 +677,60 @@ func HandleToolCall(store wms.Store, eng wms.Engine, rawParams json.RawMessage) 
 		}
 		return JSONResult(related), nil
 
+	case ToolSearch, "wms.search":
+		query := strArg("query")
+		if query == "" {
+			return Result{}, &CallError{Code: -32602, Message: "query is required"}
+		}
+		q := wms.SearchQuery{
+			Query:   query,
+			User:    strArg("user"),
+			Host:    strArg("host"),
+			Status:  strArg("status"),
+			Session: strArg("session"),
+		}
+		if v := strArg("type"); v != "" {
+			for _, t := range strings.Split(v, ",") {
+				if t = strings.TrimSpace(t); t != "" {
+					q.Types = append(q.Types, t)
+				}
+			}
+		}
+		if tags, ok := p.Arguments["tag"].([]interface{}); ok {
+			for _, t := range tags {
+				if s, ok := t.(string); ok && strings.TrimSpace(s) != "" {
+					q.Tags = append(q.Tags, strings.TrimSpace(s))
+				}
+			}
+		}
+		if v := strArg("since"); v != "" {
+			// Accept either a relative duration ("72h", matching the CLI --since
+			// convention) or an absolute RFC3339 timestamp. A value that parses as
+			// neither must not silently fall through as "no filter" — that would
+			// return unfiltered results as if the filter had applied.
+			switch d, derr := time.ParseDuration(v); {
+			case derr == nil:
+				q.Since = time.Now().UTC().Add(-d)
+			default:
+				t, terr := time.Parse(time.RFC3339, v)
+				if terr != nil {
+					return Result{}, &CallError{Code: -32602, Message: `since: want a duration ("72h") or RFC3339 timestamp`}
+				}
+				q.Since = t
+			}
+		}
+		if v, ok := p.Arguments["limit"].(float64); ok && v > 0 {
+			q.Limit = int(v)
+		}
+		hits, err := store.Search(ctx, q)
+		if err != nil {
+			return Result{}, &CallError{Code: -32000, Message: err.Error()}
+		}
+		if hits == nil {
+			hits = []wms.Hit{}
+		}
+		return JSONResult(hits), nil
+
 	case ToolSnapshotEntityTags, "wms.snapshotEntityTags":
 		entityType := strArg("entityType")
 		tagKey := strArg("tagKey")
@@ -1500,6 +1554,25 @@ var ToolDefs = []map[string]interface{}{
 				"includeTerminal": map[string]interface{}{"type": "boolean", "description": "Also return done/archived entities (default false)."},
 				"staleHours":      map[string]interface{}{"type": "integer", "description": "Consider entities with no interval activity in this many hours as stale (default 4)."},
 			},
+		},
+	},
+	{
+		"name":        ToolSearch,
+		"description": "Search across outcomes, workunits, and session focus strings for a query substring. Returns granular []Hit rows (one per matching entity or focus string), each carrying full attribution (user, host, session, agent) and the reason(s) it matched. Multi-operator by default: with no user/host filter, spans every operator and host reporting to the store.",
+		"inputSchema": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"query":   map[string]interface{}{"type": "string", "description": "Substring to search for across titles, descriptions, tags, and focus strings."},
+				"type":    map[string]interface{}{"type": "string", "description": "Comma list restricting which surfaces are searched: outcomes,workunits,focus,all. Defaults to all."},
+				"user":    map[string]interface{}{"type": "string", "description": "Filter to hits attributed to this user."},
+				"host":    map[string]interface{}{"type": "string", "description": "Filter to hits attributed to this host."},
+				"status":  map[string]interface{}{"type": "string", "description": "Filter to hits whose session is in this status (active, idle, closed)."},
+				"session": map[string]interface{}{"type": "string", "description": "Filter to hits from this session ID."},
+				"tag":     map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Exact \"key=value\" tag filters, ANDed together. A focus-string hit with no backing entity cannot satisfy a tag filter and is dropped when one is given."},
+				"since":   map[string]interface{}{"type": "string", "description": "Only return hits whose session was last active at or after this time. Accepts a relative duration (e.g. \"72h\") or an absolute RFC3339 timestamp."},
+				"limit":   map[string]interface{}{"type": "integer", "description": "Maximum hits to return. Omit or 0 for unlimited."},
+			},
+			"required": []string{"query"},
 		},
 	},
 	{

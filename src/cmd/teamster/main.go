@@ -51,6 +51,8 @@ func main() {
 			os.Exit(runTags(os.Args[2:]))
 		case "wms":
 			os.Exit(runWMS(os.Args[2:]))
+		case "search":
+			os.Exit(runSearch(os.Args[2:]))
 		case "backup":
 			os.Exit(runBackup(os.Args[2:]))
 		case "restore":
@@ -111,6 +113,7 @@ func printUsage() {
 	fmt.Fprintf(os.Stderr, "  sql         Run SQL via $TEAMSTER_STORE_DSN (password stays off argv)\n")
 	fmt.Fprintf(os.Stderr, "  tags        Tag vocabulary management\n")
 	fmt.Fprintf(os.Stderr, "  wms         WMS entity management (list, drain, close, gc)\n")
+	fmt.Fprintf(os.Stderr, "  search      Search outcomes/workunits/sessions (search sessions <query>)\n")
 	fmt.Fprintf(os.Stderr, "  backup      Take a backup (or: backup list, backup status)\n")
 	fmt.Fprintf(os.Stderr, "  restore     Restore from a backup directory\n")
 	fmt.Fprintf(os.Stderr, "  setup       Guided setup and configuration\n")

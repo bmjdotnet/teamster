@@ -131,6 +131,17 @@ func parseSupervisorFlags(args []string, cfg *config.Config) error {
 			}
 			cfg.PrometheusRetention = args[i+1]
 			i++
+		case strings.HasPrefix(a, "--prometheus-retention-size="):
+			cfg.PrometheusRetentionSize = strings.TrimPrefix(a, "--prometheus-retention-size=")
+		case a == "--prometheus-retention-size":
+			if i+1 >= len(args) {
+				return fmt.Errorf("%s requires a value", a)
+			}
+			if err := requireValue(a, args[i+1]); err != nil {
+				return err
+			}
+			cfg.PrometheusRetentionSize = args[i+1]
+			i++
 		case a == "--live":
 			statusLive = true
 		default:

@@ -15,13 +15,14 @@ import (
 
 // prometheusTemplateData is the shape fed to prometheus.yaml.tmpl.
 type prometheusTemplateData struct {
-	Hostname            string
-	Env                 string
-	HookServerHost      string
-	HookServerPort      int
-	PrometheusPort      int
-	PrometheusDataDir   string
-	PrometheusRetention string
+	Hostname                string
+	Env                     string
+	HookServerHost          string
+	HookServerPort          int
+	PrometheusPort          int
+	PrometheusDataDir       string
+	PrometheusRetention     string
+	PrometheusRetentionSize string
 }
 
 // StartPrometheus renders the prometheus config template, writes it to
@@ -54,13 +55,17 @@ func StartPrometheus(ctx context.Context, cfg config.Config) (*exec.Cmd, error) 
 		return nil, fmt.Errorf("prometheus: open log: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, binPath,
-		"--config.file="+configPath,
+	args := []string{
+		"--config.file=" + configPath,
 		fmt.Sprintf("--web.listen-address=0.0.0.0:%d", cfg.PrometheusPort),
-		"--storage.tsdb.path="+dataDir,
-		"--storage.tsdb.retention.time="+cfg.PrometheusRetention,
+		"--storage.tsdb.path=" + dataDir,
+		"--storage.tsdb.retention.time=" + cfg.PrometheusRetention,
 		"--web.enable-remote-write-receiver",
-	)
+	}
+	if cfg.PrometheusRetentionSize != "" {
+		args = append(args, "--storage.tsdb.retention.size="+cfg.PrometheusRetentionSize)
+	}
+	cmd := exec.CommandContext(ctx, binPath, args...)
 	cmd.Dir = basedir
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
@@ -123,13 +128,14 @@ func renderPrometheusConfig(dst string, cfg config.Config, dataDir string) error
 	}
 
 	data := prometheusTemplateData{
-		Hostname:            cfg.Host,
-		Env:                 cfg.Env,
-		HookServerHost:      hookHost,
-		HookServerPort:      cfg.HookServerPort,
-		PrometheusPort:      cfg.PrometheusPort,
-		PrometheusDataDir:   dataDir,
-		PrometheusRetention: cfg.PrometheusRetention,
+		Hostname:                cfg.Host,
+		Env:                     cfg.Env,
+		HookServerHost:          hookHost,
+		HookServerPort:          cfg.HookServerPort,
+		PrometheusPort:          cfg.PrometheusPort,
+		PrometheusDataDir:       dataDir,
+		PrometheusRetention:     cfg.PrometheusRetention,
+		PrometheusRetentionSize: cfg.PrometheusRetentionSize,
 	}
 	return tmpl.Execute(f, data)
 }

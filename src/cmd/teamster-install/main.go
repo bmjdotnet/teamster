@@ -322,7 +322,8 @@ func run() error {
 	relayMode := flag.String("relay-mode", "", "relay mode: none | install (persisted to teamster.yaml)")
 	relayTarget := flag.String("relay-target", "", "relay target hookd URL (persisted to teamster.yaml)")
 	replPushRemote := flag.String("repl-push-remote", "", "repl-push SCP destination user@host (persisted to teamster.yaml)")
-	prometheusRetention := flag.String("prometheus-retention", "", "TEAMSTER_PROMETHEUS_RETENTION value (e.g. 7d)")
+	prometheusRetention := flag.String("prometheus-retention", "", "TEAMSTER_PROMETHEUS_RETENTION value (e.g. 365d)")
+	prometheusRetentionSize := flag.String("prometheus-retention-size", "", "TEAMSTER_PROMETHEUS_RETENTION_SIZE value (e.g. 50GB); empty = no size cap")
 	env := flag.String("env", "", "TEAMSTER_ENV value (e.g. production)")
 	backupDir := flag.String("backup-dir", "", "backup.backup_dir value (absolute path for backup snapshots)")
 	backupSchedule := flag.String("backup-schedule", "", "backup.schedule value (e.g. 1h, 30m)")
@@ -371,6 +372,7 @@ func run() error {
 		"prometheus_endpoint", *prometheusEndpoint,
 		"grafana_endpoint", *grafanaEndpoint,
 		"prometheus_retention", *prometheusRetention,
+		"prometheus_retention_size", *prometheusRetentionSize,
 		"env", *env,
 		"debug_log", *debugLogPath,
 	)
@@ -605,6 +607,9 @@ func run() error {
 		if *prometheusRetention != "" {
 			extraEnv += fmt.Sprintf("Environment=\"TEAMSTER_PROMETHEUS_RETENTION=%s\"\n", *prometheusRetention)
 		}
+		if *prometheusRetentionSize != "" {
+			extraEnv += fmt.Sprintf("Environment=\"TEAMSTER_PROMETHEUS_RETENTION_SIZE=%s\"\n", *prometheusRetentionSize)
+		}
 		if *hookdMode != "" {
 			extraEnv += fmt.Sprintf("Environment=\"TEAMSTER_HOOKD_MODE=%s\"\n", *hookdMode)
 		}
@@ -812,6 +817,9 @@ func run() error {
 	}
 	if *prometheusRetention != "" {
 		extraVars["TEAMSTER_PROMETHEUS_RETENTION"] = *prometheusRetention
+	}
+	if *prometheusRetentionSize != "" {
+		extraVars["TEAMSTER_PROMETHEUS_RETENTION_SIZE"] = *prometheusRetentionSize
 	}
 	if *hookdMode != "" {
 		extraVars["TEAMSTER_HOOKD_MODE"] = *hookdMode

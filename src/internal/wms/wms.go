@@ -208,6 +208,12 @@ type Reader interface {
 	GetOutcomeChildren(ctx context.Context, outcomeID string) ([]string, error)
 	ListEntityDependencyBlockers(ctx context.Context, entityType, entityID string) ([]*Dependency, error)
 	ListEntityDependencyDependents(ctx context.Context, entityType, entityID string) ([]*Dependency, error)
+
+	// Search is the generic search primitive (L1): granular Hits across
+	// outcomes, workunits, and focus intervals/session-focus text, gated by
+	// SearchQuery.Types and filtered by User/Host/Status/Session/Tags/Since.
+	// SearchSessions composes over this to produce session rollups.
+	Search(ctx context.Context, q SearchQuery) ([]Hit, error)
 }
 
 // Writer is the mutating half of the WMS persistence surface.

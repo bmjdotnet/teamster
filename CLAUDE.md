@@ -63,7 +63,7 @@ src/                          Go source (go.mod: github.com/bmjdotnet/teamster)
     hookd/                    HTTP event server + dashboard
     feed/                     Terminal activity viewer (replaces gatail)
     activity-mcp/             MCP stdio: reportActivity/setOverallIntent/completeActivity/setMode
-    wms-mcp/                  MCP stdio: outcome/workunit CRUD, tags, focus, dependencies
+    wms-mcp/                  MCP stdio: outcome/workunit CRUD, tags, focus, dependencies, search
     rollup/                   Cost-attribution pipeline (allocate, recover, sweep)
     classify/                 Interval phase + work-type classifier (systemd timer)
     token-scraper/            Session transcript token-usage scraper
@@ -88,13 +88,15 @@ src/                          Go source (go.mod: github.com/bmjdotnet/teamster)
     rollup/                   Cost allocation + recovery passes (gap, synthesize, sweep-llm)
     server/                   HTTP receiver + JSONL writer + focus nudge
     store/                    Store interface + integration tests
-      mysql/                  MySQL/MariaDB store + migrations (v1–v43)
+      mysql/                  MySQL/MariaDB store + migrations (v1–v43); search.go: SQL
+                              behind wms.Search/SearchSessions
     transcript/               Session transcript reader (focus timeline, window)
     tui/                      Bubbletea TUI (tag setup wizard + editor)
     backup/                   Backup engine (config, drivers, manifest, retention, flock)
     version/                  Build-time version info
     web/                      SSE dashboard + WMS hierarchy + cost-flow + tag browser
-    wms/                      WMS engine (Outcome/WorkUnit), state machines, HookObserver
+    wms/                      WMS engine (Outcome/WorkUnit), state machines, HookObserver,
+                              Search/SearchSessions (session discovery)
 
 skel/                         Assets copied to BASEDIR at install time
   doc/specs/                  architecture.md, wms-dashboard-spec.md, semantic-conventions.md
@@ -240,7 +242,7 @@ Agent-Teams teammates run as separate top-level sessions (see Pitfalls).
 | `hookd` | HTTP event server | POST `/event` → JSONL append. Serves dashboard at `/`, WMS at `/wms`, SSE at `/events/stream`. Focus-absent nudge on PreToolUse (max 1 per session+agent per turn). Returns activity + team-dispatch `additionalContext` on UserPromptSubmit so remote Python clients get the nudge (the hub Go client ignores it — no double-inject; hookd can't see a remote's solo/team marker, so it always sends team context). |
 | `feed` | Terminal activity viewer | Tails JSONL, ANSI colorizes. Built from `cmd/feed/`. |
 | `activity-mcp` | MCP stdio (activity) | **No-op.** Tools just return confirmation strings. Real data extraction happens in the hook from PreToolUse payloads — that's how we get `agent_type` for teammate attribution. Includes `setMode` for session mode switching. |
-| `wms-mcp` | MCP stdio (WMS) | Outcome/WorkUnit CRUD, tags, focus, dependencies over MySQL/MariaDB via `TEAMSTER_STORE_DSN`. State changes posted to hookd via `HookObserver` when `TEAMSTER_HOOK_SERVER_URL` is set. |
+| `wms-mcp` | MCP stdio (WMS) | Outcome/WorkUnit CRUD, tags, focus, dependencies over MySQL/MariaDB via `TEAMSTER_STORE_DSN`. Includes `wms_search`, exposing the `wms.Search` primitive as granular `[]Hit` (the same engine `teamster search sessions` groups into session rollups). State changes posted to hookd via `HookObserver` when `TEAMSTER_HOOK_SERVER_URL` is set. |
 | `rollup` | Cost-attribution pipeline | Allocates token spend to WMS entities via focus intervals. Flags: `--reallocate`, `--recover-focus`, `--recover-warmup`, `--recover-gaps`, `--recover-directives` (focus-less remote teammates → entity named in their dispatch brief), `--repair-focus-intervals` (one-time fix of negative-width focus intervals from the dual-writer/async race), `--synthesize-remote-orphans` (remote sessions with no focus/directive/transcript → temporal correlation with concurrent focused sessions on the same host), `--synthesize-focus <file>`, `--sweep` (chains all deterministic passes), `--sweep-llm` (adds LLM-assisted synthesis), `--count-orphans` (print processable orphan count; checks local transcript existence). Reversible: `--unrecover`, `--unrecover-warmup`, `--unrecover-gaps`, `--unrecover-directives`, `--unrepair-focus-intervals`, `--unsynthesize-remote-floor`, `--unsynthesize`. |
 | `classify` | Interval phase + work-type classifier | Derives `phase` and `work-type` tags on intervals/workunits from rule-based signals. Recovers missing required lifecycle tags on work units (safety net for dispatch gaps). Run by systemd timer every 5 min. `--reclassify` re-derives from scratch. `--dry-run` logs lifecycle recovery intent without writing. |
 | `token-scraper` | Session transcript scraper | Reads Claude Code session JSONL transcripts and POSTs per-message token usage to hookd's `/telemetry` endpoint. |
@@ -250,6 +252,7 @@ Agent-Teams teammates run as separate top-level sessions (see Pitfalls).
 | `relay` | Event relay | Tails hub JSONL, POSTs each line to replica hookd `/event`. Built by installer when `--relay-mode=install`. See `docs/specs/replication.md`. |
 | `teamster tags` | CLI tag management | Subcommands: `list`, `add-key`, `add-value`, `retire`, `describe`. Built into `cmd/teamster/tags.go`. |
 | `teamster setup tags` | TUI tag wizard | Bubbletea-based guided setup for tag keyspace. 8-screen wizard on first run, 3-column editor on subsequent runs. Built from `internal/tui/`. |
+| `teamster search sessions <query>` | Find sessions by what they worked on | Session-centric: one row per session, matched via outcome/workunit title-description-focus, tag values, or focus intervals/session focus text (`--type`). Filters: `--user`, `--host`, `--status`, `--tag key=value`, `--since <dur>`, `--limit`; `--json` for scripting. Built from `cmd/teamster/search.go` over `wms.SearchSessions`. |
 
 ### Systemd timers
 

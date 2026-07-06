@@ -1249,6 +1249,32 @@ WHERE NOT EXISTS (
 			`UPDATE tags SET exclusion_group = 'work-scope' WHERE tag_key IN ('feature', 'bug') AND exclusion_group = ''`,
 		},
 	},
+	{
+		// phase-assembled-at-decouple: split the classifier's phase-derivation
+		// watermark off wms_intervals.assembled_at into its own column.
+		//
+		// assembled_at was overloaded by two subsystems: the rollup's
+		// AssembleIntervalCost uses it as the COST watermark (clear-then-reassemble
+		// idempotency, run every rollup pass), while the phase classifier used it as
+		// its idempotency key (ListIntervalsNeedingPhase / MarkIntervalAssembled).
+		// Every rollup pass NULLed assembled_at on all state intervals then
+		// re-stamped only cost-bearing ones, destroying the classifier's watermark:
+		// the classifier re-derived the oldest batch forever and never reached
+		// recent intervals, so review/rework/build phase went unclassified.
+		//
+		// phase_assembled_at is now the classifier's private watermark; assembled_at
+		// stays the cost watermark. The ADD COLUMN is made idempotent by
+		// execMigrationStmt's information_schema guard. The backfill seeds the new
+		// column from assembled_at for every interval that already has a derived
+		// phase, so existing good classifications are preserved and only the
+		// unclassified backlog is re-derived on the next forward pass.
+		Version: 50,
+		Name:    "phase-assembled-at-decouple",
+		Stmts: []string{
+			`ALTER TABLE wms_intervals ADD COLUMN phase_assembled_at DATETIME(6) NULL AFTER assembled_at`,
+			`UPDATE wms_intervals SET phase_assembled_at = assembled_at WHERE phase IS NOT NULL AND phase != ''`,
+		},
+	},
 }
 
 // mergeProjectToProduct renames `project` tag rows to `product`, handling the

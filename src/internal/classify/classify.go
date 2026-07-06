@@ -313,8 +313,8 @@ func (r *Runner) classifyPhases(ctx context.Context) (int, error) {
 		phase, err := r.derivePhase(ctx, rec, reEntry[rec.ID])
 		if errors.Is(err, errNoSignal) {
 			// No activity in this interval's window — leave phase NULL so it is
-			// reported as "unclassified", not mislabeled. Stamp assembled_at so
-			// the anti-join does not re-select it every pass (idempotency).
+			// reported as "unclassified", not mislabeled. Stamp phase_assembled_at
+			// so the anti-join does not re-select it every pass (idempotency).
 			if err := r.store.MarkIntervalAssembled(ctx, rec.ID); err != nil {
 				r.log.Warn("mark interval assembled failed", "interval", rec.ID, "error", err)
 			}

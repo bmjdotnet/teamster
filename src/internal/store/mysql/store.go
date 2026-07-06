@@ -525,21 +525,22 @@ func closeOpenStateIntervals(ctx context.Context, tx *sql.Tx, entityType, entity
 func (s *Store) UpdateEventRecordPhase(ctx context.Context, id int64, phase, source string) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE wms_intervals
-		SET phase = ?, phase_source = ?, assembled_at = ?
+		SET phase = ?, phase_source = ?, phase_assembled_at = ?
 		WHERE id = ? AND kind = 'state' AND (phase_source <> 'declared' OR ? = 'declared')`,
 		phase, source, nowUTC(), id, source)
 	return err
 }
 
-// MarkIntervalAssembled stamps assembled_at on an interval WITHOUT setting a
-// phase — for an interval that had no activity signals, so its phase stays NULL
+// MarkIntervalAssembled stamps phase_assembled_at on an interval WITHOUT setting
+// a phase — for an interval that had no activity signals, so its phase stays NULL
 // ("unclassified") yet it is not re-selected by ListIntervalsNeedingPhase every
-// pass (the anti-join keys on assembled_at). Scoped to non-declared rows so a
-// declared phase is never disturbed.
+// pass (the anti-join keys on phase_assembled_at, the classifier's private
+// watermark — distinct from assembled_at, which is the rollup's cost watermark).
+// Scoped to non-declared rows so a declared phase is never disturbed.
 func (s *Store) MarkIntervalAssembled(ctx context.Context, id int64) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE wms_intervals
-		SET assembled_at = ?
+		SET phase_assembled_at = ?
 		WHERE id = ? AND kind = 'state' AND phase_source <> 'declared'`, nowUTC(), id)
 	return err
 }
@@ -550,7 +551,7 @@ func (s *Store) MarkIntervalAssembled(ctx context.Context, id int64) error {
 //   - closed (ended_at IS NOT NULL),
 //   - not declared (phase_source <> 'declared'; declared wins and is left
 //     alone), and
-//   - unassembled or stale (phase IS NULL, or assembled_at predates the close,
+//   - unassembled or stale (phase_assembled_at IS NULL, or it predates the close,
 //     so an interval re-closed after assembly is re-derived).
 //
 // The SELECT column set mirrors ListEventRecords so callers scan EventRecord
@@ -560,10 +561,13 @@ func (s *Store) ListIntervalsNeedingPhase(ctx context.Context, limit int) ([]wms
 	if limit <= 0 {
 		limit = 500
 	}
-	// Idempotency is driven by assembled_at, NOT by phase IS NULL: a no-signal
-	// interval legitimately keeps a NULL phase but IS marked assembled (via
-	// MarkIntervalAssembled), so it must not be re-selected every pass. The
-	// anti-join is therefore "unassembled or re-closed since assembly".
+	// Idempotency is driven by phase_assembled_at (the classifier's private
+	// watermark), NOT by phase IS NULL: a no-signal interval legitimately keeps a
+	// NULL phase but IS marked assembled (via MarkIntervalAssembled), so it must
+	// not be re-selected every pass. The anti-join is therefore "unassembled or
+	// re-closed since assembly". phase_assembled_at is deliberately separate from
+	// assembled_at (the rollup's cost watermark), which the rollup clears every
+	// pass — keying off it would make the classifier re-derive forever.
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, entity_type, entity_id, state, started_at, ended_at,
 		       duration_ms, session_id, agent_name, host, phase, phase_source
@@ -571,7 +575,7 @@ func (s *Store) ListIntervalsNeedingPhase(ctx context.Context, limit int) ([]wms
 		WHERE kind = 'state'
 		  AND ended_at IS NOT NULL
 		  AND phase_source <> 'declared'
-		  AND (assembled_at IS NULL OR assembled_at < ended_at)
+		  AND (phase_assembled_at IS NULL OR phase_assembled_at < ended_at)
 		ORDER BY ended_at ASC
 		LIMIT ?`, limit)
 	if err != nil {
@@ -605,24 +609,28 @@ func (s *Store) ListIntervalsNeedingPhase(ctx context.Context, limit int) ([]wms
 	return out, rows.Err()
 }
 
-// ClearClassifierPhases resets the assembly state of every interval the
+// ClearClassifierPhases resets the phase-assembly state of every interval the
 // classifier has touched so the next forward pass re-derives it with the current
 // rules and signals — the --reclassify (Reallocate-style) recovery path. It
 // clears two cohorts, both NON-declared so a 'declared' phase is never disturbed:
 //   - phase_source = 'classifier' rows: a phase was derived — clear it.
-//   - phase_source = ” AND phase IS NULL AND assembled_at IS NOT NULL rows: a
-//     no-signal interval the classifier visited and marked assembled (via
-//     MarkIntervalAssembled). Resetting assembled_at lets a signal backfill be
-//     re-evaluated. A never-touched interval (assembled_at NULL) is left alone.
+//   - phase_source = ” AND phase IS NULL AND phase_assembled_at IS NOT NULL rows:
+//     a no-signal interval the classifier visited and marked assembled (via
+//     MarkIntervalAssembled). Resetting phase_assembled_at lets a signal backfill
+//     be re-evaluated. A never-touched interval (phase_assembled_at NULL) is left
+//     alone.
+//
+// It touches only the classifier's phase_assembled_at watermark, never the
+// rollup's assembled_at cost watermark.
 //
 // Returns the number of rows reset.
 func (s *Store) ClearClassifierPhases(ctx context.Context) (int64, error) {
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE wms_intervals
-		SET phase = NULL, phase_source = '', assembled_at = NULL
+		SET phase = NULL, phase_source = '', phase_assembled_at = NULL
 		WHERE kind = 'state'
 		  AND (phase_source = 'classifier'
-		   OR (phase_source = '' AND phase IS NULL AND assembled_at IS NOT NULL))`)
+		   OR (phase_source = '' AND phase IS NULL AND phase_assembled_at IS NOT NULL))`)
 	if err != nil {
 		return 0, err
 	}

@@ -70,6 +70,9 @@ func (f *fakeCloseoutStore) ListEntityDependencyBlockers(context.Context, string
 func (f *fakeCloseoutStore) ListEntityDependencyDependents(context.Context, string, string) ([]*Dependency, error) {
 	panic("unexpected")
 }
+func (f *fakeCloseoutStore) Search(context.Context, SearchQuery) ([]Hit, error) {
+	panic("unexpected")
+}
 
 func resolutionTag() EntityTag {
 	return EntityTag{TagKey: resolutionTagKey, TagValue: "achieved", Source: "manual"}

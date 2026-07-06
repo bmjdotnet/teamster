@@ -19,6 +19,8 @@ import (
 // insertClosedInterval seeds one closed kind='state' wms_intervals row and
 // returns its id. phase/phase_source are written verbatim so declared-vs-
 // classifier precedence can be exercised; pass phase="" for a NULL phase.
+// assembledAt is the classifier's phase_assembled_at watermark (NOT the rollup's
+// cost assembled_at).
 func insertClosedInterval(t *testing.T, s *Store, entityType, entityID, state, session, agent string,
 	start, end time.Time, phase, phaseSource string, assembledAt *time.Time) int64 {
 	t.Helper()
@@ -32,7 +34,7 @@ func insertClosedInterval(t *testing.T, s *Store, entityType, entityID, state, s
 	res, err := s.db.ExecContext(ctx, `
 		INSERT INTO wms_intervals
 			(kind, entity_type, entity_id, state, started_at, ended_at, duration_ms,
-			 session_id, agent_name, host, phase, phase_source, assembled_at)
+			 session_id, agent_name, host, phase, phase_source, phase_assembled_at)
 		VALUES ('state', ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?)`,
 		entityType, entityID, state, start, end, end.Sub(start).Milliseconds(),
 		session, agent, phaseArg, phaseSource, assembledAt)
@@ -133,8 +135,9 @@ func TestClearClassifierPhases_ScopedToClassifierOnly(t *testing.T) {
 
 // TestClearClassifierPhases_NoSignalCohort isolates the second --reclassify
 // cohort (m3): a no-signal interval the classifier MARKED assembled
-// (phase_source=”, phase NULL, assembled_at set) is reset, while a never-touched
-// interval (phase_source=”, phase NULL, assembled_at NULL) is left alone.
+// (phase_source=”, phase NULL, phase_assembled_at set) is reset, while a
+// never-touched interval (phase_source=”, phase NULL, phase_assembled_at NULL) is
+// left alone.
 func TestClearClassifierPhases_NoSignalCohort(t *testing.T) {
 	s, _ := newTestStore(t)
 	ctx := context.Background()
@@ -142,10 +145,10 @@ func TestClearClassifierPhases_NoSignalCohort(t *testing.T) {
 	start := now.Add(-time.Hour)
 	at := now
 
-	// Marked no-signal interval: assembled_at set, phase NULL, source ''.
+	// Marked no-signal interval: phase_assembled_at set, phase NULL, source ''.
 	marked := insertClosedInterval(t, s, wms.EntityWorkUnit, "wu-marked", "active", "s1xxxxxxxxxx", "a1",
 		start, now, "", "", &at)
-	// Never-touched interval: assembled_at NULL, phase NULL, source ''.
+	// Never-touched interval: phase_assembled_at NULL, phase NULL, source ''.
 	untouched := insertClosedInterval(t, s, wms.EntityWorkUnit, "wu-untouched", "active", "s2xxxxxxxxxx", "a2",
 		start, now, "", "", nil)
 
@@ -157,23 +160,23 @@ func TestClearClassifierPhases_NoSignalCohort(t *testing.T) {
 		t.Errorf("cleared %d rows, want 1 (only the marked no-signal interval)", n)
 	}
 
-	// Marked row's assembled_at is reset to NULL so a backfill re-evaluates it.
+	// Marked row's phase_assembled_at is reset to NULL so a backfill re-evaluates it.
 	var markedAssembled sql.NullTime
-	if err := s.db.QueryRowContext(ctx, `SELECT assembled_at FROM wms_intervals WHERE id = ?`, marked).Scan(&markedAssembled); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT phase_assembled_at FROM wms_intervals WHERE id = ?`, marked).Scan(&markedAssembled); err != nil {
 		t.Fatalf("scan marked: %v", err)
 	}
 	if markedAssembled.Valid {
-		t.Errorf("marked no-signal row assembled_at = %v after clear, want NULL (re-evaluable)", markedAssembled.Time)
+		t.Errorf("marked no-signal row phase_assembled_at = %v after clear, want NULL (re-evaluable)", markedAssembled.Time)
 	}
 
-	// Untouched row stays untouched (assembled_at still NULL; this also proves the
-	// clear did not blanket every '' row).
+	// Untouched row stays untouched (phase_assembled_at still NULL; this also proves
+	// the clear did not blanket every '' row).
 	var untouchedAssembled sql.NullTime
-	if err := s.db.QueryRowContext(ctx, `SELECT assembled_at FROM wms_intervals WHERE id = ?`, untouched).Scan(&untouchedAssembled); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT phase_assembled_at FROM wms_intervals WHERE id = ?`, untouched).Scan(&untouchedAssembled); err != nil {
 		t.Fatalf("scan untouched: %v", err)
 	}
 	if untouchedAssembled.Valid {
-		t.Errorf("never-touched row assembled_at became non-NULL — clear over-reached")
+		t.Errorf("never-touched row phase_assembled_at became non-NULL — clear over-reached")
 	}
 }
 

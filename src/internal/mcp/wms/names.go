@@ -50,6 +50,7 @@ const (
 	ToolClaimWorkUnit        = "wms_claimWorkUnit"
 	ToolClassifyEntity       = "wms_classifyEntity"
 	ToolListRelated          = "wms_listRelated"
+	ToolSearch               = "wms_search"
 )
 
 // v2 MCP wire names

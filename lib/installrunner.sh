@@ -120,7 +120,8 @@ PROMETHEUS_BUILD_FROM_SRC=0 # --prometheus-build-from-src
 GRAFANA_BUILD_FROM_SRC=0    # --grafana-build-from-src
 
 # Per-service config flags
-PROMETHEUS_RETENTION=""  # --prometheus-retention=<duration>
+PROMETHEUS_RETENTION=""       # --prometheus-retention=<duration>
+PROMETHEUS_RETENTION_SIZE=""  # --prometheus-retention-size=<size, e.g. 50GB>
 
 # Backup config flags
 BACKUP_DIR=""       # --backup-dir=<path>
@@ -191,6 +192,8 @@ while [[ $# -gt 0 ]]; do
         # --- per-service config flags ---
         --prometheus-retention=*) PROMETHEUS_RETENTION="${1#--prometheus-retention=}"; shift ;;
         --prometheus-retention)   require_value "$1" "${2-}"; PROMETHEUS_RETENTION="$2"; shift 2 ;;
+        --prometheus-retention-size=*) PROMETHEUS_RETENTION_SIZE="${1#--prometheus-retention-size=}"; shift ;;
+        --prometheus-retention-size)   require_value "$1" "${2-}"; PROMETHEUS_RETENTION_SIZE="$2"; shift 2 ;;
         # --- backup config flags ---
         --backup-dir=*)           BACKUP_DIR="${1#--backup-dir=}"; shift ;;
         --backup-dir)             require_value "$1" "${2-}"; BACKUP_DIR="$2"; shift 2 ;;
@@ -249,7 +252,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --otelcol-build-from-src     Build otelcol-contrib from source instead of downloading"
             echo "  --prometheus-build-from-src  Build prometheus from source instead of downloading"
             echo "  --grafana-build-from-src     Build grafana from source instead of downloading"
-            echo "  --prometheus-retention=DUR   Prometheus retention period (default: 7d)"
+            echo "  --prometheus-retention=DUR   Prometheus retention period (default: 365d)"
+            echo "  --prometheus-retention-size=SIZE  Prometheus retention size cap (e.g. 50GB; default: none)"
             echo ""
             echo "Other flags:"
             echo "  --basedir=DIR            Installation target directory (default: ~/teamster)"
@@ -306,6 +310,7 @@ dlog INFO install.parse "parsed flags" \
     "prometheus_endpoint=$PROMETHEUS_ENDPOINT" \
     "grafana_endpoint=$GRAFANA_ENDPOINT" \
     "prometheus_retention=$PROMETHEUS_RETENTION" \
+    "prometheus_retention_size=$PROMETHEUS_RETENTION_SIZE" \
     "env=$TEAMSTER_ENV" \
     "debug_log=$DEBUG_LOG"
 
@@ -1276,6 +1281,7 @@ INSTALL_FLAGS=(--basedir="$BASEDIR" --repo="$REPO" --builddir="$BUILDDIR")
 [[ -n "$PROMETHEUS_ENDPOINT" ]]  && INSTALL_FLAGS+=(--prometheus-endpoint="$PROMETHEUS_ENDPOINT")
 [[ -n "$GRAFANA_ENDPOINT" ]]     && INSTALL_FLAGS+=(--grafana-endpoint="$GRAFANA_ENDPOINT")
 [[ -n "$PROMETHEUS_RETENTION" ]] && INSTALL_FLAGS+=(--prometheus-retention="$PROMETHEUS_RETENTION")
+[[ -n "$PROMETHEUS_RETENTION_SIZE" ]] && INSTALL_FLAGS+=(--prometheus-retention-size="$PROMETHEUS_RETENTION_SIZE")
 [[ -n "$TEAMSTER_ENV" ]]         && INSTALL_FLAGS+=(--env="$TEAMSTER_ENV")
 [[ -n "$BACKUP_DIR" ]]           && INSTALL_FLAGS+=(--backup-dir="$BACKUP_DIR")
 [[ -n "$BACKUP_SCHEDULE" ]]      && INSTALL_FLAGS+=(--backup-schedule="$BACKUP_SCHEDULE")

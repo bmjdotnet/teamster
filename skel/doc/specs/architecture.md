@@ -539,7 +539,8 @@ All env vars are read by `src/internal/config/config.go`. Defaults shown.
 | `TEAMSTER_GRAFANA_PORT` | `3100` | Grafana port (bundle) |
 | `TEAMSTER_OTEL_GRPC_PORT` | `4327` | OTel collector gRPC port (bundle) |
 | `TEAMSTER_OTEL_HTTP_PORT` | `4328` | OTel collector HTTP port (bundle) |
-| `TEAMSTER_PROMETHEUS_RETENTION` | `7d` | Prometheus TSDB retention |
+| `TEAMSTER_PROMETHEUS_RETENTION` | `365d` | Prometheus TSDB retention |
+| `TEAMSTER_PROMETHEUS_RETENTION_SIZE` | — | Prometheus TSDB retention size cap (e.g. `50GB`); empty = no cap |
 | `TEAMSTER_ATAIL_HISTORY_DEFAULT` | `20` | Default lines of scrollback history for the activity viewer |
 | `TEAMSTER_SOLO` | — | `1` = subagent mode pre-seed; see Operating Modes above |
 | `TEAMSTER_REQUIRE_TAGS_ON_DONE` | — | `1` = hard close-out enforcement (block transition if tags missing) |

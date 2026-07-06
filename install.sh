@@ -635,9 +635,9 @@ PY
         fi
     }
 
-    local yaml_store_dsn yaml_hookd_port yaml_prom_mode yaml_prom_port
+    local yaml_store_dsn="" yaml_hookd_port="" yaml_prom_mode="" yaml_prom_port=""
     local yaml_prom_health="" yaml_graf_health=""
-    local yaml_graf_mode yaml_graf_port yaml_otel_mode yaml_otel_grpc yaml_otel_http
+    local yaml_graf_mode="" yaml_graf_port="" yaml_otel_mode="" yaml_otel_grpc="" yaml_otel_http=""
     local yaml_relay_mode="" yaml_relay_target="" yaml_repl_push=""
 
     yaml_store_dsn="$(_yaml_get dsn)"
@@ -730,25 +730,39 @@ PY
         info "store DSN from yaml: $DETECTED_STORE_DSN"
         dlog INFO wizard.probe "yaml seeded DETECTED_STORE_DSN=\"$yaml_store_dsn\""
     fi
-    if [[ -n "$yaml_prom_port" && -z "$DETECTED_PROMETHEUS_URL" ]]; then
+    # The health URL host overrides probe-derived URLs: local systemctl/TCP
+    # probes always report "localhost", which is wrong when an external
+    # service happens to run on this same host — the yaml records the real
+    # hostname the operator configured.
+    if [[ -n "$yaml_prom_port" ]]; then
         local _prom_host
         _prom_host="$(_host_from_url "$yaml_prom_health")"
-        _prom_host="${_prom_host:-localhost}"
-        DETECTED_PROMETHEUS_URL="http://${_prom_host}:${yaml_prom_port}"
-        info "prometheus from yaml: $DETECTED_PROMETHEUS_URL (mode=${yaml_prom_mode:-?})"
-        dlog INFO wizard.probe "yaml seeded DETECTED_PROMETHEUS_URL=\"$DETECTED_PROMETHEUS_URL\" mode=$yaml_prom_mode"
+        if [[ -n "$_prom_host" ]]; then
+            DETECTED_PROMETHEUS_URL="http://${_prom_host}:${yaml_prom_port}"
+            info "prometheus from yaml: $DETECTED_PROMETHEUS_URL (mode=${yaml_prom_mode:-?})"
+            dlog INFO wizard.probe "yaml seeded DETECTED_PROMETHEUS_URL=\"$DETECTED_PROMETHEUS_URL\" mode=$yaml_prom_mode"
+        elif [[ -z "$DETECTED_PROMETHEUS_URL" ]]; then
+            DETECTED_PROMETHEUS_URL="http://localhost:${yaml_prom_port}"
+            info "prometheus from yaml: $DETECTED_PROMETHEUS_URL (mode=${yaml_prom_mode:-?})"
+            dlog INFO wizard.probe "yaml seeded DETECTED_PROMETHEUS_URL=\"$DETECTED_PROMETHEUS_URL\" mode=$yaml_prom_mode no_health_host=1"
+        fi
     fi
     if [[ -n "$yaml_prom_mode" && -z "$DETECTED_PROMETHEUS_MODE" ]]; then
         DETECTED_PROMETHEUS_MODE="$yaml_prom_mode"
         dlog INFO wizard.probe "yaml seeded DETECTED_PROMETHEUS_MODE=$yaml_prom_mode"
     fi
-    if [[ -n "$yaml_graf_port" && -z "$DETECTED_GRAFANA_URL" ]]; then
+    if [[ -n "$yaml_graf_port" ]]; then
         local _graf_host
         _graf_host="$(_host_from_url "$yaml_graf_health")"
-        _graf_host="${_graf_host:-localhost}"
-        DETECTED_GRAFANA_URL="http://${_graf_host}:${yaml_graf_port}"
-        info "grafana from yaml: $DETECTED_GRAFANA_URL (mode=${yaml_graf_mode:-?})"
-        dlog INFO wizard.probe "yaml seeded DETECTED_GRAFANA_URL=\"$DETECTED_GRAFANA_URL\" mode=$yaml_graf_mode"
+        if [[ -n "$_graf_host" ]]; then
+            DETECTED_GRAFANA_URL="http://${_graf_host}:${yaml_graf_port}"
+            info "grafana from yaml: $DETECTED_GRAFANA_URL (mode=${yaml_graf_mode:-?})"
+            dlog INFO wizard.probe "yaml seeded DETECTED_GRAFANA_URL=\"$DETECTED_GRAFANA_URL\" mode=$yaml_graf_mode"
+        elif [[ -z "$DETECTED_GRAFANA_URL" ]]; then
+            DETECTED_GRAFANA_URL="http://localhost:${yaml_graf_port}"
+            info "grafana from yaml: $DETECTED_GRAFANA_URL (mode=${yaml_graf_mode:-?})"
+            dlog INFO wizard.probe "yaml seeded DETECTED_GRAFANA_URL=\"$DETECTED_GRAFANA_URL\" mode=$yaml_graf_mode no_health_host=1"
+        fi
     fi
     if [[ -n "$yaml_graf_mode" && -z "$DETECTED_GRAFANA_MODE" ]]; then
         DETECTED_GRAFANA_MODE="$yaml_graf_mode"
@@ -1181,7 +1195,7 @@ interview() {
 
     # Build-from-source and retention — only when mode=install for that service
     if [[ "$PROMETHEUS_MODE" == "install" ]]; then
-        ask RETENTION "Prometheus retention" "7d"
+        ask RETENTION "Prometheus retention" "365d"
         ask_yn PROMETHEUS_BUILD_FROM_SRC "Build prometheus from source?" N
     fi
     if [[ "$OTELCOL_MODE" == "install" ]]; then

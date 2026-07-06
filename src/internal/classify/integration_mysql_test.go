@@ -170,8 +170,8 @@ func phaseOf(t *testing.T, db *sql.DB, id int64) (phase, source string) {
 func assembledAtOf(t *testing.T, db *sql.DB, id int64) time.Time {
 	t.Helper()
 	var at sql.NullTime
-	if err := db.QueryRow(`SELECT assembled_at FROM wms_intervals WHERE id = ?`, id).Scan(&at); err != nil {
-		t.Fatalf("read assembled_at %d: %v", id, err)
+	if err := db.QueryRow(`SELECT phase_assembled_at FROM wms_intervals WHERE id = ?`, id).Scan(&at); err != nil {
+		t.Fatalf("read phase_assembled_at %d: %v", id, err)
 	}
 	return at.Time.UTC()
 }
@@ -253,10 +253,10 @@ func TestClassify_EndToEnd(t *testing.T) {
 	check(idDeclared, "design", "declared")
 
 	// Idempotency: a second run with no new closures writes NOTHING. Proven two
-	// ways — (1) the work set is empty (assembled_at now post-dates ended_at for
-	// every row, including the no-signal ones that were MarkIntervalAssembled),
-	// and (2) the assembled_at watermark on a derived row does not move across a
-	// re-run (a write would bump it).
+	// ways — (1) the work set is empty (phase_assembled_at now post-dates ended_at
+	// for every row, including the no-signal ones that were MarkIntervalAssembled),
+	// and (2) the phase_assembled_at watermark on a derived row does not move across
+	// a re-run (a write would bump it).
 	needing, err := st.ListIntervalsNeedingPhase(ctx, 100)
 	if err != nil {
 		t.Fatalf("ListIntervalsNeedingPhase: %v", err)
@@ -270,7 +270,7 @@ func TestClassify_EndToEnd(t *testing.T) {
 	}
 	check(idBuild, "build", "classifier") // unchanged
 	if got := assembledAtOf(t, db, idBuild); !got.Equal(assembledBefore) {
-		t.Errorf("idempotent re-run moved assembled_at (%v → %v) — it rewrote an already-derived row", assembledBefore, got)
+		t.Errorf("idempotent re-run moved phase_assembled_at (%v → %v) — it rewrote an already-derived row", assembledBefore, got)
 	}
 
 	// --reclassify clears classifier phases and re-derives them IDENTICALLY;
@@ -416,8 +416,8 @@ func TestClassify_CrossBatchRework(t *testing.T) {
 }
 
 // seedAssembledInterval inserts a closed interval that is ALREADY phased and
-// assembled (assembled_at fresh, > ended_at), so ListIntervalsNeedingPhase does
-// NOT return it — modelling a predecessor interval phased in an earlier pass.
+// assembled (phase_assembled_at fresh, > ended_at), so ListIntervalsNeedingPhase
+// does NOT return it — modelling a predecessor interval phased in an earlier pass.
 func seedAssembledInterval(t *testing.T, db *sql.DB, entityType, entityID, state, session, agent string,
 	start, end time.Time, phase, phaseSource string) int64 {
 	t.Helper()
@@ -425,7 +425,7 @@ func seedAssembledInterval(t *testing.T, db *sql.DB, entityType, entityID, state
 	res, err := db.Exec(`
 		INSERT INTO wms_intervals
 			(kind, entity_type, entity_id, state, started_at, ended_at, duration_ms,
-			 session_id, agent_name, host, phase, phase_source, assembled_at)
+			 session_id, agent_name, host, phase, phase_source, phase_assembled_at)
 		VALUES ('state', ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?)`,
 		entityType, entityID, state, start, end, end.Sub(start).Milliseconds(),
 		session, agent, phase, phaseSource, assembledAt)
@@ -450,7 +450,7 @@ func TestClassify_OutOfBatchPredecessorRework(t *testing.T) {
 	base := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Second)
 
 	// Predecessor review for wu-rwX: ALREADY phased=review/classifier and assembled
-	// (assembled_at > ended_at), so ListIntervalsNeedingPhase excludes it.
+	// (phase_assembled_at > ended_at), so ListIntervalsNeedingPhase excludes it.
 	idReview := seedAssembledInterval(t, db, wms.EntityWorkUnit, "wu-rwX", "review", "sessrwx00001", "agrwx",
 		base, base.Add(5*time.Minute), "review", "classifier")
 

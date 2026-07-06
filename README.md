@@ -259,6 +259,32 @@ sudo systemctl start teamster-backup.timer
 
 What gets backed up is configurable per store (`mysql`, `grafana`, `otel`, `teamster`). Prometheus is opt-in (ephemeral data). Grafana is skipped in external mode. Retention defaults to 7 days (`backup.retention.keep_for`).
 
+## Finding sessions
+
+Claude Code's `--resume` picker can't find a session by what it was *about* —
+it only matches the session name or first message. `teamster search sessions`
+externalizes that discovery to the WMS store: find the session id by topic,
+then `claude --resume <id>`.
+
+```bash
+teamster search sessions gastown
+```
+
+```
+USER  HOST    SESSION                               MATCHED                              WHEN
+bj    hub01   45cc474f-f08d-4988-b60c-d3f33e9d3bab   outcome:gastown-integration (+2)     12h ago
+bj    studio  892e1187-6361-4a2e-9f0c-1b2c3d4e5f60   workunit:gs-events-costagg           3d ago
+2 sessions · 2 hosts
+```
+
+Matches outcome/work-unit titles, descriptions, focus, and tag values (a
+query for `gastown` also finds entities tagged `research=gastown`), plus
+each session's own focus text; sessions tie to matched entities through
+their focus intervals. Narrow with `--type outcomes,workunits,focus,all`
+(default `all`), `--user`, `--host`, `--status`, `--tag key=value`
+(repeatable, ANDed), and `--since <dur>` (e.g. `72h`); cap rows with
+`--limit` (default 50); `--json` for scripts.
+
 ## Data & privacy
 
 Everything stays on your infrastructure. Events, token counts, work items,
@@ -280,6 +306,7 @@ Early alpha, but built for multi-user environments and trustable data.
 | `teamster setup tags` | Guided tag vocabulary setup (TUI wizard) |
 | `teamster tags list` / `add-key` / `add-value` / `retire` / `describe` | Non-interactive tag management |
 | `teamster wms list` / `drain` / `close` | WMS entity management |
+| `teamster search sessions <query>` | Find sessions by what they worked on, across hosts and operators |
 | `teamster sql` | Credential-safe database queries |
 | `teamster backup` / `list` / `status` | Take a backup, list backups, show timer status |
 | `teamster restore <path>` | Restore from a backup directory |

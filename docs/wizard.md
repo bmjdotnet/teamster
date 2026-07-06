@@ -35,7 +35,11 @@ Before asking any questions the wizard runs read-only probes:
 - **teamster.yaml** — reads `~/teamster/etc/teamster.yaml` (if present) to seed
   service mode and endpoint defaults from the prior install. On upgrade re-runs this
   prevents the wizard from losing config that was not written to settings.json
-  (e.g. external-mode service ports).
+  (e.g. external-mode service ports). The hostname in the yaml's `health:` URLs is
+  authoritative for endpoint defaults: it overrides the `localhost` URLs the
+  systemd/TCP probes produce, so an external service that happens to run on this
+  same host keeps its configured hostname across upgrades instead of being
+  re-offered as `localhost`.
 - **Port scan** — checks which Teamster ports are bound (`ss`).
 - **TCP probes** — detects Prometheus (`:9090`), Grafana (`:3000`), and otelcol
   (`:4317`/`:4318`) by attempting a TCP connection.
@@ -71,7 +75,7 @@ install. If not found, offers install / external / managed. Prompts for the DSN
 
 **Q9 — Plane integration** (opt-in; prompts for URL + API key)
 
-**Q10 — Prometheus retention** (only asked if prometheus is `install`; `7d` default)
+**Q10 — Prometheus retention** (only asked if prometheus is `install`; `365d` default)
 
 **Q11–Q13 — Build from source?** (only for `install`-mode otelcol / prometheus / grafana; default N)
 
@@ -110,7 +114,8 @@ answers:
 | Grafana URL | `--grafana-endpoint=URL` |
 | Client mode hub URL | `--hookd-mode=external --hookd-endpoint=URL` |
 | Env label | `--env=LABEL` |
-| Prometheus retention | `--prometheus-retention=7d` |
+| Prometheus retention | `--prometheus-retention=365d` |
+| Prometheus retention size cap (optional, scripted install only) | `--prometheus-retention-size=SIZE` |
 | Plane URL | `--plane-url=URL` |
 | Plane API key | `--plane-api-key=KEY` |
 | Relay (replica opt-in) | `--relay-mode=install` |
