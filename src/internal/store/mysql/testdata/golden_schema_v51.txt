@@ -240,12 +240,17 @@ TABLE session_reconciliation
   INDEX PRIMARY unique (session_id)
 TABLE sessions
   COLUMN agent_name type=varchar(64) null=NO default= extra=
+  COLUMN cli_version type=varchar(32) null=NO default= extra=
+  COLUMN cwd type=varchar(512) null=NO default= extra=
   COLUMN first_seen type=datetime(6) null=NO default=<NULL> extra=
   COLUMN focus type=varchar(255) null=NO default= extra=
   COLUMN goal_id type=varchar(64) null=NO default= extra=
   COLUMN host type=varchar(128) null=NO default= extra=
   COLUMN last_seen type=datetime(6) null=NO default=<NULL> extra=
+  COLUMN model type=varchar(128) null=NO default= extra=
+  COLUMN originator type=varchar(32) null=NO default= extra=
   COLUMN project_id type=varchar(64) null=NO default= extra=
+  COLUMN runtime type=varchar(16) null=NO default=claude extra=
   COLUMN session_id type=varchar(64) null=NO default=<NULL> extra=
   COLUMN status type=enum('active','idle','closed') null=NO default=active extra=
   COLUMN task_id type=varchar(64) null=NO default= extra=
@@ -302,6 +307,8 @@ TABLE token_ledger
   COLUMN n_thinking type=smallint unsigned null=NO default=0 extra=
   COLUMN n_tool_use type=smallint unsigned null=NO default=0 extra=
   COLUMN output_tokens type=bigint unsigned null=NO default=0 extra=
+  COLUMN reasoning_output_tokens type=bigint unsigned null=NO default=0 extra=
+  COLUMN runtime type=varchar(16) null=NO default=claude extra=
   COLUMN service_tier type=varchar(32) null=NO default= extra=
   COLUMN session_id type=varchar(64) null=NO default=<NULL> extra=
   COLUMN speed type=varchar(32) null=NO default= extra=

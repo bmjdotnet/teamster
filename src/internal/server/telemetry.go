@@ -37,6 +37,12 @@ type TelemetryRow struct {
 	Speed            string  `json:"speed"`
 	CostUSD          float64 `json:"cost_usd"`
 	Timestamp        string  `json:"timestamp"`
+
+	// Runtime distinguishes the CLI that produced this row: "claude" (default
+	// when omitted) or "codex", posted by the codex-scraper tailer.
+	// ReasoningOutputTokens is Codex-only (OpenAI's reasoning token count).
+	Runtime               string `json:"runtime"`
+	ReasoningOutputTokens int64  `json:"reasoning_output_tokens"`
 }
 
 // telemetryQueue holds the channel and fallback path for the telemetry writer.
@@ -227,28 +233,35 @@ func (s *Server) insertTelemetryChunk(chunk []TelemetryRow) error {
 			continue
 		}
 
+		runtime := row.Runtime
+		if runtime == "" {
+			runtime = "claude"
+		}
+
 		rows = append(rows, store.TelemetryRow{
-			SessionID:        row.SessionID,
-			MessageID:        row.MessageID,
-			AgentName:        agentName,
-			Host:             row.Host,
-			Username:         row.Username,
-			Model:            row.Model,
-			InputTokens:      row.InputTokens,
-			OutputTokens:     row.OutputTokens,
-			CacheReadTokens:  row.CacheReadTokens,
-			CacheWriteTokens: row.CacheWriteTokens,
-			CacheWrite1h:     row.CacheWrite1h,
-			CacheWrite5m:     row.CacheWrite5m,
-			NText:            int64(row.NText),
-			NToolUse:         int64(row.NToolUse),
-			NThinking:        int64(row.NThinking),
-			TotalInput:       row.TotalInput,
-			StopReason:       row.StopReason,
-			ServiceTier:      row.ServiceTier,
-			Speed:            row.Speed,
-			CostUSD:          row.CostUSD,
-			Timestamp:        ts.UTC(),
+			SessionID:             row.SessionID,
+			MessageID:             row.MessageID,
+			AgentName:             agentName,
+			Host:                  row.Host,
+			Username:              row.Username,
+			Model:                 row.Model,
+			InputTokens:           row.InputTokens,
+			OutputTokens:          row.OutputTokens,
+			CacheReadTokens:       row.CacheReadTokens,
+			CacheWriteTokens:      row.CacheWriteTokens,
+			CacheWrite1h:          row.CacheWrite1h,
+			CacheWrite5m:          row.CacheWrite5m,
+			NText:                 int64(row.NText),
+			NToolUse:              int64(row.NToolUse),
+			NThinking:             int64(row.NThinking),
+			TotalInput:            row.TotalInput,
+			StopReason:            row.StopReason,
+			ServiceTier:           row.ServiceTier,
+			Speed:                 row.Speed,
+			CostUSD:               row.CostUSD,
+			Timestamp:             ts.UTC(),
+			Runtime:               runtime,
+			ReasoningOutputTokens: row.ReasoningOutputTokens,
 		})
 	}
 

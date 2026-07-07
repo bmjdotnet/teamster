@@ -15,7 +15,7 @@ var _ store.TelemetryStore = (*Store)(nil)
 // limit, but the same chunk size is kept for consistency with the mysql
 // backend and to keep any single statement small (1000*21 = 21000
 // placeholders, well under either engine's ceiling).
-const telemetryColumnsPerRow = 21
+const telemetryColumnsPerRow = 23
 const maxTelemetryRowsPerInsert = 1000
 
 // UpsertTelemetryBatch implements store.TelemetryStore. It chunks rows into
@@ -52,21 +52,25 @@ func (s *Store) upsertTelemetryChunk(ctx context.Context, chunk []store.Telemetr
 		 cache_write_1h, cache_write_5m,
 		 n_text, n_tool_use, n_thinking,
 		 total_input, stop_reason, service_tier, speed,
-		 cost_usd, timestamp)
+		 cost_usd, timestamp, runtime, reasoning_output_tokens)
 	VALUES `
 
 	args := make([]interface{}, 0, len(chunk)*telemetryColumnsPerRow)
 	placeholders := make([]string, 0, len(chunk))
 
 	for _, row := range chunk {
-		placeholders = append(placeholders, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+		runtime := row.Runtime
+		if runtime == "" {
+			runtime = "claude"
+		}
+		placeholders = append(placeholders, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
 		args = append(args,
 			row.SessionID, row.MessageID, row.AgentName, row.Host, row.Username, row.Model,
 			row.InputTokens, row.OutputTokens, row.CacheReadTokens, row.CacheWriteTokens,
 			row.CacheWrite1h, row.CacheWrite5m,
 			row.NText, row.NToolUse, row.NThinking,
 			row.TotalInput, row.StopReason, row.ServiceTier, row.Speed,
-			row.CostUSD, row.Timestamp.UTC(),
+			row.CostUSD, row.Timestamp.UTC(), runtime, row.ReasoningOutputTokens,
 		)
 	}
 
@@ -106,6 +110,8 @@ func (s *Store) upsertTelemetryChunk(ctx context.Context, chunk []store.Telemetr
 			total_input        = CASE WHEN excluded.output_tokens > token_ledger.output_tokens THEN excluded.total_input ELSE token_ledger.total_input END,
 			stop_reason        = CASE WHEN excluded.output_tokens > token_ledger.output_tokens THEN excluded.stop_reason ELSE token_ledger.stop_reason END,
 			cost_usd           = CASE WHEN excluded.output_tokens > token_ledger.output_tokens THEN excluded.cost_usd ELSE token_ledger.cost_usd END,
+			reasoning_output_tokens = CASE WHEN excluded.output_tokens > token_ledger.output_tokens THEN excluded.reasoning_output_tokens ELSE token_ledger.reasoning_output_tokens END,
+			runtime            = excluded.runtime,
 			output_tokens      = CASE WHEN excluded.output_tokens > token_ledger.output_tokens THEN excluded.output_tokens ELSE token_ledger.output_tokens END`
 
 	res, err := s.db.ExecContext(ctx, query, args...)

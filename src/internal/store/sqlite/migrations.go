@@ -89,7 +89,9 @@ var migrations = []store.Migration{
 	{
 		// sessions-activity: both tables are alive (store.SessionStore /
 		// store.ActivityStore). Front-loaded with their full head shape:
-		// sessions gains `username` at mysql v34, folded in here.
+		// sessions gains `username` at mysql v34, folded in here. runtime/cwd/
+		// model/originator/cli_version added at mysql v51 (codex-support) are
+		// also folded in here.
 		Version: 3,
 		Name:    "sessions-activity",
 		SQL: []string{
@@ -107,6 +109,11 @@ var migrations = []store.Migration{
 				first_seen  DATETIME NOT NULL,
 				last_seen   DATETIME NOT NULL,
 				status      TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','idle','closed')),
+				runtime     TEXT NOT NULL DEFAULT 'claude',
+				cwd         TEXT NOT NULL DEFAULT '',
+				model       TEXT NOT NULL DEFAULT '',
+				originator  TEXT NOT NULL DEFAULT '',
+				cli_version TEXT NOT NULL DEFAULT '',
 				PRIMARY KEY (session_id, agent_name)
 			)`,
 			`CREATE INDEX IF NOT EXISTS idx_sessions_host ON sessions(host)`,
@@ -209,32 +216,35 @@ var migrations = []store.Migration{
 		// (message_id, cache_write_1h/5m, n_text/n_tool_use/n_thinking,
 		// total_input, stop_reason, service_tier, speed) and username added
 		// at v34 are folded in here.
+		// runtime/reasoning_output_tokens added at mysql v51 (codex-support) are also folded in here.
 		Version: 10,
 		Name:    "token-ledger",
 		SQL: []string{
 			`CREATE TABLE IF NOT EXISTS token_ledger (
-				id                 INTEGER PRIMARY KEY,
-				session_id         TEXT NOT NULL,
-				message_id         TEXT NOT NULL DEFAULT '',
-				agent_name         TEXT NOT NULL DEFAULT '',
-				host               TEXT NOT NULL DEFAULT '',
-				username           TEXT NOT NULL DEFAULT '',
-				model              TEXT NOT NULL DEFAULT '',
-				input_tokens       INTEGER NOT NULL DEFAULT 0,
-				output_tokens      INTEGER NOT NULL DEFAULT 0,
-				cache_read_tokens  INTEGER NOT NULL DEFAULT 0,
-				cache_write_tokens INTEGER NOT NULL DEFAULT 0,
-				cache_write_1h     INTEGER NOT NULL DEFAULT 0,
-				cache_write_5m     INTEGER NOT NULL DEFAULT 0,
-				n_text             INTEGER NOT NULL DEFAULT 0,
-				n_tool_use         INTEGER NOT NULL DEFAULT 0,
-				n_thinking         INTEGER NOT NULL DEFAULT 0,
-				total_input        INTEGER NOT NULL DEFAULT 0,
-				stop_reason        TEXT NOT NULL DEFAULT '',
-				service_tier       TEXT NOT NULL DEFAULT '',
-				speed              TEXT NOT NULL DEFAULT '',
-				cost_usd           REAL NOT NULL DEFAULT 0,
-				timestamp          DATETIME NOT NULL
+				id                      INTEGER PRIMARY KEY,
+				session_id              TEXT NOT NULL,
+				message_id              TEXT NOT NULL DEFAULT '',
+				agent_name              TEXT NOT NULL DEFAULT '',
+				host                    TEXT NOT NULL DEFAULT '',
+				username                TEXT NOT NULL DEFAULT '',
+				model                   TEXT NOT NULL DEFAULT '',
+				input_tokens            INTEGER NOT NULL DEFAULT 0,
+				output_tokens           INTEGER NOT NULL DEFAULT 0,
+				cache_read_tokens       INTEGER NOT NULL DEFAULT 0,
+				cache_write_tokens      INTEGER NOT NULL DEFAULT 0,
+				cache_write_1h          INTEGER NOT NULL DEFAULT 0,
+				cache_write_5m          INTEGER NOT NULL DEFAULT 0,
+				n_text                  INTEGER NOT NULL DEFAULT 0,
+				n_tool_use              INTEGER NOT NULL DEFAULT 0,
+				n_thinking              INTEGER NOT NULL DEFAULT 0,
+				total_input             INTEGER NOT NULL DEFAULT 0,
+				stop_reason             TEXT NOT NULL DEFAULT '',
+				service_tier            TEXT NOT NULL DEFAULT '',
+				speed                   TEXT NOT NULL DEFAULT '',
+				cost_usd                REAL NOT NULL DEFAULT 0,
+				timestamp               DATETIME NOT NULL,
+				runtime                 TEXT NOT NULL DEFAULT 'claude',
+				reasoning_output_tokens INTEGER NOT NULL DEFAULT 0
 			)`,
 			`CREATE INDEX IF NOT EXISTS idx_token_session ON token_ledger(session_id)`,
 			`CREATE INDEX IF NOT EXISTS idx_token_agent ON token_ledger(agent_name)`,
@@ -883,5 +893,12 @@ var migrations = []store.Migration{
 		SQL: []string{
 			`UPDATE wms_intervals SET phase_assembled_at = assembled_at WHERE phase IS NOT NULL AND phase != ''`,
 		},
+	},
+	{
+		// codex-support: sessions/token_ledger column additions front-loaded
+		// into v3/v10 above (see their comments). No SQL to replay here --
+		// this entry exists only to keep version numbers aligned with mysql.
+		Version: 51,
+		Name:    "codex-support",
 	},
 }

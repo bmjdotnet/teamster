@@ -1290,6 +1290,31 @@ WHERE NOT EXISTS (
 			`UPDATE wms_intervals SET phase_assembled_at = assembled_at WHERE phase IS NOT NULL AND phase != ''`,
 		},
 	},
+	{
+		// codex-support: Codex is a second runtime alongside Claude Code (WP3 of
+		// Teamster Codex support). The codex-scraper tailer is the sole writer of
+		// Codex sessions/token_ledger rows -- hookd's hook-event pipeline never
+		// fires for Codex, so the tailer must upsert the sessions row itself from
+		// session_meta + turn_context. runtime lets dashboards/queries segment
+		// Claude vs Codex without a join; cwd/model/originator/cli_version carry
+		// Codex-specific session context Claude's sessions row has never needed.
+		// reasoning_output_tokens preserves Codex's distinct reasoning token count
+		// for fidelity even though it prices at the output rate (folded into
+		// output_tokens for pricing.ComputeCost, which has no separate bucket).
+		Version: 51,
+		Name:    "codex-support",
+		Stmts: []string{
+			`ALTER TABLE sessions
+					ADD COLUMN runtime     VARCHAR(16)  NOT NULL DEFAULT 'claude' AFTER agent_name,
+					ADD COLUMN cwd         VARCHAR(512) NOT NULL DEFAULT '' AFTER username,
+					ADD COLUMN model       VARCHAR(128) NOT NULL DEFAULT '' AFTER cwd,
+					ADD COLUMN originator  VARCHAR(32)  NOT NULL DEFAULT '' AFTER model,
+					ADD COLUMN cli_version VARCHAR(32)  NOT NULL DEFAULT '' AFTER originator`,
+			`ALTER TABLE token_ledger
+					ADD COLUMN runtime                 VARCHAR(16)     NOT NULL DEFAULT 'claude' AFTER agent_name,
+					ADD COLUMN reasoning_output_tokens  BIGINT UNSIGNED NOT NULL DEFAULT 0 AFTER output_tokens`,
+		},
+	},
 }
 
 // mergeProjectToProduct renames `project` tag rows to `product`, handling the
