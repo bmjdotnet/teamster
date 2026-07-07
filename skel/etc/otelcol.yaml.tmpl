@@ -1,7 +1,7 @@
 # Teamster OTLP Collector configuration template.
 # Rendered at install time by teamster-install using Go text/template.
-# Template variables: .OtelGRPCPort, .OtelHTTPPort, .PrometheusPort,
-#                     .Env, .ForwardEndpoint (optional).
+# Template variables: .OtelGRPCPort, .OtelHTTPPort, .OtelCodexHTTPPort,
+#                     .PrometheusPort, .Env, .ForwardEndpoint (optional).
 # Do NOT use shell expansion (${VAR}) — this is a Go template, not a shell script.
 
 extensions:
@@ -16,6 +16,26 @@ receivers:
       http:
         endpoint: 0.0.0.0:{{ .OtelHTTPPort }}
 
+  # Dedicated to Codex's [otel] metrics_exporter (src/internal/codexconfig's
+  # TeamsterOtelSpec) — cannot share the `otlp` receiver above. Verified live
+  # 2026-07-07 against Codex 0.137.0: its OTLP HTTP exporter
+  # (OTel-OTLP-Exporter-Rust) always POSTs to the bare endpoint root ("/"),
+  # ignoring any path in the configured endpoint, so it 404s against the
+  # `otlp` receiver's standard /v1/metrics path; its gRPC exporter never even
+  # attempted a TCP connection in the same live test. A receiver whose
+  # metrics_url_path is "/" is the only working shape found — metrics-only
+  # (no logs_url_path) because registering two signals at the same path on
+  # one receiver instance panics the collector at startup ("multiple
+  # registrations for /"). Codex's config sets exporter="none" (no
+  # logs/traces export) precisely so this receiver only ever needs to carry
+  # metrics. See research/otel-v1.md and research/evidence-round3/ in
+  # teamster-codex-kit for the capture that found this.
+  otlp/codex:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:{{ .OtelCodexHTTPPort }}
+        metrics_url_path: /
+
 processors:
   memory_limiter:
     check_interval: 5s
@@ -26,11 +46,44 @@ processors:
     send_batch_size: 1024
     timeout: 5s
 
+  # Derives the `source` resource attribute from whichever agent runtime
+  # actually sent the record, instead of hardcoding it. Every Teamster-
+  # instrumented runtime (Claude Code today, Codex from WP5 on) shares this
+  # one collector, so a literal `source: claude_code` insert would silently
+  # mislabel every other runtime's telemetry as Claude Code's.
+  #
+  # Statements are evaluated in order and each is gated on
+  # `attributes["source"] == nil`, so a record that already carries its own
+  # `source` (set upstream, by an agent or a future runtime) is left alone —
+  # same "first writer wins" semantics as the old `action: insert`. The
+  # `service.name` string an agent actually emits is unconfirmed for both
+  # Claude Code and Codex (research/otel-v1.md §2.2 item 1), so this matches
+  # a case-insensitive substring rather than a literal, and falls back to
+  # `claude_code` (the pre-existing default) for anything else, including no
+  # `service.name` at all.
+  transform/source_label:
+    error_mode: ignore
+    metric_statements:
+      - context: resource
+        statements:
+          - set(attributes["source"], "codex") where attributes["source"] == nil and attributes["service.name"] != nil and IsMatch(attributes["service.name"], "(?i)codex")
+          - set(attributes["source"], "claude_code") where attributes["source"] == nil and attributes["service.name"] != nil and IsMatch(attributes["service.name"], "(?i)claude")
+          - set(attributes["source"], "claude_code") where attributes["source"] == nil
+    log_statements:
+      - context: resource
+        statements:
+          - set(attributes["source"], "codex") where attributes["source"] == nil and attributes["service.name"] != nil and IsMatch(attributes["service.name"], "(?i)codex")
+          - set(attributes["source"], "claude_code") where attributes["source"] == nil and attributes["service.name"] != nil and IsMatch(attributes["service.name"], "(?i)claude")
+          - set(attributes["source"], "claude_code") where attributes["source"] == nil
+    trace_statements:
+      - context: resource
+        statements:
+          - set(attributes["source"], "codex") where attributes["source"] == nil and attributes["service.name"] != nil and IsMatch(attributes["service.name"], "(?i)codex")
+          - set(attributes["source"], "claude_code") where attributes["source"] == nil and attributes["service.name"] != nil and IsMatch(attributes["service.name"], "(?i)claude")
+          - set(attributes["source"], "claude_code") where attributes["source"] == nil
+
   resource:
     attributes:
-      - key: source
-        value: claude_code
-        action: insert
       - key: deployment.environment
         value: {{ .Env }}
         action: upsert
@@ -54,17 +107,17 @@ service:
   extensions: [health_check]
   pipelines:
     metrics:
-      receivers: [otlp]
-      processors: [memory_limiter, resource, batch]
+      receivers: [otlp, otlp/codex]
+      processors: [memory_limiter, transform/source_label, resource, batch]
       exporters: [prometheusremotewrite{{ if .ForwardEndpoint }}, otlp/forward{{ end }}]
     logs:
       receivers: [otlp]
-      processors: [memory_limiter, resource, batch]
+      processors: [memory_limiter, transform/source_label, resource, batch]
       exporters: [debug]
 {{ if .ForwardEndpoint }}
     traces:
       receivers: [otlp]
-      processors: [memory_limiter, resource, batch]
+      processors: [memory_limiter, transform/source_label, resource, batch]
       exporters: [otlp/forward]
 {{ end }}
   telemetry:
