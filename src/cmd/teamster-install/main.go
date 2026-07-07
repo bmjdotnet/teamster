@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/bmjdotnet/teamster/internal/config"
+	"github.com/bmjdotnet/teamster/internal/installbackup"
 	"github.com/bmjdotnet/teamster/internal/redact"
 	"gopkg.in/yaml.v3"
 )
@@ -976,6 +977,15 @@ func registerMCPServer(name, desiredBin string) {
 		return
 	}
 
+	// Back up ~/.claude.json before invoking the claude CLI, which writes it
+	// directly — this installer doesn't control that write itself, so the
+	// backup has to happen just before the external command, not around an
+	// os.WriteFile call it doesn't own.
+	userScopePath := filepath.Join(home, ".claude.json")
+	if _, err := installbackup.Backup(userScopePath); err != nil {
+		fmt.Printf("Warning: could not back up %s before claude mcp add-json: %v\n", userScopePath, err)
+	}
+
 	var errBuf strings.Builder
 	addCmd := exec.Command(claudePath, "mcp", "add-json", "--scope", "user", name, addJSON)
 	addCmd.Stdout = os.Stdout
@@ -1023,6 +1033,9 @@ func removeMCPFromFile(path, name string) error {
 	out, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
 		return err
+	}
+	if _, err := installbackup.Backup(path); err != nil {
+		fmt.Printf("Warning: could not back up %s before write: %v\n", path, err)
 	}
 	return os.WriteFile(path, append(out, '\n'), 0o644)
 }
@@ -1403,6 +1416,9 @@ func mergeSettings(path, hookBin, hookServerURL, dataDir string, port int, extra
 		)
 		return os.Chmod(path, 0o600)
 	}
+	if _, err := installbackup.Backup(path); err != nil {
+		dlog("WARN", "teamster-install.merge", "backup settings.json failed", "err", err.Error())
+	}
 	if err := os.WriteFile(path, final, 0o600); err != nil {
 		dlog("ERROR", "teamster-install.merge", "write settings.json failed", "err", err.Error())
 		return err
@@ -1759,6 +1775,9 @@ func mergeClaudeMD(path string) error {
 
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
+	}
+	if _, err := installbackup.Backup(path); err != nil {
+		fmt.Printf("Warning: could not back up %s before write: %v\n", path, err)
 	}
 	return os.WriteFile(path, []byte(content), 0o644)
 }
