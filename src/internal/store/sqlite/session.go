@@ -44,7 +44,7 @@ func (s *Store) UpsertSession(ctx context.Context, sess store.Session) error {
 		sess.Status = store.SessionStatusActive
 	}
 	if sess.Runtime == "" {
-		sess.Runtime = "claude"
+		sess.Runtime = "claude_code"
 	}
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO sessions (
@@ -91,7 +91,7 @@ func (s *Store) CreateSession(ctx context.Context, sess store.Session) error {
 		sess.Status = store.SessionStatusActive
 	}
 	if sess.Runtime == "" {
-		sess.Runtime = "claude"
+		sess.Runtime = "claude_code"
 	}
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO sessions (

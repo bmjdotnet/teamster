@@ -109,7 +109,7 @@ var migrations = []store.Migration{
 				first_seen  DATETIME NOT NULL,
 				last_seen   DATETIME NOT NULL,
 				status      TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','idle','closed')),
-				runtime     TEXT NOT NULL DEFAULT 'claude',
+				runtime     TEXT NOT NULL DEFAULT 'claude_code',
 				cwd         TEXT NOT NULL DEFAULT '',
 				model       TEXT NOT NULL DEFAULT '',
 				originator  TEXT NOT NULL DEFAULT '',
@@ -243,7 +243,7 @@ var migrations = []store.Migration{
 				speed                   TEXT NOT NULL DEFAULT '',
 				cost_usd                REAL NOT NULL DEFAULT 0,
 				timestamp               DATETIME NOT NULL,
-				runtime                 TEXT NOT NULL DEFAULT 'claude',
+				runtime                 TEXT NOT NULL DEFAULT 'claude_code',
 				reasoning_output_tokens INTEGER NOT NULL DEFAULT 0
 			)`,
 			`CREATE INDEX IF NOT EXISTS idx_token_session ON token_ledger(session_id)`,

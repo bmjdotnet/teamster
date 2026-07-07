@@ -96,13 +96,14 @@ binary finds no rollout files under `$CODEX_HOME`, and exits 0 every run.
 
 ### Schema additions (mysql migration v51 / sqlite v51, additive-only)
 
-- `sessions`: `runtime` (default `'claude'`), `cwd`, `model`, `originator`,
+- `sessions`: `runtime` (default `'claude_code'`), `cwd`, `model`, `originator`,
   `cli_version`.
-- `token_ledger`: `runtime` (default `'claude'`), `reasoning_output_tokens`.
+- `token_ledger`: `runtime` (default `'claude_code'`), `reasoning_output_tokens`.
 
-Existing Claude Code rows are unaffected (all new columns default to
-`'claude'`/empty/0). The golden-schema fixture was regenerated at
-`testdata/golden_schema_v51.txt`.
+The `runtime` enum is `{claude_code, codex, unknown}` (identity-mapped to
+OTEL `source` labels). Existing Claude Code rows are unaffected (all new
+columns default to `'claude_code'`/empty/0). The golden-schema fixture was
+regenerated at `testdata/golden_schema_v51.txt`.
 
 ### Known blind spots (v1)
 

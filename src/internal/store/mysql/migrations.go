@@ -1305,13 +1305,13 @@ WHERE NOT EXISTS (
 		Name:    "codex-support",
 		Stmts: []string{
 			`ALTER TABLE sessions
-					ADD COLUMN runtime     VARCHAR(16)  NOT NULL DEFAULT 'claude' AFTER agent_name,
+					ADD COLUMN runtime     VARCHAR(16)  NOT NULL DEFAULT 'claude_code' AFTER agent_name,
 					ADD COLUMN cwd         VARCHAR(512) NOT NULL DEFAULT '' AFTER username,
 					ADD COLUMN model       VARCHAR(128) NOT NULL DEFAULT '' AFTER cwd,
 					ADD COLUMN originator  VARCHAR(32)  NOT NULL DEFAULT '' AFTER model,
 					ADD COLUMN cli_version VARCHAR(32)  NOT NULL DEFAULT '' AFTER originator`,
 			`ALTER TABLE token_ledger
-					ADD COLUMN runtime                 VARCHAR(16)     NOT NULL DEFAULT 'claude' AFTER agent_name,
+					ADD COLUMN runtime                 VARCHAR(16)     NOT NULL DEFAULT 'claude_code' AFTER agent_name,
 					ADD COLUMN reasoning_output_tokens  BIGINT UNSIGNED NOT NULL DEFAULT 0 AFTER output_tokens`,
 		},
 	},

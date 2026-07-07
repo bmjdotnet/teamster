@@ -56,7 +56,7 @@ func (s *Store) upsertTelemetryChunk(ctx context.Context, chunk []store.Telemetr
 	for _, row := range chunk {
 		runtime := row.Runtime
 		if runtime == "" {
-			runtime = "claude"
+			runtime = "claude_code"
 		}
 		placeholders = append(placeholders, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
 		args = append(args,

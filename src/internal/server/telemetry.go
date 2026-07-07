@@ -38,8 +38,8 @@ type TelemetryRow struct {
 	CostUSD          float64 `json:"cost_usd"`
 	Timestamp        string  `json:"timestamp"`
 
-	// Runtime distinguishes the CLI that produced this row: "claude" (default
-	// when omitted) or "codex", posted by the codex-scraper tailer.
+	// Runtime distinguishes the CLI that produced this row: "claude_code"
+	// (default when omitted) or "codex", posted by the codex-scraper tailer.
 	// ReasoningOutputTokens is Codex-only (OpenAI's reasoning token count).
 	Runtime               string `json:"runtime"`
 	ReasoningOutputTokens int64  `json:"reasoning_output_tokens"`
@@ -235,7 +235,7 @@ func (s *Server) insertTelemetryChunk(chunk []TelemetryRow) error {
 
 		runtime := row.Runtime
 		if runtime == "" {
-			runtime = "claude"
+			runtime = "claude_code"
 		}
 
 		rows = append(rows, store.TelemetryRow{
