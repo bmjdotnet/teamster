@@ -48,7 +48,47 @@ var Known = map[string]ModelPricing{
 	// best estimate, not list pricing. Without this entry fable priced at $0 (no
 	// class token "fable" existed), valuing all production fable output at $0.
 	"claude-fable-5": {Input: 0.00001, Output: 0.00005, CacheRead: 0.000001, CacheWrite: 0.0000125},
+
+	// OpenAI / Codex models. Rates verified against the official pricing page
+	// (https://developers.openai.com/api/docs/pricing, fetched 2026-07-07) —
+	// not derived from memory or third-party aggregators, several of which
+	// disagreed with each other and with the official page when checked.
+	// OpenAI publishes no separate cache-write tier for any of these models
+	// (unlike Anthropic's four-bucket cache-read/cache-write split), so
+	// CacheWrite is 0 for all entries here — see the token-type mapping note
+	// below Known for how callers (the Codex ledger tailer, WP3) should map
+	// Codex's token_type enum onto these four ComputeCost buckets.
+	//
+	// gpt-5.5 is the CLI's actual configured default in this environment
+	// (~/.codex/config.toml: model = "gpt-5.5") as of Codex CLI 0.137.0.
+	"gpt-5.5":      {Input: 0.000005, Output: 0.00003, CacheRead: 0.0000005, CacheWrite: 0},
+	"gpt-5.5-pro":  {Input: 0.00003, Output: 0.00018, CacheRead: 0, CacheWrite: 0}, // no cached-input tier published for -pro
+	"gpt-5.4":      {Input: 0.0000025, Output: 0.000015, CacheRead: 0.00000025, CacheWrite: 0},
+	"gpt-5.4-mini": {Input: 0.00000075, Output: 0.0000045, CacheRead: 0.000000075, CacheWrite: 0},
+	"gpt-5.4-nano": {Input: 0.0000002, Output: 0.00000125, CacheRead: 0.00000002, CacheWrite: 0},
+	// gpt-5.3-codex is OpenAI's current Codex-specific fine-tune (listed under
+	// "Specialized Models" on the pricing page). Codex CLI 0.137.0's binary
+	// also references gpt-5.1-codex/gpt-5.2-codex as selectable model IDs, but
+	// neither has a published current rate (superseded, dropped from the
+	// public pricing table) — deliberately NOT given a fabricated entry here;
+	// they fall through to the logged same-$0 warning path in priceFor below
+	// rather than guess.
+	"gpt-5.3-codex": {Input: 0.00000175, Output: 0.000014, CacheRead: 0.000000175, CacheWrite: 0},
+	// o3 and o4-mini are reasoning models `-c model=` can select directly
+	// (o3 appears verbatim in `codex --help`'s own usage example).
+	"o3":      {Input: 0.000002, Output: 0.000008, CacheRead: 0.0000005, CacheWrite: 0},
+	"o4-mini": {Input: 0.0000011, Output: 0.0000044, CacheRead: 0.000000275, CacheWrite: 0},
 }
+
+// Codex token_type → ModelPricing bucket mapping (for callers computing cost
+// from Codex rollout token_count entries, e.g. the token-ledger tailer):
+//   input            -> inputTokens
+//   cached_input      -> cacheReadTokens
+//   output            -> outputTokens
+//   reasoning_output  -> outputTokens (OpenAI bills reasoning tokens at the
+//                        output rate; sum with plain output tokens before
+//                        calling ComputeCost)
+//   (no cache-write token type exists in Codex's enum)  -> cacheWriteTokens: 0
 
 // classRates is the most-recent known rate per model class, used by the
 // same-class fallback when a model matches no exact or prefix key. Kept in sync
@@ -97,6 +137,13 @@ func priceFor(model string) (ModelPricing, bool) {
 			"model", model, "class", class)
 		return classRates[class], true
 	}
+	// No exact/prefix/class match: this model has zero pricing coverage and
+	// will cost $0. That used to happen silently — it's how an entire
+	// provider (OpenAI/Codex) priced at $0 with no signal anywhere. Log
+	// loudly so the gap is visible; the caller still gets ok=false/$0 until
+	// a real entry is added to Known above.
+	slog.Warn("no pricing entry for model; costing at $0 — add rates to pricing.Known",
+		"model", model)
 	return ModelPricing{}, false
 }
 

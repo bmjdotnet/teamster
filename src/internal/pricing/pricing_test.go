@@ -1,7 +1,10 @@
 package pricing
 
 import (
+	"bytes"
+	"log/slog"
 	"math"
+	"strings"
 	"testing"
 )
 
@@ -113,5 +116,118 @@ func TestComputeCostPrefixBeforeClassFallback(t *testing.T) {
 	want := 1_000_000 * 0.000005
 	if math.Abs(got-want) > 1e-9 {
 		t.Errorf("got %v want %v", got, want)
+	}
+}
+
+// OpenAI/Codex model entries. Rates verified against
+// https://developers.openai.com/api/docs/pricing (fetched 2026-07-07); each
+// price-per-1M-tokens is divided by 1e6 to get the per-token rate asserted
+// here. Before these entries, every one of these models priced at $0.
+func TestComputeCostOpenAIModels(t *testing.T) {
+	cases := []struct {
+		model                                string
+		input, output, cacheRead, cacheWrite float64
+	}{
+		{"gpt-5.5", 0.000005, 0.00003, 0.0000005, 0},
+		{"gpt-5.5-pro", 0.00003, 0.00018, 0, 0},
+		{"gpt-5.4", 0.0000025, 0.000015, 0.00000025, 0},
+		{"gpt-5.4-mini", 0.00000075, 0.0000045, 0.000000075, 0},
+		{"gpt-5.4-nano", 0.0000002, 0.00000125, 0.00000002, 0},
+		{"gpt-5.3-codex", 0.00000175, 0.000014, 0.000000175, 0},
+		{"o3", 0.000002, 0.000008, 0.0000005, 0},
+		{"o4-mini", 0.0000011, 0.0000044, 0.000000275, 0},
+	}
+	for _, c := range cases {
+		got := ComputeCost(c.model, 1000, 500, 200, 100)
+		want := 1000*c.input + 500*c.output + 200*c.cacheRead + 100*c.cacheWrite
+		if math.Abs(got-want) > 1e-9 {
+			t.Errorf("%s: got %v want %v", c.model, got, want)
+		}
+	}
+}
+
+// gpt-5.5 is Codex CLI 0.137.0's actual configured default model
+// (~/.codex/config.toml: model = "gpt-5.5") — must not price at 0.
+func TestComputeCostGPT55NotZero(t *testing.T) {
+	if got := ComputeCost("gpt-5.5", 1_000_000, 500_000, 0, 0); got == 0 {
+		t.Fatal("gpt-5.5 priced at 0 — Codex spend would be invisible")
+	}
+}
+
+// A dated snapshot of a known OpenAI model (e.g. the gpt-5.5-2026-04-23
+// snapshot ID from OpenAI's own model docs) resolves via prefix match, not 0.
+func TestComputeCostOpenAIDatedSnapshotPrefix(t *testing.T) {
+	dated := ComputeCost("gpt-5.5-2026-04-23", 1000, 500, 200, 100)
+	bare := ComputeCost("gpt-5.5", 1000, 500, 200, 100)
+	if bare == 0 {
+		t.Fatal("base gpt-5.5 priced at 0; test precondition broken")
+	}
+	if math.Abs(dated-bare) > 1e-12 {
+		t.Errorf("dated gpt-5.5 snapshot got %v, want same as bare %v", dated, bare)
+	}
+}
+
+// gpt-5.4-mini/-nano must resolve to their own (cheaper) entries, not get
+// shadowed by the shorter "gpt-5.4" prefix — longest-prefix-wins in priceFor.
+func TestComputeCostOpenAIMiniNanoNotShadowedByParent(t *testing.T) {
+	parent := ComputeCost("gpt-5.4", 1_000_000, 0, 0, 0)
+	mini := ComputeCost("gpt-5.4-mini", 1_000_000, 0, 0, 0)
+	nano := ComputeCost("gpt-5.4-nano", 1_000_000, 0, 0, 0)
+	if mini == parent {
+		t.Errorf("gpt-5.4-mini priced same as gpt-5.4 parent (%v) — wrong prefix match", parent)
+	}
+	if nano == parent || nano == mini {
+		t.Errorf("gpt-5.4-nano priced same as a larger tier — wrong prefix match")
+	}
+	if math.Abs(mini-1_000_000*0.00000075) > 1e-6 {
+		t.Errorf("gpt-5.4-mini got %v want %v", mini, 1_000_000*0.00000075)
+	}
+	if math.Abs(nano-1_000_000*0.0000002) > 1e-6 {
+		t.Errorf("gpt-5.4-nano got %v want %v", nano, 1_000_000*0.0000002)
+	}
+}
+
+// REQUIRED (WP4): an unknown model must never price to $0 silently — this is
+// the exact gap that let all OpenAI/Codex spend go invisible before this
+// change. priceFor must log a warning even though it still returns ok=false.
+func TestComputeCostUnknownModelLogsLoudly(t *testing.T) {
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(orig)
+
+	got := ComputeCost("totally-unrecognized-model-xyz", 1000, 500, 200, 100)
+
+	if got != 0 {
+		t.Errorf("expected 0 for a truly unknown model, got %v", got)
+	}
+	logged := buf.String()
+	if !strings.Contains(logged, "no pricing entry for model") {
+		t.Errorf("expected a loud warning log for the unknown model, got: %q", logged)
+	}
+	if !strings.Contains(logged, "totally-unrecognized-model-xyz") {
+		t.Errorf("expected the model name in the warning log, got: %q", logged)
+	}
+}
+
+// gpt-5.1-codex/gpt-5.2-codex are real Codex-selectable model IDs (seen in
+// the codex binary's own strings) with no published current rate — they were
+// deliberately NOT given fabricated entries in Known. Confirm the gap is
+// still loud, not silent, so a regression here is caught rather than masked.
+func TestComputeCostSupersededCodexModelsLogLoudly(t *testing.T) {
+	for _, model := range []string{"gpt-5.1-codex", "gpt-5.2-codex"} {
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+
+		got := ComputeCost(model, 1_000_000, 0, 0, 0)
+
+		slog.SetDefault(orig)
+		if got != 0 {
+			t.Errorf("%s: expected 0 (no published rate), got %v", model, got)
+		}
+		if !strings.Contains(buf.String(), "no pricing entry for model") {
+			t.Errorf("%s: expected a loud warning, got: %q", model, buf.String())
+		}
 	}
 }
