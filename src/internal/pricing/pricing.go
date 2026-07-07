@@ -74,21 +74,31 @@ var Known = map[string]ModelPricing{
 	// they fall through to the logged same-$0 warning path in priceFor below
 	// rather than guess.
 	"gpt-5.3-codex": {Input: 0.00000175, Output: 0.000014, CacheRead: 0.000000175, CacheWrite: 0},
-	// o3 and o4-mini are reasoning models `-c model=` can select directly
-	// (o3 appears verbatim in `codex --help`'s own usage example).
-	"o3":      {Input: 0.000002, Output: 0.000008, CacheRead: 0.0000005, CacheWrite: 0},
-	"o4-mini": {Input: 0.0000011, Output: 0.0000044, CacheRead: 0.000000275, CacheWrite: 0},
+	// o3 and o4-mini (both real selectable Codex model IDs — o3 appears
+	// verbatim in `codex --help`'s own usage example, o4-mini in the CLI
+	// binary's strings) are deliberately NOT given entries: neither appears as
+	// a standalone actively-priced row on the official pricing page as of
+	// 2026-07-07 (o3 doesn't appear at all; o4-mini only appears as the
+	// distinct "o4-mini-deep-research" batch product and an "o4-mini-2025-04-16"
+	// finetuning snapshot, neither of which is this model's rate). They fall
+	// through to the logged same-$0 warning path below rather than guess.
 }
 
 // Codex token_type → ModelPricing bucket mapping (for callers computing cost
-// from Codex rollout token_count entries, e.g. the token-ledger tailer):
-//   input            -> inputTokens
-//   cached_input      -> cacheReadTokens
-//   output            -> outputTokens
-//   reasoning_output  -> outputTokens (OpenAI bills reasoning tokens at the
-//                        output rate; sum with plain output tokens before
-//                        calling ComputeCost)
-//   (no cache-write token type exists in Codex's enum)  -> cacheWriteTokens: 0
+// from Codex rollout token_count entries, e.g. the token-ledger tailer).
+// token_count.info.total_token_usage carries input_tokens, cached_input_tokens,
+// output_tokens, reasoning_output_tokens, total_tokens — and total_tokens ==
+// input_tokens + output_tokens exactly (confirmed against live rollout
+// evidence: 12439 + 109 = 12548). That means cached_input_tokens and
+// reasoning_output_tokens are SUBSETS already counted inside input_tokens and
+// output_tokens respectively — NOT additional buckets to sum in:
+//   inputTokens      -> input_tokens - cached_input_tokens (the uncached
+//                        remainder, billed at the full input rate)
+//   cacheReadTokens  -> cached_input_tokens (billed at the cache-read rate)
+//   outputTokens     -> output_tokens AS-IS (reasoning_output_tokens is
+//                        already included in this total; do NOT add it again)
+//   cacheWriteTokens -> 0 always (no cache-write token type exists in Codex's
+//                        enum, and OpenAI publishes no cache-write tier)
 
 // classRates is the most-recent known rate per model class, used by the
 // same-class fallback when a model matches no exact or prefix key. Kept in sync

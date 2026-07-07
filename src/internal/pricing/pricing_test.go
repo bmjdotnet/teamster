@@ -134,8 +134,6 @@ func TestComputeCostOpenAIModels(t *testing.T) {
 		{"gpt-5.4-mini", 0.00000075, 0.0000045, 0.000000075, 0},
 		{"gpt-5.4-nano", 0.0000002, 0.00000125, 0.00000002, 0},
 		{"gpt-5.3-codex", 0.00000175, 0.000014, 0.000000175, 0},
-		{"o3", 0.000002, 0.000008, 0.0000005, 0},
-		{"o4-mini", 0.0000011, 0.0000044, 0.000000275, 0},
 	}
 	for _, c := range cases {
 		got := ComputeCost(c.model, 1000, 500, 200, 100)
@@ -187,6 +185,35 @@ func TestComputeCostOpenAIMiniNanoNotShadowedByParent(t *testing.T) {
 	}
 }
 
+// Documents the correct Codex token_type -> ComputeCost bucket derivation
+// (see the mapping comment in pricing.go, below Known) against a real rollout
+// token_count sample: input_tokens=12439, cached_input_tokens=2432,
+// output_tokens=109, reasoning_output_tokens=43, total_tokens=12548.
+// total == input + output exactly (12439+109=12548), proving cached_input and
+// reasoning_output are subsets, not additional buckets — a caller that summed
+// reasoning_output into outputTokens, or cached_input into inputTokens on top
+// of the full input, would double-count and overprice.
+func TestComputeCostOpenAITokenTypeSubsetDerivation(t *testing.T) {
+	const inputTokens int64 = 12439
+	const cachedInputTokens int64 = 2432
+	const outputTokens int64 = 109 // reasoning_output_tokens (43) already included
+
+	uncachedInput := inputTokens - cachedInputTokens
+	correct := ComputeCost("gpt-5.5", uncachedInput, outputTokens, cachedInputTokens, 0)
+
+	// The wrong (additive) derivation: full input PLUS cached again, output
+	// PLUS reasoning again.
+	const reasoningOutputTokens int64 = 43
+	wrongAdditive := ComputeCost("gpt-5.5", inputTokens+cachedInputTokens, outputTokens+reasoningOutputTokens, cachedInputTokens, 0)
+
+	if correct == wrongAdditive {
+		t.Fatal("correct and wrong-additive derivations produced the same cost — test isn't discriminating")
+	}
+	if correct >= wrongAdditive {
+		t.Errorf("correct derivation (%v) should be cheaper than the double-counted additive one (%v)", correct, wrongAdditive)
+	}
+}
+
 // REQUIRED (WP4): an unknown model must never price to $0 silently — this is
 // the exact gap that let all OpenAI/Codex spend go invisible before this
 // change. priceFor must log a warning even though it still returns ok=false.
@@ -210,12 +237,14 @@ func TestComputeCostUnknownModelLogsLoudly(t *testing.T) {
 	}
 }
 
-// gpt-5.1-codex/gpt-5.2-codex are real Codex-selectable model IDs (seen in
-// the codex binary's own strings) with no published current rate — they were
-// deliberately NOT given fabricated entries in Known. Confirm the gap is
-// still loud, not silent, so a regression here is caught rather than masked.
-func TestComputeCostSupersededCodexModelsLogLoudly(t *testing.T) {
-	for _, model := range []string{"gpt-5.1-codex", "gpt-5.2-codex"} {
+// gpt-5.1-codex/gpt-5.2-codex/o3/o4-mini are real Codex-selectable model IDs
+// (seen in the codex binary's own strings, and o3 in codex --help's own
+// usage example) with no current standalone rate confirmed on OpenAI's
+// official pricing page — they were deliberately NOT given fabricated
+// entries in Known. Confirm the gap is still loud, not silent, so a
+// regression here is caught rather than masked.
+func TestComputeCostUnpricedRealModelsLogLoudly(t *testing.T) {
+	for _, model := range []string{"gpt-5.1-codex", "gpt-5.2-codex", "o3", "o4-mini"} {
 		var buf bytes.Buffer
 		orig := slog.Default()
 		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
