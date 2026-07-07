@@ -81,6 +81,30 @@ dump_tags() {
     echo "  (tags seen: $(lxc exec "$CONTAINER" -- grep -o '"tag":"[^"]*"' "$JSONL" 2>/dev/null | sort -u | tr '\n' ' ' || echo 'none'))"
 }
 
+# run_codex sends a prompt to `codex exec` inside the container, same shape
+# as run_prompt but for the second runtime.
+run_codex() {
+    local prompt="$1"
+    lxc exec "$CONTAINER" -- su - "$USER" -c \
+        "export PATH=\"\$HOME/.local/bin:\$HOME/bin:\$PATH\" && \
+         timeout 60 codex exec --skip-git-repo-check $(printf '%q' "$prompt") 2>/dev/null" \
+        || true
+}
+
+# check_file verifies a file exists inside the container (backups, systemd
+# units, etc.) — a lighter check than check_tag since it doesn't depend on
+# JSONL content, just that an install-time write actually happened.
+check_file() {
+    local path="$1" label="$2"
+    TOTAL=$((TOTAL + 1))
+    if lxc exec "$CONTAINER" -- su - "$USER" -c "test -e $(printf '%q' "$path")" 2>/dev/null; then
+        echo "  PASS: [$label] ($path)"
+    else
+        echo "  FAIL: [$label] not found: $path"
+        FAILURES=$((FAILURES + 1))
+    fi
+}
+
 # --- test cases ---
 
 echo "--- Test A: MCP activity tools ---"
@@ -110,6 +134,62 @@ sleep 2
 check_tag "EDIT"
 check_tag "READ"
 dump_tags
+
+# --- Codex tests (graceful skip: a container without Codex installed is not
+# a failure, same opposite-polarity posture as the installer's own probe) ---
+
+if lxc exec "$CONTAINER" -- su - "$USER" -c 'command -v codex' >/dev/null 2>&1; then
+    echo ""
+    echo "--- Test D: Codex config.toml doctor gate ---"
+    TOTAL=$((TOTAL + 1))
+    DOCTOR_JSON=$(lxc exec "$CONTAINER" -- su - "$USER" -c \
+        'export PATH="$HOME/.local/bin:$HOME/bin:$PATH" && codex --strict-config doctor --json' 2>/dev/null || echo '{}')
+    DOCTOR_STATUS=$(echo "$DOCTOR_JSON" | python3 -c 'import json,sys
+try:
+    print(json.load(sys.stdin)["checks"]["config.load"]["status"])
+except Exception:
+    print("parse-error")' 2>/dev/null)
+    if [[ "$DOCTOR_STATUS" == "ok" ]]; then
+        echo "  PASS: [DOCTOR] config.load status=ok"
+    else
+        echo "  FAIL: [DOCTOR] config.load status=$DOCTOR_STATUS (expected ok)"
+        FAILURES=$((FAILURES + 1))
+    fi
+
+    echo ""
+    echo "--- Test E: Codex client-config backups exist (both runtimes) ---"
+    check_file "/home/$USER/.codex/config.toml.pre-teamster" "codex config.toml backup"
+    check_file "/home/$USER/.claude/settings.json.pre-teamster" "claude settings.json backup"
+    check_file "/home/$USER/.claude.json.pre-teamster" "claude .claude.json backup"
+    check_file "/home/$USER/.claude/CLAUDE.md.pre-teamster" "claude CLAUDE.md backup"
+
+    echo ""
+    echo "--- Test F: codex-scraper systemd timer present ---"
+    TOTAL=$((TOTAL + 1))
+    if lxc exec "$CONTAINER" -- systemctl is-enabled teamster-codex-scraper.timer >/dev/null 2>&1; then
+        echo "  PASS: [SCRAPER] teamster-codex-scraper.timer enabled"
+    else
+        echo "  FAIL: [SCRAPER] teamster-codex-scraper.timer not enabled"
+        FAILURES=$((FAILURES + 1))
+    fi
+
+    echo ""
+    echo "--- Test G: Codex hook fires with zero interactive trust ---"
+    clear_jsonl
+    run_codex "Run the shell command: echo teamster-selftest-codex"
+    sleep 2
+    TOTAL=$((TOTAL + 1))
+    if lxc exec "$CONTAINER" -- test -s "$JSONL" 2>/dev/null; then
+        echo "  PASS: [CODEX-HOOK] events.jsonl received at least one event post-install, no trust prompt needed"
+    else
+        echo "  FAIL: [CODEX-HOOK] no events reached events.jsonl from codex exec"
+        FAILURES=$((FAILURES + 1))
+    fi
+    dump_tags
+else
+    echo ""
+    echo "--- Codex tests skipped: codex CLI not found in $CONTAINER (informational, not a failure) ---"
+fi
 
 # --- summary ---
 

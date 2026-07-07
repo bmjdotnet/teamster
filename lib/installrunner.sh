@@ -106,6 +106,7 @@ OTELCOL_MODE=""       # --otelcol-mode=install|external|managed|none
 PROMETHEUS_MODE=""    # --prometheus-mode=install|external|managed|none
 GRAFANA_MODE=""       # --grafana-mode=install|external|managed|none
 RELAY_MODE=""         # --relay-mode=none|install
+CODEX_MODE=""         # --codex-mode=install|none (unset = auto-detect)
 
 # Per-service endpoint flags
 STORE_DSN=""             # --store-dsn=<mysql://...>
@@ -174,6 +175,8 @@ while [[ $# -gt 0 ]]; do
         --grafana-mode)         require_value "$1" "${2-}"; GRAFANA_MODE="$2"; shift 2 ;;
         --relay-mode=*)         RELAY_MODE="${1#--relay-mode=}"; shift ;;
         --relay-mode)           require_value "$1" "${2-}"; RELAY_MODE="$2"; shift 2 ;;
+        --codex-mode=*)         CODEX_MODE="${1#--codex-mode=}"; shift ;;
+        --codex-mode)           require_value "$1" "${2-}"; CODEX_MODE="$2"; shift 2 ;;
         # --- per-service endpoint flags ---
         --store-dsn=*)          STORE_DSN="${1#--store-dsn=}"; shift ;;
         --store-dsn)            require_value "$1" "${2-}"; STORE_DSN="$2"; shift 2 ;;
@@ -237,6 +240,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --prometheus-mode=MODE   prometheus mode: install (default) | external | managed | none"
             echo "  --grafana-mode=MODE      grafana mode: none (default) | install | external | managed"
             echo "  --relay-mode=MODE        relay mode: none (default) | install"
+            echo "  --codex-mode=MODE        codex wiring: auto-detect (default) | install | none"
             echo ""
             echo "Per-service endpoint flags:"
             echo "  --store-dsn=DSN              MySQL DSN (mysql://user:pass@host:port/db)"
@@ -329,6 +333,8 @@ if [[ "${RELAY_MODE:-none}" == "install" ]]; then
     [[ -z "$RELAY_TARGET" ]]     && die "--relay-target is required when --relay-mode=install"
     [[ -z "$REPL_PUSH_REMOTE" ]] && die "--repl-push-remote is required when --relay-mode=install"
 fi
+[[ -n "$CODEX_MODE" ]] && [[ "$CODEX_MODE" != "install" && "$CODEX_MODE" != "none" ]] \
+    && die "--codex-mode must be 'install' or 'none' (unset = auto-detect), got: $CODEX_MODE"
 [[ "$OTELCOL_BUILD_FROM_SRC" -eq 1 ]] && [[ "$OTELCOL_MODE" != "install" ]] \
     && die "--otelcol-build-from-src requires --otelcol-mode=install"
 [[ "$PROMETHEUS_BUILD_FROM_SRC" -eq 1 ]] && [[ "$PROMETHEUS_MODE" != "install" ]] \
@@ -1029,6 +1035,22 @@ if [ -n "$MISSING" ]; then
     exit 1
 fi
 
+# Codex probe — opposite polarity from the claude check above: informational
+# only, never fails the install. teamster-install (Go) re-probes and does the
+# actual gating (including the --codex-mode=install hard-error case); this is
+# purely so the operator sees Codex's status alongside the other prereqs.
+if [[ "$CODEX_MODE" == "none" ]]; then
+    echo "Codex: skipping (--codex-mode=none)"
+elif command -v codex &>/dev/null; then
+    echo "Codex: found ($(codex --version 2>/dev/null | tail -1)) — will be wired"
+else
+    if [[ "$CODEX_MODE" == "install" ]]; then
+        printf -- "${C_BOLD_RED}ERROR: --codex-mode=install requires the codex CLI in PATH${C_RESET}\n"
+        exit 1
+    fi
+    echo "Codex: not found — skipping (informational; install https://developers.openai.com/codex/cli if you want it wired)"
+fi
+
 printf -- "${C_GREEN}Prerequisites OK: go %s, claude %s${C_RESET}\n" "$(go version | grep -oP '\d+\.\d+\.\d+')" "$(claude --version 2>/dev/null | head -1)"
 echo ""
 
@@ -1313,6 +1335,7 @@ INSTALL_FLAGS=(--basedir="$BASEDIR" --repo="$REPO" --builddir="$BUILDDIR")
 [[ -n "$RELAY_MODE" && "$RELAY_MODE" != "none" ]] && INSTALL_FLAGS+=(--relay-mode="$RELAY_MODE")
 [[ -n "$RELAY_TARGET" ]]         && INSTALL_FLAGS+=(--relay-target="$RELAY_TARGET")
 [[ -n "$REPL_PUSH_REMOTE" ]]    && INSTALL_FLAGS+=(--repl-push-remote="$REPL_PUSH_REMOTE")
+[[ -n "$CODEX_MODE" ]]          && INSTALL_FLAGS+=(--codex-mode="$CODEX_MODE")
 dlog INFO install.subproc "exec teamster-install" "cmd=$(printf '%q ' "$BUILDDIR/teamster-install" "${INSTALL_FLAGS[@]}")"
 if "$BUILDDIR/teamster-install" "${INSTALL_FLAGS[@]}"; then
     dlog INFO install.subproc "teamster-install done" "rc=0"

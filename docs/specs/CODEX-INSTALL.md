@@ -1,9 +1,72 @@
 # Codex Support — Install & Operate
 
-**Status: partial.** This document currently covers only WP3 (the codex-scraper
-cost/ledger tailer). WP7 owns assembling the full installer-integration guide
-(MCP server wiring, hooks trust provisioning, skills plugin, uninstall
-recipe) — merge that content in here rather than starting a second doc.
+**Status: partial.** WP3 (codex-scraper) and the uninstall recipe are complete
+below. WP7 still owns assembling the rest of the installer-integration guide
+(MCP server wiring detail, hooks trust provisioning, skills plugin, residual
+audit-risk note) — merge that content in here rather than starting a second doc.
+
+## Uninstall
+
+No automated `teamster uninstall` exists yet (same posture as the Claude Code
+side — see `REMOTE-INSTALL.md`'s Uninstall section). This is the manual
+recipe, in that document's style.
+
+Teamster writes into `~/.codex/config.toml` using marker-bounded sections
+(`# >>> teamster:<name> >>>` ... `# <<< teamster:<name> <<<`) so its content
+can be stripped without disturbing anything else in the file — an operator's
+own comments, `mcp_servers` entries, or `[projects]` trust settings are never
+touched by any of this.
+
+```bash
+CODEX_CONFIG=~/.codex/config.toml   # or $CODEX_HOME/config.toml if CODEX_HOME is set
+
+# Remove exactly the tables Teamster wrote — safe even if the operator has
+# made unrelated edits to config.toml since install. Repeatable; a name with
+# no matching span is a no-op.
+for name in mcp_servers.activity mcp_servers.wms otel hooks hooks-state; do
+  sed -i "/# >>> teamster:${name} >>>/,/# <<< teamster:${name} <<</d" "$CODEX_CONFIG"
+done
+
+# Skills Teamster installed via file-copy (not the plugin system — see
+# InstallSkills's doc comment for why):
+rm -rf ~/.codex/skills/teamster-solo ~/.codex/skills/teamster-status \
+       ~/.codex/skills/teamster-tags ~/.codex/skills/teamster-review
+
+# codex-scraper systemd timer/service:
+sudo systemctl disable --now teamster-codex-scraper.timer 2>/dev/null || true
+sudo rm -f /etc/systemd/system/teamster-codex-scraper.{service,timer}
+sudo systemctl daemon-reload
+
+rm -f ~/teamster/var/codex-scraper-cursors.json   # tailer's byte-offset cursor
+```
+
+**AGENTS.md protocol text** (`mergeCodexAgentsMD`) is a plain content append
+keyed by a heading marker, not a removable marker pair like config.toml's
+sections above (same posture as `mergeClaudeMD`/CLAUDE.md on the Claude Code
+side — REMOTE-INSTALL.md's Uninstall section is equally hand-wavy about it).
+Two options, in order of safety:
+1. **Restore from backup** (cleanest): every write Teamster makes to
+   `AGENTS.md`/`AGENTS.override.md` is preceded by `installbackup.Backup` —
+   `<file>.pre-teamster` holds the exact pre-Teamster content from the very
+   first install. `cp ~/.codex/AGENTS.md.pre-teamster ~/.codex/AGENTS.md`
+   (or the `.override.md` variant, whichever `mergeCodexAgentsMD` actually
+   targeted — check which file contains the `## Getting Started with
+   Teamster (Codex)` heading). This reverts anything else appended to the
+   file after install too, so only use it if nothing else has touched the
+   file since.
+2. **Manual excision**: the Teamster block runs from the
+   `## Getting Started with Teamster (Codex)` heading to end-of-file (it's
+   always appended last) — delete from that heading onward if there's
+   trailing operator content you need to keep that was added after install.
+
+**Backups left behind** (all `installbackup`-managed, safe to leave or clean
+up as the operator prefers): `~/.codex/config.toml.pre-teamster` +
+`~/.codex/config.toml.<timestamp>.bak` per run;
+`~/.codex/AGENTS.md.pre-teamster` (or `.override.md`) + timestamped backups
+the same way. The Claude Code side has the equivalent
+`~/.claude/settings.json.pre-teamster`, `~/.claude.json.pre-teamster`,
+`~/.claude/CLAUDE.md.pre-teamster` (retrofitted in WP2 — these did not exist
+before Codex support shipped).
 
 ## codex-scraper — the Codex cost/ledger tailer
 

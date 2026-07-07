@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/bmjdotnet/teamster/internal/codexconfig"
 	"github.com/bmjdotnet/teamster/internal/config"
 	"github.com/bmjdotnet/teamster/internal/installbackup"
 	"github.com/bmjdotnet/teamster/internal/redact"
@@ -328,6 +329,7 @@ func run() error {
 	env := flag.String("env", "", "TEAMSTER_ENV value (e.g. production)")
 	backupDir := flag.String("backup-dir", "", "backup.backup_dir value (absolute path for backup snapshots)")
 	backupSchedule := flag.String("backup-schedule", "", "backup.schedule value (e.g. 1h, 30m)")
+	codexMode := flag.String("codex-mode", "", "codex wiring mode: install (force, error if codex absent) | none (skip, even if present) | unset (auto-detect, default)")
 	debugLogPath := flag.String("debug-log", "", "append structured trace events to this file (Round 0 instrumentation)")
 	flag.Parse()
 	// otelcol-build-from-src/prometheus-build-from-src/grafana-build-from-src are informational
@@ -376,6 +378,7 @@ func run() error {
 		"prometheus_retention_size", *prometheusRetentionSize,
 		"env", *env,
 		"debug_log", *debugLogPath,
+		"codex_mode", *codexMode,
 	)
 
 	if *repoDir == "" {
@@ -557,12 +560,26 @@ func run() error {
 			otelHTTPPort = findFreePort(4328)
 		}
 	}
+	// otelCodexHTTPPort is the dedicated otlp/http receiver Codex's [otel]
+	// export points at — never otelHTTPPort, the receiver Claude Code shares
+	// (see internal/codexconfig/otel.go's OtelSpec.MetricsEndpoint doc
+	// comment). Gated on the same otelcolMode as otelHTTPPort: there's no
+	// collector to point Codex at unless one is actually running.
+	otelCodexHTTPPort := 0
+	if *otelcolMode == "install" {
+		if prior.Otelcol.CodexHTTPPort != 0 {
+			otelCodexHTTPPort = prior.Otelcol.CodexHTTPPort
+		} else {
+			otelCodexHTTPPort = findFreePort(4329)
+		}
+	}
 	dlog("INFO", "teamster-install.ports", "found free ports",
 		"hookd", fmt.Sprintf("%d", port),
 		"prometheus", fmt.Sprintf("%d", ports.prometheus),
 		"grafana", fmt.Sprintf("%d", ports.grafana),
 		"otel_grpc", fmt.Sprintf("%d", ports.otelGRPC),
 		"otel_http", fmt.Sprintf("%d", otelHTTPPort),
+		"otel_codex_http", fmt.Sprintf("%d", otelCodexHTTPPort),
 	)
 
 	// 4b. Write the 0600 secrets EnvironmentFile (the store DSN) BEFORE any unit
@@ -809,6 +826,7 @@ func run() error {
 		env:                *env,
 		ports:              ports,
 		otelHTTP:           otelHTTPPort,
+		otelCodexHTTP:      otelCodexHTTPPort,
 	})
 
 	// Merge backup: section into teamster.yaml. Runs AFTER writeYAMLConfig so the
@@ -913,7 +931,32 @@ func run() error {
 		fmt.Fprintf(os.Stderr, "warning: updating .bashrc: %v\n", err)
 	}
 
-	// 11. Print summary.
+	// 11. Wire Codex CLI, if present and not explicitly disabled. Graceful,
+	// opposite polarity from Claude Code's hard requirement above (probe.sh)
+	// — a host without Codex installs unchanged, informational only.
+	codexStatus := "not detected — skipped"
+	switch *codexMode {
+	case "none":
+		codexStatus = "skipped (--codex-mode=none)"
+		dlog("INFO", "teamster-install.codex", "codex-mode=none — skipping by explicit operator request")
+	default:
+		codexVersion, probeErr := probeCodex()
+		switch {
+		case probeErr != nil && *codexMode == "install":
+			dlog("ERROR", "teamster-install.codex", "--codex-mode=install but codex not found in PATH", "err", probeErr.Error())
+			return fmt.Errorf("--codex-mode=install requires the codex CLI in PATH: %w", probeErr)
+		case probeErr != nil:
+			dlog("INFO", "teamster-install.codex", "codex not found in PATH — skipping (informational)")
+		default:
+			dlog("INFO", "teamster-install.codex", "codex detected", "version", codexVersion)
+			if err := wireCodex(*basedir, home, effectiveDSN, ports.hookServerURL, hubHost(), *env, otelCodexHTTPPort); err != nil {
+				return fmt.Errorf("wiring codex: %w", err)
+			}
+			codexStatus = fmt.Sprintf("wired (codex %s)", codexVersion)
+		}
+	}
+
+	// 12. Print summary.
 	fmt.Printf(`
 Teamster installed to: %s
 
@@ -926,6 +969,7 @@ Teamster installed to: %s
   settings:      %s (merged)
   CLAUDE.md:     %s (updated)
   plugin:        %s
+  codex:         %s
 
 Start hookd:     %s
 Watch activity:  %s
@@ -933,10 +977,80 @@ Watch activity:  %s
 		*basedir,
 		binPath, dataDir,
 		port, hookBin, activityBin, wmsBin,
-		settingsPath, claudeMDPath, pluginStatus,
+		settingsPath, claudeMDPath, pluginStatus, codexStatus,
 		filepath.Join(*basedir, "bin", "hookd"),
 		filepath.Join(*basedir, "bin", "feed"),
 	)
+
+	return nil
+}
+
+// probeCodex detects the codex CLI in PATH and returns its reported version.
+// Graceful, opposite polarity from the hard `claude` requirement enforced
+// upstream in install.sh/lib/installrunner.sh: a host without Codex is a
+// normal, expected case, not an error — the caller decides what "not found"
+// means (an informational skip by default, or a hard error when
+// --codex-mode=install explicitly demanded it).
+func probeCodex() (string, error) {
+	codexPath, err := exec.LookPath("codex")
+	if err != nil {
+		return "", err
+	}
+	out, err := exec.Command(codexPath, "--version").Output()
+	if err != nil {
+		return "", fmt.Errorf("codex --version: %w", err)
+	}
+	// Live output is "codex-cli 0.137.0\n" — take the trailing field so a
+	// banner wording change upstream doesn't break parsing.
+	fields := strings.Fields(string(out))
+	if len(fields) == 0 {
+		return strings.TrimSpace(string(out)), nil
+	}
+	return fields[len(fields)-1], nil
+}
+
+// wireCodex writes everything Teamster owns in Codex's config.toml (MCP
+// servers, OTEL export, hooks + trust state) plus AGENTS.md and skills,
+// using internal/codexconfig's shared backup+doctor-gate machinery — every
+// config.toml write it makes is already individually gated and rolled back
+// on failure, so this function's only job is sequencing, not safety.
+//
+// Called only after probeCodex confirms codex is on PATH. otelCodexHTTPPort
+// of 0 means otelcol isn't running (--otelcol-mode != install) — there's no
+// collector to point Codex's [otel] export at, so that step is skipped
+// rather than writing a config Codex would export into a black hole.
+func wireCodex(basedir, home, storeDSN, hookServerURL, host, env string, otelCodexHTTPPort int) error {
+	configPath := codexconfig.DefaultConfigPath(home)
+	codexHome := filepath.Dir(configPath)
+
+	specs := codexconfig.TeamsterMCPServerSpecs(basedir, storeDSN, hookServerURL, host)
+	if _, err := codexconfig.WriteMCPServers(configPath, specs); err != nil {
+		return fmt.Errorf("mcp servers: %w", err)
+	}
+
+	if otelCodexHTTPPort != 0 {
+		envLabel := env
+		if envLabel == "" {
+			envLabel = "production"
+		}
+		otelEndpoint := fmt.Sprintf("http://localhost:%d", otelCodexHTTPPort)
+		if _, err := codexconfig.WriteOtelConfig(configPath, codexconfig.TeamsterOtelSpec(otelEndpoint, envLabel)); err != nil {
+			return fmt.Errorf("otel config: %w", err)
+		}
+	}
+
+	skillsSrc := filepath.Join(basedir, "lib", "codex-plugin", "skills")
+	if _, err := codexconfig.InstallSkills(skillsSrc, codexHome); err != nil {
+		return fmt.Errorf("skills: %w", err)
+	}
+	if err := mergeCodexAgentsMD(codexHome); err != nil {
+		return fmt.Errorf("AGENTS.md: %w", err)
+	}
+
+	hookSpecs := codexconfig.TeamsterHookSpecs(basedir, codexconfig.DefaultHookTimeoutSec)
+	if _, err := codexconfig.WriteHooks(configPath, hookSpecs); err != nil {
+		return fmt.Errorf("hooks: %w", err)
+	}
 
 	return nil
 }

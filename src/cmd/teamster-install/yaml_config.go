@@ -30,6 +30,10 @@ type yamlOtelcol struct {
 	Mode     string `yaml:"mode"`
 	GRPCPort int    `yaml:"grpc_port"`
 	HTTPPort int    `yaml:"http_port"`
+	// CodexHTTPPort is the dedicated otlp/http receiver instance Codex's
+	// [otel] export points at — never shared with HTTPPort, see
+	// internal/codexconfig/otel.go's OtelSpec.MetricsEndpoint doc comment.
+	CodexHTTPPort int `yaml:"codex_http_port"`
 }
 
 type yamlTokenScraper struct {
@@ -110,6 +114,7 @@ type yamlParams struct {
 	env                string
 	ports              portConfig
 	otelHTTP           int
+	otelCodexHTTP      int
 }
 
 func writeYAMLConfig(p yamlParams) {
@@ -207,6 +212,7 @@ func buildYAMLConfig(p yamlParams) teamsterYAML {
 	otelcolMode := strOr(p.otelcolMode, strOr(prior.Otelcol.Mode, "install"))
 	otelGRPC := intOr(p.ports.otelGRPC, intOr(prior.Otelcol.GRPCPort, 4327))
 	otelHTTP := intOr(p.otelHTTP, intOr(prior.Otelcol.HTTPPort, 4328))
+	otelCodexHTTP := intOr(p.otelCodexHTTP, intOr(prior.Otelcol.CodexHTTPPort, 4329))
 
 	promMode := strOr(p.promMode, strOr(prior.Prometheus.Mode, "install"))
 	promPort := intOr(p.ports.prometheus, intOr(prior.Prometheus.Port, 9190))
@@ -266,9 +272,10 @@ func buildYAMLConfig(p yamlParams) teamsterYAML {
 			Health: fmt.Sprintf("http://%s:%d/api/health", grafHost, grafanaPort),
 		},
 		Otelcol: yamlOtelcol{
-			Mode:     otelcolMode,
-			GRPCPort: otelGRPC,
-			HTTPPort: otelHTTP,
+			Mode:          otelcolMode,
+			GRPCPort:      otelGRPC,
+			HTTPPort:      otelHTTP,
+			CodexHTTPPort: otelCodexHTTP,
 		},
 		TokenScraper: yamlTokenScraper{
 			Mode: ccusageMode,
