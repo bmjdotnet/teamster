@@ -6,9 +6,16 @@ import (
 	"strings"
 	"testing"
 	"text/template"
+
+	"github.com/bmjdotnet/teamster/internal/config"
 )
 
-func TestDecomposeStoreDSN(t *testing.T) {
+// TestStoreDSNForGrafana exercises the host/port/db decomposition that
+// StartGrafana and checkStoreStatus's grafana_ro row derive from a parsed
+// config.StoreDSN — the mysql-driver-plus-non-empty-host/database gate and
+// port defaulting (storePortString) that the pre-unification per-caller
+// decompose helper used to compute in one shot.
+func TestStoreDSNForGrafana(t *testing.T) {
 	tests := []struct {
 		name                       string
 		raw                        string
@@ -39,16 +46,18 @@ func TestDecomposeStoreDSN(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			host, port, db, ok := decomposeStoreDSN(tt.raw)
+			dsn, err := config.ParseStoreDSN(tt.raw)
+			ok := err == nil && dsn.Scheme == "mysql" && dsn.Host != "" && dsn.Database != ""
 			if ok != tt.wantOK {
 				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
 			}
 			if !tt.wantOK {
 				return
 			}
-			if host != tt.wantHost || port != tt.wantPort || db != tt.wantDB {
+			port := storePortString(dsn.Port)
+			if dsn.Host != tt.wantHost || port != tt.wantPort || dsn.Database != tt.wantDB {
 				t.Fatalf("got (%q,%q,%q), want (%q,%q,%q)",
-					host, port, db, tt.wantHost, tt.wantPort, tt.wantDB)
+					dsn.Host, port, dsn.Database, tt.wantHost, tt.wantPort, tt.wantDB)
 			}
 		})
 	}

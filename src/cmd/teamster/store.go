@@ -1,13 +1,12 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
 
-	"github.com/bmjdotnet/teamster/internal/config"
 	"github.com/bmjdotnet/teamster/internal/store"
-	"github.com/bmjdotnet/teamster/internal/store/mysql"
 )
 
 // runStore dispatches the `teamster store <subcommand>` family. It returns
@@ -67,12 +66,5 @@ func runStoreMigrate(args []string) int {
 }
 
 func openStore(dsn string) (store.Store, error) {
-	parsed, err := config.ParseStoreDSN(dsn)
-	if err != nil {
-		return nil, err
-	}
-	if parsed.Driver != config.StoreDriverMySQL {
-		return nil, fmt.Errorf("unknown driver: %s", parsed.Driver)
-	}
-	return mysql.New(parsed.Primary)
+	return store.Open(context.Background(), dsn)
 }

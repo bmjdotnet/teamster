@@ -2,46 +2,17 @@ package store_test
 
 import (
 	"context"
-	"database/sql"
-	"fmt"
-	"os"
-	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/bmjdotnet/teamster/internal/store"
-	"github.com/bmjdotnet/teamster/internal/store/mysql"
+	"github.com/bmjdotnet/teamster/internal/store/storetest"
 )
 
 // openScratchStore spins up a throwaway teamster_test_* schema (migrated) and
 // returns the store. Skips when TEAMSTER_TEST_MYSQL_DSN is unset. Never touches
 // the live database.
-func openScratchStore(t *testing.T) *mysql.Store {
-	t.Helper()
-	dsn := os.Getenv("TEAMSTER_TEST_MYSQL_DSN")
-	if dsn == "" {
-		t.Skip("TEAMSTER_TEST_MYSQL_DSN not set")
-	}
-	if !mysqlReachable(dsn) {
-		t.Skip("mysql not reachable")
-	}
-	schema := fmt.Sprintf("teamster_test_p3_%d_%d", time.Now().UnixNano(), atomic.AddInt64(&mysqlSchemaCounter, 1))
-	if err := mysqlEnsureSchema(dsn, schema); err != nil {
-		t.Fatalf("ensure schema: %v", err)
-	}
-	schemaDSN, err := mysqlRebindSchema(dsn, schema)
-	if err != nil {
-		t.Fatalf("rebind: %v", err)
-	}
-	st, err := mysql.New(schemaDSN)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = st.Close()
-		_ = mysqlDropSchema(dsn, schema)
-	})
-	return st
+func openScratchStore(t *testing.T) store.Store {
+	return storetest.Open(t, "teamster_test_p3")
 }
 
 // TestTagEntity verifies the tag-application path: seed tags exist, applying a
@@ -50,7 +21,7 @@ func openScratchStore(t *testing.T) *mysql.Store {
 func TestTagEntity(t *testing.T) {
 	st := openScratchStore(t)
 	ctx := context.Background()
-	db := st.DB()
+	db := st
 
 	// Migration v12 seeds 20 starter tags.
 	tags, err := st.ListTags(ctx)
@@ -91,51 +62,36 @@ func TestTagEntity(t *testing.T) {
 	// entity_tags should have exactly 2 rows for o1 (phase=build, squad=alpha),
 	// the re-tag updated in place rather than duplicating.
 	var n int
-	if err := db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM entity_tags WHERE entity_type='outcome' AND entity_id='o1'`).Scan(&n); err != nil {
-		t.Fatalf("count entity_tags: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT COUNT(*) FROM entity_tags WHERE entity_type='outcome' AND entity_id='o1'`, nil, &n)
 	if n != 2 {
 		t.Fatalf("expected 2 entity_tags rows for o1, got %d", n)
 	}
 
 	// The new squad=alpha tag is non-seed.
 	var isSeed int
-	if err := db.QueryRowContext(ctx,
-		`SELECT is_seed FROM tags WHERE tag_key='squad' AND tag_value='alpha'`).Scan(&isSeed); err != nil {
-		t.Fatalf("query squad tag: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT is_seed FROM tags WHERE tag_key='squad' AND tag_value='alpha'`, nil, &isSeed)
 	if isSeed != 0 {
 		t.Errorf("operator-defined tag squad=alpha should have is_seed=0, got %d", isSeed)
 	}
 
 	// Source was refreshed by the re-tag.
 	var src string
-	if err := db.QueryRowContext(ctx,
-		`SELECT et.source FROM entity_tags et JOIN tags t ON t.id=et.tag_id
-		 WHERE et.entity_type='outcome' AND et.entity_id='o1' AND t.tag_key='phase' AND t.tag_value='build'`).Scan(&src); err != nil {
-		t.Fatalf("query source: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT et.source FROM entity_tags et JOIN tags t ON t.id=et.tag_id
+		 WHERE et.entity_type='outcome' AND et.entity_id='o1' AND t.tag_key='phase' AND t.tag_value='build'`, nil, &src)
 	if src != "classifier" {
 		t.Errorf("re-tag should refresh source to 'classifier', got %q", src)
 	}
 
 	// The new squad=alpha tag stored its description (dynamic + self-describing).
 	var squadDesc string
-	if err := db.QueryRowContext(ctx,
-		`SELECT description FROM tags WHERE tag_key='squad' AND tag_value='alpha'`).Scan(&squadDesc); err != nil {
-		t.Fatalf("query squad desc: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT description FROM tags WHERE tag_key='squad' AND tag_value='alpha'`, nil, &squadDesc)
 	if squadDesc != "the alpha squad owns this" {
 		t.Errorf("new tag should store its description, got %q", squadDesc)
 	}
 
 	// The seed tag's description was NOT clobbered by the re-tag's description.
 	var phaseBuildDesc string
-	if err := db.QueryRowContext(ctx,
-		`SELECT description FROM tags WHERE tag_key='phase' AND tag_value='build'`).Scan(&phaseBuildDesc); err != nil {
-		t.Fatalf("query phase=build desc: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT description FROM tags WHERE tag_key='phase' AND tag_value='build'`, nil, &phaseBuildDesc)
 	if phaseBuildDesc == "SHOULD NOT OVERWRITE SEED DESC" || phaseBuildDesc == "" {
 		t.Errorf("re-tag must not clobber existing description, got %q", phaseBuildDesc)
 	}
@@ -152,7 +108,7 @@ func TestTagEntity(t *testing.T) {
 func TestOpenFocusIntervalGuard(t *testing.T) {
 	st := openScratchStore(t)
 	ctx := context.Background()
-	db := st.DB()
+	db := st
 	key := store.SessionKey{SessionID: "sess1", AgentName: "@spine"}
 
 	// First focus → one open interval.
@@ -167,10 +123,7 @@ func TestOpenFocusIntervalGuard(t *testing.T) {
 		t.Fatalf("same-entity re-focus should not add a row; got %d intervals", got)
 	}
 	var openCount int
-	if err := db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM wms_intervals WHERE kind='focus' AND session_id='sess1' AND agent_name='@spine' AND ended_at IS NULL`).Scan(&openCount); err != nil {
-		t.Fatalf("count open: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT COUNT(*) FROM wms_intervals WHERE kind='focus' AND session_id='sess1' AND agent_name='@spine' AND ended_at IS NULL`, nil, &openCount)
 	if openCount != 1 {
 		t.Fatalf("expected exactly 1 open interval, got %d", openCount)
 	}
@@ -182,10 +135,7 @@ func TestOpenFocusIntervalGuard(t *testing.T) {
 	if got := countIntervals(t, db, "sess1", "@spine"); got != 2 {
 		t.Fatalf("switching entity should add a row; got %d intervals", got)
 	}
-	if err := db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM wms_intervals WHERE kind='focus' AND session_id='sess1' AND agent_name='@spine' AND ended_at IS NULL`).Scan(&openCount); err != nil {
-		t.Fatalf("count open after switch: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT COUNT(*) FROM wms_intervals WHERE kind='focus' AND session_id='sess1' AND agent_name='@spine' AND ended_at IS NULL`, nil, &openCount)
 	if openCount != 1 {
 		t.Fatalf("after switch expected 1 open interval, got %d", openCount)
 	}
@@ -197,7 +147,7 @@ func TestOpenFocusIntervalGuard(t *testing.T) {
 func TestCloseFocusInterval(t *testing.T) {
 	st := openScratchStore(t)
 	ctx := context.Background()
-	db := st.DB()
+	db := st
 	key := store.SessionKey{SessionID: "sess1", AgentName: "@spine"}
 
 	// No-op when nothing is open: must not error and must not create a row.
@@ -220,19 +170,13 @@ func TestCloseFocusInterval(t *testing.T) {
 		t.Fatalf("close must not insert a new row; got %d intervals", got)
 	}
 	var openCount int
-	if err := db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM wms_intervals WHERE kind='focus' AND session_id='sess1' AND agent_name='@spine' AND ended_at IS NULL`).Scan(&openCount); err != nil {
-		t.Fatalf("count open: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT COUNT(*) FROM wms_intervals WHERE kind='focus' AND session_id='sess1' AND agent_name='@spine' AND ended_at IS NULL`, nil, &openCount)
 	if openCount != 0 {
 		t.Fatalf("after close expected 0 open intervals, got %d", openCount)
 	}
 	// The closed interval still points at the real entity, not an empty one.
 	var entityType, entityID string
-	if err := db.QueryRowContext(ctx,
-		`SELECT entity_type, entity_id FROM wms_intervals WHERE kind='focus' AND session_id='sess1' AND agent_name='@spine'`).Scan(&entityType, &entityID); err != nil {
-		t.Fatalf("read closed interval: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT entity_type, entity_id FROM wms_intervals WHERE kind='focus' AND session_id='sess1' AND agent_name='@spine'`, nil, &entityType, &entityID)
 	if entityType != "outcome" || entityID != "out1" {
 		t.Errorf("closed interval should retain its entity, got %s/%s", entityType, entityID)
 	}
@@ -256,16 +200,13 @@ func TestCloseFocusInterval(t *testing.T) {
 func TestCloseFocusIntervalForEntity(t *testing.T) {
 	st := openScratchStore(t)
 	ctx := context.Background()
-	db := st.DB()
+	db := st
 	key := store.SessionKey{SessionID: "sess1", AgentName: "@spine"}
 
 	openCount := func() int {
 		t.Helper()
 		var n int
-		if err := db.QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM wms_intervals WHERE kind='focus' AND session_id='sess1' AND agent_name='@spine' AND ended_at IS NULL`).Scan(&n); err != nil {
-			t.Fatalf("count open: %v", err)
-		}
+		storetest.QueryRow(t, ctx, db, `SELECT COUNT(*) FROM wms_intervals WHERE kind='focus' AND session_id='sess1' AND agent_name='@spine' AND ended_at IS NULL`, nil, &n)
 		return n
 	}
 
@@ -311,23 +252,18 @@ func TestCloseFocusIntervalForEntity(t *testing.T) {
 	}
 	// The closed interval retains A's identity.
 	var entityType, entityID string
-	if err := db.QueryRowContext(ctx,
-		`SELECT entity_type, entity_id FROM wms_intervals WHERE kind='focus' AND session_id='sess1' AND agent_name='@spine'`).Scan(&entityType, &entityID); err != nil {
-		t.Fatalf("read closed interval: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT entity_type, entity_id FROM wms_intervals WHERE kind='focus' AND session_id='sess1' AND agent_name='@spine'`, nil, &entityType, &entityID)
 	if entityType != "outcome" || entityID != "out-A" {
 		t.Errorf("closed interval should retain entity A, got %s/%s", entityType, entityID)
 	}
 }
 
-func countIntervals(t *testing.T, db *sql.DB, sessionID, agent string) int {
+func countIntervals(t *testing.T, db store.Store, sessionID, agent string) int {
 	t.Helper()
 	var n int
-	if err := db.QueryRowContext(context.Background(),
+	storetest.QueryRow(t, context.Background(), db,
 		`SELECT COUNT(*) FROM wms_intervals WHERE kind='focus' AND session_id=? AND agent_name=?`,
-		sessionID, agent).Scan(&n); err != nil {
-		t.Fatalf("count intervals: %v", err)
-	}
+		[]any{sessionID, agent}, &n)
 	return n
 }
 
@@ -415,15 +351,12 @@ func TestTagCategoriesAndGetEntityTags(t *testing.T) {
 func TestTagDescriptionBackfill(t *testing.T) {
 	st := openScratchStore(t)
 	ctx := context.Background()
-	db := st.DB()
+	db := st
 
 	descOf := func(key, val string) string {
 		t.Helper()
 		var d string
-		if err := db.QueryRowContext(ctx,
-			`SELECT description FROM tags WHERE tag_key=? AND tag_value=?`, key, val).Scan(&d); err != nil {
-			t.Fatalf("query desc %s=%s: %v", key, val, err)
-		}
+		storetest.QueryRow(t, ctx, db, `SELECT description FROM tags WHERE tag_key=? AND tag_value=?`, []any{key, val}, &d)
 		return d
 	}
 

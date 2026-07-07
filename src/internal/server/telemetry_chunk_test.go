@@ -2,17 +2,14 @@ package server
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
-	"net/url"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
-	mysqldriver "github.com/go-sql-driver/mysql"
-
-	storemysql "github.com/bmjdotnet/teamster/internal/store/mysql"
+	"github.com/bmjdotnet/teamster/internal/store"
+	"github.com/bmjdotnet/teamster/internal/store/storetest"
 )
 
 // TestTelemetryChunkSizing is a pure-logic guard (no DB) that the chunk loop
@@ -42,87 +39,18 @@ func TestTelemetryChunkSizing(t *testing.T) {
 	}
 }
 
-// freshTelemetryDB creates a throwaway MySQL schema, fully migrates it via
-// storemysql.New, and returns a Server wired with the resulting *sql.DB. It
-// SKIPs when TEAMSTER_TEST_MYSQL_DSN is unset (vacuous green). The base DSN must
-// be a server-level mysql:// URL with no database name (e.g.
-// mysql://root:test@127.0.0.1:13306/) so the CREATE DATABASE connection does
-// not hit Error 1049 against a not-yet-existing schema.
-func freshTelemetryDB(t *testing.T) (*Server, *sql.DB) {
+// freshTelemetryDB creates a throwaway MySQL schema, fully migrated, and
+// returns a Server wired with the resulting store.Store. It SKIPs when
+// TEAMSTER_TEST_MYSQL_DSN is unset (vacuous green).
+func freshTelemetryDB(t *testing.T) (*Server, store.Store) {
 	t.Helper()
-	base := os.Getenv("TEAMSTER_TEST_MYSQL_DSN")
-	if base == "" {
-		t.Skip("TEAMSTER_TEST_MYSQL_DSN not set")
-	}
-
-	schema := fmt.Sprintf("teamster_drain_%d", time.Now().UnixNano())
-
-	admin := openServerLevel(t, base)
-	if _, err := admin.Exec("CREATE DATABASE `" + schema + "`"); err != nil {
-		admin.Close() //nolint:errcheck
-		t.Fatalf("create schema: %v", err)
-	}
-	t.Cleanup(func() {
-		_, _ = admin.Exec("DROP DATABASE IF EXISTS `" + schema + "`")
-		_ = admin.Close()
-	})
-
-	ms, err := storemysql.New(rebindSchema(t, base, schema))
-	if err != nil {
-		t.Fatalf("migrate schema: %v", err)
-	}
-	t.Cleanup(func() { _ = ms.Close() })
-
+	st := storetest.Open(t, "teamster_drain")
 	s := &Server{
-		wmsDB:           ms.DB(),
+		obsStore:        st,
 		telemetry:       &telemetryQueue{fallback: t.TempDir() + "/telemetry-fallback.jsonl"},
 		telemetryAgents: &agentCache{cache: make(map[string]string)},
 	}
-	return s, ms.DB()
-}
-
-// openServerLevel opens a raw driver connection with the database name cleared,
-// so CREATE/DROP DATABASE work even before the per-test schema exists.
-func openServerLevel(t *testing.T, base string) *sql.DB {
-	t.Helper()
-	u, err := url.Parse(base)
-	if err != nil {
-		t.Fatalf("parse base dsn: %v", err)
-	}
-	cfg := mysqldriver.NewConfig()
-	cfg.Net = "tcp"
-	cfg.Addr = u.Host
-	if u.User != nil {
-		cfg.User = u.User.Username()
-		if pw, ok := u.User.Password(); ok {
-			cfg.Passwd = pw
-		}
-	}
-	cfg.DBName = "" // server-level: no database selected
-	cfg.ParseTime = true
-	cfg.Loc = time.UTC
-	db, err := sql.Open("mysql", cfg.FormatDSN())
-	if err != nil {
-		t.Fatalf("open server-level: %v", err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := db.PingContext(ctx); err != nil {
-		db.Close() //nolint:errcheck
-		t.Skipf("mysql not reachable: %v", err)
-	}
-	return db
-}
-
-// rebindSchema returns the base mysql:// URL with its path set to schema.
-func rebindSchema(t *testing.T, base, schema string) string {
-	t.Helper()
-	u, err := url.Parse(base)
-	if err != nil {
-		t.Fatalf("parse base dsn: %v", err)
-	}
-	u.Path = "/" + schema
-	return u.String()
+	return s, st
 }
 
 func makeTelemetryRows(n int, prefix string) []TelemetryRow {
@@ -143,12 +71,10 @@ func makeTelemetryRows(n int, prefix string) []TelemetryRow {
 	return rows
 }
 
-func countLedger(t *testing.T, db *sql.DB) int {
+func countLedger(t *testing.T, db store.Store) int {
 	t.Helper()
 	var n int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM token_ledger`).Scan(&n); err != nil {
-		t.Fatalf("count token_ledger: %v", err)
-	}
+	storetest.QueryRow(t, context.Background(), db, `SELECT COUNT(*) FROM token_ledger`, nil, &n)
 	return n
 }
 
@@ -213,7 +139,7 @@ func TestDrainTelemetryFallback_Idempotent(t *testing.T) {
 
 // TestDrainTelemetryFallback_RetainsOnFailure proves the spool is NOT truncated
 // when the insert fails — the data-loss bug behind the lost 8335 events. We
-// force failure by pointing wmsDB at a closed connection.
+// force failure by closing the store's connection before draining.
 func TestDrainTelemetryFallback_RetainsOnFailure(t *testing.T) {
 	s, db := freshTelemetryDB(t)
 	if err := db.Close(); err != nil {
@@ -240,15 +166,12 @@ func TestDrainTelemetryFallback_RetainsOnFailure(t *testing.T) {
 }
 
 // readLedgerRow returns the token/cost columns for one message_id.
-func readLedgerRow(t *testing.T, db *sql.DB, messageID string) (in, out, cacheRead, cacheWrite int64, cost float64) {
+func readLedgerRow(t *testing.T, db store.Store, messageID string) (in, out, cacheRead, cacheWrite int64, cost float64) {
 	t.Helper()
-	err := db.QueryRow(
+	storetest.QueryRow(t, context.Background(), db,
 		`SELECT input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd
-		   FROM token_ledger WHERE message_id = ?`, messageID,
-	).Scan(&in, &out, &cacheRead, &cacheWrite, &cost)
-	if err != nil {
-		t.Fatalf("read ledger row %s: %v", messageID, err)
-	}
+		   FROM token_ledger WHERE message_id = ?`, []any{messageID},
+		&in, &out, &cacheRead, &cacheWrite, &cost)
 	return
 }
 
@@ -335,11 +258,8 @@ func TestTelemetryStampsHostUsername(t *testing.T) {
 		t.Fatalf("flush stamped row: %v", err)
 	}
 	var host, username string
-	if err := db.QueryRow(
-		`SELECT host, username FROM token_ledger WHERE message_id = ?`, "msg_hu|req_hu",
-	).Scan(&host, &username); err != nil {
-		t.Fatalf("read back host/username: %v", err)
-	}
+	storetest.QueryRow(t, context.Background(), db,
+		`SELECT host, username FROM token_ledger WHERE message_id = ?`, []any{"msg_hu|req_hu"}, &host, &username)
 	if host != "hub-1" || username != "claude" {
 		t.Fatalf("host/username round-trip = %q/%q, want hub-1/claude", host, username)
 	}
@@ -354,11 +274,8 @@ func TestTelemetryStampsHostUsername(t *testing.T) {
 	if err := s.flushTelemetryBatch([]TelemetryRow{unstamped}); err != nil {
 		t.Fatalf("flush unstamped row: %v", err)
 	}
-	if err := db.QueryRow(
-		`SELECT username FROM token_ledger WHERE message_id = ?`, "msg_nou|req_nou",
-	).Scan(&username); err != nil {
-		t.Fatalf("read back default username: %v", err)
-	}
+	storetest.QueryRow(t, context.Background(), db,
+		`SELECT username FROM token_ledger WHERE message_id = ?`, []any{"msg_nou|req_nou"}, &username)
 	if username != "" {
 		t.Fatalf("omitted username = %q, want '' (column default)", username)
 	}

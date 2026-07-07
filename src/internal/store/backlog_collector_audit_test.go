@@ -2,18 +2,15 @@ package store_test
 
 import (
 	"context"
-	"database/sql"
-	"fmt"
 	"io"
 	"log/slog"
-	"os"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/bmjdotnet/teamster/internal/observability"
 	"github.com/bmjdotnet/teamster/internal/rollup"
-	"github.com/bmjdotnet/teamster/internal/store/mysql"
+	"github.com/bmjdotnet/teamster/internal/store"
+	"github.com/bmjdotnet/teamster/internal/store/storetest"
 
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
@@ -32,37 +29,13 @@ import (
 //
 // Skips when TEAMSTER_TEST_MYSQL_DSN is unset. Never touches the live DB.
 func TestBacklogCollectorLiveValidation(t *testing.T) {
-	dsn := os.Getenv("TEAMSTER_TEST_MYSQL_DSN")
-	if dsn == "" {
-		t.Skip("TEAMSTER_TEST_MYSQL_DSN not set")
-	}
-	if !mysqlReachable(dsn) {
-		t.Skip("mysql not reachable")
-	}
-
-	schema := fmt.Sprintf("teamster_test_backlog_%d_%d", time.Now().UnixNano(), atomic.AddInt64(&mysqlSchemaCounter, 1))
-	if err := mysqlEnsureSchema(dsn, schema); err != nil {
-		t.Fatalf("ensure schema: %v", err)
-	}
-	schemaDSN, err := mysqlRebindSchema(dsn, schema)
-	if err != nil {
-		t.Fatalf("rebind: %v", err)
-	}
-	st, err := mysql.New(schemaDSN)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = st.Close()
-		_ = mysqlDropSchema(dsn, schema)
-	})
-
+	st := storetest.Open(t, "teamster_test_backlog")
 	ctx := context.Background()
-	db := st.DB()
+	db := st
 	base := time.Date(2026, 5, 30, 12, 0, 0, 0, time.UTC)
 
 	// Fresh schema: empty ledger ⇒ backlog must read 0.
-	if got := readBacklog(t, db); got != 0 {
+	if got := readBacklog(t, st); got != 0 {
 		t.Fatalf("empty ledger: backlog = %v, want 0", got)
 	}
 
@@ -79,12 +52,12 @@ func TestBacklogCollectorLiveValidation(t *testing.T) {
 	insertLedger(t, db, ctx, "m5", "s1", "", base.Add(5*time.Minute), 5.0)
 
 	// All 5 are unattributed ⇒ backlog == 5 (the true LEFT-JOIN depth).
-	if got := readBacklog(t, db); got != 5 {
+	if got := readBacklog(t, st); got != 5 {
 		t.Fatalf("after seeding 5 unattributed: backlog = %v, want 5", got)
 	}
 
 	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
-	r := rollup.New(db, nil, discard)
+	r := rollup.NewRunner(st, st, st, st, st, st, nil, discard)
 
 	// One rollup pass allocates all 5 (4 temporal_join + 1 unallocated) ⇒ the
 	// backlog drains to exactly 0. This is the invariant: a pass that allocates
@@ -97,7 +70,7 @@ func TestBacklogCollectorLiveValidation(t *testing.T) {
 	if allocated != 5 {
 		t.Fatalf("allocate returned %d, want 5", allocated)
 	}
-	if got := readBacklog(t, db); got != 0 {
+	if got := readBacklog(t, st); got != 0 {
 		t.Fatalf("after full rollup pass: backlog = %v, want 0 (gauge did not drain with the anti-join)", got)
 	}
 
@@ -106,7 +79,7 @@ func TestBacklogCollectorLiveValidation(t *testing.T) {
 	// the live shortfall, not a cumulative total.
 	insertLedger(t, db, ctx, "m6", "s1", "spine", base.Add(6*time.Minute), 10.0)
 	insertLedger(t, db, ctx, "m7", "s1", "spine", base.Add(7*time.Minute), 10.0)
-	if got := readBacklog(t, db); got != 2 {
+	if got := readBacklog(t, st); got != 2 {
 		t.Fatalf("after adding 2 new unattributed: backlog = %v, want 2", got)
 	}
 
@@ -114,7 +87,7 @@ func TestBacklogCollectorLiveValidation(t *testing.T) {
 	if _, err := r.Allocate(ctx); err != nil {
 		t.Fatalf("second allocate: %v", err)
 	}
-	if got := readBacklog(t, db); got != 0 {
+	if got := readBacklog(t, st); got != 0 {
 		t.Fatalf("after second pass: backlog = %v, want 0", got)
 	}
 }
@@ -122,9 +95,9 @@ func TestBacklogCollectorLiveValidation(t *testing.T) {
 // readBacklog drives a FRESH BacklogCollector through its public Collect path
 // (the exact mechanism Prometheus uses) and returns the emitted gauge value.
 // A fresh collector each call sidesteps the 30s cache so the value is current.
-func readBacklog(t *testing.T, db *sql.DB) float64 {
+func readBacklog(t *testing.T, rep store.ReportingStore) float64 {
 	t.Helper()
-	c := observability.NewBacklogCollector(db)
+	c := observability.NewBacklogCollector(rep)
 	ch := make(chan prometheus.Metric, 1)
 	c.Collect(ch)
 	close(ch)

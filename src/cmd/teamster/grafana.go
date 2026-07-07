@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -34,7 +33,7 @@ type grafanaTemplateData struct {
 	PrometheusPort       int
 	HookdPort            int
 
-	// Teamster MySQL datasource connection (decomposed from cfg.StoreDSN.Primary).
+	// Teamster MySQL datasource connection (decomposed from cfg.StoreDSN).
 	// Grafana connects as the read-only GrafanaDBUser, not the StoreDSN account.
 	StoreHost         string
 	StorePort         string
@@ -106,14 +105,14 @@ func StartGrafana(ctx context.Context, cfg config.Config) (*exec.Cmd, error) {
 	// install-mode), the datasource still provisions but with no password and
 	// its panels are unauthorized; that is surfaced by install.sh and
 	// `teamster status`, not by aborting grafana start.
-	if host, port, db, ok := decomposeStoreDSN(cfg.StoreDSN.Primary); ok {
+	if cfg.StoreDSN.Scheme == "mysql" && cfg.StoreDSN.Host != "" && cfg.StoreDSN.Database != "" {
 		roPassword, perr := readGrafanaReadonlyPassword(grafanaStateDir)
 		if perr != nil {
 			return nil, fmt.Errorf("grafana: read-only db password: %w", perr)
 		}
-		data.StoreHost = host
-		data.StorePort = port
-		data.StoreDB = db
+		data.StoreHost = cfg.StoreDSN.Host
+		data.StorePort = storePortString(cfg.StoreDSN.Port)
+		data.StoreDB = cfg.StoreDSN.Database
 		data.GrafanaDBUser = grafanaReadonlyUser
 		data.GrafanaDBPassword = roPassword
 		if roPassword == "" {
@@ -290,30 +289,13 @@ func grafanaPersistentSecret(stateDir, name string, nBytes int) (string, error) 
 	return secret, nil
 }
 
-// decomposeStoreDSN splits a mysql://user:pass@host:port/db URL into the
-// host, port, and database the Grafana MySQL datasource needs. The user/pass
-// are intentionally ignored — Grafana connects as the read-only grafana_ro
-// account, not the StoreDSN write account. Mirrors the parse in
-// internal/store/mysql/store.go convertDSN. Returns ok=false for an empty or
-// non-mysql DSN.
-func decomposeStoreDSN(raw string) (host, port, db string, ok bool) {
-	if !strings.HasPrefix(raw, "mysql://") {
-		return "", "", "", false
+// storePortString returns dsnPort as a string for datasource/status display,
+// defaulting to MySQL's standard 3306 when the DSN omitted a port.
+func storePortString(dsnPort int) string {
+	if dsnPort == 0 {
+		return "3306"
 	}
-	u, err := url.Parse(raw)
-	if err != nil {
-		return "", "", "", false
-	}
-	host = u.Hostname()
-	port = u.Port()
-	db = strings.TrimPrefix(u.Path, "/")
-	if host == "" || db == "" {
-		return "", "", "", false
-	}
-	if port == "" {
-		port = "3306"
-	}
-	return host, port, db, true
+	return strconv.Itoa(dsnPort)
 }
 
 // grafanaReadonlyPasswordFile is the basename, under <grafanaStateDir>, of the

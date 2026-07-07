@@ -3,12 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"os"
-	"strings"
 	"testing"
 
-	_ "github.com/go-sql-driver/mysql"
+	"github.com/bmjdotnet/teamster/internal/store"
 )
 
 // TestRunSQLStmt_Formatting verifies the tab-separated output contract that the
@@ -16,38 +14,30 @@ import (
 // NULL rendered as the literal "NULL", and fields joined by a single tab.
 //
 // Gates on TEAMSTER_TEST_MYSQL_DSN and SKIPs (vacuous green) when unset, like
-// every other DB-backed test. The queries are SELECT literals — no schema or
-// migration is needed, so we open the driver directly against the server.
+// every other DB-backed test. Opens via store.Open (WithSkipMigrate — the
+// queries are SELECT literals, no schema needed) and drives runSQLStmt through
+// the same store.RawExecutor type-assertion `teamster sql` uses in production.
 func TestRunSQLStmt_Formatting(t *testing.T) {
 	dsn := os.Getenv("TEAMSTER_TEST_MYSQL_DSN")
 	if dsn == "" {
 		t.Skip("TEAMSTER_TEST_MYSQL_DSN not set")
 	}
-	drvDSN := strings.TrimPrefix(dsn, "mysql://")
-	if i := strings.Index(drvDSN, "@"); i >= 0 {
-		// mysql://user:pass@host:port/db -> user:pass@tcp(host:port)/db
-		creds, rest := drvDSN[:i+1], drvDSN[i+1:]
-		if j := strings.IndexByte(rest, '/'); j >= 0 {
-			drvDSN = creds + "tcp(" + rest[:j] + ")" + rest[j:]
-		} else {
-			drvDSN = creds + "tcp(" + rest + ")/"
-		}
-	}
-	db, err := sql.Open("mysql", drvDSN)
+	ctx := context.Background()
+	st, err := store.Open(ctx, dsn, store.WithSkipMigrate())
 	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer db.Close() //nolint:errcheck
-	if err := db.Ping(); err != nil {
 		t.Skipf("test mysql not reachable: %v", err)
 	}
+	defer st.Close() //nolint:errcheck
+	rx, ok := st.(store.RawExecutor)
+	if !ok {
+		t.Fatalf("mysql store does not implement store.RawExecutor")
+	}
 
-	ctx := context.Background()
 	const query = "SELECT 1 AS a, NULL AS b, 'c' AS c"
 
 	t.Run("with header", func(t *testing.T) {
 		var buf bytes.Buffer
-		if err := runSQLStmt(ctx, db, query, true, &buf); err != nil {
+		if err := runSQLStmt(ctx, rx, query, true, &buf); err != nil {
 			t.Fatalf("runSQLStmt: %v", err)
 		}
 		want := "a\tb\tc\n1\tNULL\tc\n"
@@ -58,7 +48,7 @@ func TestRunSQLStmt_Formatting(t *testing.T) {
 
 	t.Run("no header (-N)", func(t *testing.T) {
 		var buf bytes.Buffer
-		if err := runSQLStmt(ctx, db, query, false, &buf); err != nil {
+		if err := runSQLStmt(ctx, rx, query, false, &buf); err != nil {
 			t.Fatalf("runSQLStmt: %v", err)
 		}
 		want := "1\tNULL\tc\n"
@@ -69,7 +59,7 @@ func TestRunSQLStmt_Formatting(t *testing.T) {
 
 	t.Run("no rows still prints header when requested", func(t *testing.T) {
 		var buf bytes.Buffer
-		if err := runSQLStmt(ctx, db, "SELECT 1 AS only WHERE 1=0", true, &buf); err != nil {
+		if err := runSQLStmt(ctx, rx, "SELECT 1 AS only WHERE 1=0", true, &buf); err != nil {
 			t.Fatalf("runSQLStmt: %v", err)
 		}
 		if buf.String() != "only\n" {

@@ -256,6 +256,10 @@ type Writer interface {
 	// key can be re-promoted later via DefineTag or the yaml vocabulary.
 	RetireTag(ctx context.Context, tagKey string) error
 
+	// RetireTagValue marks a single (tagKey, tagValue) row retired (retired=1),
+	// the value-level peer of RetireTag's key-level demotion.
+	RetireTagValue(ctx context.Context, tagKey, tagValue string) error
+
 	// UpdateTagValueDescription overwrites the description on ONE (tagKey,
 	// tagValue) row (per-value). A description is free-text classification rubric
 	// with no engine coupling, so this has NO system-managed-key guard — it MUST

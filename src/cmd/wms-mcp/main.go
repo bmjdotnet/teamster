@@ -16,7 +16,8 @@ import (
 	"github.com/bmjdotnet/teamster/internal/logging"
 	mcpwms "github.com/bmjdotnet/teamster/internal/mcp/wms"
 	"github.com/bmjdotnet/teamster/internal/redact"
-	storemysql "github.com/bmjdotnet/teamster/internal/store/mysql"
+	"github.com/bmjdotnet/teamster/internal/store"
+	_ "github.com/bmjdotnet/teamster/internal/store/mysql" // registers mysql, mariadb
 	"github.com/bmjdotnet/teamster/internal/version"
 	"github.com/bmjdotnet/teamster/internal/wms"
 )
@@ -64,41 +65,37 @@ func main() {
 
 	logger := logging.Init("wms-mcp")
 
-	if cfg.StoreDSN.Driver != config.StoreDriverMySQL {
-		logger.Error("TEAMSTER_STORE_DSN must be a mysql:// URL")
-		os.Exit(1)
-	}
-	s, err := storemysql.New(cfg.StoreDSN.Primary,
-		storemysql.WithRequireTagsOnDone(cfg.RequireTagsOnDone))
+	s, err := store.Open(context.Background(), cfg.StoreDSN.Raw,
+		store.WithRequireTagsOnDone(cfg.RequireTagsOnDone))
 	if err != nil {
-		logger.Error("opening store failed", "dsn", redact.Redact(cfg.StoreDSN.Primary), "error", err)
+		logger.Error("opening store failed", "dsn", redact.Redact(cfg.StoreDSN.Raw), "error", err)
 		os.Exit(1)
 	}
 	defer s.Close() //nolint:errcheck
-	var store wms.Store = s
+	var wmsStore wms.Store = s
 
 	// Reconcile the declared tag vocabulary (teamster.yaml `tags:`) into the
 	// seed vocabulary before serving. Non-fatal: a bad vocab line must not stop
 	// the MCP — log the error and proceed with whatever seeds the migrations
 	// already established (honor no-silent-failures: log, don't swallow).
 	if specs := cfg.TagSpecs(); len(specs) > 0 {
-		if err := store.ReconcileVocabulary(context.Background(), specs); err != nil {
+		if err := wmsStore.ReconcileVocabulary(context.Background(), specs); err != nil {
 			logger.Error("reconciling tag vocabulary failed", "tag_keys", len(specs), "error", err)
 		} else {
 			logger.Info("reconciled tag vocabulary", "tag_keys", len(specs))
 		}
 	}
 
-	eng := wms.NewEngine(store, nil)
+	eng := wms.NewEngine(wmsStore, nil)
 
-	eng.AddObserver(wms.NewJournalObserver(store))
+	eng.AddObserver(wms.NewJournalObserver(wmsStore))
 
 	if hookURL := os.Getenv("TEAMSTER_HOOK_SERVER_URL"); hookURL != "" {
 		eng.AddObserver(wms.NewHookObserver(hookURL, cfg.Host))
 	}
 
 	sr := wms.NewJSONLSignalReader()
-	classifier := wms.NewRuleClassifier(store, sr, cfg.LogFile)
+	classifier := wms.NewRuleClassifier(wmsStore, sr, cfg.LogFile)
 	mcpwms.ActiveClassifier = classifier
 	mcpwms.CreatorUser = cfg.User
 	eng.AddObserver(wms.NewClassifierObserver(classifier))
@@ -133,7 +130,7 @@ func main() {
 			respond(req.ID, map[string]interface{}{"tools": mcpwms.ToolDefs})
 
 		case "tools/call":
-			result, callErr := mcpwms.HandleToolCall(store, eng, req.Params)
+			result, callErr := mcpwms.HandleToolCall(wmsStore, eng, req.Params)
 			if callErr != nil {
 				respondError(req.ID, callErr.Code, callErr.Message)
 			} else {

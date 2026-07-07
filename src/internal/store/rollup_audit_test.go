@@ -2,18 +2,15 @@ package store_test
 
 import (
 	"context"
-	"database/sql"
-	"fmt"
 	"io"
 	"log/slog"
 	"math"
-	"os"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/bmjdotnet/teamster/internal/rollup"
-	"github.com/bmjdotnet/teamster/internal/store/mysql"
+	"github.com/bmjdotnet/teamster/internal/store"
+	"github.com/bmjdotnet/teamster/internal/store/storetest"
 )
 
 // TestRollupReallocateDedupAudit is the @auditor's adversarial verification of
@@ -30,33 +27,9 @@ import (
 //
 // Skips when TEAMSTER_TEST_MYSQL_DSN is unset. Never touches the live DB.
 func TestRollupReallocateDedupAudit(t *testing.T) {
-	dsn := os.Getenv("TEAMSTER_TEST_MYSQL_DSN")
-	if dsn == "" {
-		t.Skip("TEAMSTER_TEST_MYSQL_DSN not set")
-	}
-	if !mysqlReachable(dsn) {
-		t.Skip("mysql not reachable")
-	}
-
-	schema := fmt.Sprintf("teamster_test_realloc_%d_%d", time.Now().UnixNano(), atomic.AddInt64(&mysqlSchemaCounter, 1))
-	if err := mysqlEnsureSchema(dsn, schema); err != nil {
-		t.Fatalf("ensure schema: %v", err)
-	}
-	schemaDSN, err := mysqlRebindSchema(dsn, schema)
-	if err != nil {
-		t.Fatalf("rebind: %v", err)
-	}
-	st, err := mysql.New(schemaDSN)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = st.Close()
-		_ = mysqlDropSchema(dsn, schema)
-	})
-
+	st := storetest.Open(t, "teamster_test_realloc")
 	ctx := context.Background()
-	db := st.DB()
+	db := st
 	base := time.Date(2026, 5, 30, 12, 0, 0, 0, time.UTC)
 
 	// @spine focuses outcome o1 for the whole window.
@@ -78,7 +51,7 @@ func TestRollupReallocateDedupAudit(t *testing.T) {
 	insertLedger(t, db, ctx, "m3", "s1", "unknown", base.Add(7*time.Minute), 5.0)
 
 	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
-	r := rollup.New(db, nil, discard)
+	r := rollup.NewRunner(st, st, st, st, st, st, nil, discard)
 
 	if err := r.Run(ctx, false); err != nil {
 		t.Fatalf("initial run: %v", err)
@@ -134,11 +107,9 @@ func TestRollupReallocateDedupAudit(t *testing.T) {
 
 	// SUM(weight)=1 per message must still hold everywhere.
 	var bad int
-	if err := db.QueryRowContext(ctx,
+	storetest.QueryRow(t, ctx, db,
 		`SELECT COUNT(*) FROM (SELECT message_id, SUM(weight) s FROM usage_attribution
-		 GROUP BY message_id HAVING ABS(s-1.0) > 1e-6) x`).Scan(&bad); err != nil {
-		t.Fatalf("weight invariant: %v", err)
-	}
+		 GROUP BY message_id HAVING ABS(s-1.0) > 1e-6) x`, nil, &bad)
 	if bad != 0 {
 		t.Fatalf("weight invariant violated after recovery: %d messages", bad)
 	}
@@ -146,15 +117,11 @@ func TestRollupReallocateDedupAudit(t *testing.T) {
 
 // assertConserved checks cost_rollup total == token_ledger total == want — the
 // conservation invariant that makes double-counting structurally detectable.
-func assertConserved(t *testing.T, db *sql.DB, ctx context.Context, want float64) {
+func assertConserved(t *testing.T, db store.Store, ctx context.Context, want float64) {
 	t.Helper()
 	var rollupTotal, ledgerTotal float64
-	if err := db.QueryRowContext(ctx, `SELECT COALESCE(SUM(cost_usd),0) FROM cost_rollup`).Scan(&rollupTotal); err != nil {
-		t.Fatalf("rollup total: %v", err)
-	}
-	if err := db.QueryRowContext(ctx, `SELECT COALESCE(SUM(cost_usd),0) FROM token_ledger`).Scan(&ledgerTotal); err != nil {
-		t.Fatalf("ledger total: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT COALESCE(SUM(cost_usd),0) FROM cost_rollup`, nil, &rollupTotal)
+	storetest.QueryRow(t, ctx, db, `SELECT COALESCE(SUM(cost_usd),0) FROM token_ledger`, nil, &ledgerTotal)
 	if math.Abs(rollupTotal-ledgerTotal) > 1e-4 {
 		t.Fatalf("conservation violated: cost_rollup=%.6f ledger=%.6f", rollupTotal, ledgerTotal)
 	}
@@ -163,26 +130,22 @@ func assertConserved(t *testing.T, db *sql.DB, ctx context.Context, want float64
 	}
 }
 
-func assertRowCount(t *testing.T, db *sql.DB, ctx context.Context, table string, want int) {
+func assertRowCount(t *testing.T, db store.Store, ctx context.Context, table string, want int) {
 	t.Helper()
 	var n int
-	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+table).Scan(&n); err != nil {
-		t.Fatalf("count %s: %v", table, err)
-	}
+	storetest.QueryRow(t, ctx, db, "SELECT COUNT(*) FROM "+table, nil, &n)
 	if n != want {
 		t.Fatalf("%s row count = %d, want %d", table, n, want)
 	}
 }
 
-func assertMethod(t *testing.T, db *sql.DB, ctx context.Context, messageID, wantMethod, wantType, wantID string) {
+func assertMethod(t *testing.T, db store.Store, ctx context.Context, messageID, wantMethod, wantType, wantID string) {
 	t.Helper()
 	var method, et, eid string
 	var w float64
-	if err := db.QueryRowContext(ctx,
+	storetest.QueryRow(t, ctx, db,
 		`SELECT method, entity_type, entity_id, weight FROM usage_attribution WHERE message_id=?`,
-		messageID).Scan(&method, &et, &eid, &w); err != nil {
-		t.Fatalf("query %s: %v", messageID, err)
-	}
+		[]any{messageID}, &method, &et, &eid, &w)
 	if method != wantMethod || et != wantType || eid != wantID {
 		t.Fatalf("%s: got (%q,%q,%q), want (%q,%q,%q)", messageID, method, et, eid, wantMethod, wantType, wantID)
 	}
@@ -191,25 +154,21 @@ func assertMethod(t *testing.T, db *sql.DB, ctx context.Context, messageID, want
 	}
 }
 
-func assertBucketCost(t *testing.T, db *sql.DB, ctx context.Context, et, eid string, want float64) {
+func assertBucketCost(t *testing.T, db store.Store, ctx context.Context, et, eid string, want float64) {
 	t.Helper()
 	var c float64
-	if err := db.QueryRowContext(ctx,
+	storetest.QueryRow(t, ctx, db,
 		`SELECT COALESCE(SUM(cost_usd),0) FROM cost_rollup WHERE entity_type=? AND entity_id=?`,
-		et, eid).Scan(&c); err != nil {
-		t.Fatalf("bucket cost (%q,%q): %v", et, eid, err)
-	}
+		[]any{et, eid}, &c)
 	if math.Abs(c-want) > 1e-4 {
 		t.Fatalf("bucket (%q,%q) cost=%.6f, want %.6f", et, eid, c, want)
 	}
 }
 
-func computedAt(t *testing.T, db *sql.DB, ctx context.Context, messageID string) time.Time {
+func computedAt(t *testing.T, db store.Store, ctx context.Context, messageID string) time.Time {
 	t.Helper()
 	var ts time.Time
-	if err := db.QueryRowContext(ctx,
-		`SELECT computed_at FROM usage_attribution WHERE message_id=?`, messageID).Scan(&ts); err != nil {
-		t.Fatalf("computed_at %s: %v", messageID, err)
-	}
+	storetest.QueryRow(t, ctx, db,
+		`SELECT computed_at FROM usage_attribution WHERE message_id=?`, []any{messageID}, &ts)
 	return ts
 }

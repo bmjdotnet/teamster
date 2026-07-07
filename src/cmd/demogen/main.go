@@ -4,18 +4,19 @@
 package main
 
 import (
-	"database/sql"
+	"context"
 	"flag"
 	"fmt"
 	"log"
 	"math/rand"
-	"net/url"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/bmjdotnet/teamster/internal/config"
-	mysqldriver "github.com/go-sql-driver/mysql"
+	"github.com/bmjdotnet/teamster/internal/store"
+	_ "github.com/bmjdotnet/teamster/internal/store/mysql" // registers the "mysql"/"mariadb" store.Open schemes
+	"github.com/bmjdotnet/teamster/internal/wms"
 )
 
 // --------------------------------------------------------------------------
@@ -97,30 +98,33 @@ func main() {
 		*dsn = os.Getenv("TEAMSTER_STORE_DSN")
 	}
 	if *dsn == "" {
-		if cfg, err := config.Load(); err == nil && cfg.StoreDSN.Primary != "" {
-			*dsn = cfg.StoreDSN.Primary
+		if cfg, err := config.Load(); err == nil && cfg.StoreDSN.Raw != "" {
+			*dsn = cfg.StoreDSN.Raw
 		}
 	}
 	if *dsn == "" {
 		log.Fatal("no DSN: set TEAMSTER_STORE_DSN, pass --dsn=, or configure store.dsn in teamster.yaml")
 	}
 
-	goDriverDSN, err := normalizeDSN(*dsn)
+	ctx := context.Background()
+	st, err := store.Open(ctx, *dsn)
 	if err != nil {
-		log.Fatalf("bad DSN: %v", err)
+		log.Fatalf("open store: %v", err)
 	}
-	db, err := sql.Open("mysql", goDriverDSN)
-	if err != nil {
-		log.Fatalf("open db: %v", err)
+	defer st.Close() //nolint:errcheck
+
+	ds, ok := st.(store.DemoSeeder)
+	if !ok {
+		log.Fatalf("backend has no demo seeder")
 	}
-	defer db.Close()
-	if err := db.Ping(); err != nil {
-		log.Fatalf("ping db: %v", err)
+	rx, ok := st.(store.RawExecutor)
+	if !ok {
+		log.Fatalf("backend has no raw-SQL surface")
 	}
 
 	// Always clean before generating to prevent duplicates (B5 fix)
 	fmt.Println("Cleaning existing demo data...")
-	if err := cleanDemo(db); err != nil {
+	if err := ds.CleanDemo(ctx); err != nil {
 		log.Fatalf("clean: %v", err)
 	}
 
@@ -130,7 +134,7 @@ func main() {
 	}
 
 	rng := rand.New(rand.NewSource(42))
-	anchor := time.Now().UTC().Truncate(24 * time.Hour).AddDate(0, 0, -30)
+	anchor := time.Now().UTC().Truncate(24*time.Hour).AddDate(0, 0, -30)
 	genTime := time.Now().UTC()
 
 	outcomes := buildOutcomes()
@@ -140,12 +144,12 @@ func main() {
 
 	// Insert outcomes
 	for _, out := range outcomes {
-		if err := upsertOutcome(db, out, anchor); err != nil {
+		if err := upsertOutcome(ctx, st, out, anchor); err != nil {
 			log.Fatalf("upsert outcome %s: %v", out.id, err)
 		}
 		totalOutcomes++
 
-		if err := bindTags(db, "outcome", out.id, out.tags); err != nil {
+		if err := bindTags(ctx, st, "outcome", out.id, out.tags); err != nil {
 			log.Fatalf("bind outcome tags %s: %v", out.id, err)
 		}
 		totalTags += len(out.tags)
@@ -154,7 +158,7 @@ func main() {
 	// Insert outcome_edges
 	for _, out := range outcomes {
 		if out.parentID != "" {
-			if err := insertOutcomeEdge(db, out.parentID, out.id); err != nil {
+			if err := st.AddOutcomeEdge(ctx, out.parentID, out.id); err != nil {
 				log.Fatalf("insert edge %s→%s: %v", out.parentID, out.id, err)
 			}
 			totalEdges++
@@ -171,39 +175,39 @@ func main() {
 
 	// Insert workunits, messages, intervals, attribution, journal, sessions
 	for _, wu := range allUnits {
-		if err := upsertWorkUnit(db, wu, anchor); err != nil {
+		if err := upsertWorkUnit(ctx, st, wu, anchor); err != nil {
 			log.Fatalf("upsert workunit %s: %v", wu.id, err)
 		}
 		totalUnits++
 
-		if err := bindTags(db, "workunit", wu.id, wu.tags); err != nil {
+		if err := bindTags(ctx, st, "workunit", wu.id, wu.tags); err != nil {
 			log.Fatalf("bind workunit tags %s: %v", wu.id, err)
 		}
 		totalTags += len(wu.tags)
 
-		msgs, err := genMessages(db, rng, wu, anchor)
+		msgs, err := genMessages(ctx, ds, rng, wu, anchor)
 		if err != nil {
 			log.Fatalf("gen messages %s: %v", wu.id, err)
 		}
 		totalMessages += len(msgs)
 
-		intervals, err := genIntervals(db, wu, anchor, msgs, genTime)
+		intervals, err := genIntervals(ctx, rx, wu, anchor, msgs, genTime)
 		if err != nil {
 			log.Fatalf("gen intervals %s: %v", wu.id, err)
 		}
 		totalIntervals += intervals
 
-		if err := genAttribution(db, wu, msgs); err != nil {
+		if err := genAttribution(ctx, rx, wu, msgs); err != nil {
 			log.Fatalf("gen attribution %s: %v", wu.id, err)
 		}
 
-		n, err := genJournal(db, wu, anchor)
+		n, err := genJournal(ctx, rx, wu, anchor)
 		if err != nil {
 			log.Fatalf("gen journal %s: %v", wu.id, err)
 		}
 		totalJournal += n
 
-		n, err = genSessions(db, wu, msgs)
+		n, err = genSessions(ctx, st, wu, msgs)
 		if err != nil {
 			log.Fatalf("gen sessions %s: %v", wu.id, err)
 		}
@@ -211,24 +215,29 @@ func main() {
 	}
 
 	// Entity dependencies
-	n, err := genDependencies(db, allUnits, anchor)
+	n, err := genDependencies(ctx, st, allUnits, anchor)
 	if err != nil {
 		log.Fatalf("gen dependencies: %v", err)
 	}
 	totalDeps += n
 
 	// Cost rollup
-	if err := buildCostRollup(db, outcomes); err != nil {
+	//
+	// TODO(phase-13/ADR-4 step 9): route through the real rollup service /
+	// AllocationStore.BuildCostRollup once Phase 11 lands, per
+	// phase-13-nongo-adrs-admin-plane.md's named partial dependency — deferred
+	// rather than hand-rolling a separate rollup path for demo data.
+	if err := buildCostRollup(ctx, rx, outcomes); err != nil {
 		log.Fatalf("build cost_rollup: %v", err)
 	}
 
 	// Link usage_attribution to covering intervals
-	if err := linkAttributionIntervals(db); err != nil {
+	if err := linkAttributionIntervals(ctx, rx); err != nil {
 		log.Fatalf("link attribution intervals: %v", err)
 	}
 
 	// Assemble cost on closed state intervals
-	if err := assembleIntervalCosts(db, genTime); err != nil {
+	if err := assembleIntervalCosts(ctx, rx, genTime); err != nil {
 		log.Fatalf("assemble interval costs: %v", err)
 	}
 
@@ -517,61 +526,49 @@ func buildOutcomes() []*outcome {
 // Upsert entities
 // --------------------------------------------------------------------------
 
-func upsertOutcome(db *sql.DB, out *outcome, anchor time.Time) error {
-	createdAt := anchor
-	_, err := db.Exec(`
-		INSERT IGNORE INTO outcomes
-		  (id, title, description, status, prior_status, focus, origin_host, origin_session, origin_agent, created_at, updated_at)
-		VALUES (?, ?, '', ?, '', '', 'demo-host', 'demo-sess-lead', '', ?, ?)`,
-		out.id, out.title, out.status, createdAt, createdAt)
-	return err
+// upsertOutcome creates out via the domain API (wms.Writer.CreateOutcome).
+//
+// NOTE: unlike the raw INSERT it replaces, CreateOutcome always stamps
+// created_at/updated_at to the real current time — it does not accept a
+// caller-supplied timestamp. Outcomes/workunits therefore no longer show
+// backdated creation dates spread across the 30-day anchor window (they all
+// read as "created today"); the interval/message/session time series that
+// drive the actual dashboards are unaffected, since those keep exact
+// historical timestamps (see genIntervals/genMessages/genSessions). This is
+// the deliberate, spec'd tradeoff of Phase 13/ADR-4 killing demogen's silent
+// schema-rot problem via the compile-time-checked domain API.
+func upsertOutcome(ctx context.Context, wr wms.Writer, out *outcome, _ time.Time) error {
+	return wr.CreateOutcome(ctx, &wms.Outcome{
+		ID:            out.id,
+		Title:         out.title,
+		Status:        out.status,
+		OriginHost:    "demo-host",
+		OriginSession: "demo-sess-lead",
+	})
 }
 
-func insertOutcomeEdge(db *sql.DB, parentID, childID string) error {
-	_, err := db.Exec(`INSERT IGNORE INTO outcome_edges (parent_id, child_id) VALUES (?, ?)`,
-		parentID, childID)
-	return err
-}
-
-func upsertWorkUnit(db *sql.DB, wu *workUnit, anchor time.Time) error {
-	createdAt := anchor.Add(time.Duration(wu.startDay*24) * time.Hour)
-	_, err := db.Exec(`
-		INSERT IGNORE INTO workunits
-		  (id, outcome_id, title, description, status, prior_status, agent_id, focus, origin_host, origin_session, origin_agent, created_at, updated_at)
-		VALUES (?, ?, ?, '', ?, '', ?, '', 'demo-host', 'demo-sess-lead', '', ?, ?)`,
-		wu.id, wu.outcomeID, wu.title, wu.status, wu.agent, createdAt, createdAt)
-	return err
+func upsertWorkUnit(ctx context.Context, wr wms.Writer, wu *workUnit, _ time.Time) error {
+	return wr.CreateWorkUnit(ctx, &wms.WorkUnit{
+		ID:            wu.id,
+		OutcomeID:     wu.outcomeID,
+		Title:         wu.title,
+		Status:        wu.status,
+		AgentID:       wu.agent,
+		OriginHost:    "demo-host",
+		OriginSession: "demo-sess-lead",
+	})
 }
 
 // --------------------------------------------------------------------------
 // Tags
 // --------------------------------------------------------------------------
 
-func ensureTag(db *sql.DB, key, val string) (int64, error) {
-	_, err := db.Exec(`
-		INSERT INTO tags (tag_key, tag_value, is_seed, category, cardinality, description)
-		VALUES (?, ?, 0, 'context', 'single', '')
-		ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)`, key, val)
-	if err != nil {
-		return 0, err
-	}
-	var id int64
-	err = db.QueryRow(`SELECT id FROM tags WHERE tag_key = ? AND tag_value = ?`, key, val).Scan(&id)
-	return id, err
-}
-
-func bindTags(db *sql.DB, entityType, entityID string, tags []tagKV) error {
-	now := time.Now().UTC()
+// bindTags applies each tag via wms.Writer.TagEntity, which creates the
+// (key, value) pair as a non-seed context tag on first use — the domain-API
+// equivalent of the former ensureTag+INSERT INTO entity_tags pair.
+func bindTags(ctx context.Context, wr wms.Writer, entityType, entityID string, tags []tagKV) error {
 	for _, t := range tags {
-		tagID, err := ensureTag(db, t.key, t.val)
-		if err != nil {
-			return fmt.Errorf("ensure tag %s:%s: %w", t.key, t.val, err)
-		}
-		_, err = db.Exec(`
-			INSERT IGNORE INTO entity_tags (entity_type, entity_id, tag_id, source, applied_at)
-			VALUES (?, ?, ?, 'manual', ?)`,
-			entityType, entityID, tagID, now)
-		if err != nil {
+		if err := wr.TagEntity(ctx, entityType, entityID, t.key, t.val, "manual", ""); err != nil {
 			return fmt.Errorf("bind tag %s:%s to %s/%s: %w", t.key, t.val, entityType, entityID, err)
 		}
 	}
@@ -610,7 +607,7 @@ func pickModel(rng *rand.Rand) string {
 type workSession struct {
 	start    time.Time
 	duration time.Duration
-	nMsgs   int
+	nMsgs    int
 }
 
 func planSessions(rng *rand.Rand, wu *workUnit, anchor time.Time) []workSession {
@@ -688,9 +685,10 @@ func pickServiceTier(rng *rand.Rand) string {
 	return ""
 }
 
-func genMessages(db *sql.DB, rng *rand.Rand, wu *workUnit, anchor time.Time) ([]msgRecord, error) {
+func genMessages(ctx context.Context, ds store.DemoSeeder, rng *rand.Rand, wu *workUnit, anchor time.Time) ([]msgRecord, error) {
 	sessions := planSessions(rng, wu, anchor)
 	var records []msgRecord
+	var rows []store.TelemetryRow
 
 	// For done workunits, compute the hard deadline so no message exceeds it
 	var wuEnd time.Time
@@ -756,27 +754,29 @@ func genMessages(db *sql.DB, rng *rand.Rand, wu *workUnit, anchor time.Time) ([]
 			}
 			records = append(records, rec)
 
-			_, err := db.Exec(`
-				INSERT IGNORE INTO token_ledger
-				  (session_id, message_id, agent_name, host, model,
-				   input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
-				   cache_write_1h, cache_write_5m,
-				   n_text, n_tool_use, n_thinking,
-				   total_input, stop_reason, service_tier, speed, cost_usd, timestamp)
-				VALUES (?, ?, ?, 'demo-host', ?,
-				        ?, ?, ?, ?,
-				        0, 0,
-				        ?, ?, 0,
-				        ?, ?, ?, ?, ?, ?)`,
-				sessID, msgID, wu.agent, model,
-				inputToks, outputToks, cacheRead, cacheWrite,
-				nText, nToolUse,
-				totalInput, stopReason, serviceTier, speed,
-				cost, msgTS)
-			if err != nil {
-				return nil, fmt.Errorf("insert message %s: %w", msgID, err)
-			}
+			rows = append(rows, store.TelemetryRow{
+				SessionID:        sessID,
+				MessageID:        msgID,
+				AgentName:        wu.agent,
+				Host:             "demo-host",
+				Model:            model,
+				InputTokens:      inputToks,
+				OutputTokens:     outputToks,
+				CacheReadTokens:  cacheRead,
+				CacheWriteTokens: cacheWrite,
+				NText:            int64(nText),
+				NToolUse:         int64(nToolUse),
+				TotalInput:       totalInput,
+				StopReason:       stopReason,
+				ServiceTier:      serviceTier,
+				Speed:            speed,
+				CostUSD:          cost,
+				Timestamp:        msgTS,
+			})
 		}
+	}
+	if _, err := ds.SeedLedger(ctx, rows); err != nil {
+		return nil, fmt.Errorf("seed ledger for %s: %w", wu.id, err)
 	}
 	return records, nil
 }
@@ -785,7 +785,7 @@ func genMessages(db *sql.DB, rng *rand.Rand, wu *workUnit, anchor time.Time) ([]
 // Intervals
 // --------------------------------------------------------------------------
 
-func genIntervals(db *sql.DB, wu *workUnit, anchor time.Time, msgs []msgRecord, genTime time.Time) (int, error) {
+func genIntervals(ctx context.Context, rx store.RawExecutor, wu *workUnit, anchor time.Time, msgs []msgRecord, genTime time.Time) (int, error) {
 	wuStart := anchor.Add(time.Duration(wu.startDay*24) * time.Hour)
 	wuEnd := wuStart.Add(time.Duration(wu.durDays*24) * time.Hour)
 	if wu.status == "active" && wuEnd.After(time.Now().UTC()) {
@@ -848,7 +848,7 @@ func genIntervals(db *sql.DB, wu *workUnit, anchor time.Time, msgs []msgRecord, 
 			host = "demo-host"
 		}
 
-		_, err := db.Exec(`
+		_, err := rx.ExecRaw(ctx, `
 			INSERT IGNORE INTO wms_intervals
 			  (kind, entity_type, entity_id, state, session_id, agent_name, host,
 			   started_at, ended_at, duration_ms, phase, phase_source, assembled_at, phase_assembled_at, cost_usd, cost_tokens, identity_source)
@@ -872,7 +872,7 @@ func genIntervals(db *sql.DB, wu *workUnit, anchor time.Time, msgs []msgRecord, 
 		fEnd := sessmsgs[len(sessmsgs)-1].ts.Add(5 * time.Minute)
 		ms := fEnd.Sub(fStart).Milliseconds()
 
-		_, err := db.Exec(`
+		_, err := rx.ExecRaw(ctx, `
 			INSERT IGNORE INTO wms_intervals
 			  (kind, entity_type, entity_id, state, session_id, agent_name, host,
 			   started_at, ended_at, duration_ms, phase, phase_source, assembled_at, cost_usd, cost_tokens, identity_source)
@@ -930,10 +930,10 @@ func groupBySession(msgs []msgRecord) map[string][]msgRecord {
 // Attribution — 100% attributed, no unallocated
 // --------------------------------------------------------------------------
 
-func genAttribution(db *sql.DB, wu *workUnit, msgs []msgRecord) error {
+func genAttribution(ctx context.Context, rx store.RawExecutor, wu *workUnit, msgs []msgRecord) error {
 	now := time.Now().UTC()
 	for _, msg := range msgs {
-		_, err := db.Exec(`
+		_, err := rx.ExecRaw(ctx, `
 			INSERT IGNORE INTO usage_attribution
 			  (message_id, entity_type, entity_id, weight, method, computed_at, interval_id)
 			VALUES (?, 'workunit', ?, 1.00000, 'temporal_join', ?, 0)`,
@@ -949,7 +949,7 @@ func genAttribution(db *sql.DB, wu *workUnit, msgs []msgRecord) error {
 // Journal — one entry per status transition
 // --------------------------------------------------------------------------
 
-func genJournal(db *sql.DB, wu *workUnit, anchor time.Time) (int, error) {
+func genJournal(ctx context.Context, rx store.RawExecutor, wu *workUnit, anchor time.Time) (int, error) {
 	wuStart := anchor.Add(time.Duration(wu.startDay*24) * time.Hour)
 	wuEnd := wuStart.Add(time.Duration(wu.durDays*24) * time.Hour)
 	totalDur := wuEnd.Sub(wuStart)
@@ -970,7 +970,7 @@ func genJournal(db *sql.DB, wu *workUnit, anchor time.Time) (int, error) {
 			transTS = wuStart.Add(time.Duration(wu.progression[i-1].fraction * float64(totalDur)))
 		}
 
-		_, err := db.Exec(`
+		_, err := rx.ExecRaw(ctx, `
 			INSERT INTO wms_journal
 			  (entity_type, entity_id, field, old_value, new_value, agent_id, host, session_id, notes, created_at)
 			VALUES ('workunit', ?, 'status', ?, ?, '', '', '', NULL, ?)`,
@@ -987,7 +987,7 @@ func genJournal(db *sql.DB, wu *workUnit, anchor time.Time) (int, error) {
 // Sessions — one row per (session_id, agent_name)
 // --------------------------------------------------------------------------
 
-func genSessions(db *sql.DB, wu *workUnit, msgs []msgRecord) (int, error) {
+func genSessions(ctx context.Context, ss store.SessionStore, wu *workUnit, msgs []msgRecord) (int, error) {
 	sessions := groupBySession(msgs)
 	count := 0
 	for sessID, sessmsgs := range sessions {
@@ -998,23 +998,19 @@ func genSessions(db *sql.DB, wu *workUnit, msgs []msgRecord) (int, error) {
 		lastSeen := sessmsgs[len(sessmsgs)-1].ts
 
 		// Lead session (agent_name='')
-		_, err := db.Exec(`
-			INSERT IGNORE INTO sessions
-			  (session_id, agent_name, host, team_name, project_id, goal_id, task_id, workitem_id, focus, first_seen, last_seen, status)
-			VALUES (?, '', '', '', '', '', '', '', '', ?, ?, 'closed')`,
-			sessID, firstSeen, lastSeen)
-		if err != nil {
+		if err := ss.CreateSession(ctx, store.Session{
+			SessionID: sessID, Status: store.SessionStatusClosed,
+			FirstSeen: firstSeen, LastSeen: lastSeen,
+		}); err != nil {
 			return count, fmt.Errorf("insert lead session %s: %w", sessID, err)
 		}
 		count++
 
 		// Teammate session
-		_, err = db.Exec(`
-			INSERT IGNORE INTO sessions
-			  (session_id, agent_name, host, team_name, project_id, goal_id, task_id, workitem_id, focus, first_seen, last_seen, status)
-			VALUES (?, ?, '', '', '', '', '', '', '', ?, ?, 'closed')`,
-			sessID, wu.agent, firstSeen, lastSeen)
-		if err != nil {
+		if err := ss.CreateSession(ctx, store.Session{
+			SessionID: sessID, AgentName: wu.agent, Status: store.SessionStatusClosed,
+			FirstSeen: firstSeen, LastSeen: lastSeen,
+		}); err != nil {
 			return count, fmt.Errorf("insert teammate session %s/%s: %w", sessID, wu.agent, err)
 		}
 		count++
@@ -1026,7 +1022,7 @@ func genSessions(db *sql.DB, wu *workUnit, msgs []msgRecord) (int, error) {
 // Entity dependencies
 // --------------------------------------------------------------------------
 
-func genDependencies(db *sql.DB, units []*workUnit, anchor time.Time) (int, error) {
+func genDependencies(ctx context.Context, wr wms.Writer, units []*workUnit, anchor time.Time) (int, error) {
 	// Create 3 dependency chains
 	deps := [][2]string{
 		{"demo-wu-schema-migration", "demo-wu-endpoint-refactor"},
@@ -1034,14 +1030,12 @@ func genDependencies(db *sql.DB, units []*workUnit, anchor time.Time) (int, erro
 		{"demo-wu-component-library", "demo-wu-data-viz"},
 	}
 
-	now := time.Now().UTC()
 	count := 0
 	for _, d := range deps {
-		_, err := db.Exec(`
-			INSERT IGNORE INTO entity_dependencies
-			  (blocker_type, blocker_id, blocked_type, blocked_id, created_at)
-			VALUES ('workunit', ?, 'workunit', ?, ?)`,
-			d[0], d[1], now)
+		err := wr.AddEntityDependency(ctx, &wms.Dependency{
+			BlockerType: "workunit", BlockerID: d[0],
+			BlockedType: "workunit", BlockedID: d[1],
+		})
 		if err != nil {
 			return count, fmt.Errorf("insert dep %s→%s: %w", d[0], d[1], err)
 		}
@@ -1054,8 +1048,8 @@ func genDependencies(db *sql.DB, units []*workUnit, anchor time.Time) (int, erro
 // Link usage_attribution rows to covering state intervals
 // --------------------------------------------------------------------------
 
-func linkAttributionIntervals(db *sql.DB) error {
-	_, err := db.Exec(`
+func linkAttributionIntervals(ctx context.Context, rx store.RawExecutor) error {
+	_, err := rx.ExecRaw(ctx, `
 		UPDATE usage_attribution ua
 		JOIN token_ledger tl ON tl.message_id = ua.message_id
 		JOIN wms_intervals wi
@@ -1074,8 +1068,8 @@ func linkAttributionIntervals(db *sql.DB) error {
 // Assemble cost on closed state intervals
 // --------------------------------------------------------------------------
 
-func assembleIntervalCosts(db *sql.DB, genTime time.Time) error {
-	_, err := db.Exec(`
+func assembleIntervalCosts(ctx context.Context, rx store.RawExecutor, genTime time.Time) error {
+	_, err := rx.ExecRaw(ctx, `
 		UPDATE wms_intervals wi
 		JOIN (
 			SELECT ua.interval_id,
@@ -1099,7 +1093,7 @@ func assembleIntervalCosts(db *sql.DB, genTime time.Time) error {
 // Cost rollup
 // --------------------------------------------------------------------------
 
-func buildCostRollup(db *sql.DB, outcomes []*outcome) error {
+func buildCostRollup(ctx context.Context, rx store.RawExecutor, outcomes []*outcome) error {
 	type rollupKey struct {
 		day        string
 		entityType string
@@ -1115,7 +1109,7 @@ func buildCostRollup(db *sql.DB, outcomes []*outcome) error {
 
 	for _, out := range outcomes {
 		for _, wu := range out.units {
-			rows, err := db.Query(`
+			rows, err := rx.QueryRaw(ctx, `
 				SELECT tl.timestamp, tl.model, tl.agent_name,
 				       tl.input_tokens + tl.cache_read_tokens AS tokens,
 				       tl.cost_usd, ua.weight, ua.entity_type, ua.entity_id
@@ -1155,7 +1149,7 @@ func buildCostRollup(db *sql.DB, outcomes []*outcome) error {
 	}
 
 	for k, v := range rollup {
-		_, err := db.Exec(`
+		_, err := rx.ExecRaw(ctx, `
 			INSERT INTO cost_rollup
 			  (bucket_day, entity_type, entity_id, agent_name, model, tokens, cost_usd)
 			VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -1169,120 +1163,3 @@ func buildCostRollup(db *sql.DB, outcomes []*outcome) error {
 	}
 	return nil
 }
-
-// --------------------------------------------------------------------------
-// Clean — only removes demo-specific data
-// --------------------------------------------------------------------------
-
-// demoTagValues are the non-seeded tag values that demogen creates.
-// Used by cleanDemo to delete only these specific (key, value) pairs.
-var demoTagValues = []tagKV{
-	{"product", "acme-platform"},
-	{"feature", "api-overhaul"},
-	{"feature", "dashboard-rebuild"},
-	{"feature", "ops-automation"},
-	{"feature", "schema-migration"},
-	{"feature", "endpoint-refactor"},
-	{"feature", "auth-integration"},
-	{"feature", "component-library"},
-	{"feature", "data-viz"},
-	{"feature", "realtime-updates"},
-	{"feature", "ci-pipeline"},
-	{"feature", "monitoring-setup"},
-	{"feature", "deploy-automation"},
-	{"bug", "timeout-on-heavy-load"},
-	{"component", "monitoring"},
-	{"product-version", "2.0.0"},
-	{"product-version", "1.0.0"},
-	{"github.owner", "acme"},
-	{"github.repo", "acme-api"},
-	{"github.repo", "dashboard-app"},
-	{"github.pr", "142"},
-	{"github.pr", "156"},
-	{"github.pr", "161"},
-	{"github.pr", "23"},
-	{"github.pr", "31"},
-	{"github.pr", "45"},
-	{"github.issue", "89"},
-	{"github.issue", "112"},
-	{"github.issue", "15"},
-	{"jira.id", "ACME-4521"},
-	{"jira.project", "ACME"},
-	{"git.repo", "/home/user/projects/monitoring"},
-	{"git.branch", "main"},
-}
-
-func cleanDemo(db *sql.DB) error {
-	tables := []struct {
-		table string
-		where string
-	}{
-		{"cost_rollup", "entity_id LIKE 'demo-%' OR (entity_id = '' AND agent_name LIKE 'demo-%')"},
-		{"usage_attribution", "message_id LIKE 'demo-msg-%'"},
-		{"wms_intervals", "entity_id LIKE 'demo-%' OR session_id LIKE 'demo-sess-%'"},
-		{"token_ledger", "session_id LIKE 'demo-sess-%'"},
-		{"entity_tags", "entity_id LIKE 'demo-%'"},
-		{"wms_journal", "entity_id LIKE 'demo-%'"},
-		{"sessions", "session_id LIKE 'demo-sess-%'"},
-		{"entity_dependencies", "(blocker_id LIKE 'demo-%' OR blocked_id LIKE 'demo-%')"},
-		{"workunits", "id LIKE 'demo-wu-%'"},
-		{"outcome_edges", "parent_id LIKE 'demo-%' OR child_id LIKE 'demo-%'"},
-		{"outcomes", "id LIKE 'demo-out-%'"},
-	}
-	for _, t := range tables {
-		q := fmt.Sprintf("DELETE FROM %s WHERE %s", t.table, t.where)
-		if _, err := db.Exec(q); err != nil {
-			fmt.Fprintf(os.Stderr, "clean %s: %v\n", t.table, err)
-			return fmt.Errorf("clean %s: %w", t.table, err)
-		}
-	}
-
-	// Clean only demo-specific tag values (B2/B3 fix)
-	for _, tv := range demoTagValues {
-		if _, err := db.Exec(
-			`DELETE FROM tags WHERE tag_key = ? AND tag_value = ? AND is_seed = 0`,
-			tv.key, tv.val); err != nil {
-			fmt.Fprintf(os.Stderr, "clean tag %s:%s: %v\n", tv.key, tv.val, err)
-			return fmt.Errorf("clean tag %s:%s: %w", tv.key, tv.val, err)
-		}
-	}
-
-	return nil
-}
-
-func normalizeDSN(raw string) (string, error) {
-	if strings.HasPrefix(raw, "mysql://") {
-		u, err := url.Parse(raw)
-		if err != nil {
-			return "", fmt.Errorf("parse DSN URL: %w", err)
-		}
-		cfg := mysqldriver.NewConfig()
-		cfg.Net = "tcp"
-		cfg.Addr = u.Host
-		if u.User != nil {
-			cfg.User = u.User.Username()
-			if pw, ok := u.User.Password(); ok {
-				cfg.Passwd = pw
-			}
-		}
-		cfg.DBName = strings.TrimPrefix(u.Path, "/")
-		cfg.ParseTime = true
-		cfg.Loc = time.UTC
-		cfg.Params = map[string]string{"time_zone": "'+00:00'"}
-		for k, vs := range u.Query() {
-			if len(vs) > 0 {
-				cfg.Params[k] = vs[0]
-			}
-		}
-		return cfg.FormatDSN(), nil
-	}
-	if !strings.Contains(raw, "parseTime=true") {
-		sep := "?"
-		if strings.Contains(raw, "?") {
-			sep = "&"
-		}
-		raw += sep + "parseTime=true"
-	}
-	return raw, nil
-}
-

@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -35,32 +36,63 @@ type Store struct {
 	// has no value bound. Set via WithRequireTagsOnDone; default false.
 	requireTagsOnDone bool
 	skipMigrate       bool
+	// conn is this Store's own connection identity, retained from construction
+	// so admin-plane capabilities that need it later — CredentialProber's
+	// alternate-credential probe, BackupEngine's mysqldump/mysql shell-out —
+	// don't have to re-derive it from a DSN string a second time.
+	conn connInfo
 }
 
-// Option configures a Store at construction.
-type Option func(*Store)
-
-// WithRequireTagsOnDone enables hard close-out enforcement: when set, the store
-// rejects a workunit's 'done' transition while any required tag key is unset.
-// Wired from config.RequireTagsOnDone (TEAMSTER_REQUIRE_TAGS_ON_DONE). Omitting
-// the option leaves enforcement off, byte-identical to pre-feature behavior.
-func WithRequireTagsOnDone(v bool) Option {
-	return func(s *Store) { s.requireTagsOnDone = v }
+// connInfo is the parsed identity of a mysql://user:pass@host:port/db DSN.
+type connInfo struct {
+	host     string
+	port     int
+	user     string
+	password string
+	dbName   string
 }
 
-// WithSkipMigrate skips the auto-migration step. Use for read-only callers
-// (e.g. teamster status) that should never modify schema.
-func WithSkipMigrate() Option {
-	return func(s *Store) { s.skipMigrate = true }
+// parseConnInfo extracts connInfo from a mysql:// DSN. Parallel to convertDSN
+// (which builds the go-sql-driver DSN string) but kept separate so admin-plane
+// consumers get plain fields instead of a driver-formatted DSN.
+func parseConnInfo(raw string) (connInfo, error) {
+	if !strings.HasPrefix(raw, "mysql://") {
+		return connInfo{}, fmt.Errorf("mysql DSN must start with mysql://; got scheme %q", dsnScheme(raw))
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			err = ue.Err
+		}
+		return connInfo{}, fmt.Errorf("parse mysql DSN: %v", err)
+	}
+	ci := connInfo{host: u.Hostname(), dbName: strings.TrimPrefix(u.Path, "/"), port: 3306}
+	if p := u.Port(); p != "" {
+		if n, err := strconv.Atoi(p); err == nil {
+			ci.port = n
+		}
+	}
+	if u.User != nil {
+		ci.user = u.User.Username()
+		if pw, ok := u.User.Password(); ok {
+			ci.password = pw
+		}
+	}
+	return ci, nil
 }
 
 // New opens a MySQL connection from a TEAMSTER_STORE_DSN value (mysql://...)
 // and runs migrations. The connection pool is left at driver defaults; the
 // caller may tune via SetMaxOpenConns after construction if needed. Optional
-// Options set behavior flags (e.g. WithRequireTagsOnDone); existing callers
-// that pass none keep their prior behavior.
-func New(dsn string, opts ...Option) (*Store, error) {
+// store.Options set behavior flags (e.g. store.WithRequireTagsOnDone);
+// existing callers that pass none keep their prior behavior.
+func New(dsn string, opts ...store.Option) (*Store, error) {
 	drvDSN, err := convertDSN(dsn)
+	if err != nil {
+		return nil, err
+	}
+	ci, err := parseConnInfo(dsn)
 	if err != nil {
 		return nil, err
 	}
@@ -74,14 +106,15 @@ func New(dsn string, opts ...Option) (*Store, error) {
 		db.Close() //nolint:errcheck
 		return nil, fmt.Errorf("ping mysql: %w", err)
 	}
-	s := &Store{db: db}
+	var so store.Options
 	for _, opt := range opts {
-		opt(s)
+		opt(&so)
 	}
+	s := &Store{db: db, requireTagsOnDone: so.RequireTagsOnDone, skipMigrate: so.SkipMigrate, conn: ci}
 	if !s.skipMigrate {
 		migrateCtx, migrateCancel := context.WithTimeout(context.Background(), migrateLockTimeout+30*time.Second)
 		defer migrateCancel()
-		if err := migrate(migrateCtx, db); err != nil {
+		if err := store.RunMigrations(migrateCtx, newMysqlMigrator(db)); err != nil {
 			db.Close() //nolint:errcheck
 			return nil, fmt.Errorf("migrate: %w", err)
 		}
@@ -89,11 +122,23 @@ func New(dsn string, opts ...Option) (*Store, error) {
 	return s, nil
 }
 
+func init() {
+	store.Register("mysql", Open)
+	store.Register("mariadb", Open) // same backend, MySQL/MariaDB dual-target
+}
+
+// Open constructs a [store.Store] from dsn — the registry entry point for the
+// "mysql"/"mariadb" schemes registered by init above. New still returns the
+// concrete *Store; Open returns the interface store.Open's callers expect.
+func Open(ctx context.Context, dsn string, opts ...store.Option) (store.Store, error) {
+	return New(dsn, opts...)
+}
+
 // Close releases the underlying connection pool.
 func (s *Store) Close() error { return s.db.Close() }
 
-// DB returns the underlying *sql.DB for callers that need raw SQL access (e.g. the /wms dashboard).
-func (s *Store) DB() *sql.DB { return s.db }
+// Ping implements [store.Prober] by pinging the underlying connection.
+func (s *Store) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }
 
 // convertDSN turns a mysql://user:pass@host:port/db?param=v URL into the
 // go-sql-driver DSN form (user:pass@tcp(host:port)/db?parseTime=true&...).
@@ -169,13 +214,13 @@ func checkTagDescriptionLen(description string) error {
 
 // --- helpers ---
 
-func requireOneRow(res sql.Result, entityType, id string) error {
+func requireOneRow(res sql.Result, op, entityType, id string) error {
 	n, err := res.RowsAffected()
 	if err != nil {
 		return err
 	}
 	if n == 0 {
-		return fmt.Errorf("%s %s not found", entityType, id)
+		return store.NotFound(op, entityType, id)
 	}
 	return nil
 }
@@ -290,16 +335,18 @@ func (s *Store) WriteJournalEntry(ctx context.Context, entry wms.JournalEntry) e
 // --- Event Records ---
 
 func (s *Store) OpenEventRecord(ctx context.Context, entityType, entityID, state, sessionID, agentName, host string) error {
-	now := nowUTC()
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback() //nolint:errcheck
-	if err := openStateInterval(ctx, tx, entityType, entityID, state, sessionID, agentName, host, now); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return s.withStateLock(ctx, entityType, entityID, func() error {
+		now := nowUTC()
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback() //nolint:errcheck
+		if err := openStateInterval(ctx, tx, entityType, entityID, state, sessionID, agentName, host, now); err != nil {
+			return err
+		}
+		return tx.Commit()
+	})
 }
 
 // openStateInterval inserts a kind='state' wms_intervals row for an EventRecord
@@ -334,7 +381,7 @@ func (s *Store) GetOpenEventRecord(ctx context.Context, entityType, entityID str
 	if err := row.Scan(&r.ID, &r.EntityType, &r.EntityID, &r.State, &r.StartedAt,
 		&endedAt, &durationMs, &r.SessionID, &r.AgentName, &r.Host, &phase, &r.PhaseSource); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, nil
+			return nil, store.NotFound("GetOpenEventRecord", entityType, entityID)
 		}
 		return nil, err
 	}
@@ -396,6 +443,18 @@ func (s *Store) ListEventRecords(ctx context.Context, entityType, entityID strin
 }
 
 func (s *Store) TransitionEventRecord(ctx context.Context, entityType, entityID, newState, sessionID, agentName, host string) error {
+	return s.withStateLock(ctx, entityType, entityID, func() error {
+		return s.transitionEventRecordLocked(ctx, entityType, entityID, newState, sessionID, agentName, host)
+	})
+}
+
+// transitionEventRecordLocked is TransitionEventRecord's body, run only
+// while withStateLock holds the (entity_type, entity_id) advisory lock —
+// see withStateLock's doc comment for why the lock is required: the FOR
+// UPDATE read here can still race a first-ever OpenEventRecord for the same
+// entity, and empirically produced a transient double-open under enough
+// concurrent transition callers even when a row already existed to lock.
+func (s *Store) transitionEventRecordLocked(ctx context.Context, entityType, entityID, newState, sessionID, agentName, host string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -454,10 +513,16 @@ func (s *Store) TransitionEventRecord(ctx context.Context, entityType, entityID,
 		for i := 1; i < len(open); i++ {
 			closeAt := open[0].startedAt
 			dur := closeAt.Sub(open[i].startedAt).Milliseconds()
+			// closeAt can coincide with another row's existing ended_at for this
+			// entity (two concurrent transitions closing within the same
+			// microsecond), colliding on uq_open (entity_type, entity_id, kind,
+			// ended_at). Map it to the closed error-sentinel set (02-errors.md)
+			// like every other uq_open collision (BackfillInterval, RepairInterval)
+			// so a caller can retry rather than see a raw driver error.
 			if _, err := tx.ExecContext(ctx,
 				`UPDATE wms_intervals SET ended_at = ?, duration_ms = ? WHERE id = ?`,
 				closeAt, dur, open[i].id); err != nil {
-				return fmt.Errorf("close stale record %d: %w", open[i].id, err)
+				return classifyConflict("TransitionEventRecord", fmt.Errorf("close stale record %d: %w", open[i].id, err))
 			}
 		}
 	}
@@ -1048,7 +1113,7 @@ func (s *Store) RetireTagValue(ctx context.Context, tagKey, tagValue string) err
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		return fmt.Errorf("RetireTagValue: tag %s:%s not found", tagKey, tagValue)
+		return store.NotFound("RetireTagValue", "tag", tagKey+":"+tagValue)
 	}
 	return nil
 }
@@ -1091,7 +1156,7 @@ func (s *Store) UpdateTagValueDescription(ctx context.Context, tagKey, tagValue,
 		`SELECT 1 FROM tags WHERE tag_key = ? AND tag_value = ? LIMIT 1`, tagKey, tagValue,
 	).Scan(&exists); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("tag %s:%s not found", tagKey, tagValue)
+			return store.NotFound("UpdateTagValueDescription", "tag", tagKey+":"+tagValue)
 		}
 		return err
 	}
@@ -1424,7 +1489,7 @@ func (s *Store) GetSession(ctx context.Context, key store.SessionKey) (store.Ses
 		&sess.Focus, &sess.FirstSeen, &sess.LastSeen, &status,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return store.Session{}, fmt.Errorf("session %q/%q: %w", key.SessionID, key.AgentName, err)
+			return store.Session{}, store.NotFound("GetSession", "session", key.SessionID+"/"+key.AgentName)
 		}
 		return store.Session{}, err
 	}
@@ -1500,42 +1565,105 @@ func (s *Store) SetSessionWorkItem(ctx context.Context, key store.SessionKey, wo
 // guard, not by this dedup. On the hub (single writer) the lock is uncontended —
 // behavior is unchanged.
 func (s *Store) OpenFocusInterval(ctx context.Context, key store.SessionKey, entityType, entityID string) error {
-	now := nowUTC()
-	tx, err := s.db.BeginTx(ctx, nil)
+	return s.withFocusLock(ctx, key.SessionID, key.AgentName, func() error {
+		now := nowUTC()
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback() //nolint:errcheck
+
+		var curType, curID string
+		err = tx.QueryRowContext(ctx,
+			`SELECT entity_type, entity_id FROM wms_intervals
+			 WHERE kind = 'focus' AND session_id = ? AND agent_name = ? AND ended_at IS NULL
+			 ORDER BY started_at DESC LIMIT 1 FOR UPDATE`,
+			key.SessionID, key.AgentName,
+		).Scan(&curType, &curID)
+		if err == nil && curType == entityType && curID == entityID {
+			return tx.Commit() // already focused on this exact entity
+		}
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+
+		// Close the open focus interval then open the new one. Focus rows carry
+		// identity directly (it's always present on the focus path), so
+		// identity_source='direct'.
+		if err := closeOpenFocusIntervals(ctx, tx, key.SessionID, key.AgentName, now); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO wms_intervals
+				(kind, entity_type, entity_id, state, session_id, agent_name, host, started_at, identity_source)
+			VALUES ('focus', ?, ?, '', ?, ?, '', ?, 'direct')`,
+			entityType, entityID, key.SessionID, key.AgentName, now,
+		); err != nil {
+			return err
+		}
+		return tx.Commit()
+	})
+}
+
+// focusLockTimeout bounds how long a focus writer waits on another writer's
+// same-(session,agent) lock before giving up.
+const focusLockTimeout = 10 * time.Second
+
+// withFocusLock serializes OpenFocusInterval/WriteFocusInterval for one
+// (session, agent) pair across concurrent connections and processes via a
+// named advisory lock (GET_LOCK) — the same idiom mysqlMigrator.Lock uses
+// for migration serialization. Without it, two concurrent callers racing to
+// set the FIRST-ever focus for a (session, agent) both run their SELECT ...
+// FOR UPDATE against a currently-empty result set (nothing to lock), both
+// see sql.ErrNoRows, and both proceed to INSERT their own open interval:
+// uq_open (entity_type, entity_id, kind, ended_at) cannot catch this because
+// NULL ended_at is DISTINCT in a MySQL UNIQUE index (it is a CLOSED-interval
+// guard, not a single-open enforcer — see migrations.go v21's doc comment).
+// The lock is held only around the existing read-modify-write body, on a
+// connection separate from the transaction it protects, so it adds no risk
+// of self-deadlock.
+func (s *Store) withFocusLock(ctx context.Context, sessionID, agentName string, fn func() error) error {
+	return s.withNamedLock(ctx, "teamster_focus:"+sessionID+":"+agentName, fn)
+}
+
+// withStateLock is withFocusLock's kind='state' counterpart, serializing
+// OpenEventRecord/TransitionEventRecord for one (entity_type, entity_id):
+// their SELECT ... FOR UPDATE ... (no LIMIT, since double-open detection
+// wants every open row) still cannot serialize a first-ever OpenEventRecord
+// racing another OpenEventRecord for the same entity (nothing to lock), and
+// empirically the same class of race can surface as a transient double-open
+// under enough concurrent TransitionEventRecord callers on one entity even
+// when a row DOES exist to lock. The advisory lock removes the ambiguity.
+func (s *Store) withStateLock(ctx context.Context, entityType, entityID string, fn func() error) error {
+	return s.withNamedLock(ctx, "teamster_state:"+entityType+":"+entityID, fn)
+}
+
+// withNamedLock serializes fn against every other caller using the same
+// name, across concurrent connections and processes, via a named advisory
+// lock (GET_LOCK) — the same idiom mysqlMigrator.Lock uses for migration
+// serialization. The lock is held on a connection separate from whatever
+// transaction fn opens, so it adds no risk of self-deadlock.
+func (s *Store) withNamedLock(ctx context.Context, name string, fn func() error) error {
+	conn, err := s.db.Conn(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("named lock: acquire connection: %w", err)
 	}
-	defer tx.Rollback() //nolint:errcheck
+	defer conn.Close() //nolint:errcheck
 
-	var curType, curID string
-	err = tx.QueryRowContext(ctx,
-		`SELECT entity_type, entity_id FROM wms_intervals
-		 WHERE kind = 'focus' AND session_id = ? AND agent_name = ? AND ended_at IS NULL
-		 ORDER BY started_at DESC LIMIT 1 FOR UPDATE`,
-		key.SessionID, key.AgentName,
-	).Scan(&curType, &curID)
-	if err == nil && curType == entityType && curID == entityID {
-		return tx.Commit() // already focused on this exact entity
+	var locked sql.NullInt64
+	if err := conn.QueryRowContext(ctx, `SELECT GET_LOCK(?, ?)`, name, int(focusLockTimeout.Seconds())).Scan(&locked); err != nil {
+		return fmt.Errorf("named lock: acquire %q: %w", name, err)
 	}
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return err
+	if !locked.Valid || locked.Int64 != 1 {
+		return fmt.Errorf("named lock: timed out after %s waiting for %q (another writer in progress)", focusLockTimeout, name)
 	}
+	defer func() {
+		relCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, _ = conn.ExecContext(relCtx, `SELECT RELEASE_LOCK(?)`, name)
+	}()
 
-	// Close the open focus interval then open the new one. Focus rows carry
-	// identity directly (it's always present on the focus path), so
-	// identity_source='direct'.
-	if err := closeOpenFocusIntervals(ctx, tx, key.SessionID, key.AgentName, now); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO wms_intervals
-			(kind, entity_type, entity_id, state, session_id, agent_name, host, started_at, identity_source)
-		VALUES ('focus', ?, ?, '', ?, ?, '', ?, 'direct')`,
-		entityType, entityID, key.SessionID, key.AgentName, now,
-	); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return fn()
 }
 
 // HasAnyFocusInterval returns true when (session, agent) has any kind='focus'
@@ -1681,7 +1809,7 @@ func (s *Store) CloseSessionIntervals(ctx context.Context, sessionID, agentName 
 	}
 	res, err := s.db.ExecContext(ctx, query, args...)
 	if err != nil {
-		return 0, err
+		return 0, classifyConflict("CloseSessionIntervals", err)
 	}
 	return res.RowsAffected()
 }
@@ -1749,6 +1877,135 @@ func (s *Store) CloseIntervalsForStaleSessions(ctx context.Context, staleThresho
 		return 0, err
 	}
 	return res.RowsAffected()
+}
+
+// WriteFocusInterval is the remote_scraper path: atomically closes the open
+// focus interval for (session, agent) and opens a new one at `at`, stamping
+// identity_source='remote_scraper'. Ported verbatim (behind the interface)
+// from internal/server/focus_timeline.go's writeFocusInterval.
+//
+// Cross-writer dedup (focus-interval-dual-writer fix): if an open focus
+// interval for (session, agent) is ALREADY this exact entity, this is the
+// same logical setFocus the other writer (OpenFocusInterval's 'direct' path)
+// already opened — no-op rather than blind-close-and-reopen. Without this,
+// the scraper and the direct path each open a row for one setFocus and each
+// close the other's, collapsing both to negative width. Mirrors
+// OpenFocusInterval's same-entity guard.
+func (s *Store) WriteFocusInterval(ctx context.Context, sessionID, agentName, entityType, entityID string, at time.Time) error {
+	return s.withFocusLock(ctx, sessionID, agentName, func() error {
+		return s.writeFocusIntervalLocked(ctx, sessionID, agentName, entityType, entityID, at)
+	})
+}
+
+// writeFocusIntervalLocked is WriteFocusInterval's body, run only while
+// withFocusLock holds the (session, agent) advisory lock — see that
+// method's doc comment for why the lock is required.
+func (s *Store) writeFocusIntervalLocked(ctx context.Context, sessionID, agentName, entityType, entityID string, at time.Time) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var curType, curID string
+	err = tx.QueryRowContext(ctx, `
+		SELECT entity_type, entity_id FROM wms_intervals
+		WHERE kind = 'focus' AND session_id = ? AND agent_name = ? AND ended_at IS NULL
+		ORDER BY started_at DESC LIMIT 1 FOR UPDATE`,
+		sessionID, agentName).Scan(&curType, &curID)
+	if err == nil && curType == entityType && curID == entityID {
+		return tx.Commit() // already focused on this exact entity
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+
+	// Close any open focus interval for this (session, agent). Reuses the
+	// same ordering-safe `started_at <= at` guard as OpenFocusInterval.
+	if err := closeOpenFocusIntervals(ctx, tx, sessionID, agentName, at); err != nil {
+		return err
+	}
+
+	// INSERT IGNORE handles dedup: if the same (session_id, agent_name,
+	// entity_type, entity_id, started_at) already exists via the uq_open
+	// unique index, the INSERT is a no-op.
+	if _, err := tx.ExecContext(ctx, `
+		INSERT IGNORE INTO wms_intervals
+			(kind, entity_type, entity_id, state, session_id, agent_name, host, started_at, identity_source)
+		VALUES ('focus', ?, ?, '', ?, ?, '', ?, 'remote_scraper')`,
+		entityType, entityID, sessionID, agentName, at); err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+// WriteBriefDirectiveInterval materializes a focus-less teammate's INTENDED
+// focus (parsed from its dispatch brief) as a subordinate, open-ended focus
+// interval — but ONLY when (a) (session, agent) has no focus interval of ANY
+// source yet, and (b) the named entity actually exists in WMS. Ported
+// (behind the interface) from focus_timeline.go's writeBriefDirectiveInterval;
+// its runtime table-name switch (`"SELECT 1 FROM "+table+" WHERE id=?"`) is
+// replaced here by GetWorkUnit/GetOutcome.
+//
+// Returns nil when the interval is inserted; ErrPrecondition when (session,
+// agent) already has a focus interval — a real setFocus or an earlier
+// directive wins, so this write is a no-op, not a failure; ErrNotFound when
+// entityType is not "workunit"/"outcome" or the named entity does not exist
+// — a typo'd or paraphrased brief must not create a bogus focus interval
+// that would mis-attribute the session's whole cost.
+func (s *Store) WriteBriefDirectiveInterval(ctx context.Context, sessionID, agentName, entityType, entityID, source string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	// Subordinate gate: do nothing if ANY focus interval already exists for
+	// this (session, agent) — a real setFocus, or a directive we already
+	// wrote. SELECT ... FOR UPDATE serializes concurrent directive writers
+	// so exactly one row is inserted.
+	var exists int
+	err = tx.QueryRowContext(ctx, `
+		SELECT 1 FROM wms_intervals
+		WHERE kind = 'focus' AND session_id = ? AND agent_name = ?
+		LIMIT 1 FOR UPDATE`,
+		sessionID, agentName).Scan(&exists)
+	if err == nil {
+		// A focus interval already exists — leave it; directive is subordinate.
+		if cerr := tx.Commit(); cerr != nil {
+			return cerr
+		}
+		return store.Precondition("WriteBriefDirectiveInterval", "session", sessionID+"/"+agentName)
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+
+	// Validate the named entity exists in WMS before materializing an
+	// interval.
+	switch entityType {
+	case "workunit":
+		if _, err := s.GetWorkUnit(ctx, entityID); err != nil {
+			return err
+		}
+	case "outcome":
+		if _, err := s.GetOutcome(ctx, entityID); err != nil {
+			return err
+		}
+	default:
+		return store.NotFound("WriteBriefDirectiveInterval", entityType, entityID)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT IGNORE INTO wms_intervals
+			(kind, entity_type, entity_id, state, session_id, agent_name, host, started_at, identity_source)
+		VALUES ('focus', ?, ?, '', ?, ?, '', ?, ?)`,
+		entityType, entityID, sessionID, agentName, nowUTC(), source); err != nil {
+		return err
+	}
+
+	return tx.Commit()
 }
 
 func (s *Store) CloseSession(ctx context.Context, sessionID string, at time.Time) error {

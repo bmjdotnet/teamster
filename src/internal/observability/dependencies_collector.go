@@ -2,11 +2,11 @@ package observability
 
 import (
 	"context"
-	"database/sql"
 	"log/slog"
 	"sync"
 	"time"
 
+	"github.com/bmjdotnet/teamster/internal/store"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -24,7 +24,7 @@ var dependenciesDesc = prometheus.NewDesc(
 // are acting as blockers vs how many are blocked, from entity_dependencies.
 // Results are cached for 30s.
 type DependenciesCollector struct {
-	db *sql.DB
+	rep store.ReportingStore
 
 	mu        sync.Mutex
 	lastQuery time.Time
@@ -33,10 +33,10 @@ type DependenciesCollector struct {
 	haveCache bool
 }
 
-// NewDependenciesCollector creates a DependenciesCollector backed by db with a
-// 30s cache TTL.
-func NewDependenciesCollector(db *sql.DB) *DependenciesCollector {
-	return &DependenciesCollector{db: db}
+// NewDependenciesCollector creates a DependenciesCollector backed by rep with
+// a 30s cache TTL.
+func NewDependenciesCollector(rep store.ReportingStore) *DependenciesCollector {
+	return &DependenciesCollector{rep: rep}
 }
 
 // Describe sends the descriptor to ch.
@@ -75,20 +75,16 @@ func (c *DependenciesCollector) snapshot() (blockers, blocked float64) {
 // once each. Returns ok=false on error so a transient DB failure keeps the last
 // good value.
 func (c *DependenciesCollector) query() (blockers, blocked float64, ok bool) {
-	if c.db == nil {
+	if c.rep == nil {
 		return 0, 0, false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := c.db.QueryRowContext(ctx, `
-		SELECT
-			COUNT(DISTINCT blocker_type, blocker_id),
-			COUNT(DISTINCT blocked_type, blocked_id)
-		FROM entity_dependencies`).Scan(&blockers, &blocked)
+	b, bd, err := c.rep.DependencyCounts(ctx)
 	if err != nil {
 		slog.Warn("DependenciesCollector: query failed", "error", err)
 		return 0, 0, false
 	}
-	return blockers, blocked, true
+	return float64(b), float64(bd), true
 }

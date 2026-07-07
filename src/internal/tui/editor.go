@@ -2,15 +2,30 @@ package tui
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
-	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/bmjdotnet/teamster/internal/store"
+	"github.com/bmjdotnet/teamster/internal/wms"
 )
+
+// tagEditorStore is the editor's dependency: the full TagAdminStore surface
+// plus the three wms.Writer methods (DefineTag/RetireTag/
+// UpdateTagValueDescription) its add-key/retire-key/edit-value-description
+// actions need — those stay on wms.Writer per the design (the MCP write
+// path), not duplicated onto TagAdminStore. store.Store satisfies this
+// structurally, so callers pass their store.Store unchanged.
+type tagEditorStore interface {
+	store.TagAdminStore
+	DefineTag(ctx context.Context, spec wms.TagSpec) error
+	RetireTag(ctx context.Context, tagKey string) error
+	UpdateTagValueDescription(ctx context.Context, tagKey, tagValue, description string) error
+}
 
 // --- Data types -------------------------------------------------------------
 
@@ -19,7 +34,6 @@ type keyEntry struct {
 	category    string
 	cardinality string
 	description string
-	isSeed      bool
 	required    bool
 	entityCount int
 
@@ -30,8 +44,8 @@ type keyEntry struct {
 }
 
 type keyGroup struct {
-	namespace string    // "" = top-level context key; "github" = integration group; "lifecycle" = lifecycle section
-	label     string    // display label for group header
+	namespace string // "" = top-level context key; "github" = integration group; "lifecycle" = lifecycle section
+	label     string // display label for group header
 	keys      []keyEntry
 	collapsed bool
 	isSection bool // true = non-selectable section header
@@ -49,7 +63,6 @@ type entityRef struct {
 	entityType string
 	entityID   string
 	title      string
-	appliedAt  time.Time
 }
 
 type valueDetail struct {
@@ -156,10 +169,10 @@ const (
 // EditorModel is the bubbletea model for the full-screen 3-column tag editor.
 // Export it so the wizard can embed/transition to it.
 type EditorModel struct {
-	db *sql.DB
+	st tagEditorStore
 
 	groups    []keyGroup
-	keyCursor int   // flat index into visible key rows
+	keyCursor int          // flat index into visible key rows
 	visKeys   []visibleKey // flattened view of groups for navigation
 
 	values    []tagValue
@@ -173,11 +186,11 @@ type EditorModel struct {
 	width  int
 	height int
 
-	filterMode    bool
-	filterInput   textinput.Model
-	filterVal     string
+	filterMode  bool
+	filterInput textinput.Model
+	filterVal   string
 
-	modal  *modalModel
+	modal    *modalModel
 	showHelp bool
 
 	selectedKey   keyEntry
@@ -203,15 +216,15 @@ type visibleKey struct {
 	label     string // display text
 }
 
-// NewEditor creates an EditorModel ready to run. Call tea.NewProgram(NewEditor(db)).
-func NewEditor(db *sql.DB) EditorModel {
+// NewEditor creates an EditorModel ready to run. Call tea.NewProgram(NewEditor(st)).
+func NewEditor(st tagEditorStore) EditorModel {
 	fi := textinput.New()
 	fi.Placeholder = "filter..."
 	fi.CharLimit = 32
 	fi.Width = 20
 
 	m := EditorModel{
-		db:          db,
+		st:          st,
 		filterInput: fi,
 		loading:     true,
 	}
@@ -220,8 +233,8 @@ func NewEditor(db *sql.DB) EditorModel {
 
 // RunEditor is the standalone entry point for `teamster setup tags` on a system
 // with existing tag data.
-func RunEditor(db *sql.DB) error {
-	m := NewEditor(db)
+func RunEditor(st tagEditorStore) error {
+	m := NewEditor(st)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	_, err := p.Run()
 	return err
@@ -235,67 +248,29 @@ func (m EditorModel) Init() tea.Cmd {
 
 func (m EditorModel) loadData() tea.Cmd {
 	return func() tea.Msg {
-		groups, err := loadKeyGroups(m.db)
+		groups, err := loadKeyGroups(m.st)
 		return editorDataLoaded{groups: groups, err: err}
 	}
 }
 
-func loadKeyGroups(db *sql.DB) ([]keyGroup, error) {
-	rows, err := db.QueryContext(context.Background(), `
-		SELECT DISTINCT t.tag_key, t.category, t.cardinality, t.is_seed, t.required, t.description,
-		       t.scope, t.exclusion_group, t.auto_extract, t.interview,
-		       COUNT(DISTINCT et.entity_id) AS entity_count
-		FROM tags t
-		LEFT JOIN entity_tags et ON et.tag_id = t.id
-		GROUP BY t.tag_key, t.category, t.cardinality, t.is_seed, t.required, t.description,
-		         t.scope, t.exclusion_group, t.auto_extract, t.interview
-		ORDER BY
-		    CASE t.category WHEN 'lifecycle' THEN 0 ELSE 1 END,
-		    t.tag_key`)
+// loadKeyGroups fetches the per-key rollup and the shared entity-count read
+// model, then groups keys into context / integration-namespace / lifecycle
+// sections for column 1. Entity counts are summed per key from
+// TagEntityCounts rather than a per-key raw join, since a key's bindings can
+// span multiple entity types.
+func loadKeyGroups(st store.TagAdminStore) ([]keyGroup, error) {
+	ctx := context.Background()
+	summaries, err := st.TagKeys(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close() //nolint:errcheck
-
-	type rawKey struct {
-		tagKey         string
-		category       string
-		cardinality    string
-		isSeed         bool
-		required       bool
-		description    string
-		scope          string
-		exclusionGroup string
-		autoExtract    string
-		interview      string
-		entityCount    int
-	}
-
-	// Deduplicate by tagKey (multiple value rows share metadata).
-	seen := map[string]*rawKey{}
-	var order []string
-	for rows.Next() {
-		var rk rawKey
-		var isSeed, required int
-		if err := rows.Scan(&rk.tagKey, &rk.category, &rk.cardinality, &isSeed, &required,
-			&rk.description, &rk.scope, &rk.exclusionGroup, &rk.autoExtract, &rk.interview,
-			&rk.entityCount); err != nil {
-			return nil, err
-		}
-		rk.isSeed = isSeed != 0
-		rk.required = required != 0
-		if _, ok := seen[rk.tagKey]; !ok {
-			seen[rk.tagKey] = &rk
-			order = append(order, rk.tagKey)
-		} else {
-			// accumulate entity count across values; required is per-key, so a
-			// single value row marked required makes the whole key required.
-			seen[rk.tagKey].entityCount += rk.entityCount
-			seen[rk.tagKey].required = seen[rk.tagKey].required || rk.required
-		}
-	}
-	if err := rows.Err(); err != nil {
+	counts, err := st.TagEntityCounts(ctx)
+	if err != nil {
 		return nil, err
+	}
+	entityCountByKey := map[string]int{}
+	for _, c := range counts {
+		entityCountByKey[c.TagKey] += int(c.Count)
 	}
 
 	// Build groups: context keys, integration namespaces, lifecycle section.
@@ -304,29 +279,27 @@ func loadKeyGroups(db *sql.DB) ([]keyGroup, error) {
 	integrationGroups := map[string]*keyGroup{}
 	var integrationOrder []string
 
-	for _, k := range order {
-		rk := seen[k]
+	for _, sm := range summaries {
 		entry := keyEntry{
-			tagKey:         rk.tagKey,
-			category:       rk.category,
-			cardinality:    rk.cardinality,
-			description:    rk.description,
-			isSeed:         rk.isSeed,
-			required:       rk.required,
-			entityCount:    rk.entityCount,
-			scope:          rk.scope,
-			exclusionGroup: rk.exclusionGroup,
-			autoExtract:    rk.autoExtract,
-			interview:      rk.interview,
+			tagKey:         sm.Key,
+			category:       sm.Category,
+			cardinality:    sm.Cardinality,
+			description:    sm.Description,
+			required:       sm.Required,
+			entityCount:    entityCountByKey[sm.Key],
+			scope:          sm.Scope,
+			exclusionGroup: sm.ExclusionGroup,
+			autoExtract:    sm.AutoExtract,
+			interview:      sm.Interview,
 		}
 
-		if rk.category == "lifecycle" {
+		if sm.Category == "lifecycle" {
 			lifecycleGroup.keys = append(lifecycleGroup.keys, entry)
 			continue
 		}
 
-		if idx := strings.Index(rk.tagKey, "."); idx > 0 {
-			ns := rk.tagKey[:idx]
+		if idx := strings.Index(sm.Key, "."); idx > 0 {
+			ns := sm.Key[:idx]
 			if _, ok := integrationGroups[ns]; !ok {
 				integrationGroups[ns] = &keyGroup{namespace: ns, label: ns}
 				integrationOrder = append(integrationOrder, ns)
@@ -352,90 +325,66 @@ func loadKeyGroups(db *sql.DB) ([]keyGroup, error) {
 	return groups, nil
 }
 
-func loadValues(db *sql.DB, tagKey string, showRetired bool) tea.Cmd {
+// loadValues fetches every value of tagKey (retired included) plus the
+// shared entity-count read model, filters by showRetired, and sorts by
+// entity count desc then value — matching the prior raw-join ordering.
+func loadValues(st store.TagAdminStore, tagKey string, showRetired bool) tea.Cmd {
 	return func() tea.Msg {
-		q := `
-			SELECT t.tag_value, t.is_seed, t.description,
-			       COUNT(et.tag_id) AS entity_count, t.retired
-			FROM tags t
-			LEFT JOIN entity_tags et ON et.tag_id = t.id
-			WHERE t.tag_key = ?`
-		if !showRetired {
-			q += ` AND t.retired = 0`
-		}
-		q += `
-			GROUP BY t.id, t.tag_value, t.is_seed, t.description, t.retired
-			ORDER BY entity_count DESC, t.tag_value`
-		rows, err := db.QueryContext(context.Background(), q, tagKey)
+		ctx := context.Background()
+		all, err := st.TagValues(ctx, tagKey)
 		if err != nil {
 			return valuesLoaded{err: err}
 		}
-		defer rows.Close() //nolint:errcheck
-		var vals []tagValue
-		for rows.Next() {
-			var v tagValue
-			var isSeed, retired int
-			if err := rows.Scan(&v.value, &isSeed, &v.description, &v.entityCount, &retired); err != nil {
-				return valuesLoaded{err: err}
-			}
-			v.isSeed = isSeed != 0
-			v.retired = retired != 0
-			vals = append(vals, v)
-		}
-		if err := rows.Err(); err != nil {
+		counts, err := st.TagEntityCounts(ctx)
+		if err != nil {
 			return valuesLoaded{err: err}
 		}
+		countByValue := map[string]int{}
+		for _, c := range counts {
+			if c.TagKey != tagKey {
+				continue
+			}
+			countByValue[c.TagValue] += int(c.Count)
+		}
+
+		var vals []tagValue
+		for _, t := range all {
+			if t.Retired && !showRetired {
+				continue
+			}
+			vals = append(vals, tagValue{
+				value:       t.Value,
+				isSeed:      t.IsSeed,
+				description: t.Description,
+				entityCount: countByValue[t.Value],
+				retired:     t.Retired,
+			})
+		}
+		sort.SliceStable(vals, func(i, j int) bool {
+			if vals[i].entityCount != vals[j].entityCount {
+				return vals[i].entityCount > vals[j].entityCount
+			}
+			return vals[i].value < vals[j].value
+		})
 		return valuesLoaded{values: vals}
 	}
 }
 
-func loadDetail(db *sql.DB, tagKey, tagValue string) tea.Cmd {
+func loadDetail(st store.TagAdminStore, tagKey, tagValue string) tea.Cmd {
 	return func() tea.Msg {
-		var entityCount int
-		var isSeed int
-		var desc string
-		err := db.QueryRowContext(context.Background(),
-			`SELECT COUNT(et.tag_id), t.is_seed, t.description
-			 FROM tags t
-			 LEFT JOIN entity_tags et ON et.tag_id = t.id
-			 WHERE t.tag_key = ? AND t.tag_value = ?
-			 GROUP BY t.id, t.is_seed, t.description`, tagKey, tagValue,
-		).Scan(&entityCount, &isSeed, &desc)
-		if err != nil && err != sql.ErrNoRows {
-			return detailLoaded{err: err}
-		}
-
-		rows, err := db.QueryContext(context.Background(), `
-			SELECT et.entity_type, et.entity_id,
-			       COALESCE(o.title, wu.title, et.entity_id) AS title,
-			       et.applied_at
-			FROM entity_tags et
-			JOIN tags t ON t.id = et.tag_id
-			LEFT JOIN outcomes o ON o.id = et.entity_id AND et.entity_type = 'outcome'
-			LEFT JOIN workunits wu ON wu.id = et.entity_id AND et.entity_type = 'workunit'
-			WHERE t.tag_key = ? AND t.tag_value = ?
-			ORDER BY et.applied_at DESC
-			LIMIT 20`, tagKey, tagValue)
+		detail, err := st.TagValueDetail(context.Background(), tagKey, tagValue)
 		if err != nil {
 			return detailLoaded{err: err}
 		}
-		defer rows.Close() //nolint:errcheck
 		var refs []entityRef
-		for rows.Next() {
-			var r entityRef
-			if err := rows.Scan(&r.entityType, &r.entityID, &r.title, &r.appliedAt); err != nil {
-				return detailLoaded{err: err}
-			}
-			refs = append(refs, r)
-		}
-		if err := rows.Err(); err != nil {
-			return detailLoaded{err: err}
+		for _, e := range detail.BoundEntities {
+			refs = append(refs, entityRef{entityType: e.EntityType, entityID: e.EntityID, title: e.Why})
 		}
 		return detailLoaded{detail: valueDetail{
-			value:       tagValue,
-			isSeed:      isSeed != 0,
-			description: desc,
-			entityCount: entityCount,
+			value:       detail.Value,
+			isSeed:      detail.IsSeed,
+			description: detail.Description,
+			entityCount: int(detail.EntityCount),
 			entities:    refs,
 		}}
 	}
@@ -475,7 +424,7 @@ func (m EditorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.detail = valueDetail{}
 		if len(m.values) > 0 {
 			m.selectedValue = m.values[0]
-			return m, loadDetail(m.db, m.selectedKey.tagKey, m.selectedValue.value)
+			return m, loadDetail(m.st, m.selectedKey.tagKey, m.selectedValue.value)
 		}
 		return m, nil
 
@@ -711,14 +660,14 @@ func (m *EditorModel) handleCol1Key(key string) (tea.Model, tea.Cmd) {
 			m.valCursor--
 			if m.valCursor < len(m.values) {
 				m.selectedValue = m.values[m.valCursor]
-				return m, loadDetail(m.db, m.selectedKey.tagKey, m.selectedValue.value)
+				return m, loadDetail(m.st, m.selectedKey.tagKey, m.selectedValue.value)
 			}
 		}
 	case "down", "j":
 		if m.valCursor < len(m.values)-1 {
 			m.valCursor++
 			m.selectedValue = m.values[m.valCursor]
-			return m, loadDetail(m.db, m.selectedKey.tagKey, m.selectedValue.value)
+			return m, loadDetail(m.st, m.selectedKey.tagKey, m.selectedValue.value)
 		}
 
 	case "a":
@@ -883,49 +832,40 @@ func (m *EditorModel) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // --- DB commands ------------------------------------------------------------
 
 func (m *EditorModel) addKeyCmd(tagKey, category, cardinality string) tea.Cmd {
-	db := m.db
+	st := m.st
 	return func() tea.Msg {
-		// Seed the key as a create-on-apply stub (empty value).
-		_, err := db.ExecContext(context.Background(),
-			`INSERT INTO tags (tag_key, tag_value, is_seed, category, cardinality, description)
-			 VALUES (?, '', 1, ?, ?, '')
-			 ON DUPLICATE KEY UPDATE
-			     is_seed=1, category=VALUES(category), cardinality=VALUES(cardinality)`,
-			tagKey, category, cardinality)
+		err := st.DefineTag(context.Background(), wms.TagSpec{
+			Key:         tagKey,
+			Category:    category,
+			Cardinality: cardinality,
+		})
 		return dbWriteDone{err: err}
 	}
 }
 
 func (m *EditorModel) addValueCmd(value string) tea.Cmd {
-	db := m.db
+	st := m.st
 	tagKey := m.selectedKey.tagKey
-	category := m.selectedKey.category
-	cardinality := m.selectedKey.cardinality
 	return func() tea.Msg {
-		_, err := db.ExecContext(context.Background(),
-			`INSERT IGNORE INTO tags (tag_key, tag_value, is_seed, category, cardinality, description)
-			 VALUES (?, ?, 0, ?, ?, '')`,
-			tagKey, value, category, cardinality)
+		err := st.AddTagValue(context.Background(), tagKey, value, "")
 		return dbWriteDone{err: err}
 	}
 }
 
 func (m *EditorModel) editDescCmd(desc string) tea.Cmd {
-	db := m.db
+	st := m.st
 	tagKey := m.selectedKey.tagKey
 	return func() tea.Msg {
-		_, err := db.ExecContext(context.Background(),
-			`UPDATE tags SET description = ? WHERE tag_key = ?`, desc, tagKey)
+		err := st.UpdateTagDescription(context.Background(), tagKey, desc)
 		return dbWriteDone{err: err}
 	}
 }
 
 func (m *EditorModel) retireKeyCmd() tea.Cmd {
-	db := m.db
+	st := m.st
 	tagKey := m.selectedKey.tagKey
 	return func() tea.Msg {
-		_, err := db.ExecContext(context.Background(),
-			`UPDATE tags SET is_seed = 0 WHERE tag_key = ?`, tagKey)
+		err := st.RetireTag(context.Background(), tagKey)
 		return dbWriteDone{err: err}
 	}
 }
@@ -934,36 +874,29 @@ func (m *EditorModel) retireKeyCmd() tea.Cmd {
 // value rows. Equivalent to store.DefineTag with Required set — required is a
 // per-key property like cardinality, so it is written to every row of the key.
 func (m *EditorModel) toggleRequiredCmd(tagKey string, required bool) tea.Cmd {
-	db := m.db
+	st := m.st
 	return func() tea.Msg {
-		val := 0
-		if required {
-			val = 1
-		}
-		_, err := db.ExecContext(context.Background(),
-			`UPDATE tags SET required = ? WHERE tag_key = ?`, val, tagKey)
+		err := st.SetTagRequired(context.Background(), tagKey, required)
 		return dbWriteDone{err: err}
 	}
 }
 
 func (m *EditorModel) retireValueCmd() tea.Cmd {
-	db := m.db
+	st := m.st
 	tagKey := m.selectedKey.tagKey
 	tagValue := m.selectedValue.value
 	return func() tea.Msg {
-		_, err := db.ExecContext(context.Background(),
-			`UPDATE tags SET retired = 1 WHERE tag_key = ? AND tag_value = ?`, tagKey, tagValue)
+		err := st.RetireTagValue(context.Background(), tagKey, tagValue)
 		return dbWriteDone{err: err}
 	}
 }
 
 func (m *EditorModel) editValueDescCmd(desc string) tea.Cmd {
-	db := m.db
+	st := m.st
 	tagKey := m.selectedKey.tagKey
 	tagValue := m.selectedValue.value
 	return func() tea.Msg {
-		_, err := db.ExecContext(context.Background(),
-			`UPDATE tags SET description = ? WHERE tag_key = ? AND tag_value = ?`, desc, tagKey, tagValue)
+		err := st.UpdateTagValueDescription(context.Background(), tagKey, tagValue, desc)
 		return dbWriteDone{err: err}
 	}
 }
@@ -972,7 +905,7 @@ func (m *EditorModel) loadValuesCmd() tea.Cmd {
 	if m.selectedKey.tagKey == "" {
 		return nil
 	}
-	return loadValues(m.db, m.selectedKey.tagKey, m.showRetired)
+	return loadValues(m.st, m.selectedKey.tagKey, m.showRetired)
 }
 
 // --- Helpers ----------------------------------------------------------------
@@ -1382,11 +1315,6 @@ func (m EditorModel) renderCol3(w, h int) string {
 			required = "yes"
 		}
 		lines = append(lines, TextStyle.Render("Required: "+required))
-		seed := "no"
-		if m.selectedKey.isSeed {
-			seed = "yes"
-		}
-		lines = append(lines, TextStyle.Render("Seed: "+seed))
 		lines = append(lines, "")
 		lines = append(lines, m.renderConventionFields(w)...)
 		if m.selectedKey.description != "" {
@@ -1581,11 +1509,9 @@ func cycleValue(current string, options []string) string {
 }
 
 func (m *EditorModel) updateConventionCmd(tagKey, scope, exclusionGroup, autoExtract, interview string) tea.Cmd {
-	db := m.db
+	st := m.st
 	return func() tea.Msg {
-		_, err := db.ExecContext(context.Background(),
-			`UPDATE tags SET scope = ?, exclusion_group = ?, auto_extract = ?, interview = ? WHERE tag_key = ?`,
-			scope, exclusionGroup, autoExtract, interview, tagKey)
+		err := st.UpdateTagConventions(context.Background(), tagKey, scope, exclusionGroup, autoExtract, interview)
 		return dbWriteDone{err: err}
 	}
 }

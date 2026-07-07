@@ -6,6 +6,8 @@ import (
 	"math"
 	"testing"
 	"time"
+
+	"github.com/bmjdotnet/teamster/internal/store/storetest"
 )
 
 // ---------------------------------------------------------------------------
@@ -19,7 +21,7 @@ import (
 // they land unallocated. Gap recovery resolves them from the session's
 // attributed teammate messages.
 func TestRecoverGaps_LeadThreadFromTeammateAttributions(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC)
 
@@ -81,11 +83,9 @@ func TestRecoverGaps_LeadThreadFromTeammateAttributions(t *testing.T) {
 
 	// Provenance: gap_evidence records the resolution.
 	var evEType, evEID, evResMethod string
-	if err := db.QueryRowContext(ctx,
-		`SELECT entity_type, entity_id, resolution_method FROM gap_evidence WHERE message_id = 'lead1'`).
-		Scan(&evEType, &evEID, &evResMethod); err != nil {
-		t.Fatalf("read gap evidence for lead1: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db,
+		`SELECT entity_type, entity_id, resolution_method FROM gap_evidence WHERE message_id = 'lead1'`, nil,
+		&evEType, &evEID, &evResMethod)
 	if evEType != "outcome" || evEID != "o1" || evResMethod != "session_outcome_inference" {
 		t.Fatalf("evidence lead1 = (%q,%q,%q), want (outcome,o1,session_outcome_inference)", evEType, evEID, evResMethod)
 	}
@@ -100,7 +100,7 @@ func TestRecoverGaps_LeadThreadFromTeammateAttributions(t *testing.T) {
 // a teammate that never focused, whose message arrives BEFORE any focus in the
 // session, but the session later has attributed messages the gap can infer from.
 func TestRecoverGaps_TeammateFromSessionOutcome(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC)
 
@@ -153,7 +153,7 @@ func TestRecoverGaps_TeammateFromSessionOutcome(t *testing.T) {
 // later set focus in the same session gets attributed to its own focused entity
 // via agent_focus_inheritance, not the session's strategic outcome.
 func TestRecoverGaps_TeammateInheritsOwnLaterFocus(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC)
 
@@ -205,11 +205,8 @@ func TestRecoverGaps_TeammateInheritsOwnLaterFocus(t *testing.T) {
 	}
 
 	var evResMethod string
-	if err := db.QueryRowContext(ctx,
-		`SELECT resolution_method FROM gap_evidence WHERE message_id = 'impl_early'`).
-		Scan(&evResMethod); err != nil {
-		t.Fatalf("read gap evidence: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db,
+		`SELECT resolution_method FROM gap_evidence WHERE message_id = 'impl_early'`, nil, &evResMethod)
 	if evResMethod != "agent_focus_inheritance" {
 		t.Fatalf("impl_early resolution_method=%q, want agent_focus_inheritance", evResMethod)
 	}
@@ -221,7 +218,7 @@ func TestRecoverGaps_TeammateInheritsOwnLaterFocus(t *testing.T) {
 
 // TestRecoverGaps_DryRunWritesNothing verifies --dry-run performs zero writes.
 func TestRecoverGaps_DryRunWritesNothing(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC)
 
@@ -254,9 +251,7 @@ func TestRecoverGaps_DryRunWritesNothing(t *testing.T) {
 		t.Fatalf("dry-run mutated attribution: method=%q, want unallocated", method)
 	}
 	var ev int
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM gap_evidence`).Scan(&ev); err != nil {
-		t.Fatalf("count gap evidence: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT COUNT(*) FROM gap_evidence`, nil, &ev)
 	if ev != 0 {
 		t.Fatalf("dry-run wrote %d gap evidence rows, want 0", ev)
 	}
@@ -265,7 +260,7 @@ func TestRecoverGaps_DryRunWritesNothing(t *testing.T) {
 // TestRecoverGaps_UncoverReverses verifies that UncoverGaps deletes every
 // gap_recovery attribution and its evidence.
 func TestRecoverGaps_UncoverReverses(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC)
 
@@ -312,9 +307,7 @@ func TestRecoverGaps_UncoverReverses(t *testing.T) {
 
 	// Evidence cleared.
 	var ev int
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM gap_evidence`).Scan(&ev); err != nil {
-		t.Fatalf("count gap evidence: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT COUNT(*) FROM gap_evidence`, nil, &ev)
 	if ev != 0 {
 		t.Fatalf("uncover left %d gap evidence rows, want 0", ev)
 	}
@@ -326,7 +319,7 @@ func TestRecoverGaps_UncoverReverses(t *testing.T) {
 
 // TestRecoverGaps_ConservationInvariant is the explicit conservation assertion.
 func TestRecoverGaps_ConservationInvariant(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC)
 
@@ -378,7 +371,7 @@ func TestRecoverGaps_ConservationInvariant(t *testing.T) {
 // TestRecoverGaps_NeverTouchesNonUnallocated verifies gap recovery only touches
 // method='unallocated' rows.
 func TestRecoverGaps_NeverTouchesNonUnallocated(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC)
 
@@ -414,7 +407,7 @@ func TestRecoverGaps_NeverTouchesNonUnallocated(t *testing.T) {
 // unallocated messages but no resolvable entity (shouldn't happen normally but
 // guard) is skipped, leaving messages for LLM fallback.
 func TestRecoverGaps_SessionWithNoResolvableEntity(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC)
 
@@ -432,11 +425,9 @@ func TestRecoverGaps_SessionWithNoResolvableEntity(t *testing.T) {
 	// Both are unallocated after normal allocation. Manually attribute m_attr
 	// to simulate a partial-gap session where the attributed entity doesn't
 	// have a resolvable outcome.
-	if _, err := db.ExecContext(ctx,
+	storetest.Exec(t, ctx, db,
 		`UPDATE usage_attribution SET entity_type='outcome', entity_id='nonexistent',
-		 method='temporal_join' WHERE message_id='m_attr'`); err != nil {
-		t.Fatalf("manual attribute: %v", err)
-	}
+		 method='temporal_join' WHERE message_id='m_attr'`)
 
 	if _, err := r.RecoverGaps(ctx, false); err != nil {
 		t.Fatalf("recover-gaps: %v", err)
@@ -454,11 +445,88 @@ func TestRecoverGaps_SessionWithNoResolvableEntity(t *testing.T) {
 	}
 }
 
+// TestRecoverGaps_LeadAndTeammateGapsResolveIndependently is the F1
+// agentExact regression test: a single session has BOTH a lead gap thread
+// (agent_name="") and a named teammate gap thread (agent_name="@store"),
+// each of which must resolve to a DIFFERENT entity. This locks in the
+// agentExact=true fix at gap.go:60 — before that fix,
+// ReclaimableMessages(session, "", methods) with agentName=="" meant "no
+// agent filter," so processing the lead's gap thread would also sweep up
+// the teammate's still-unallocated messages and misattribute them to the
+// lead's resolved entity (whichever thread GapThreads happened to process
+// first "won" the teammate's messages too).
+func TestRecoverGaps_LeadAndTeammateGapsResolveIndependently(t *testing.T) {
+	db := rollupTestStore(t)
+	ctx := context.Background()
+	base := time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC)
+
+	seedOutcome(t, db, ctx, "o-main")
+	seedWorkunit(t, db, ctx, "w-store", "o-main")
+
+	// @store focuses w-store starting at 10:10; its own early message (10:03,
+	// before its focus opens) has no covering interval and stays unallocated.
+	seedFocus(t, db, ctx, "s1", "@store", "workunit", "w-store", base.Add(10*time.Minute), nil)
+	seedEventRecord(t, db, ctx, "workunit", "w-store", "active", "@store", base.Add(10*time.Minute), nil)
+	seedLedger(t, db, ctx, "store_late", "s1", "@store", base.Add(15*time.Minute), 25.0, 2500)
+	seedLedger(t, db, ctx, "store_early", "s1", "@store", base.Add(3*time.Minute), 8.0, 800)
+
+	// Lead never focuses at all in this session — its messages have no
+	// covering interval (own, teammate, or session-wide) and stay unallocated.
+	seedLedger(t, db, ctx, "lead1", "s1", "", base.Add(1*time.Minute), 10.0, 1000)
+	seedLedger(t, db, ctx, "lead2", "s1", "", base.Add(2*time.Minute), 20.0, 2000)
+
+	r := newTestRunner(db)
+	if err := r.Run(ctx, false); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	// Preconditions.
+	if _, _, method := attributionOf(t, db, ctx, "store_late"); method != "temporal_join" {
+		t.Fatalf("store_late method=%q, want temporal_join", method)
+	}
+	for _, m := range []string{"store_early", "lead1", "lead2"} {
+		if _, _, method := attributionOf(t, db, ctx, m); method != "unallocated" {
+			t.Fatalf("%s pre-gap method=%q, want unallocated", m, method)
+		}
+	}
+
+	stats, err := r.RecoverGaps(ctx, false)
+	if err != nil {
+		t.Fatalf("recover-gaps: %v", err)
+	}
+	if stats.Recovered != 3 {
+		t.Fatalf("stats.Recovered=%d, want 3 (lead1 + lead2 + store_early)", stats.Recovered)
+	}
+
+	// Lead's gap resolves via the session's strategic outcome (o-main, the
+	// parent of w-store — the only attributed entity in the session).
+	for _, m := range []string{"lead1", "lead2"} {
+		et, ei, method := attributionOf(t, db, ctx, m)
+		if method != gapMethod || et != "outcome" || ei != "o-main" {
+			t.Fatalf("%s → (%q,%q) method=%q, want (outcome,o-main) %s", m, et, ei, method, gapMethod)
+		}
+	}
+
+	// The teammate's OWN gap resolves via its own later focus (w-store) —
+	// NOT the lead's resolved entity. Without agentExact, this would
+	// incorrectly land on (outcome, o-main) too, or never be reached at all
+	// (already reassigned by the lead's over-broad ReclaimableMessages call).
+	et, ei, method := attributionOf(t, db, ctx, "store_early")
+	if method != gapMethod || et != "workunit" || ei != "w-store" {
+		t.Fatalf("store_early → (%q,%q) method=%q, want (workunit,w-store) %s", et, ei, method, gapMethod)
+	}
+
+	if l, f := sumLedger(t, db, ctx), sumCostFacts(t, db, ctx); math.Abs(l-f) > eps {
+		t.Fatalf("conservation violated: ledger=%.6f, cost_facts=%.6f", l, f)
+	}
+	assertNoDoubleAttribution(t, db, ctx)
+}
+
 // TestRecoverGaps_FullyUnallocatedSessionSkipped verifies that a session where
 // ALL messages are unallocated (no attributed messages at all) is NOT a gap
 // session — it's an orphan session for LLM synthesis (Objective 2).
 func TestRecoverGaps_FullyUnallocatedSessionSkipped(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC)
 

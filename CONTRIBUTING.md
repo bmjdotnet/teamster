@@ -20,13 +20,23 @@ go vet ./...
 ```
 
 Store and migration tests skip unless `TEAMSTER_TEST_MYSQL_DSN` is set.
-To run them, point the DSN at a server-level connection (no database name).
-The DSN must be server-level (note the trailing slash with no database name)
-so the per-test-schema harness can create and drop isolated schemas:
+The easiest way to run them is:
 
 ```bash
-export TEAMSTER_TEST_MYSQL_DSN='root:test@tcp(127.0.0.1:3306)/'
-go test ./...
+scripts/test-with-mysql.sh
+```
+
+This starts a throwaway MySQL 8 container (reusing one already listening on
+`127.0.0.1:13306` if present), runs `go test ./...` against it, and tears
+down any container it started.
+
+To point at MySQL yourself, the DSN must be `mysql://` URL form, server-level
+(no database name, trailing slash) so the per-test-schema harness can create
+and drop isolated schemas:
+
+```bash
+export TEAMSTER_TEST_MYSQL_DSN='mysql://root:test@127.0.0.1:13306/'
+cd src && go test ./...
 ```
 
 ## Development workflow

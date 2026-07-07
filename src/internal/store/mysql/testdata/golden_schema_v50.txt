@@ -1,0 +1,418 @@
+TABLE activity_events
+  COLUMN agent_name type=varchar(64) null=NO default= extra=
+  COLUMN display type=text null=NO default=<NULL> extra=
+  COLUMN focus type=varchar(255) null=NO default= extra=
+  COLUMN host type=varchar(128) null=NO default= extra=
+  COLUMN id type=bigint null=NO default=<NULL> extra=auto_increment
+  COLUMN session_id type=varchar(64) null=NO default=<NULL> extra=
+  COLUMN tag type=varchar(16) null=NO default=<NULL> extra=
+  COLUMN timestamp type=datetime(6) null=NO default=<NULL> extra=
+  INDEX idx_activity_pair_time nonunique (session_id,agent_name,timestamp)
+  INDEX idx_activity_time nonunique (timestamp)
+  INDEX PRIMARY unique (id)
+TABLE archived_v1_goals
+  COLUMN created_at type=datetime(6) null=NO default=<NULL> extra=
+  COLUMN description type=text null=NO default=<NULL> extra=
+  COLUMN focus type=varchar(255) null=NO default= extra=
+  COLUMN id type=varchar(64) null=NO default=<NULL> extra=
+  COLUMN origin_agent type=varchar(64) null=NO default= extra=
+  COLUMN origin_host type=varchar(128) null=NO default= extra=
+  COLUMN origin_session type=varchar(64) null=NO default= extra=
+  COLUMN project_id type=varchar(64) null=NO default=<NULL> extra=
+  COLUMN status type=enum('open','active','blocked','achieved','abandoned') null=NO default=open extra=
+  COLUMN title type=varchar(255) null=NO default=<NULL> extra=
+  COLUMN updated_at type=datetime(6) null=NO default=<NULL> extra=
+  INDEX idx_goals_project nonunique (project_id)
+  INDEX PRIMARY unique (id)
+TABLE archived_v1_plane_sync
+  COLUMN last_sync type=datetime(6) null=YES default=<NULL> extra=
+  COLUMN plane_id type=varchar(255) null=NO default=<NULL> extra=
+  COLUMN plane_project_id type=varchar(255) null=NO default= extra=
+  COLUMN plane_type type=varchar(64) null=NO default=<NULL> extra=
+  COLUMN sync_source type=varchar(16) null=NO default=plane extra=
+  COLUMN wms_entity_id type=varchar(64) null=NO default=<NULL> extra=
+  COLUMN wms_entity_type type=varchar(32) null=NO default=<NULL> extra=
+  INDEX idx_plane_sync_wms nonunique (wms_entity_type,wms_entity_id)
+  INDEX PRIMARY unique (plane_id,plane_type)
+TABLE archived_v1_projects
+  COLUMN created_at type=datetime(6) null=NO default=<NULL> extra=
+  COLUMN description type=text null=NO default=<NULL> extra=
+  COLUMN focus type=varchar(255) null=NO default= extra=
+  COLUMN id type=varchar(64) null=NO default=<NULL> extra=
+  COLUMN name type=varchar(255) null=NO default=<NULL> extra=
+  COLUMN origin_agent type=varchar(64) null=NO default= extra=
+  COLUMN origin_host type=varchar(128) null=NO default= extra=
+  COLUMN origin_session type=varchar(64) null=NO default= extra=
+  COLUMN status type=enum('planning','active','blocked','complete','archived') null=NO default=planning extra=
+  COLUMN team_id type=varchar(64) null=NO default=<NULL> extra=
+  COLUMN updated_at type=datetime(6) null=NO default=<NULL> extra=
+  INDEX idx_projects_team nonunique (team_id)
+  INDEX PRIMARY unique (id)
+TABLE archived_v1_tasks
+  COLUMN cost_details type=text null=NO default=<NULL> extra=
+  COLUMN created_at type=datetime(6) null=NO default=<NULL> extra=
+  COLUMN description type=text null=NO default=<NULL> extra=
+  COLUMN focus type=varchar(255) null=NO default= extra=
+  COLUMN goal_id type=varchar(64) null=NO default= extra=
+  COLUMN id type=varchar(64) null=NO default=<NULL> extra=
+  COLUMN origin_agent type=varchar(64) null=NO default= extra=
+  COLUMN origin_host type=varchar(128) null=NO default= extra=
+  COLUMN origin_session type=varchar(64) null=NO default= extra=
+  COLUMN prior_status type=varchar(32) null=NO default= extra=
+  COLUMN squad_id type=varchar(64) null=NO default= extra=
+  COLUMN status type=enum('pending','active','blocked','review','complete') null=NO default=pending extra=
+  COLUMN title type=varchar(255) null=NO default=<NULL> extra=
+  COLUMN updated_at type=datetime(6) null=NO default=<NULL> extra=
+  COLUMN usage_details type=text null=NO default=<NULL> extra=
+  INDEX idx_tasks_goal nonunique (goal_id)
+  INDEX PRIMARY unique (id)
+TABLE archived_v1_work_dependencies
+  COLUMN blocked_id type=varchar(64) null=NO default=<NULL> extra=
+  COLUMN blocked_type type=varchar(32) null=NO default=<NULL> extra=
+  COLUMN blocker_id type=varchar(64) null=NO default=<NULL> extra=
+  COLUMN blocker_type type=varchar(32) null=NO default=<NULL> extra=
+  COLUMN created_at type=datetime(6) null=NO default=<NULL> extra=
+  INDEX idx_deps_blocked nonunique (blocked_id)
+  INDEX PRIMARY unique (blocker_id,blocked_id)
+TABLE archived_v1_work_items
+  COLUMN agent_id type=varchar(64) null=NO default= extra=
+  COLUMN cost_details type=text null=NO default=<NULL> extra=
+  COLUMN created_at type=datetime(6) null=NO default=<NULL> extra=
+  COLUMN description type=text null=NO default=<NULL> extra=
+  COLUMN id type=varchar(64) null=NO default=<NULL> extra=
+  COLUMN origin_agent type=varchar(64) null=NO default= extra=
+  COLUMN origin_host type=varchar(128) null=NO default= extra=
+  COLUMN origin_session type=varchar(64) null=NO default= extra=
+  COLUMN output type=text null=NO default=<NULL> extra=
+  COLUMN prior_status type=varchar(32) null=NO default= extra=
+  COLUMN status type=enum('pending','assigned','active','review','complete','blocked') null=NO default=pending extra=
+  COLUMN task_id type=varchar(64) null=NO default=<NULL> extra=
+  COLUMN title type=varchar(255) null=NO default=<NULL> extra=
+  COLUMN updated_at type=datetime(6) null=NO default=<NULL> extra=
+  COLUMN usage_details type=text null=NO default=<NULL> extra=
+  INDEX idx_work_items_task nonunique (task_id)
+  INDEX PRIMARY unique (id)
+TABLE archived_v2_event_records
+  COLUMN agent_name type=varchar(64) null=NO default= extra=
+  COLUMN assembled_at type=datetime(6) null=YES default=<NULL> extra=
+  COLUMN cost_tokens type=bigint unsigned null=YES default=<NULL> extra=
+  COLUMN cost_usd type=decimal(14,6) null=YES default=<NULL> extra=
+  COLUMN duration_ms type=bigint null=YES default=<NULL> extra=
+  COLUMN ended_at type=datetime(6) null=YES default=<NULL> extra=
+  COLUMN entity_id type=varchar(128) null=NO default=<NULL> extra=
+  COLUMN entity_type type=varchar(32) null=NO default=<NULL> extra=
+  COLUMN host type=varchar(128) null=NO default= extra=
+  COLUMN id type=bigint unsigned null=NO default=<NULL> extra=auto_increment
+  COLUMN phase type=varchar(32) null=YES default=<NULL> extra=
+  COLUMN phase_source type=varchar(16) null=NO default= extra=
+  COLUMN session_id type=varchar(64) null=NO default= extra=
+  COLUMN started_at type=datetime(6) null=NO default=<NULL> extra=
+  COLUMN state type=varchar(32) null=NO default=<NULL> extra=
+  INDEX idx_duration nonunique (duration_ms)
+  INDEX idx_ended_started nonunique (ended_at,started_at)
+  INDEX idx_entity_time nonunique (entity_type,entity_id,started_at)
+  INDEX idx_phase nonunique (entity_type,phase)
+  INDEX idx_started_ended nonunique (started_at,ended_at)
+  INDEX PRIMARY unique (id)
+  INDEX uq_open unique (entity_type,entity_id,ended_at)
+TABLE archived_v2_focus_intervals
+  COLUMN agent_name type=varchar(64) null=NO default= extra=
+  COLUMN ended_at type=datetime(6) null=YES default=<NULL> extra=
+  COLUMN entity_id type=varchar(128) null=NO default=<NULL> extra=
+  COLUMN entity_type type=varchar(32) null=NO default=<NULL> extra=
+  COLUMN id type=bigint unsigned null=NO default=<NULL> extra=auto_increment
+  COLUMN session_id type=varchar(64) null=NO default=<NULL> extra=
+  COLUMN started_at type=datetime(6) null=NO default=<NULL> extra=
+  INDEX idx_afi_lookup nonunique (session_id,agent_name,started_at)
+  INDEX idx_afi_open nonunique (session_id,agent_name,ended_at)
+  INDEX PRIMARY unique (id)
+TABLE cost_rollup
+  COLUMN agent_name type=varchar(64) null=NO default= extra=
+  COLUMN bucket_day type=date null=NO default=<NULL> extra=
+  COLUMN bucket_hour type=datetime null=NO default=1970-01-01 00:00:00 extra=
+  COLUMN cost_usd type=decimal(14,6) null=NO default=0.000000 extra=
+  COLUMN entity_id type=varchar(128) null=NO default= extra=
+  COLUMN entity_type type=varchar(32) null=NO default= extra=
+  COLUMN model type=varchar(128) null=NO default= extra=
+  COLUMN tokens type=bigint unsigned null=NO default=0 extra=
+  INDEX idx_cr_agent nonunique (agent_name)
+  INDEX idx_cr_entity nonunique (entity_type,entity_id)
+  INDEX PRIMARY unique (bucket_hour,entity_type,entity_id,agent_name,model)
+TABLE directive_evidence
+  COLUMN agent_name type=varchar(128) null=NO default= extra=
+  COLUMN directive_id type=varchar(128) null=NO default= extra=
+  COLUMN directive_type type=varchar(32) null=NO default= extra=
+  COLUMN entity_id type=varchar(128) null=NO default= extra=
+  COLUMN entity_type type=varchar(32) null=NO default= extra=
+  COLUMN message_id type=varchar(128) null=NO default=<NULL> extra=
+  COLUMN recovered_at type=datetime(6) null=NO default=<NULL> extra=
+  COLUMN session_id type=varchar(64) null=NO default= extra=
+  INDEX idx_de_entity nonunique (entity_type,entity_id)
+  INDEX idx_de_session nonunique (session_id)
+  INDEX PRIMARY unique (message_id)
+TABLE entity_dependencies
+  COLUMN blocked_id type=varchar(64) null=NO default=<NULL> extra=
+  COLUMN blocked_type type=varchar(32) null=NO default=<NULL> extra=
+  COLUMN blocker_id type=varchar(64) null=NO default=<NULL> extra=
+  COLUMN blocker_type type=varchar(32) null=NO default=<NULL> extra=
+  COLUMN created_at type=datetime(6) null=NO default=<NULL> extra=
+  INDEX idx_ed_blocked nonunique (blocked_type,blocked_id)
+  INDEX PRIMARY unique (blocker_type,blocker_id,blocked_type,blocked_id)
+TABLE entity_tags
+  COLUMN applied_at type=datetime(6) null=NO default=<NULL> extra=
+  COLUMN entity_id type=varchar(128) null=NO default=<NULL> extra=
+  COLUMN entity_type type=varchar(32) null=NO default=<NULL> extra=
+  COLUMN source type=varchar(16) null=NO default=manual extra=
+  COLUMN tag_id type=bigint unsigned null=NO default=<NULL> extra=
+  INDEX idx_et_entity nonunique (entity_type,entity_id)
+  INDEX idx_et_tag nonunique (tag_id)
+  INDEX PRIMARY unique (entity_type,entity_id,tag_id)
+TABLE focus_interval_repair
+  COLUMN interval_id type=bigint unsigned null=NO default=<NULL> extra=
+  COLUMN new_ended_at type=datetime(6) null=YES default=<NULL> extra=
+  COLUMN prior_ended_at type=datetime(6) null=YES default=<NULL> extra=
+  COLUMN repaired_at type=datetime(6) null=NO default=<NULL> extra=
+  INDEX PRIMARY unique (interval_id)
+TABLE gap_evidence
+  COLUMN agent_name type=varchar(64) null=NO default= extra=
+  COLUMN entity_id type=varchar(128) null=NO default= extra=
+  COLUMN entity_type type=varchar(32) null=NO default= extra=
+  COLUMN message_id type=varchar(128) null=NO default=<NULL> extra=
+  COLUMN recovered_at type=datetime(6) null=NO default=<NULL> extra=
+  COLUMN resolution_method type=varchar(48) null=NO default= extra=
+  COLUMN resolved_from_entity type=varchar(192) null=NO default= extra=
+  COLUMN session_id type=varchar(64) null=NO default= extra=
+  INDEX idx_ge_entity nonunique (entity_type,entity_id)
+  INDEX idx_ge_session nonunique (session_id)
+  INDEX PRIMARY unique (message_id)
+TABLE outcome_cost_rollup
+  COLUMN agent_name type=varchar(128) null=NO default= extra=
+  COLUMN bucket_day type=date null=NO default=<NULL> extra=
+  COLUMN bucket_hour type=datetime null=NO default=1970-01-01 00:00:00 extra=
+  COLUMN cost_usd type=decimal(12,6) null=NO default=0.000000 extra=
+  COLUMN model type=varchar(64) null=NO default= extra=
+  COLUMN outcome_id type=varchar(64) null=NO default=<NULL> extra=
+  COLUMN source_id type=varchar(128) null=NO default= extra=
+  COLUMN source_type type=varchar(32) null=NO default=<NULL> extra=
+  COLUMN tokens type=bigint unsigned null=NO default=0 extra=
+  INDEX idx_ocr_day nonunique (bucket_day)
+  INDEX idx_ocr_outcome nonunique (outcome_id)
+  INDEX PRIMARY unique (bucket_hour,outcome_id,source_type,source_id,model,agent_name)
+TABLE outcome_edges
+  COLUMN child_id type=varchar(64) null=NO default=<NULL> extra=
+  COLUMN parent_id type=varchar(64) null=NO default=<NULL> extra=
+  INDEX idx_oe_child nonunique (child_id)
+  INDEX PRIMARY unique (parent_id,child_id)
+TABLE outcomes
+  COLUMN created_at type=datetime(6) null=NO default=<NULL> extra=
+  COLUMN description type=text null=NO default=<NULL> extra=
+  COLUMN focus type=varchar(255) null=NO default= extra=
+  COLUMN id type=varchar(64) null=NO default=<NULL> extra=
+  COLUMN origin_agent type=varchar(64) null=NO default= extra=
+  COLUMN origin_host type=varchar(128) null=NO default= extra=
+  COLUMN origin_session type=varchar(64) null=NO default= extra=
+  COLUMN prior_status type=varchar(32) null=NO default= extra=
+  COLUMN status type=varchar(32) null=NO default=pending extra=
+  COLUMN title type=varchar(255) null=NO default=<NULL> extra=
+  COLUMN updated_at type=datetime(6) null=NO default=<NULL> extra=
+  INDEX idx_outcomes_status nonunique (status)
+  INDEX PRIMARY unique (id)
+TABLE recovery_evidence
+  COLUMN entity_id type=varchar(128) null=NO default= extra=
+  COLUMN entity_type type=varchar(32) null=NO default= extra=
+  COLUMN message_id type=varchar(128) null=NO default=<NULL> extra=
+  COLUMN recovered_at type=datetime(6) null=NO default=<NULL> extra=
+  COLUMN setfocus_at type=datetime(6) null=NO default=<NULL> extra=
+  INDEX idx_re_entity nonunique (entity_type,entity_id)
+  INDEX PRIMARY unique (message_id)
+TABLE schema_version
+  COLUMN applied_at type=datetime(6) null=NO default=<NULL> extra=
+  COLUMN name type=varchar(128) null=NO default=<NULL> extra=
+  COLUMN version type=int null=NO default=<NULL> extra=
+  INDEX PRIMARY unique (version)
+TABLE session_reconciliation
+  COLUMN computed_at type=datetime(6) null=NO default=<NULL> extra=
+  COLUMN divergence_usd type=decimal(14,6) null=NO default=0.000000 extra=
+  COLUMN ledger_cost_usd type=decimal(14,6) null=NO default=0.000000 extra=
+  COLUMN otel_cost_usd type=decimal(14,6) null=NO default=0.000000 extra=
+  COLUMN session_id type=varchar(64) null=NO default=<NULL> extra=
+  INDEX idx_sr_divergence nonunique (divergence_usd)
+  INDEX PRIMARY unique (session_id)
+TABLE sessions
+  COLUMN agent_name type=varchar(64) null=NO default= extra=
+  COLUMN first_seen type=datetime(6) null=NO default=<NULL> extra=
+  COLUMN focus type=varchar(255) null=NO default= extra=
+  COLUMN goal_id type=varchar(64) null=NO default= extra=
+  COLUMN host type=varchar(128) null=NO default= extra=
+  COLUMN last_seen type=datetime(6) null=NO default=<NULL> extra=
+  COLUMN project_id type=varchar(64) null=NO default= extra=
+  COLUMN session_id type=varchar(64) null=NO default=<NULL> extra=
+  COLUMN status type=enum('active','idle','closed') null=NO default=active extra=
+  COLUMN task_id type=varchar(64) null=NO default= extra=
+  COLUMN team_name type=varchar(64) null=NO default= extra=
+  COLUMN username type=varchar(64) null=NO default= extra=
+  COLUMN workitem_id type=varchar(64) null=NO default= extra=
+  INDEX idx_sessions_host nonunique (host)
+  INDEX idx_sessions_last_seen nonunique (last_seen)
+  INDEX idx_sessions_team nonunique (team_name)
+  INDEX PRIMARY unique (session_id,agent_name)
+TABLE synthesis_evidence
+  COLUMN confidence type=varchar(32) null=NO default= extra=
+  COLUMN entity_id type=varchar(128) null=NO default= extra=
+  COLUMN entity_type type=varchar(32) null=NO default= extra=
+  COLUMN evidence_excerpt type=text null=NO default=<NULL> extra=
+  COLUMN mapping_source type=varchar(255) null=NO default= extra=
+  COLUMN message_id type=varchar(128) null=NO default=<NULL> extra=
+  COLUMN recovered_at type=datetime(6) null=NO default=<NULL> extra=
+  COLUMN session_id type=varchar(64) null=NO default= extra=
+  INDEX idx_se_entity nonunique (entity_type,entity_id)
+  INDEX idx_se_session nonunique (session_id)
+  INDEX PRIMARY unique (message_id)
+TABLE tags
+  COLUMN auto_extract type=varchar(32) null=NO default= extra=
+  COLUMN cardinality type=varchar(8) null=NO default=multi extra=
+  COLUMN category type=varchar(32) null=NO default=context extra=
+  COLUMN description type=varchar(1024) null=NO default= extra=
+  COLUMN exclusion_group type=varchar(64) null=NO default= extra=
+  COLUMN facet_source type=varchar(64) null=NO default= extra=
+  COLUMN id type=bigint unsigned null=NO default=<NULL> extra=auto_increment
+  COLUMN interview type=varchar(16) null=NO default=propose extra=
+  COLUMN is_seed type=tinyint(1) null=NO default=0 extra=
+  COLUMN required type=tinyint(1) null=NO default=0 extra=
+  COLUMN retired type=tinyint(1) null=NO default=0 extra=
+  COLUMN scope type=varchar(16) null=NO default= extra=
+  COLUMN tag_key type=varchar(64) null=NO default=<NULL> extra=
+  COLUMN tag_value type=varchar(128) null=NO default=<NULL> extra=
+  INDEX idx_tag_key nonunique (tag_key)
+  INDEX PRIMARY unique (id)
+  INDEX uq_tag unique (tag_key,tag_value)
+TABLE token_ledger
+  COLUMN agent_name type=varchar(64) null=NO default= extra=
+  COLUMN cache_read_tokens type=bigint unsigned null=NO default=0 extra=
+  COLUMN cache_write_1h type=bigint unsigned null=NO default=0 extra=
+  COLUMN cache_write_5m type=bigint unsigned null=NO default=0 extra=
+  COLUMN cache_write_tokens type=bigint unsigned null=NO default=0 extra=
+  COLUMN cost_usd type=decimal(12,6) null=NO default=0.000000 extra=
+  COLUMN host type=varchar(128) null=NO default= extra=
+  COLUMN id type=bigint unsigned null=NO default=<NULL> extra=auto_increment
+  COLUMN input_tokens type=bigint unsigned null=NO default=0 extra=
+  COLUMN message_id type=varchar(128) null=NO default= extra=
+  COLUMN model type=varchar(128) null=NO default= extra=
+  COLUMN n_text type=smallint unsigned null=NO default=0 extra=
+  COLUMN n_thinking type=smallint unsigned null=NO default=0 extra=
+  COLUMN n_tool_use type=smallint unsigned null=NO default=0 extra=
+  COLUMN output_tokens type=bigint unsigned null=NO default=0 extra=
+  COLUMN service_tier type=varchar(32) null=NO default= extra=
+  COLUMN session_id type=varchar(64) null=NO default=<NULL> extra=
+  COLUMN speed type=varchar(32) null=NO default= extra=
+  COLUMN stop_reason type=varchar(32) null=NO default= extra=
+  COLUMN timestamp type=datetime(6) null=NO default=<NULL> extra=
+  COLUMN total_input type=bigint unsigned null=NO default=0 extra=
+  COLUMN username type=varchar(64) null=NO default= extra=
+  INDEX idx_token_agent nonunique (agent_name)
+  INDEX idx_token_agent_time nonunique (agent_name,timestamp)
+  INDEX idx_token_model nonunique (model)
+  INDEX idx_token_session nonunique (session_id)
+  INDEX idx_token_time nonunique (timestamp)
+  INDEX idx_token_total_input nonunique (session_id,total_input)
+  INDEX PRIMARY unique (id)
+  INDEX uq_message unique (message_id)
+TABLE transition_rules
+  COLUMN entity_type type=varchar(32) null=NO default=<NULL> extra=
+  COLUMN new_status type=varchar(32) null=NO default=<NULL> extra=
+  COLUMN old_status type=varchar(32) null=NO default=<NULL> extra=
+  COLUMN required_role type=varchar(64) null=NO default=* extra=
+  INDEX PRIMARY unique (entity_type,old_status,new_status,required_role)
+TABLE usage_attribution
+  COLUMN computed_at type=datetime(6) null=NO default=<NULL> extra=
+  COLUMN entity_id type=varchar(128) null=NO default= extra=
+  COLUMN entity_type type=varchar(32) null=NO default= extra=
+  COLUMN interval_id type=bigint unsigned null=NO default=0 extra=
+  COLUMN message_id type=varchar(128) null=NO default=<NULL> extra=
+  COLUMN method type=varchar(48) null=NO default=<NULL> extra=
+  COLUMN weight type=decimal(6,5) null=NO default=<NULL> extra=
+  INDEX idx_ua_entity nonunique (entity_type,entity_id)
+  INDEX idx_ua_interval nonunique (interval_id)
+  INDEX idx_ua_method nonunique (method)
+  INDEX PRIMARY unique (message_id,entity_type,entity_id)
+TABLE warmup_evidence
+  COLUMN entity_id type=varchar(128) null=NO default= extra=
+  COLUMN entity_type type=varchar(32) null=NO default= extra=
+  COLUMN first_focus_at type=datetime(6) null=NO default=<NULL> extra=
+  COLUMN message_id type=varchar(128) null=NO default=<NULL> extra=
+  COLUMN recovered_at type=datetime(6) null=NO default=<NULL> extra=
+  COLUMN warmup_start type=datetime(6) null=NO default=<NULL> extra=
+  INDEX idx_we_entity nonunique (entity_type,entity_id)
+  INDEX PRIMARY unique (message_id)
+TABLE wms_intervals
+  COLUMN agent_name type=varchar(64) null=NO default= extra=
+  COLUMN assembled_at type=datetime(6) null=YES default=<NULL> extra=
+  COLUMN cost_tokens type=bigint unsigned null=YES default=<NULL> extra=
+  COLUMN cost_usd type=decimal(14,6) null=YES default=<NULL> extra=
+  COLUMN duration_ms type=bigint null=YES default=<NULL> extra=
+  COLUMN ended_at type=datetime(6) null=YES default=<NULL> extra=
+  COLUMN entity_id type=varchar(128) null=NO default=<NULL> extra=
+  COLUMN entity_type type=varchar(32) null=NO default=<NULL> extra=
+  COLUMN host type=varchar(128) null=NO default= extra=
+  COLUMN id type=bigint unsigned null=NO default=<NULL> extra=auto_increment
+  COLUMN identity_source type=varchar(16) null=NO default= extra=
+  COLUMN kind type=varchar(16) null=NO default=<NULL> extra=
+  COLUMN phase type=varchar(32) null=YES default=<NULL> extra=
+  COLUMN phase_assembled_at type=datetime(6) null=YES default=<NULL> extra=
+  COLUMN phase_source type=varchar(16) null=NO default= extra=
+  COLUMN session_id type=varchar(64) null=NO default= extra=
+  COLUMN started_at type=datetime(6) null=NO default=<NULL> extra=
+  COLUMN state type=varchar(32) null=NO default= extra=
+  INDEX idx_assemble nonunique (ended_at,assembled_at)
+  INDEX idx_duration nonunique (duration_ms)
+  INDEX idx_ended_started nonunique (ended_at,started_at)
+  INDEX idx_entity_time nonunique (entity_type,entity_id,started_at)
+  INDEX idx_focus_lookup nonunique (session_id,agent_name,started_at)
+  INDEX idx_focus_open nonunique (session_id,agent_name,ended_at)
+  INDEX idx_kind_entity nonunique (kind,entity_type,entity_id,started_at)
+  INDEX idx_phase nonunique (entity_type,phase)
+  INDEX idx_started_ended nonunique (started_at,ended_at)
+  INDEX PRIMARY unique (id)
+  INDEX uq_open unique (entity_type,entity_id,kind,ended_at)
+TABLE wms_journal
+  COLUMN agent_id type=varchar(128) null=YES default=<NULL> extra=
+  COLUMN created_at type=datetime null=NO default=CURRENT_TIMESTAMP extra=DEFAULT_GENERATED
+  COLUMN entity_id type=varchar(128) null=NO default=<NULL> extra=
+  COLUMN entity_type type=varchar(32) null=NO default=<NULL> extra=
+  COLUMN field type=varchar(64) null=NO default=<NULL> extra=
+  COLUMN host type=varchar(128) null=YES default=<NULL> extra=
+  COLUMN id type=bigint unsigned null=NO default=<NULL> extra=auto_increment
+  COLUMN new_value type=text null=YES default=<NULL> extra=
+  COLUMN notes type=text null=YES default=<NULL> extra=
+  COLUMN old_value type=text null=YES default=<NULL> extra=
+  COLUMN session_id type=varchar(128) null=YES default=<NULL> extra=
+  INDEX idx_entity nonunique (entity_type,entity_id)
+  INDEX PRIMARY unique (id)
+TABLE workunits
+  COLUMN agent_id type=varchar(64) null=NO default= extra=
+  COLUMN created_at type=datetime(6) null=NO default=<NULL> extra=
+  COLUMN description type=text null=NO default=<NULL> extra=
+  COLUMN focus type=varchar(255) null=NO default= extra=
+  COLUMN id type=varchar(64) null=NO default=<NULL> extra=
+  COLUMN origin_agent type=varchar(64) null=NO default= extra=
+  COLUMN origin_host type=varchar(128) null=NO default= extra=
+  COLUMN origin_session type=varchar(64) null=NO default= extra=
+  COLUMN outcome_id type=varchar(64) null=NO default=<NULL> extra=
+  COLUMN prior_status type=varchar(32) null=NO default= extra=
+  COLUMN status type=varchar(32) null=NO default=pending extra=
+  COLUMN title type=varchar(255) null=NO default=<NULL> extra=
+  COLUMN updated_at type=datetime(6) null=NO default=<NULL> extra=
+  INDEX idx_wu_agent nonunique (agent_id)
+  INDEX idx_wu_outcome nonunique (outcome_id)
+  INDEX idx_wu_status nonunique (status)
+  INDEX PRIMARY unique (id)
+FK activity_events.agent_name -> sessions.agent_name [fk_activity_session]
+FK activity_events.session_id -> sessions.session_id [fk_activity_session]
+FK entity_tags.tag_id -> tags.id [fk_et_tag]
+FK outcome_edges.child_id -> outcomes.id [fk_oe_child]
+FK outcome_edges.parent_id -> outcomes.id [fk_oe_parent]
+FK workunits.outcome_id -> outcomes.id [fk_wu_outcome]
+VIEW cost_facts
+  select `tl`.`message_id` AS `message_id`,`tl`.`session_id` AS `session_id`,`tl`.`agent_name` AS `agent_name`,`tl`.`host` AS `host`,`tl`.`model` AS `model`,`tl`.`timestamp` AS `timestamp`,coalesce(`ua`.`entity_type`,'') AS `entity_type`,coalesce(`ua`.`entity_id`,'') AS `entity_id`,coalesce(`ua`.`weight`,1) AS `weight`,(`tl`.`cost_usd` * coalesce(`ua`.`weight`,1)) AS `cost_usd`,cast(((((`tl`.`input_tokens` + `tl`.`output_tokens`) + `tl`.`cache_read_tokens`) + `tl`.`cache_write_tokens`) * coalesce(`ua`.`weight`,1)) as unsigned) AS `tokens` from (`token_ledger` `tl` left join `usage_attribution` `ua` on((`ua`.`message_id` = `tl`.`message_id`)))
+VIEW entity_tags_resolved
+  select `et`.`entity_type` AS `entity_type`,`et`.`entity_id` AS `entity_id`,`et`.`tag_id` AS `tag_id` from `entity_tags` `et` union all select 'workunit' AS `workunit`,`w`.`id` AS `id`,`et`.`tag_id` AS `tag_id` from ((`workunits` `w` join `entity_tags` `et` on(((`et`.`entity_type` = 'outcome') and (`et`.`entity_id` = `w`.`outcome_id`)))) join `tags` `ti` on(((`ti`.`id` = `et`.`tag_id`) and (`ti`.`category` = 'context')))) where exists(select 1 from (`entity_tags` `e2` join `tags` `t2` on((`t2`.`id` = `e2`.`tag_id`))) where ((`e2`.`entity_type` = 'workunit') and (`e2`.`entity_id` = `w`.`id`) and (`t2`.`tag_key` = `ti`.`tag_key`))) is false union all select 'outcome' AS `outcome`,`o`.`id` AS `id`,`dominant`.`tag_id` AS `tag_id` from (`outcomes` `o` join (select `w2`.`outcome_id` AS `outcome_id`,`et2`.`tag_id` AS `tag_id`,`t3`.`tag_key` AS `tag_key`,row_number() OVER (PARTITION BY `w2`.`outcome_id`,`t3`.`tag_key` ORDER BY count(0) desc ) AS `rn` from ((`workunits` `w2` join `entity_tags` `et2` on(((`et2`.`entity_type` = 'workunit') and (`et2`.`entity_id` = `w2`.`id`)))) join `tags` `t3` on(((`t3`.`id` = `et2`.`tag_id`) and (`t3`.`category` = 'lifecycle')))) group by `w2`.`outcome_id`,`et2`.`tag_id`,`t3`.`tag_key`) `dominant` on(((`dominant`.`outcome_id` = `o`.`id`) and (`dominant`.`rn` = 1)))) where exists(select 1 from (`entity_tags` `e3` join `tags` `t4` on((`t4`.`id` = `e3`.`tag_id`))) where ((`e3`.`entity_type` = 'outcome') and (`e3`.`entity_id` = `o`.`id`) and (`t4`.`tag_key` = `dominant`.`tag_key`))) is false

@@ -2,10 +2,11 @@ package rollup
 
 import (
 	"context"
-	"database/sql"
+	"errors"
 	"fmt"
-	"strings"
 	"time"
+
+	"github.com/bmjdotnet/teamster/internal/store"
 )
 
 // RepairStats summarizes one focus-interval repair pass.
@@ -13,16 +14,6 @@ type RepairStats struct {
 	Inverted int // negative-width focus intervals found
 	Repaired int // intervals whose ended_at was recomputed
 	Reopened int // intervals left open (no valid successor) — ended_at set NULL
-}
-
-// invertedInterval is one negative-width focus interval needing repair, with the
-// chain context to recompute its ended_at.
-type invertedInterval struct {
-	id        uint64
-	sessionID string
-	agentName string
-	startedAt time.Time
-	priorEnd  sql.NullTime
 }
 
 // RepairFocusIntervals fixes focus intervals whose ended_at < started_at — the
@@ -51,30 +42,13 @@ type invertedInterval struct {
 //
 // DryRun performs ZERO writes (logs the plan + counts only).
 func (r *Runner) RepairFocusIntervals(ctx context.Context, dryRun bool) (RepairStats, error) {
-	rows, err := r.db.QueryContext(ctx, `
-		SELECT id, session_id, agent_name, started_at, ended_at
-		FROM wms_intervals
-		WHERE kind = 'focus' AND ended_at IS NOT NULL AND ended_at < started_at
-		ORDER BY session_id, agent_name, started_at`)
+	ms := r.maint
+
+	inverted, err := ms.InvertedFocusIntervals(ctx)
 	if err != nil {
 		return RepairStats{}, fmt.Errorf("list inverted intervals: %w", err)
 	}
-	var inverted []invertedInterval
-	for rows.Next() {
-		var iv invertedInterval
-		if err := rows.Scan(&iv.id, &iv.sessionID, &iv.agentName, &iv.startedAt, &iv.priorEnd); err != nil {
-			rows.Close() //nolint:errcheck
-			return RepairStats{}, fmt.Errorf("scan inverted interval: %w", err)
-		}
-		inverted = append(inverted, iv)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close() //nolint:errcheck
-		return RepairStats{}, err
-	}
-	rows.Close() //nolint:errcheck
 
-	now := time.Now().UTC()
 	var stats RepairStats
 	stats.Inverted = len(inverted)
 
@@ -90,41 +64,40 @@ func (r *Runner) RepairFocusIntervals(ctx context.Context, dryRun bool) (RepairS
 		// focus. A miss (no later focus) means this was the chain's last focus:
 		// leave it open. We query each row's successor rather than precomputing
 		// the chain so a concurrent writer's new interval is naturally respected.
-		var successor sql.NullTime
-		err := r.db.QueryRowContext(ctx, `
-			SELECT MIN(started_at)
-			FROM wms_intervals
-			WHERE kind = 'focus' AND session_id = ? AND agent_name = ?
-			  AND started_at > ?`,
-			iv.sessionID, iv.agentName, iv.startedAt).Scan(&successor)
-		if err != nil && err != sql.ErrNoRows {
-			return stats, fmt.Errorf("interval %d: find successor: %w", iv.id, err)
+		successor, ok, err := ms.EarliestIntervalStart(ctx, iv.SessionID, iv.AgentName, "focus", iv.StartedAt)
+		if err != nil {
+			return stats, fmt.Errorf("interval %d: find successor: %w", iv.ID, err)
 		}
 
-		var newEnd sql.NullTime
-		if successor.Valid && successor.Time.After(iv.startedAt) {
+		var newEnd time.Time
+		if ok && successor.After(iv.StartedAt) {
 			newEnd = successor // positive-width: close at the next focus's start
 		}
-		// else: leave open (newEnd stays invalid/NULL) — Reopened.
+		// else: leave open (newEnd stays zero) — Reopened.
+
+		var priorEnd time.Time
+		if iv.EndedAt != nil {
+			priorEnd = *iv.EndedAt
+		}
 
 		if dryRun {
-			if newEnd.Valid {
+			if !newEnd.IsZero() {
 				stats.Repaired++
 			} else {
 				stats.Reopened++
 			}
 			r.log.Info("repair-focus-intervals (dry-run): would fix inverted interval",
-				"interval_id", iv.id, "session_id", iv.sessionID, "agent_name", iv.agentName,
-				"started_at", iv.startedAt, "bad_ended_at", iv.priorEnd.Time,
-				"new_ended_at", newEnd, "reopened", !newEnd.Valid)
+				"interval_id", iv.ID, "session_id", iv.SessionID, "agent_name", iv.AgentName,
+				"started_at", iv.StartedAt, "bad_ended_at", priorEnd,
+				"new_ended_at", newEnd, "reopened", newEnd.IsZero())
 			continue
 		}
 
-		if err := r.applyRepair(ctx, iv, newEnd, now); err != nil {
-			return stats, fmt.Errorf("interval %d: apply repair: %w", iv.id, err)
+		if err := r.applyFocusRepair(ctx, ms, iv, newEnd); err != nil {
+			return stats, fmt.Errorf("interval %d: apply repair: %w", iv.ID, err)
 		}
-		affected[iv.sessionID] = struct{}{}
-		if newEnd.Valid {
+		affected[iv.SessionID] = struct{}{}
+		if !newEnd.IsZero() {
 			stats.Repaired++
 		} else {
 			stats.Reopened++
@@ -138,11 +111,7 @@ func (r *Runner) RepairFocusIntervals(ctx context.Context, dryRun bool) (RepairS
 		// attributions on unrelated sessions. CONSERVATION: this only DELETES
 		// not-yet-attributed rows; Allocate re-creates exactly one row per message.
 		for sid := range affected {
-			if _, err := r.db.ExecContext(ctx, `
-				DELETE ua FROM usage_attribution ua
-				JOIN token_ledger t ON t.message_id = ua.message_id
-				WHERE t.session_id = ? AND ua.method IN ('unallocated','sweep_skipped')`,
-				sid); err != nil {
+			if _, err := r.rec.ReleaseSessionAttribution(ctx, sid, []string{"unallocated", "sweep_skipped"}); err != nil {
 				return stats, fmt.Errorf("repair-focus-intervals: release session %s: %w", sid, err)
 			}
 		}
@@ -160,128 +129,22 @@ func (r *Runner) RepairFocusIntervals(ctx context.Context, dryRun bool) (RepairS
 	return stats, nil
 }
 
-// applyRepair recomputes one inverted interval's ended_at (and duration_ms) and
-// records the prior value for reversibility — both in one transaction.
-//
-// Dual-writer handling: when both the direct (hub MCP) and remote_scraper
-// writers create a focus interval for the same entity at the same instant, the
-// direct interval can get inverted (the Class A bug) while the remote_scraper
-// sibling is correct. Setting a real ended_at on the inverted row would collide
-// with the sibling on uq_open. When a non-inverted sibling exists within 5s,
-// the inverted row is collapsed to zero-width (ended_at = started_at) instead —
-// it becomes harmless and focusAt matches the correct sibling.
-func (r *Runner) applyRepair(ctx context.Context, iv invertedInterval, newEnd sql.NullTime, now time.Time) error {
-	// Check for a non-inverted sibling from a different writer covering the
-	// same entity at approximately the same instant (dual-writer case).
-	if newEnd.Valid {
-		var siblingID uint64
-		err := r.db.QueryRowContext(ctx, `
-			SELECT id FROM wms_intervals
-			WHERE kind = 'focus'
-			  AND session_id = ?
-			  AND entity_type = (SELECT entity_type FROM wms_intervals WHERE id = ?)
-			  AND entity_id   = (SELECT entity_id   FROM wms_intervals WHERE id = ?)
-			  AND id <> ?
-			  AND ABS(TIMESTAMPDIFF(SECOND, started_at, ?)) <= 5
-			  AND (ended_at IS NULL OR ended_at >= started_at)
-			LIMIT 1`,
-			iv.sessionID, iv.id, iv.id, iv.id, iv.startedAt).Scan(&siblingID)
-		if err == nil {
-			r.log.Info("repair-focus-intervals: collapsed dual-writer duplicate",
-				"interval_id", iv.id, "sibling_id", siblingID,
-				"session_id", iv.sessionID, "agent_name", iv.agentName)
-			newEnd = sql.NullTime{Time: iv.startedAt, Valid: true}
-		}
-		// sql.ErrNoRows = no sibling, proceed with the computed newEnd
+// applyFocusRepair clamps one inverted focus interval via MaintenanceStore.
+// RepairInterval, falling back to CollapseIntervalToZeroWidth on a uq_open
+// collision (e.g. a dual-writer sibling already occupies the computed
+// ended_at) — collapsing to zero-width is harmless and idempotent regardless
+// of which writer produced the colliding row.
+func (r *Runner) applyFocusRepair(ctx context.Context, ms store.MaintenanceStore, iv store.Interval, newEnd time.Time) error {
+	err := ms.RepairInterval(ctx, iv.ID, iv.StartedAt, newEnd, "focus")
+	if err == nil {
+		return nil
 	}
-
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
+	if errors.Is(err, store.ErrConflict) {
+		r.log.Info("repair-focus-intervals: collapsed to zero-width after uq_open collision",
+			"interval_id", iv.ID, "session_id", iv.SessionID, "agent_name", iv.AgentName)
+		return ms.CollapseIntervalToZeroWidth(ctx, iv.ID, "focus")
 	}
-	defer tx.Rollback() //nolint:errcheck
-
-	// Scoped to a row that is still inverted so a concurrent fix makes this a
-	// 0-row no-op rather than clobbering a corrected value.
-	if newEnd.Valid {
-		_, err := tx.ExecContext(ctx, `
-			UPDATE wms_intervals
-			SET ended_at = ?, duration_ms = TIMESTAMPDIFF(MICROSECOND, started_at, ?) / 1000
-			WHERE id = ? AND kind = 'focus' AND ended_at IS NOT NULL AND ended_at < started_at`,
-			newEnd.Time, newEnd.Time, iv.id)
-		if err != nil {
-			if isDuplicateKeyError(err) {
-				// Belt-and-suspenders: the computed ended_at collides with a
-				// sibling on uq_open that we didn't detect above. Collapse to
-				// zero-width instead of aborting the pass.
-				tx.Rollback() //nolint:errcheck
-				return r.collapseToZeroWidth(ctx, iv, now)
-			}
-			return fmt.Errorf("update ended_at: %w", err)
-		}
-	} else {
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE wms_intervals
-			SET ended_at = NULL, duration_ms = NULL
-			WHERE id = ? AND kind = 'focus' AND ended_at IS NOT NULL AND ended_at < started_at`,
-			iv.id); err != nil {
-			return fmt.Errorf("reopen interval: %w", err)
-		}
-	}
-
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO focus_interval_repair (interval_id, prior_ended_at, new_ended_at, repaired_at)
-		VALUES (?, ?, ?, ?)
-		ON DUPLICATE KEY UPDATE
-			prior_ended_at = VALUES(prior_ended_at),
-			new_ended_at   = VALUES(new_ended_at),
-			repaired_at    = VALUES(repaired_at)`,
-		iv.id, iv.priorEnd, newEnd, now); err != nil {
-		return fmt.Errorf("record repair evidence: %w", err)
-	}
-
-	return tx.Commit()
-}
-
-// collapseToZeroWidth sets an inverted interval's ended_at = started_at,
-// making it zero-width and harmless. Used as a fallback when the computed
-// ended_at would collide with a sibling on uq_open.
-func (r *Runner) collapseToZeroWidth(ctx context.Context, iv invertedInterval, now time.Time) error {
-	r.log.Info("repair-focus-intervals: collapsed to zero-width after duplicate key",
-		"interval_id", iv.id, "session_id", iv.sessionID, "agent_name", iv.agentName)
-
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback() //nolint:errcheck
-
-	zeroEnd := sql.NullTime{Time: iv.startedAt, Valid: true}
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE wms_intervals
-		SET ended_at = ?, duration_ms = 0
-		WHERE id = ? AND kind = 'focus' AND ended_at IS NOT NULL AND ended_at < started_at`,
-		iv.startedAt, iv.id); err != nil {
-		return fmt.Errorf("collapse to zero-width: %w", err)
-	}
-
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO focus_interval_repair (interval_id, prior_ended_at, new_ended_at, repaired_at)
-		VALUES (?, ?, ?, ?)
-		ON DUPLICATE KEY UPDATE
-			prior_ended_at = VALUES(prior_ended_at),
-			new_ended_at   = VALUES(new_ended_at),
-			repaired_at    = VALUES(repaired_at)`,
-		iv.id, iv.priorEnd, zeroEnd, now); err != nil {
-		return fmt.Errorf("record repair evidence: %w", err)
-	}
-
-	return tx.Commit()
-}
-
-func isDuplicateKeyError(err error) bool {
-	s := err.Error()
-	return strings.Contains(s, "Duplicate entry") || strings.Contains(s, "1062")
+	return err
 }
 
 // RepairStateStats summarizes one state-interval repair pass.
@@ -308,59 +171,34 @@ type RepairStateStats struct {
 //
 // DryRun performs ZERO writes (logs the plan + counts only).
 func (r *Runner) RepairStateIntervals(ctx context.Context, dryRun bool) (RepairStateStats, error) {
-	type invertedState struct {
-		id         uint64
-		entityType string
-		entityID   string
-		startedAt  time.Time
-		badEndedAt time.Time
-	}
+	ms := r.maint
 
-	rows, err := r.db.QueryContext(ctx, `
-		SELECT id, entity_type, entity_id, started_at, ended_at
-		FROM wms_intervals
-		WHERE kind = 'state' AND ended_at IS NOT NULL AND ended_at < started_at
-		ORDER BY entity_type, entity_id, started_at`)
+	inverted, err := ms.InvertedStateIntervals(ctx)
 	if err != nil {
 		return RepairStateStats{}, fmt.Errorf("list inverted state intervals: %w", err)
 	}
-	var inverted []invertedState
-	for rows.Next() {
-		var iv invertedState
-		if err := rows.Scan(&iv.id, &iv.entityType, &iv.entityID, &iv.startedAt, &iv.badEndedAt); err != nil {
-			rows.Close() //nolint:errcheck
-			return RepairStateStats{}, fmt.Errorf("scan inverted state interval: %w", err)
-		}
-		inverted = append(inverted, iv)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close() //nolint:errcheck
-		return RepairStateStats{}, err
-	}
-	rows.Close() //nolint:errcheck
 
 	var stats RepairStateStats
 	stats.Inverted = len(inverted)
 
 	for _, iv := range inverted {
-		var successor sql.NullTime
-		err := r.db.QueryRowContext(ctx, `
-			SELECT MIN(started_at)
-			FROM wms_intervals
-			WHERE kind = 'state' AND entity_type = ? AND entity_id = ?
-			  AND started_at > ?`,
-			iv.entityType, iv.entityID, iv.startedAt).Scan(&successor)
-		if err != nil && err != sql.ErrNoRows {
-			return stats, fmt.Errorf("state interval %d: find successor: %w", iv.id, err)
+		successor, ok, err := ms.EarliestIntervalStart(ctx, iv.EntityType, iv.EntityID, "state", iv.StartedAt)
+		if err != nil {
+			return stats, fmt.Errorf("state interval %d: find successor: %w", iv.ID, err)
 		}
 
 		var newEnd time.Time
 		collapsed := false
-		if successor.Valid && successor.Time.After(iv.startedAt) {
-			newEnd = successor.Time
+		if ok && successor.After(iv.StartedAt) {
+			newEnd = successor
 		} else {
-			newEnd = iv.startedAt // zero-width: ended_at = started_at
+			newEnd = iv.StartedAt // zero-width: ended_at = started_at
 			collapsed = true
+		}
+
+		var badEndedAt time.Time
+		if iv.EndedAt != nil {
+			badEndedAt = *iv.EndedAt
 		}
 
 		if dryRun {
@@ -370,64 +208,29 @@ func (r *Runner) RepairStateIntervals(ctx context.Context, dryRun bool) (RepairS
 				stats.Repaired++
 			}
 			r.log.Info("repair-state-intervals (dry-run): would fix inverted interval",
-				"interval_id", iv.id, "entity_type", iv.entityType, "entity_id", iv.entityID,
-				"started_at", iv.startedAt, "bad_ended_at", iv.badEndedAt,
+				"interval_id", iv.ID, "entity_type", iv.EntityType, "entity_id", iv.EntityID,
+				"started_at", iv.StartedAt, "bad_ended_at", badEndedAt,
 				"new_ended_at", newEnd, "collapsed", collapsed)
 			continue
 		}
 
-		var durationMS *int64
-		if !collapsed {
-			d := successor.Time.Sub(iv.startedAt).Microseconds() / 1000
-			durationMS = &d
-		}
-		if durationMS != nil {
-			_, err := r.db.ExecContext(ctx, `
-				UPDATE wms_intervals
-				SET ended_at = ?, duration_ms = ?
-				WHERE id = ? AND kind = 'state' AND ended_at IS NOT NULL AND ended_at < started_at`,
-				newEnd, *durationMS, iv.id)
-			if err != nil {
-				if !isDuplicateKeyError(err) {
-					return stats, fmt.Errorf("state interval %d: repair: %w", iv.id, err)
-				}
-				// uq_open collision: a valid closed row already exists at successor.started_at.
-				// The inverted row is corrupted — delete it.
-				if _, err := r.db.ExecContext(ctx,
-					`DELETE FROM wms_intervals WHERE id = ? AND kind = 'state' AND ended_at < started_at`,
-					iv.id); err != nil {
-					return stats, fmt.Errorf("state interval %d: delete after collision: %w", iv.id, err)
-				}
-				r.log.Info("repair-state-intervals: deleted inverted interval after uq_open collision",
-					"interval_id", iv.id, "entity_type", iv.entityType, "entity_id", iv.entityID,
-					"started_at", iv.startedAt)
-				stats.Deleted++
-				continue
+		if err := ms.RepairInterval(ctx, iv.ID, iv.StartedAt, newEnd, "state"); err != nil {
+			if !errors.Is(err, store.ErrConflict) {
+				return stats, fmt.Errorf("state interval %d: repair: %w", iv.ID, err)
 			}
-		} else {
-			_, err := r.db.ExecContext(ctx, `
-				UPDATE wms_intervals
-				SET ended_at = ?, duration_ms = 0
-				WHERE id = ? AND kind = 'state' AND ended_at IS NOT NULL AND ended_at < started_at`,
-				newEnd, iv.id)
-			if err != nil {
-				if !isDuplicateKeyError(err) {
-					return stats, fmt.Errorf("state interval %d: collapse: %w", iv.id, err)
-				}
-				// uq_open collision: a valid row already exists at ended_at=started_at for
-				// this entity. The inverted row is zero-information — delete it.
-				if _, err := r.db.ExecContext(ctx,
-					`DELETE FROM wms_intervals WHERE id = ? AND kind = 'state' AND ended_at < started_at`,
-					iv.id); err != nil {
-					return stats, fmt.Errorf("state interval %d: delete after collision: %w", iv.id, err)
-				}
-				r.log.Info("repair-state-intervals: deleted inverted interval after uq_open collision",
-					"interval_id", iv.id, "entity_type", iv.entityType, "entity_id", iv.entityID,
-					"started_at", iv.startedAt)
-				stats.Deleted++
-				continue
+			// uq_open collision: a valid row already occupies the computed
+			// ended_at for this entity. The inverted row is corrupted/
+			// zero-information — delete it (state intervals carry no undo table).
+			if err := ms.CollapseIntervalToZeroWidth(ctx, iv.ID, "state"); err != nil {
+				return stats, fmt.Errorf("state interval %d: delete after collision: %w", iv.ID, err)
 			}
+			r.log.Info("repair-state-intervals: deleted inverted interval after uq_open collision",
+				"interval_id", iv.ID, "entity_type", iv.EntityType, "entity_id", iv.EntityID,
+				"started_at", iv.StartedAt)
+			stats.Deleted++
+			continue
 		}
+
 		if collapsed {
 			stats.Collapsed++
 		} else {
@@ -446,60 +249,6 @@ func (r *Runner) RepairStateIntervals(ctx context.Context, dryRun bool) (RepairS
 // number of intervals reverted. After unrepair the rows are inverted again (the
 // pre-fix state), so it is a true undo of the data change.
 func (r *Runner) UnrepairFocusIntervals(ctx context.Context) (int, error) {
-	rows, err := r.db.QueryContext(ctx,
-		`SELECT interval_id, prior_ended_at FROM focus_interval_repair`)
-	if err != nil {
-		return 0, fmt.Errorf("list repairs: %w", err)
-	}
-	type rep struct {
-		id    uint64
-		prior sql.NullTime
-	}
-	var reps []rep
-	for rows.Next() {
-		var rp rep
-		if err := rows.Scan(&rp.id, &rp.prior); err != nil {
-			rows.Close() //nolint:errcheck
-			return 0, err
-		}
-		reps = append(reps, rp)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close() //nolint:errcheck
-		return 0, err
-	}
-	rows.Close() //nolint:errcheck
-
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, err
-	}
-	defer tx.Rollback() //nolint:errcheck
-
-	n := 0
-	for _, rp := range reps {
-		if rp.prior.Valid {
-			if _, err := tx.ExecContext(ctx, `
-				UPDATE wms_intervals
-				SET ended_at = ?, duration_ms = TIMESTAMPDIFF(MICROSECOND, started_at, ?) / 1000
-				WHERE id = ? AND kind = 'focus'`,
-				rp.prior.Time, rp.prior.Time, rp.id); err != nil {
-				return 0, fmt.Errorf("restore interval %d: %w", rp.id, err)
-			}
-		} else {
-			if _, err := tx.ExecContext(ctx, `
-				UPDATE wms_intervals SET ended_at = NULL, duration_ms = NULL
-				WHERE id = ? AND kind = 'focus'`, rp.id); err != nil {
-				return 0, fmt.Errorf("restore interval %d: %w", rp.id, err)
-			}
-		}
-		n++
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM focus_interval_repair`); err != nil {
-		return 0, fmt.Errorf("clear repair evidence: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return 0, err
-	}
-	return n, nil
+	n, err := r.maint.UnrepairIntervals(ctx)
+	return int(n), err
 }

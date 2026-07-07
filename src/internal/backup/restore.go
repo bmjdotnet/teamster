@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/bmjdotnet/teamster/internal/store"
 )
 
 // RunRestore restores stores from a backup directory into the locations
@@ -143,30 +145,6 @@ func RestoreMySQL(ctx context.Context, cfg *MySQLConfig, restoreDir string, logg
 	if cfg.DSN == "" {
 		return fmt.Errorf("mysql restore requires store.dsn in teamster.yaml")
 	}
-	fields, err := ParseMySQLDSN(cfg.DSN)
-	if err != nil {
-		return fmt.Errorf("parse mysql dsn: %w", err)
-	}
-
-	// Write credentials to a temp file so they never appear on the command line.
-	tmp, err := os.CreateTemp("", "teamster-mysql-*.cnf")
-	if err != nil {
-		return fmt.Errorf("create temp defaults file: %w", err)
-	}
-	defer os.Remove(tmp.Name())
-	cnf := fmt.Sprintf("[client]\nuser=%s\npassword=%s\nhost=%s\nport=%s\n",
-		fields.User, fields.Password, fields.Host, fields.Port)
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return fmt.Errorf("chmod temp defaults file: %w", err)
-	}
-	if _, err := tmp.WriteString(cnf); err != nil {
-		tmp.Close()
-		return fmt.Errorf("write temp defaults file: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close temp defaults file: %w", err)
-	}
 
 	mysqlDir := filepath.Join(restoreDir, "mysql")
 	for _, db := range cfg.Databases {
@@ -175,38 +153,33 @@ func RestoreMySQL(ctx context.Context, cfg *MySQLConfig, restoreDir string, logg
 			return fmt.Errorf("mysql restore: dump file not found for db %q: %w", db, err)
 		}
 		logger.Info("mysql restore: importing", "db", db)
-		if err := runImport(ctx, tmp.Name(), db, dumpFile); err != nil {
+		if err := restoreDatabase(ctx, cfg.DSN, db, dumpFile); err != nil {
 			return fmt.Errorf("import %s: %w", db, err)
 		}
 	}
 	return nil
 }
 
-func runImport(ctx context.Context, defaultsFile, db, dumpFile string) error {
-	gunzip := exec.CommandContext(ctx, "gunzip", "--stdout", dumpFile)
-	mysql := exec.CommandContext(ctx, "mysql",
-		"--defaults-extra-file="+defaultsFile,
-		"--force",
-		db)
-	mysql.Stdin, _ = gunzip.StdoutPipe()
+// restoreDatabase opens db via store.Open (retargeted to the given database
+// name per dsnForDatabase) and restores it through the backend's BackupEngine
+// — the gunzip/mysql shell-out mechanism itself is unchanged, just relocated
+// behind the admin-plane interface in internal/store/mysql (ADR-2).
+func restoreDatabase(ctx context.Context, rawDSN, db, dumpFile string) error {
+	dsn, err := dsnForDatabase(rawDSN, db)
+	if err != nil {
+		return fmt.Errorf("build DSN for db %q: %w", db, err)
+	}
+	st, err := store.Open(ctx, dsn, store.WithSkipMigrate())
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
+	}
+	defer st.Close() //nolint:errcheck
 
-	if err := gunzip.Start(); err != nil {
-		return fmt.Errorf("gunzip start: %w", err)
+	be, ok := st.(store.BackupEngine)
+	if !ok {
+		return fmt.Errorf("backend has no backup engine")
 	}
-	// Check both mysql and gunzip exit status. A corrupt .gz causes a partial
-	// import even if mysql exits 0, so gunzip failure is also fatal.
-	mysqlOut, mysqlErr := mysql.CombinedOutput()
-	gunzipErr := gunzip.Wait()
-	if gunzipErr != nil {
-		return fmt.Errorf("gunzip failed (partial import possible): %w", gunzipErr)
-	}
-	if mysqlErr != nil {
-		if len(mysqlOut) > 0 {
-			return fmt.Errorf("mysql: %w: %s", mysqlErr, strings.TrimSpace(string(mysqlOut)))
-		}
-		return fmt.Errorf("mysql: %w", mysqlErr)
-	}
-	return nil
+	return be.Restore(ctx, dumpFile)
 }
 
 // RestorePrometheus stops prometheus, extracts into a fresh data dir with

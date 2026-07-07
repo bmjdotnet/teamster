@@ -2,11 +2,11 @@ package observability
 
 import (
 	"context"
-	"database/sql"
 	"log/slog"
 	"sync"
 	"time"
 
+	"github.com/bmjdotnet/teamster/internal/store"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -61,16 +61,16 @@ var (
 // UsageCollector is a prometheus.Collector that queries token_ledger for
 // daily, block, and all-time usage metrics. Results are cached for 30s.
 type UsageCollector struct {
-	db *sql.DB
+	rep store.ReportingStore
 
 	mu        sync.Mutex
 	lastQuery time.Time
 	cached    *usageSnapshot
 }
 
-// NewUsageCollector creates a UsageCollector backed by db with a 30s cache TTL.
-func NewUsageCollector(db *sql.DB) *UsageCollector {
-	return &UsageCollector{db: db}
+// NewUsageCollector creates a UsageCollector backed by rep with a 30s cache TTL.
+func NewUsageCollector(rep store.ReportingStore) *UsageCollector {
+	return &UsageCollector{rep: rep}
 }
 
 // Describe sends all metric descriptors to ch.
@@ -138,16 +138,9 @@ func (c *UsageCollector) snapshot() usageSnapshot {
 	return snap
 }
 
-// ledgerRow is a minimal row from token_ledger for block computation.
-type ledgerRow struct {
-	ts     time.Time
-	tokens int64
-	cost   float64
-}
-
-// query runs the SQL aggregations against token_ledger.
+// query runs the store aggregations backing token_ledger usage metrics.
 func (c *UsageCollector) query() (snap usageSnapshot) {
-	if c.db == nil {
+	if c.rep == nil {
 		return
 	}
 
@@ -156,106 +149,30 @@ func (c *UsageCollector) query() (snap usageSnapshot) {
 
 	now := time.Now().UTC()
 
-	// --- daily aggregates (UTC calendar day) ---
-	row := c.db.QueryRowContext(ctx, `
-		SELECT
-			COALESCE(SUM(input_tokens), 0),
-			COALESCE(SUM(output_tokens), 0),
-			COALESCE(SUM(cache_write_tokens), 0),
-			COALESCE(SUM(cache_read_tokens), 0),
-			COALESCE(SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens), 0),
-			COALESCE(SUM(cost_usd), 0)
-		FROM token_ledger
-		WHERE DATE(CONVERT_TZ(timestamp, 'UTC', 'UTC')) = CURDATE()`)
-	if err := row.Scan(
-		&snap.dailyInputTokens,
-		&snap.dailyOutputTokens,
-		&snap.dailyCacheWrite,
-		&snap.dailyCacheRead,
-		&snap.dailyTotalTokens,
-		&snap.dailyCostUSD,
-	); err != nil {
+	// --- daily aggregates (UTC calendar day) + daily by model ---
+	daily, err := c.rep.DailyTokenUsage(ctx)
+	if err != nil {
 		slog.Warn("UsageCollector: daily query failed", "error", err)
 		return
 	}
-
-	// --- daily by model ---
-	modelRows, err := c.db.QueryContext(ctx, `
-		SELECT model,
-			COALESCE(SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens), 0)
-		FROM token_ledger
-		WHERE DATE(CONVERT_TZ(timestamp, 'UTC', 'UTC')) = CURDATE()
-		GROUP BY model`)
-	if err != nil {
-		slog.Warn("UsageCollector: daily model query failed", "error", err)
-		return
-	}
-	defer modelRows.Close()
-	snap.modelTokens = make(map[string]float64)
-	for modelRows.Next() {
-		var model string
-		var tokens float64
-		if err := modelRows.Scan(&model, &tokens); err != nil {
-			slog.Warn("UsageCollector: model row scan failed", "error", err)
-			return
-		}
-		snap.modelTokens[model] = tokens
-	}
-	if err := modelRows.Err(); err != nil {
-		slog.Warn("UsageCollector: model rows error", "error", err)
-		return
-	}
-	modelRows.Close()
+	snap.dailyInputTokens = daily.DailyInputTokens
+	snap.dailyOutputTokens = daily.DailyOutputTokens
+	snap.dailyCacheWrite = daily.DailyCacheWrite
+	snap.dailyCacheRead = daily.DailyCacheRead
+	snap.dailyTotalTokens = daily.DailyTotalTokens
+	snap.dailyCostUSD = daily.DailyCostUSD
+	snap.modelTokens = daily.ModelTokens
 
 	// --- block algorithm (row-based gap detection, last 24h) ---
 	// Each row anchors a block: first row in a sequence sets blockStart =
 	// row.ts.Truncate(hour), blockEnd = blockStart + 5h. Rows outside that
 	// window start a new block. Active block = last block whose end > now.
-	blockRowsQ, err := c.db.QueryContext(ctx, `
-		SELECT timestamp,
-			input_tokens + output_tokens + cache_read_tokens + cache_write_tokens,
-			cost_usd
-		FROM token_ledger
-		WHERE timestamp >= ?
-		ORDER BY timestamp ASC`,
-		now.Add(-24*time.Hour).Format("2006-01-02 15:04:05"),
-	)
+	ledgerRows, err := c.rep.TokenLedgerRows(ctx, now.Add(-24*time.Hour))
 	if err != nil {
 		slog.Warn("UsageCollector: block rows query failed", "error", err)
 		return
 	}
-	defer blockRowsQ.Close()
 
-	var rows []ledgerRow
-	for blockRowsQ.Next() {
-		var r ledgerRow
-		var ts string
-		var tokens int64
-		var cost float64
-		if err := blockRowsQ.Scan(&ts, &tokens, &cost); err != nil {
-			slog.Warn("UsageCollector: block row scan failed", "error", err)
-			return
-		}
-		t, err := time.Parse("2006-01-02 15:04:05.999999", ts)
-		if err != nil {
-			t, err = time.Parse("2006-01-02 15:04:05", ts)
-			if err != nil {
-				continue
-			}
-		}
-		r.ts = t.UTC()
-		r.tokens = tokens
-		r.cost = cost
-		rows = append(rows, r)
-	}
-	if err := blockRowsQ.Err(); err != nil {
-		slog.Warn("UsageCollector: block rows iteration error", "error", err)
-		return
-	}
-	blockRowsQ.Close()
-
-	// Group rows into blocks; each new block starts when a row falls outside
-	// the previous block's window.
 	type block struct {
 		start   time.Time
 		end     time.Time
@@ -265,17 +182,18 @@ func (c *UsageCollector) query() (snap usageSnapshot) {
 	}
 	var blocks []block
 	var cur *block
-	for _, r := range rows {
+	for _, r := range ledgerRows {
+		tokens := r.Input + r.Output + r.CacheRead + r.CacheCreate
 		if cur == nil {
-			bs := r.ts.Truncate(time.Hour)
+			bs := r.Timestamp.Truncate(time.Hour)
 			cur = &block{start: bs, end: bs.Add(5 * time.Hour)}
-		} else if !r.ts.Before(cur.end) {
+		} else if !r.Timestamp.Before(cur.end) {
 			blocks = append(blocks, *cur)
-			bs := r.ts.Truncate(time.Hour)
+			bs := r.Timestamp.Truncate(time.Hour)
 			cur = &block{start: bs, end: bs.Add(5 * time.Hour)}
 		}
-		cur.tokens += r.tokens
-		cur.cost += r.cost
+		cur.tokens += tokens
+		cur.cost += r.CostUSD
 		cur.entries++
 	}
 	if cur != nil {
@@ -297,15 +215,13 @@ func (c *UsageCollector) query() (snap usageSnapshot) {
 	}
 
 	// --- all-time totals ---
-	row = c.db.QueryRowContext(ctx, `
-		SELECT
-			COALESCE(SUM(cost_usd), 0),
-			COALESCE(SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens), 0)
-		FROM token_ledger`)
-	if err := row.Scan(&snap.totalCostUSD, &snap.totalTokens); err != nil {
+	totals, err := c.rep.AllTimeTokenTotals(ctx)
+	if err != nil {
 		slog.Warn("UsageCollector: totals query failed", "error", err)
 		return
 	}
+	snap.totalCostUSD = totals.CostUSD
+	snap.totalTokens = totals.Tokens
 
 	snap.scrapeSuccess = 1
 	snap.scrapeTimestamp = float64(now.Unix())

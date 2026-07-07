@@ -387,6 +387,127 @@ advisory warnings (never blocks) if child work units are non-terminal or no
 
 ---
 
+## Persistence Layer
+
+`internal/store` defines the backend-neutral persistence surface for all of
+Teamster — WMS, sessions, focus intervals, cost attribution, tags, telemetry.
+No caller anywhere depends on a concrete backend type; every composition root
+(`hookd`, `wms-mcp`, `teamster`, `rollup`, `classify`, `demogen`) constructs a
+`store.Store` through the registry and consumes it only through interfaces.
+
+### Backend registry and construction
+
+```go
+_ "github.com/bmjdotnet/teamster/internal/store/mysql"  // blank import: registers "mysql", "mariadb"
+
+s, err := store.Open(ctx, dsn, opts...)   // internal/store/factory.go
+```
+
+A backend package registers an `OpenFunc` under one or more DSN schemes from
+its own `init()` (`store.Register("mysql", Open)`) — the same side-effect-import
+idiom `database/sql` drivers use. `store.Open` parses the DSN's scheme,
+dispatches to the registered opener, and returns a `store.Store`. A composition
+root pulls in only the backend(s) it needs via blank import; there is no
+`.DB()` escape hatch and no path that names a concrete backend package
+directly outside the backend's own code and its tests.
+
+Two backends exist:
+
+- **`internal/store/mysql`** — the production backend (MySQL/MariaDB via
+  `go-sql-driver/mysql`). Schemes `mysql` and `mariadb` (same backend, dual
+  driver-string target). Migrations v1–v50.
+- **`internal/store/sqlite`** — a pure-Go backend (`modernc.org/sqlite`, no
+  cgo) that exists solely to validate the `Store` contract is truly
+  backend-agnostic. It is not exposed as an install-time option (see
+  `docs/wizard.md` Q7) — it backs the conformance suite only.
+
+### Role-based sub-interfaces
+
+`store.Store` is the union of `wms.Reader`/`wms.Writer` plus role-based
+sub-interfaces, each scoped to one concern and each independently consumable
+by a caller that needs only that slice:
+
+`SessionStore`, `IntervalStore`, `MaintenanceStore`, `ActivityStore`,
+`StatusStore`, `RelatedStore`, `ClassifierStore`, `TagAdminStore`,
+`TelemetryStore`, `AllocationStore`, `RecoveryStore`, `SweepStore`,
+`ReportingStore`, and the always-present `Prober` (`Ping`). See
+`src/internal/store/store.go` for the full method sets — e.g. `rollup`
+depends only on `AllocationStore`/`RecoveryStore`, `classify` only on
+`ClassifierStore`, without either importing the others.
+
+### Typed error model
+
+Every backend maps its driver-level errors onto three sentinels
+(`internal/store/errors.go`):
+
+| Sentinel | Meaning |
+|----------|---------|
+| `ErrNotFound` | A lookup or mutation found no matching row |
+| `ErrConflict` | A write violated a uniqueness constraint (MySQL 1062, SQLite `SQLITE_CONSTRAINT_UNIQUE`) |
+| `ErrPrecondition` | An optimistic/conditional write's guard failed — row existed but wasn't in the expected state |
+
+Callers check with `errors.Is(err, store.ErrNotFound)` etc., never a
+driver-specific error string or code. `StoreError` wraps a sentinel with
+entity/op context for logs while still satisfying `errors.Is`.
+
+### Portable migration framework
+
+`internal/store/migrate.go` defines a shared, backend-agnostic
+`RunMigrations` runner plus the `Migrator` contract each backend implements:
+`Lock` (serializes concurrent migration attempts — MySQL uses
+`GET_LOCK`/`RELEASE_LOCK`; a single-writer backend like SQLite may no-op),
+`CurrentVersion`/`SetVersion` (schema-version bookkeeping), and `Steps`
+(the backend's ordered `Migration` list). A `Migration` carries portable SQL,
+a backend-specific `Func`, or both; `Func` receives the `Migrator` itself as
+its `Execer` so a step cannot escape onto an unlocked connection. The runner
+refuses to run against a schema newer than the binary knows (the safeguard
+that closes the schema-ahead-of-binary incident class).
+
+### Admin plane
+
+Four capabilities are deliberately **not** part of `Store` — a backend may
+legitimately lack them, so callers discover them by type-assertion rather
+than a compile-time dependency:
+
+| Interface | Backs | Notes |
+|-----------|-------|-------|
+| `RawExecutor` | `teamster sql` | Raw exec/query escape hatch; a backend without it fails `teamster sql` cleanly instead of a compile break |
+| `BackupEngine` | `backup`/`teamster restore` | Whole-database dump/restore/verify — no finite set of domain calls can express this |
+| `DemoSeeder` | `demogen` | Bulk, controlled-timestamp ledger/interval/attribution seeding for synthetic dashboards |
+| `CredentialProber` | `teamster status` (grafana_ro check) | Verifies a distinct least-privilege credential authorizes — cannot reuse the store's own connection |
+
+### Conformance suite
+
+`internal/store`'s conformance tests run the identical test bodies against
+every registered backend via a `backends()` table (`store_test.go`), so a new
+backend either satisfies the same behavioral contract or fails a named test —
+never a re-implemented, backend-specific test suite. Six dimensions:
+
+1. **CRUD round-trip** (`conformance_dim1_test.go`) — every entity type
+   round-trips through its Store methods unchanged.
+2. **Transactions/atomicity** (`conformance_dim2_test.go`) — multi-row writes
+   (e.g. `ApplyRecovery`, `BackfillInterval`) are all-or-nothing.
+3. **Concurrency/locking** (`conformance_dim3_test.go`) — concurrent writers
+   to the same row/interval don't corrupt state (uq_open collisions, migration
+   races).
+4. **Error sentinels** (`conformance_dim4_test.go`) — each backend raises the
+   correct sentinel (`ErrNotFound`/`ErrConflict`/`ErrPrecondition`) for the
+   same fault.
+5. **Migration lifecycle** — `RunMigrations` behaves identically across
+   backends: locking, version gating, ahead-of-binary refusal.
+6. **Cross-backend attribution equivalence** (`dim6_test.go`) — the rollup
+   allocation algorithm produces the same attribution result whichever
+   backend supplies the primitives.
+
+The `sqlite` entry always runs (in-memory, no external server). The `mysql`
+entry SKIPs unless `TEAMSTER_TEST_MYSQL_DSN` is set and reachable — see
+Pitfalls in the repo's `CLAUDE.md`. `internal/store/storetest` is a shared
+harness (per-test schema isolation, `RawExecutor`-based fixture helpers) that
+other packages (`internal/rollup`, `internal/server`, `internal/observability`)
+use instead of each hand-rolling MySQL setup/teardown.
+
+---
+
 ## Observability
 
 ### JSONL as contract

@@ -250,7 +250,8 @@ func TestBackfillWmsIntervals_RemapKeepsCostConserved(t *testing.T) {
 
 	// THEN run the REAL cost assembler (post-W3 it targets wms_intervals kind='state').
 	// It joins the remapped interval_id onto the new row and stamps the cost there.
-	r := rollup.New(db, nil, slog.Default())
+	st := NewFromDB(db)
+	r := rollup.NewRunner(st, st, st, st, st, st, nil, slog.Default())
 	if _, err := r.AssembleIntervalCost(ctx); err != nil {
 		t.Fatalf("AssembleIntervalCost: %v", err)
 	}

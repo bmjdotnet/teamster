@@ -13,6 +13,7 @@ import (
 
 	"github.com/bmjdotnet/teamster/internal/config"
 	"github.com/bmjdotnet/teamster/internal/hook"
+	_ "github.com/bmjdotnet/teamster/internal/store/mysql" // registers mysql, mariadb
 	"github.com/bmjdotnet/teamster/internal/version"
 )
 

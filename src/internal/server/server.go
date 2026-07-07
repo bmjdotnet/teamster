@@ -4,7 +4,6 @@ package server
 import (
 	"bufio"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -24,7 +23,7 @@ import (
 	"github.com/bmjdotnet/teamster/internal/observability"
 	"github.com/bmjdotnet/teamster/internal/redact"
 	"github.com/bmjdotnet/teamster/internal/store"
-	storemysql "github.com/bmjdotnet/teamster/internal/store/mysql"
+	_ "github.com/bmjdotnet/teamster/internal/store/mysql" // registers mysql, mariadb
 	"github.com/bmjdotnet/teamster/internal/version"
 	"github.com/bmjdotnet/teamster/internal/web"
 	"github.com/bmjdotnet/teamster/internal/wms"
@@ -92,7 +91,6 @@ type Server struct {
 	logFile         *os.File
 	mu              sync.Mutex
 	bus             eventBus
-	wmsDB           *sql.DB // read-only, for the /wms dashboard
 	wmsStore        wms.Store
 	wmsEng          *wms.EngineImpl
 	obsStore        store.Store // new unified store (nil when store package not ready)
@@ -155,8 +153,8 @@ func NewServer(cfg config.Config) (*Server, error) {
 	}
 	s.bus.subscribers = make(map[uint64]chan []byte)
 
-	if cfg.StoreDSN.Driver == config.StoreDriverMySQL {
-		ms, storeErr := storemysql.New(cfg.StoreDSN.Primary)
+	if cfg.StoreDSN.Raw != "" {
+		ms, storeErr := store.Open(context.Background(), cfg.StoreDSN.Raw)
 		if storeErr == nil {
 			s.obsStore = ms
 			s.wmsStore = ms
@@ -165,15 +163,14 @@ func NewServer(cfg config.Config) (*Server, error) {
 			}
 			s.wmsEng = wms.NewEngine(ms, nil)
 			s.wmsEng.AddObserver(observability.NewInProcessObserver(observability.IncrementEntityCounts))
-			s.wmsDB = ms.DB()
 			reg.MustRegister(
-				observability.NewUsageCollector(s.wmsDB),
-				observability.NewTagCountsCollector(s.wmsDB),
-				observability.NewAttributionCollector(s.wmsDB),
-				observability.NewDependenciesCollector(s.wmsDB),
-				observability.NewCostCollector(s.wmsDB),
-				observability.NewIntervalPhaseCostCollector(s.wmsDB),
-				observability.NewBacklogCollector(s.wmsDB),
+				observability.NewUsageCollector(s.obsStore),
+				observability.NewTagCountsCollector(s.obsStore),
+				observability.NewAttributionCollector(s.obsStore),
+				observability.NewDependenciesCollector(s.obsStore),
+				observability.NewCostCollector(s.obsStore),
+				observability.NewIntervalPhaseCostCollector(s.obsStore),
+				observability.NewBacklogCollector(s.obsStore),
 			)
 
 			tctx, tcancel := context.WithCancel(context.Background())
@@ -226,10 +223,10 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	}
 
 	mux.Handle("/wms/cost-flow", timed(web.HandleCostFlowPage))
-	mux.Handle("/wms/api/cost-flow", timed(web.HandleCostFlowAPI(s.wmsDB)))
+	mux.Handle("/wms/api/cost-flow", timed(web.HandleCostFlowAPI(s.obsStore)))
 	mux.Handle("/wms/tags", timed(web.HandleTagsPage))
-	mux.Handle("/wms/api/tags", timed(web.HandleTagsAPI(s.wmsDB)))
-	mux.Handle("/wms", timed(web.HandleWMS(s.wmsDB)))
+	mux.Handle("/wms/api/tags", timed(web.HandleTagsAPI(s.obsStore)))
+	mux.Handle("/wms", timed(web.HandleWMS(s.obsStore)))
 	mux.Handle("/", timed(web.HandleDashboard))
 	mux.Handle("/metrics", timed(observability.Handler(s.promRegistry).ServeHTTP))
 }
@@ -263,7 +260,6 @@ func (s *Server) Close() error {
 			c.Close() //nolint:errcheck
 		}
 	}
-	// MySQL shares the *sql.DB handle between obsStore and wmsDB; Close via obsStore above.
 	return s.logFile.Close()
 }
 

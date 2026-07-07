@@ -2,13 +2,15 @@ package tui
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/bmjdotnet/teamster/internal/store"
+	"github.com/bmjdotnet/teamster/internal/wms"
 )
 
 const totalScreens = 9
@@ -24,12 +26,12 @@ type conventionEntry struct {
 
 // WizardModel is the bubbletea Model for the 9-screen setup wizard.
 type WizardModel struct {
-	screen  int
-	width   int
-	height  int
-	db      *sql.DB
-	done    bool
-	errMsg  string
+	screen int
+	width  int
+	height int
+	st     store.TagAdminStore
+	done   bool
+	errMsg string
 
 	// Screen 2: integration selection
 	integrationList CheckboxList
@@ -41,11 +43,11 @@ type WizardModel struct {
 	screen5Cursor int
 
 	// Screen 5b: tag conventions
-	conventions     []conventionEntry
-	convCursor      int
-	convCol         int // 0=scope, 1=interview, 2=exclusionGroup, 3=autoExtract
-	convEditing     bool // true when typing into exclusionGroup field
-	convEditInput   textinput.Model
+	conventions   []conventionEntry
+	convCursor    int
+	convCol       int  // 0=scope, 1=interview, 2=exclusionGroup, 3=autoExtract
+	convEditing   bool // true when typing into exclusionGroup field
+	convEditInput textinput.Model
 
 	// Screen 6: integration key review (only if integrations selected)
 	keyList FlatKeyList
@@ -55,8 +57,8 @@ type WizardModel struct {
 	applyResults []string
 }
 
-// NewWizardModel creates a WizardModel. db may be nil for screens that don't need it.
-func NewWizardModel(db *sql.DB) WizardModel {
+// NewWizardModel creates a WizardModel. st may be nil for screens that don't need it.
+func NewWizardModel(st store.TagAdminStore) WizardModel {
 	// Build integration checkbox items
 	items := make([]CheckboxItem, len(Integrations))
 	for i, intg := range Integrations {
@@ -75,7 +77,7 @@ func NewWizardModel(db *sql.DB) WizardModel {
 
 	return WizardModel{
 		screen:          0,
-		db:              db,
+		st:              st,
 		integrationList: cl,
 		productModel:    NewProductListModel(),
 		convEditInput:   cei,
@@ -388,7 +390,7 @@ func (m *WizardModel) buildKeyList() {
 }
 
 func (m *WizardModel) applySetup() {
-	if m.db == nil {
+	if m.st == nil {
 		m.applyResults = []string{"(dry run — no database connection)"}
 		m.applyDone = true
 		return
@@ -397,20 +399,20 @@ func (m *WizardModel) applySetup() {
 	var results []string
 
 	// Seed universal context keys.
-	keysSeeded := 0
-	for _, uk := range UniversalKeys {
-		_, err := m.db.ExecContext(ctx,
-			`INSERT IGNORE INTO tags (tag_key, tag_value, is_seed, category, cardinality, description)
-			 VALUES (?, '', 1, 'context', ?, ?)`,
-			uk.Key, uk.Cardinality, uk.Description,
-		)
-		if err != nil {
-			m.errMsg = fmt.Sprintf("error seeding %s: %v", uk.Key, err)
-			return
+	specs := make([]wms.TagSpec, len(UniversalKeys))
+	for i, uk := range UniversalKeys {
+		specs[i] = wms.TagSpec{
+			Key:         uk.Key,
+			Category:    "context",
+			Cardinality: uk.Cardinality,
+			Description: uk.Description,
 		}
-		keysSeeded++
 	}
-	results = append(results, fmt.Sprintf("Seeded %d universal keys", keysSeeded))
+	if err := m.st.SeedTags(ctx, specs); err != nil {
+		m.errMsg = fmt.Sprintf("error seeding universal keys: %v", err)
+		return
+	}
+	results = append(results, fmt.Sprintf("Seeded %d universal keys", len(specs)))
 
 	// Apply conventions to universal keys.
 	convApplied := 0
@@ -419,11 +421,7 @@ func (m *WizardModel) applySetup() {
 		if interview == "" {
 			interview = "propose"
 		}
-		_, err := m.db.ExecContext(ctx,
-			`UPDATE tags SET scope = ?, exclusion_group = ?, auto_extract = ?, interview = ? WHERE tag_key = ?`,
-			ce.scope, ce.exclusionGroup, ce.autoExtract, interview, ce.key,
-		)
-		if err != nil {
+		if err := m.st.UpdateTagConventions(ctx, ce.key, ce.scope, ce.exclusionGroup, ce.autoExtract, interview); err != nil {
 			m.errMsg = fmt.Sprintf("error applying convention for %s: %v", ce.key, err)
 			return
 		}
@@ -434,40 +432,28 @@ func (m *WizardModel) applySetup() {
 	}
 
 	// Seed product values.
-	for _, p := range m.productModel.Products {
-		_, err := m.db.ExecContext(ctx,
-			`INSERT IGNORE INTO tags (tag_key, tag_value, is_seed, category, cardinality, description)
-			 VALUES ('product', ?, 0, 'context', 'single', '')`,
-			p,
-		)
-		if err != nil {
-			m.errMsg = fmt.Sprintf("error adding product %q: %v", p, err)
+	if len(m.productModel.Products) > 0 {
+		if err := m.st.SeedProductValues(ctx, m.productModel.Products); err != nil {
+			m.errMsg = fmt.Sprintf("error adding products: %v", err)
 			return
 		}
-	}
-	if len(m.productModel.Products) > 0 {
 		results = append(results, fmt.Sprintf("Added products: %s", strings.Join(m.productModel.Products, ", ")))
 	}
 
 	// Seed selected integration keys.
-	intKeysSeeded := 0
+	var intKeys []store.IntegrationKey
 	for _, item := range m.keyList.Items {
 		if !item.Checked {
 			continue
 		}
-		_, err := m.db.ExecContext(ctx,
-			`INSERT IGNORE INTO tags (tag_key, tag_value, is_seed, category, cardinality, description)
-			 VALUES (?, '', 1, 'context', 'single', ?)`,
-			item.Key, item.Desc,
-		)
-		if err != nil {
-			m.errMsg = fmt.Sprintf("error seeding %s: %v", item.Key, err)
+		intKeys = append(intKeys, store.IntegrationKey{Key: item.Key, Description: item.Desc})
+	}
+	if len(intKeys) > 0 {
+		if err := m.st.SeedIntegrationKeys(ctx, intKeys); err != nil {
+			m.errMsg = fmt.Sprintf("error seeding integration keys: %v", err)
 			return
 		}
-		intKeysSeeded++
-	}
-	if intKeysSeeded > 0 {
-		results = append(results, fmt.Sprintf("Seeded %d integration keys", intKeysSeeded))
+		results = append(results, fmt.Sprintf("Seeded %d integration keys", len(intKeys)))
 	}
 
 	m.applyResults = results
@@ -512,7 +498,7 @@ func (m WizardModel) View() string {
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ColorBorder).
-		Width(m.width - 2).
+		Width(m.width-2).
 		Height(outerHeight).
 		Padding(0, 1).
 		Render(content)
@@ -524,9 +510,9 @@ func stepLabel(n int) string {
 	return fmt.Sprintf("Step %d of %d", n, totalScreens)
 }
 
-// RunWizard launches the bubbletea wizard. db may be nil (dry-run mode).
-func RunWizard(db *sql.DB) error {
-	m := NewWizardModel(db)
+// RunWizard launches the bubbletea wizard. st may be nil (dry-run mode).
+func RunWizard(st store.TagAdminStore) error {
+	m := NewWizardModel(st)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	_, err := p.Run()
 	return err

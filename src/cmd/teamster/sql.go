@@ -8,6 +8,8 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	"github.com/bmjdotnet/teamster/internal/store"
 )
 
 // runSQL dispatches `teamster sql`. It runs a single SQL statement in-process
@@ -59,7 +61,13 @@ func runSQL(args []string) int {
 	}
 	defer s.Close() //nolint:errcheck
 
-	if err := runSQLStmt(context.Background(), s.DB(), stmt, !*skipNames, os.Stdout); err != nil {
+	rx, ok := s.(store.RawExecutor)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "sql: teamster sql is not available on backend %T (no raw-SQL surface); use the backend's native client\n", s)
+		return 1
+	}
+
+	if err := runSQLStmt(context.Background(), rx, stmt, !*skipNames, os.Stdout); err != nil {
 		fmt.Fprintf(os.Stderr, "sql: %v\n", err)
 		return 1
 	}
@@ -69,8 +77,8 @@ func runSQL(args []string) int {
 // runSQLStmt executes stmt and streams the result rows to w, tab-separated.
 // When header is true a column-header line precedes the rows. A statement that
 // returns no result set (e.g. UPDATE) produces no output and no error.
-func runSQLStmt(ctx context.Context, db *sql.DB, stmt string, header bool, w io.Writer) error {
-	rows, err := db.QueryContext(ctx, stmt)
+func runSQLStmt(ctx context.Context, rx store.RawExecutor, stmt string, header bool, w io.Writer) error {
+	rows, err := rx.QueryRaw(ctx, stmt)
 	if err != nil {
 		return err
 	}

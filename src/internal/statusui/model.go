@@ -11,7 +11,6 @@ import (
 
 	"github.com/bmjdotnet/teamster/internal/config"
 	"github.com/bmjdotnet/teamster/internal/store"
-	mysqlstore "github.com/bmjdotnet/teamster/internal/store/mysql"
 	"github.com/bmjdotnet/teamster/internal/version"
 )
 
@@ -184,8 +183,8 @@ func (m Model) fetch() tea.Cmd {
 
 		var summary store.StatusSummary
 		var hasStore bool
-		if cfg.StoreDSN.Primary != "" {
-			s, err := mysqlstore.New(cfg.StoreDSN.Primary, mysqlstore.WithSkipMigrate())
+		if cfg.StoreDSN.Raw != "" {
+			s, err := store.Open(context.Background(), cfg.StoreDSN.Raw, store.WithSkipMigrate())
 			if err == nil {
 				defer s.Close() //nolint:errcheck
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -223,8 +222,8 @@ func RenderOnce(cfg config.Config, fetchRows ServiceRowFetcher) string {
 
 	var summary store.StatusSummary
 	var hasStore bool
-	if cfg.StoreDSN.Primary != "" {
-		s, err := mysqlstore.New(cfg.StoreDSN.Primary, mysqlstore.WithSkipMigrate())
+	if cfg.StoreDSN.Raw != "" {
+		s, err := store.Open(context.Background(), cfg.StoreDSN.Raw, store.WithSkipMigrate())
 		if err == nil {
 			defer s.Close() //nolint:errcheck
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

@@ -3,7 +3,6 @@ package web
 
 import (
 	"crypto/md5"
-	"database/sql"
 	"embed"
 	"fmt"
 	"html"
@@ -12,6 +11,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/bmjdotnet/teamster/internal/store"
 )
 
 //go:embed dashboard.html wms.html cost_flow.html tags.html
@@ -146,50 +147,32 @@ func FormatEventHTML(rec map[string]interface{}) string {
 
 // --- WMS dashboard ---
 
-// fmtTokens formats a token count with k/M suffixes.
-// wmsWorkUnit is a v2 work unit for the template.
-type wmsV2WorkUnit struct {
-	ID          string
-	OutcomeID   string
-	Title       string
-	Description string
-	Status      string
-	AgentID     string
-	Focus       string
-}
-
-// wmsOutcome is a v2 outcome node for the template (recursive).
-type wmsOutcome struct {
-	ID          string
-	Title       string
-	Description string
-	Status      string
-	Focus       string
-	WorkUnits   []wmsV2WorkUnit
-	Children    []wmsOutcome
-}
-
-// wmsPageData is the top-level template data.
+// wmsPageData is the top-level template data. V2Outcomes reuses
+// store.WMSTreeOutcome directly — its field names (ID, Title, Status, Focus,
+// WorkUnits, Children) already match what wms.html's "outcome-node" template
+// range-accesses, so no parallel type is needed.
 type wmsPageData struct {
-	V2Outcomes []wmsOutcome
+	V2Outcomes []store.WMSTreeOutcome
 	Error      string
 }
 
 var wmsTmpl = template.Must(template.New("wms").ParseFS(assets, "wms.html"))
 
 // HandleWMS returns an http.HandlerFunc that renders the WMS state dashboard.
-// db may be nil if the WMS database is not yet available; the page shows an empty state.
-func HandleWMS(db *sql.DB) http.HandlerFunc {
+// rep may be nil if the WMS store is not yet available; the page shows an
+// empty state.
+func HandleWMS(rep store.ReportingStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		data := wmsPageData{}
 
-		if db == nil {
+		if rep == nil {
 			data.Error = "WMS store unavailable (migration failed or DB unreachable) — check hookd logs"
 		} else {
-			var err error
-			data.V2Outcomes, err = loadWMSV2Data(r, db)
+			tree, err := rep.WMSTree(r.Context(), "")
 			if err != nil {
 				data.Error = fmt.Sprintf("query error: %v", err)
+			} else {
+				data.V2Outcomes = tree.Outcomes
 			}
 		}
 
@@ -198,103 +181,4 @@ func HandleWMS(db *sql.DB) http.HandlerFunc {
 			http.Error(w, "template error: "+err.Error(), http.StatusInternalServerError)
 		}
 	}
-}
-
-// loadWMSV2Data queries the v2 outcomes/workunits tables and builds a tree.
-// Returns nil (not an error) when the v2 tables don't exist yet.
-func loadWMSV2Data(r *http.Request, db *sql.DB) ([]wmsOutcome, error) {
-	ctx := r.Context()
-
-	rootRows, err := db.QueryContext(ctx, `
-		SELECT o.id, o.title, COALESCE(o.description,''), COALESCE(o.status,''),
-		       COALESCE(o.focus,'')
-		FROM outcomes o
-		WHERE NOT EXISTS (SELECT 1 FROM outcome_edges oe WHERE oe.child_id = o.id)
-		ORDER BY o.created_at ASC`)
-	if err != nil {
-		// v2 tables may not exist on older installs — treat as empty.
-		return nil, nil //nolint:nilerr
-	}
-	defer rootRows.Close()
-
-	var roots []wmsOutcome
-	for rootRows.Next() {
-		var o wmsOutcome
-		if err := rootRows.Scan(&o.ID, &o.Title, &o.Description, &o.Status, &o.Focus); err != nil {
-			return nil, err
-		}
-		roots = append(roots, o)
-	}
-	rootRows.Close()
-	if err := rootRows.Err(); err != nil {
-		return nil, err
-	}
-
-	for i := range roots {
-		if err := populateOutcome(r, db, &roots[i]); err != nil {
-			return nil, err
-		}
-	}
-	return roots, nil
-}
-
-// populateOutcome fills Children and WorkUnits for a single outcome node.
-func populateOutcome(r *http.Request, db *sql.DB, o *wmsOutcome) error {
-	ctx := r.Context()
-
-	// Children.
-	childRows, err := db.QueryContext(ctx, `
-		SELECT o.id, o.title, COALESCE(o.description,''), COALESCE(o.status,''),
-		       COALESCE(o.focus,'')
-		FROM outcomes o
-		JOIN outcome_edges oe ON oe.child_id = o.id
-		WHERE oe.parent_id = ?
-		ORDER BY o.created_at ASC`, o.ID)
-	if err != nil {
-		return fmt.Errorf("children of %s: %w", o.ID, err)
-	}
-	defer childRows.Close()
-	var children []wmsOutcome
-	for childRows.Next() {
-		var c wmsOutcome
-		if err := childRows.Scan(&c.ID, &c.Title, &c.Description, &c.Status, &c.Focus); err != nil {
-			return err
-		}
-		children = append(children, c)
-	}
-	childRows.Close()
-	if err := childRows.Err(); err != nil {
-		return err
-	}
-	for i := range children {
-		if err := populateOutcome(r, db, &children[i]); err != nil {
-			return err
-		}
-	}
-	o.Children = children
-
-	// Work units.
-	wuRows, err := db.QueryContext(ctx, `
-		SELECT id, COALESCE(outcome_id,''), title, COALESCE(description,''),
-		       COALESCE(status,''), COALESCE(agent_id,''), COALESCE(focus,'')
-		FROM workunits WHERE outcome_id = ? ORDER BY created_at ASC`, o.ID)
-	if err != nil {
-		return fmt.Errorf("workunits for %s: %w", o.ID, err)
-	}
-	defer wuRows.Close()
-	var wus []wmsV2WorkUnit
-	for wuRows.Next() {
-		var wu wmsV2WorkUnit
-		if err := wuRows.Scan(&wu.ID, &wu.OutcomeID, &wu.Title, &wu.Description,
-			&wu.Status, &wu.AgentID, &wu.Focus); err != nil {
-			return err
-		}
-		wus = append(wus, wu)
-	}
-	wuRows.Close()
-	if err := wuRows.Err(); err != nil {
-		return err
-	}
-	o.WorkUnits = wus
-	return nil
 }

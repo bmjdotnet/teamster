@@ -2,11 +2,11 @@ package observability
 
 import (
 	"context"
-	"database/sql"
 	"log/slog"
 	"sync"
 	"time"
 
+	"github.com/bmjdotnet/teamster/internal/store"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -23,7 +23,7 @@ var attributionRateDesc = prometheus.NewDesc(
 // costed messages the allocator mapped to a real entity. Backed by
 // usage_attribution.method ('unallocated' vs any join method). Cached for 30s.
 type AttributionCollector struct {
-	db *sql.DB
+	rep store.ReportingStore
 
 	mu        sync.Mutex
 	lastQuery time.Time
@@ -31,10 +31,10 @@ type AttributionCollector struct {
 	haveCache bool
 }
 
-// NewAttributionCollector creates an AttributionCollector backed by db with a
-// 30s cache TTL.
-func NewAttributionCollector(db *sql.DB) *AttributionCollector {
-	return &AttributionCollector{db: db}
+// NewAttributionCollector creates an AttributionCollector backed by rep with
+// a 30s cache TTL.
+func NewAttributionCollector(rep store.ReportingStore) *AttributionCollector {
+	return &AttributionCollector{rep: rep}
 }
 
 // Describe sends the descriptor to ch.
@@ -72,22 +72,19 @@ func (c *AttributionCollector) snapshot() float64 {
 // query computes attributed / total over usage_attribution. Returns ok=false
 // on error so a transient DB failure keeps the last good value.
 func (c *AttributionCollector) query() (rate float64, ok bool) {
-	if c.db == nil {
+	if c.rep == nil {
 		return 0, false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	var total, attributed sql.NullFloat64
-	err := c.db.QueryRowContext(ctx, `
-		SELECT COUNT(*), SUM(method <> 'unallocated')
-		FROM usage_attribution`).Scan(&total, &attributed)
+	total, mapped, err := c.rep.AttributionRate(ctx)
 	if err != nil {
 		slog.Warn("AttributionCollector: query failed", "error", err)
 		return 0, false
 	}
-	if !total.Valid || total.Float64 == 0 {
+	if total == 0 {
 		return 0, true // empty table: 0% attributed, but a valid scrape
 	}
-	return attributed.Float64 / total.Float64, true
+	return float64(mapped) / float64(total), true
 }

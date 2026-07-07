@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"database/sql"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -10,8 +10,8 @@ import (
 	"text/tabwriter"
 
 	"github.com/bmjdotnet/teamster/internal/config"
+	"github.com/bmjdotnet/teamster/internal/store"
 	"github.com/bmjdotnet/teamster/internal/wms"
-	"github.com/bmjdotnet/teamster/internal/store/mysql"
 )
 
 // runTags dispatches the `teamster tags <subcommand>` family. Returns the exit code.
@@ -70,28 +70,21 @@ flags (list):
   --key <key>                       show values for a specific key
   --show-retired                    include retired values in output`
 
-func openTagsDB() (*mysql.Store, error) {
+func openTagsDB() (store.Store, error) {
 	dsn := os.Getenv("TEAMSTER_STORE_DSN")
 	if dsn == "" {
 		// Fall back to DSN from teamster.yaml via config.Load so the CLI works
 		// without the env var in the user's shell (managed-mode installs only set
 		// the env in settings.json for hooks/MCPs, not in the shell).
 		cfg, err := config.Load()
-		if err == nil && cfg.StoreDSN.Primary != "" {
-			dsn = cfg.StoreDSN.Primary
+		if err == nil && cfg.StoreDSN.Raw != "" {
+			dsn = cfg.StoreDSN.Raw
 		}
 	}
 	if dsn == "" {
 		return nil, fmt.Errorf("TEAMSTER_STORE_DSN is not set and no DSN found in teamster.yaml")
 	}
-	parsed, err := config.ParseStoreDSN(dsn)
-	if err != nil {
-		return nil, fmt.Errorf("parse DSN: %w", err)
-	}
-	if parsed.Driver != config.StoreDriverMySQL {
-		return nil, fmt.Errorf("unsupported store driver: %s", parsed.Driver)
-	}
-	return mysql.New(parsed.Primary)
+	return store.Open(context.Background(), dsn)
 }
 
 func runTagsList(args []string) int {
@@ -126,7 +119,7 @@ func runTagsList(args []string) int {
 		tags = filtered
 	}
 
-	counts, err := queryEntityCounts(s)
+	counts, err := queryEntityCounts(ctx, s)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "tags list: entity counts: %v\n", err)
 		return 1
@@ -144,27 +137,16 @@ type entityCountKey struct {
 	tagValue string
 }
 
-func queryEntityCounts(s *mysql.Store) (map[entityCountKey]int, error) {
-	db := s.DB()
-	rows, err := db.QueryContext(context.Background(), `
-		SELECT t.tag_key, t.tag_value, COUNT(et.tag_id) AS cnt
-		FROM tags t
-		LEFT JOIN entity_tags et ON et.tag_id = t.id
-		GROUP BY t.id, t.tag_key, t.tag_value`)
+func queryEntityCounts(ctx context.Context, s store.TagAdminStore) (map[entityCountKey]int, error) {
+	rows, err := s.TagEntityCounts(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close() //nolint:errcheck
 	out := map[entityCountKey]int{}
-	for rows.Next() {
-		var k, v string
-		var cnt int
-		if err := rows.Scan(&k, &v, &cnt); err != nil {
-			return nil, err
-		}
-		out[entityCountKey{k, v}] = cnt
+	for _, r := range rows {
+		out[entityCountKey{r.TagKey, r.TagValue}] += int(r.Count)
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 func printTagKeys(tags []wms.Tag, counts map[entityCountKey]int) int {
@@ -312,38 +294,12 @@ func runTagsAddValue(args []string) int {
 	}
 	defer s.Close() //nolint:errcheck
 
-	db := s.DB()
-	ctx := context.Background()
-
-	// Verify the key exists.
-	var exists int
-	err = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM tags WHERE tag_key = ?`, key).Scan(&exists)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "tags add-value: %v\n", err)
-		return 1
-	}
-	if exists == 0 {
-		fmt.Fprintf(os.Stderr, "tags add-value: key %q does not exist; create it first with 'teamster tags add-key'\n", key)
-		return 1
-	}
-
-	// Fetch category and cardinality from the existing key.
-	var category, cardinality string
-	err = db.QueryRowContext(ctx,
-		`SELECT category, cardinality FROM tags WHERE tag_key = ? LIMIT 1`, key,
-	).Scan(&category, &cardinality)
-	if err != nil && err != sql.ErrNoRows {
-		fmt.Fprintf(os.Stderr, "tags add-value: %v\n", err)
-		return 1
-	}
-
-	_, err = db.ExecContext(ctx,
-		`INSERT IGNORE INTO tags (tag_key, tag_value, is_seed, category, cardinality, description)
-		 VALUES (?, ?, 0, ?, ?, ?)`,
-		key, value, category, cardinality, *description,
-	)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "tags add-value: %v\n", err)
+	if err := s.AddTagValue(context.Background(), key, value, *description); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			fmt.Fprintf(os.Stderr, "tags add-value: key %q does not exist; create it first with 'teamster tags add-key'\n", key)
+		} else {
+			fmt.Fprintf(os.Stderr, "tags add-value: %v\n", err)
+		}
 		return 1
 	}
 	fmt.Printf("Added value %q to key %q\n", value, key)
@@ -367,14 +323,9 @@ func runTagsRetire(args []string) int {
 	ctx := context.Background()
 
 	// Count values and entity bindings before retiring.
-	db := s.DB()
-	var valueCount, bindingCount int
-	db.QueryRowContext(ctx, //nolint:errcheck
-		`SELECT COUNT(*) FROM tags WHERE tag_key = ?`, key,
-	).Scan(&valueCount) //nolint:errcheck
-	db.QueryRowContext(ctx, //nolint:errcheck
-		`SELECT COUNT(*) FROM entity_tags WHERE tag_id IN (SELECT id FROM tags WHERE tag_key = ?)`, key,
-	).Scan(&bindingCount) //nolint:errcheck
+	values, _ := s.TagValues(ctx, key)
+	valueCount := len(values)
+	bindingCount, _ := s.TagBindingCount(ctx, key)
 
 	if err := s.RetireTag(ctx, key); err != nil {
 		fmt.Fprintf(os.Stderr, "tags retire: %v\n", err)
@@ -445,15 +396,20 @@ func runTagsDelete(args []string) int {
 	}
 	defer s.Close() //nolint:errcheck
 
-	db := s.DB()
 	ctx := context.Background()
 
-	var valueCount, bindingCount int
-	db.QueryRowContext(ctx, `SELECT COUNT(*) FROM tags WHERE tag_key = ?`, key).Scan(&valueCount)         //nolint:errcheck
-	db.QueryRowContext(ctx, `SELECT COUNT(*) FROM entity_tags WHERE tag_id IN (SELECT id FROM tags WHERE tag_key = ?)`, key).Scan(&bindingCount) //nolint:errcheck
-
-	if valueCount == 0 {
+	values, err := s.TagValues(ctx, key)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "tags delete: %v\n", err)
+		return 1
+	}
+	if len(values) == 0 {
 		fmt.Fprintf(os.Stderr, "tags delete: key %q not found\n", key)
+		return 1
+	}
+	bindingCount, err := s.TagBindingCount(ctx, key)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "tags delete: %v\n", err)
 		return 1
 	}
 
@@ -462,12 +418,11 @@ func runTagsDelete(args []string) int {
 		return 1
 	}
 
-	res, err := db.ExecContext(ctx, `DELETE FROM tags WHERE tag_key = ?`, key)
+	n, err := s.DeleteTagKey(ctx, key)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "tags delete: %v\n", err)
 		return 1
 	}
-	n, _ := res.RowsAffected()
 	fmt.Printf("Deleted key %q (%d value(s) removed, %d entity binding(s) cascaded)\n", key, n, bindingCount)
 	return 0
 }
@@ -510,29 +465,25 @@ func runTagsDeleteValue(args []string) int {
 	}
 	defer s.Close() //nolint:errcheck
 
-	db := s.DB()
 	ctx := context.Background()
 
-	var tagID int64
-	var bindingCount int
-	err = db.QueryRowContext(ctx, `SELECT id FROM tags WHERE tag_key = ? AND tag_value = ?`, key, value).Scan(&tagID)
+	detail, err := s.TagValueDetail(ctx, key, value)
 	if err != nil {
-		if err == sql.ErrNoRows {
+		if errors.Is(err, store.ErrNotFound) {
 			fmt.Fprintf(os.Stderr, "tags delete-value: %s:%s not found\n", key, value)
 			return 1
 		}
 		fmt.Fprintf(os.Stderr, "tags delete-value: %v\n", err)
 		return 1
 	}
-	db.QueryRowContext(ctx, `SELECT COUNT(*) FROM entity_tags WHERE tag_id = ?`, tagID).Scan(&bindingCount) //nolint:errcheck
+	bindingCount := detail.EntityCount
 
 	if bindingCount > 0 && !force {
 		fmt.Fprintf(os.Stderr, "tags delete-value: %s:%s has %d entity binding(s) — pass --force to delete anyway\n", key, value, bindingCount)
 		return 1
 	}
 
-	_, err = db.ExecContext(ctx, `DELETE FROM tags WHERE id = ?`, tagID)
-	if err != nil {
+	if err := s.DeleteTagValue(ctx, key, value); err != nil {
 		fmt.Fprintf(os.Stderr, "tags delete-value: %v\n", err)
 		return 1
 	}
@@ -555,19 +506,14 @@ func runTagsDescribe(args []string) int {
 	}
 	defer s.Close() //nolint:errcheck
 
-	db := s.DB()
-	ctx := context.Background()
-	res, err := db.ExecContext(ctx,
-		`UPDATE tags SET description = ? WHERE tag_key = ?`, desc, key)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "tags describe: %v\n", err)
+	if err := s.UpdateTagDescription(context.Background(), key, desc); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			fmt.Fprintf(os.Stderr, "tags describe: key %q not found\n", key)
+		} else {
+			fmt.Fprintf(os.Stderr, "tags describe: %v\n", err)
+		}
 		return 1
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		fmt.Fprintf(os.Stderr, "tags describe: key %q not found\n", key)
-		return 1
-	}
-	fmt.Printf("Updated description on %d row(s) for key %q\n", n, key)
+	fmt.Printf("Updated description for key %q\n", key)
 	return 0
 }

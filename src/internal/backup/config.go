@@ -2,11 +2,10 @@ package backup
 
 import (
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
-	"strings"
 
+	"github.com/bmjdotnet/teamster/internal/config"
 	"gopkg.in/yaml.v3"
 )
 
@@ -61,33 +60,6 @@ type TeamsterConfig struct {
 	IncludeLogs bool   `yaml:"include_logs"`
 }
 
-// MySQLDSNFields holds the parsed components of a mysql:// DSN.
-type MySQLDSNFields struct {
-	User     string
-	Password string
-	Host     string
-	Port     string
-}
-
-// ParseMySQLDSN parses a mysql://user:pass@host:port/db DSN.
-func ParseMySQLDSN(dsn string) (MySQLDSNFields, error) {
-	u, err := url.Parse(dsn)
-	if err != nil {
-		return MySQLDSNFields{}, fmt.Errorf("parse dsn: %w", err)
-	}
-	if u.Scheme != "mysql" {
-		return MySQLDSNFields{}, fmt.Errorf("dsn scheme must be mysql, got %q", u.Scheme)
-	}
-	host := u.Hostname()
-	port := u.Port()
-	if port == "" {
-		port = "3306"
-	}
-	user := u.User.Username()
-	pass, _ := u.User.Password()
-	return MySQLDSNFields{User: user, Password: pass, Host: host, Port: port}, nil
-}
-
 type teamsterYAML struct {
 	Backup  Config `yaml:"backup"`
 	Store   struct {
@@ -132,13 +104,10 @@ func LoadConfig(path string, restoreMode bool) (*Config, error) {
 		cfg.Stores.OTel.Files = []string{filepath.Join(basedir, "etc", "otelcol.yaml")}
 	}
 
-	// Default mysql databases from the DSN path when absent.
+	// Default mysql databases from the DSN's database name when absent.
 	if len(cfg.Stores.MySQL.Databases) == 0 && cfg.Stores.MySQL.DSN != "" {
-		if u, err := url.Parse(cfg.Stores.MySQL.DSN); err == nil && u.Path != "" {
-			dbName := strings.TrimPrefix(u.Path, "/")
-			if dbName != "" {
-				cfg.Stores.MySQL.Databases = []string{dbName}
-			}
+		if parsed, err := config.ParseStoreDSN(cfg.Stores.MySQL.DSN); err == nil && parsed.Database != "" {
+			cfg.Stores.MySQL.Databases = []string{parsed.Database}
 		}
 	}
 

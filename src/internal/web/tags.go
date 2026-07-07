@@ -1,9 +1,10 @@
 package web
 
 import (
-	"database/sql"
 	"encoding/json"
 	"net/http"
+
+	"github.com/bmjdotnet/teamster/internal/store"
 )
 
 // tagValue is one vocabulary row from the tags table.
@@ -40,68 +41,41 @@ func HandleTagsPage(w http.ResponseWriter, r *http.Request) {
 
 // HandleTagsAPI returns an http.HandlerFunc that queries the tags vocabulary
 // and returns JSON with entity counts per value.
-func HandleTagsAPI(db *sql.DB) http.HandlerFunc {
+func HandleTagsAPI(rep store.ReportingStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if db == nil {
+		if rep == nil {
 			http.Error(w, `{"error":"WMS store unavailable"}`, http.StatusServiceUnavailable)
 			return
 		}
 
-		const q = `
-SELECT t.tag_key, t.tag_value, t.is_seed, t.category, t.cardinality,
-       COALESCE(t.description, ''),
-       COUNT(et.tag_id) AS entity_count
-FROM tags t
-LEFT JOIN entity_tags et ON et.tag_id = t.id
-GROUP BY t.id
-ORDER BY t.category, t.tag_key, t.tag_value`
-
-		rows, err := db.QueryContext(r.Context(), q)
+		rows, err := rep.TagsWithEntityCounts(r.Context())
 		if err != nil {
 			http.Error(w, `{"error":"query failed"}`, http.StatusInternalServerError)
 			return
 		}
-		defer rows.Close()
 
 		// Accumulate rows into tagKey groups preserving order.
 		var keys []tagKey
 		keyIndex := map[string]int{}
 
-		for rows.Next() {
-			var (
-				tagKeyStr   string
-				tagValStr   string
-				isSeedInt   int
-				category    string
-				cardinality string
-				description string
-				count       int
-			)
-			if err := rows.Scan(&tagKeyStr, &tagValStr, &isSeedInt, &category, &cardinality, &description, &count); err != nil {
-				http.Error(w, `{"error":"scan failed"}`, http.StatusInternalServerError)
-				return
-			}
+		for _, tc := range rows {
 			tv := tagValue{
-				TagValue:    tagValStr,
-				IsSeed:      isSeedInt == 1,
-				EntityCount: count,
-				Description: description,
+				TagValue:    tc.Value,
+				IsSeed:      tc.IsSeed,
+				EntityCount: int(tc.EntityCount),
+				Description: tc.Description,
 			}
-			if idx, ok := keyIndex[tagKeyStr]; ok {
+			if idx, ok := keyIndex[tc.Key]; ok {
 				keys[idx].Values = append(keys[idx].Values, tv)
 			} else {
-				keyIndex[tagKeyStr] = len(keys)
+				keyIndex[tc.Key] = len(keys)
 				keys = append(keys, tagKey{
-					TagKey:      tagKeyStr,
-					Category:    category,
-					Cardinality: cardinality,
+					TagKey:      tc.Key,
+					Category:    tc.Category,
+					Cardinality: tc.Cardinality,
 					Values:      []tagValue{tv},
 				})
 			}
-		}
-		if err := rows.Err(); err != nil {
-			http.Error(w, `{"error":"rows error"}`, http.StatusInternalServerError)
-			return
 		}
 
 		if keys == nil {

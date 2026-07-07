@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/bmjdotnet/teamster/internal/store/storetest"
 	"github.com/bmjdotnet/teamster/internal/wms"
 )
 
@@ -234,24 +235,17 @@ func TestWorkTypeLifecycleSeeds(t *testing.T) {
 func TestWorkTypeCorrectiveUpdate(t *testing.T) {
 	st := openScratchStore(t)
 	ctx := context.Background()
-	db := st.DB()
 
 	// Simulate the pre-v15 state: force the seeded rows back to 'context' as if
 	// a classifier had created them via create-on-apply before the seed existed.
-	if _, err := db.ExecContext(ctx,
-		`UPDATE tags SET category = 'context' WHERE tag_key = 'work-type' AND tag_value IN ('test','docs')`); err != nil {
-		t.Fatalf("force context: %v", err)
-	}
+	storetest.Exec(t, ctx, st,
+		`UPDATE tags SET category = 'context' WHERE tag_key = 'work-type' AND tag_value IN ('test','docs')`)
 	// Run the exact corrective statement from migration v15.
-	if _, err := db.ExecContext(ctx,
-		`UPDATE tags SET category = 'lifecycle' WHERE tag_key = 'work-type' AND tag_value IN ('test', 'docs')`); err != nil {
-		t.Fatalf("corrective update: %v", err)
-	}
+	storetest.Exec(t, ctx, st,
+		`UPDATE tags SET category = 'lifecycle' WHERE tag_key = 'work-type' AND tag_value IN ('test', 'docs')`)
 	var n int
-	if err := db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM tags WHERE tag_key='work-type' AND tag_value IN ('test','docs') AND category='lifecycle'`).Scan(&n); err != nil {
-		t.Fatalf("count: %v", err)
-	}
+	storetest.QueryRow(t, ctx, st,
+		`SELECT COUNT(*) FROM tags WHERE tag_key='work-type' AND tag_value IN ('test','docs') AND category='lifecycle'`, nil, &n)
 	if n != 2 {
 		t.Errorf("corrective UPDATE should set both test+docs to lifecycle, got %d", n)
 	}

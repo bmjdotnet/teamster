@@ -2,21 +2,18 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
-	mysqldriver "github.com/go-sql-driver/mysql"
-
 	"github.com/bmjdotnet/teamster/internal/config"
 	"github.com/bmjdotnet/teamster/internal/statusui"
+	"github.com/bmjdotnet/teamster/internal/store"
 )
 
 // ANSI color codes — used only by buildStatusRows / checkStatus return values.
@@ -144,11 +141,11 @@ func buildStatusRows(cfg config.Config) []statusRow {
 	}
 	storeEndpoint := "—"
 	storeStatus := colorize("Not configured", ansiDim)
-	if cfg.StoreDSN.Primary != "" {
+	if cfg.StoreDSN.Raw != "" {
 		// host:port only — never the full DSN, which carries the password.
 		// Consistent with the grafana_ro row below.
-		storeEndpoint = storeHostForDisplay(cfg.StoreDSN.Primary)
-		storeStatus = checkStoreStatus(storeMode, cfg.StoreDSN.Primary, timeout)
+		storeEndpoint = storeHostForDisplay(cfg.StoreDSN)
+		storeStatus = checkStoreStatus(storeMode, cfg.StoreDSN.Raw, timeout)
 	}
 	rows = append(rows, statusRow{
 		label:    "WMS Store (store)",
@@ -239,10 +236,10 @@ func buildStatusRows(cfg config.Config) []statusRow {
 	// false "Provisioned". (A MySQL connect on an interactive status call is
 	// acceptable.) Only relevant when this host installs Grafana over a MySQL
 	// store.
-	if grafanaMode == "install" && strings.HasPrefix(cfg.StoreDSN.Primary, "mysql://") {
+	if grafanaMode == "install" && cfg.StoreDSN.Scheme == "mysql" {
 		var roStatus, roEndpoint string
 		pw, _ := readGrafanaReadonlyPassword(filepath.Join(grafanaBasedir(cfg), "var", "grafana"))
-		host, port, db, ok := decomposeStoreDSN(cfg.StoreDSN.Primary)
+		ok := cfg.StoreDSN.Host != "" && cfg.StoreDSN.Database != ""
 		switch {
 		case pw == "":
 			roStatus = colorize("Not provisioned", ansiYellow)
@@ -250,9 +247,9 @@ func buildStatusRows(cfg config.Config) []statusRow {
 		case !ok:
 			roStatus = colorize("Unknown", ansiDim)
 			roEndpoint = "—"
-		case grafanaReadonlyAuthorizes(host, port, db, pw, timeout):
+		case credentialProberAuthorizes(cfg.StoreDSN.Raw, pw, timeout):
 			roStatus = colorize("Provisioned", ansiGreen)
-			roEndpoint = grafanaReadonlyUser + "@" + storeHostForDisplay(cfg.StoreDSN.Primary)
+			roEndpoint = grafanaReadonlyUser + "@" + storeHostForDisplay(cfg.StoreDSN)
 		default:
 			roStatus = colorize("Unauthorized", ansiRed)
 			roEndpoint = "grafana_ro cannot authorize — re-apply grafana-readonly-user.sql as a DB admin"
@@ -295,7 +292,6 @@ type checkParams struct {
 	pidName    string // PID file name (empty = no PID check)
 	port       int    // TCP port to probe (0 = skip)
 	healthURL  string // HTTP health URL (empty = skip)
-	healthDSN  string // MySQL DSN for TCP probe (empty = skip)
 	systemdSvc string // systemd service name for systemd mode (empty = skip)
 	cfg        config.Config
 	timeout    time.Duration
@@ -336,9 +332,7 @@ func checkStatus(p checkParams) string {
 			running = portBound(p.port)
 		}
 	case "managed", "external":
-		if p.healthDSN != "" {
-			running = mysqlReachable(p.healthDSN, p.timeout)
-		} else if p.healthURL != "" {
+		if p.healthURL != "" {
 			running = httpHealthy(ctx, p.healthURL)
 		} else if p.port != 0 {
 			running = portBound(p.port)
@@ -356,9 +350,7 @@ func checkStatus(p checkParams) string {
 
 	// Running — attempt health check.
 	healthy := true
-	if p.healthDSN != "" {
-		healthy = mysqlReachable(p.healthDSN, p.timeout)
-	} else if p.healthURL != "" {
+	if p.healthURL != "" {
 		healthy = httpHealthy(ctx, p.healthURL)
 	}
 
@@ -376,29 +368,49 @@ func checkStatus(p checkParams) string {
 	return colorize("Healthy", ansiGreen)
 }
 
-// checkStoreStatus checks MySQL/store health.
+// checkStoreStatus checks store health.
 // Store is never supervisor-managed — MySQL is either apt-installed (install)
-// or externally provided (managed/external). Primary check is always TCP dial
-// via mysqlReachable. For install mode, a failing TCP dial is cross-checked
-// against systemctl to distinguish "service up, port not yet ready" from
-// "service down."
+// or externally provided (managed/external). Primary check is storeReachable
+// (F10: a real backend connection, not a raw port probe). For install mode, a
+// failed connection is cross-checked against systemctl to distinguish
+// "service up, not ready yet" from "service down."
 func checkStoreStatus(mode, dsn string, timeout time.Duration) string {
-	reachable := mysqlReachable(dsn, timeout)
+	reachable := storeReachable(dsn, timeout)
 	if reachable {
 		return colorize("Healthy", ansiGreen)
 	}
-	// TCP failed. For install mode check whether systemd unit is active.
+	// Unreachable. For install mode check whether systemd unit is active.
 	if mode == "install" {
 		for _, unit := range []string{"mariadb", "mysql", "mysqld"} {
 			cmd := exec.Command("systemctl", "is-active", "--quiet", unit)
 			if cmd.Run() == nil {
-				// Systemd says the service is active but TCP not ready yet.
+				// Systemd says the service is active but the store isn't ready yet.
 				return colorize("Not responding", ansiYellow)
 			}
 		}
 		return colorize("Not running", ansiRed)
 	}
 	return colorize("Unreachable", ansiRed)
+}
+
+// storeReachable opens dsn read-only via store.Open (skipping migrations,
+// since a status check must never write schema) and pings the resulting
+// handle — a construction failure or a failed ping both mean "unreachable".
+// This replaces the old raw TCP-dial-against-host-port approach, which
+// hard-coded MySQL's default port 3306 and couldn't distinguish a real
+// outage from an unsupported/misconfigured backend.
+func storeReachable(dsn string, timeout time.Duration) bool {
+	if dsn == "" {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	st, err := store.Open(ctx, dsn, store.WithSkipMigrate())
+	if err != nil {
+		return false
+	}
+	defer st.Close() //nolint:errcheck
+	return st.Ping(ctx) == nil
 }
 
 // pidIfInstall returns pidName only when mode == "install" (supervisor-managed).
@@ -440,63 +452,40 @@ func httpHealthy(ctx context.Context, healthURL string) bool {
 	return resp.StatusCode == http.StatusOK
 }
 
-// grafanaReadonlyAuthorizes connects to MySQL as the grafana_ro user with the
-// persisted password and runs SELECT 1, returning true iff the account actually
-// authorizes. This is the authoritative provisioning check for the status row:
-// it proves the D1-D4 datasource account can really query, so a stale password
-// file or an out-of-band-dropped user can't read as "Provisioned". Builds the
-// driver DSN via mysqldriver.Config (same shape as the store's convertDSN);
-// importing the driver here also guarantees it is registered for sql.Open.
-func grafanaReadonlyAuthorizes(host, port, db, password string, timeout time.Duration) bool {
-	dc := mysqldriver.NewConfig()
-	dc.Net = "tcp"
-	dc.Addr = net.JoinHostPort(host, port)
-	dc.User = grafanaReadonlyUser
-	dc.Passwd = password
-	dc.DBName = db
-	dc.Timeout = timeout
-
-	pool, err := sql.Open("mysql", dc.FormatDSN())
-	if err != nil {
-		return false
-	}
-	defer pool.Close() //nolint:errcheck
-
+// credentialProberAuthorizes opens dsn read-only via store.Open (skipping
+// migrations, same as storeReachable) and type-asserts store.CredentialProber,
+// returning true iff the grafana_ro user actually authorizes against it. This
+// is the authoritative provisioning check for the status row: it proves the
+// D1-D4 datasource account can really connect, so a stale password file or an
+// out-of-band-dropped user can't read as "Provisioned". A backend without a
+// CredentialProber (or an unreachable store) degrades to false, rendered as
+// "Unauthorized" by the caller — the safe default for a security-relevant row.
+func credentialProberAuthorizes(dsn, password string, timeout time.Duration) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	var one int
-	if err := pool.QueryRowContext(ctx, "SELECT 1").Scan(&one); err != nil {
-		return false
-	}
-	return one == 1
-}
-
-// storeHostForDisplay returns the host[:port] of a mysql:// DSN for the status
-// table, dropping the credentials. Falls back to the raw host on parse failure.
-func storeHostForDisplay(dsn string) string {
-	u, err := url.Parse(dsn)
-	if err != nil || u.Host == "" {
-		return "store"
-	}
-	return u.Host
-}
-
-// mysqlReachable TCP-dials the host:port from a mysql:// DSN.
-func mysqlReachable(dsn string, timeout time.Duration) bool {
-	u, err := url.Parse(dsn)
-	if err != nil || u.Host == "" {
-		return false
-	}
-	host := u.Host
-	if !strings.Contains(host, ":") {
-		host += ":3306"
-	}
-	conn, err := net.DialTimeout("tcp", host, timeout)
+	st, err := store.Open(ctx, dsn, store.WithSkipMigrate())
 	if err != nil {
 		return false
 	}
-	conn.Close()
-	return true
+	defer st.Close() //nolint:errcheck
+	cp, ok := st.(store.CredentialProber)
+	if !ok {
+		return false
+	}
+	return cp.PingAs(ctx, grafanaReadonlyUser, password) == nil
+}
+
+// storeHostForDisplay returns the host[:port] of the store DSN for the status
+// table, dropping the credentials. Falls back to "store" when the DSN has no
+// host (empty or unconfigured).
+func storeHostForDisplay(dsn config.StoreDSN) string {
+	if dsn.Host == "" {
+		return "store"
+	}
+	if dsn.Port == 0 {
+		return dsn.Host
+	}
+	return fmt.Sprintf("%s:%d", dsn.Host, dsn.Port)
 }
 
 // portBound returns true if a listener is already bound on the given TCP port.

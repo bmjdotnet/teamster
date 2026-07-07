@@ -9,19 +9,24 @@ import (
 	"math"
 	"net"
 	"net/http"
-	"os"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/bmjdotnet/teamster/internal/store/mysql"
+	"github.com/bmjdotnet/teamster/internal/store"
+	"github.com/bmjdotnet/teamster/internal/store/storetest"
 )
+
+// ref is a terse store.EntityRef constructor for test tables, keeping struct
+// literals keyed (go vet composites) without a wall of field names.
+func ref(entityType, entityID string) store.EntityRef {
+	return store.EntityRef{EntityType: entityType, EntityID: entityID}
+}
 
 func TestMostSpecific(t *testing.T) {
 	tests := []struct {
 		name     string
-		cands    []focusCandidate
+		cands    []store.EntityRef
 		wantType string
 		wantID   string
 		wantOK   bool
@@ -33,56 +38,56 @@ func TestMostSpecific(t *testing.T) {
 		},
 		{
 			name:     "single task",
-			cands:    []focusCandidate{{"task", "t1"}},
+			cands:    []store.EntityRef{ref("task", "t1")},
 			wantType: "task", wantID: "t1", wantOK: true,
 		},
 		{
 			name: "task beats its goal and project",
-			cands: []focusCandidate{
-				{"project", "p1"}, {"goal", "g1"}, {"task", "t1"},
+			cands: []store.EntityRef{
+				ref("project", "p1"), ref("goal", "g1"), ref("task", "t1"),
 			},
 			wantType: "task", wantID: "t1", wantOK: true,
 		},
 		{
 			name: "workitem is most specific",
-			cands: []focusCandidate{
-				{"goal", "g1"}, {"workitem", "w1"}, {"task", "t1"},
+			cands: []store.EntityRef{
+				ref("goal", "g1"), ref("workitem", "w1"), ref("task", "t1"),
 			},
 			wantType: "workitem", wantID: "w1", wantOK: true,
 		},
 		{
 			name:   "unknown entity type ignored",
-			cands:  []focusCandidate{{"squad", "s1"}},
+			cands:  []store.EntityRef{ref("squad", "s1")},
 			wantOK: false,
 		},
 		{
 			name: "goal chosen over project when no task",
-			cands: []focusCandidate{
-				{"project", "p1"}, {"goal", "g1"},
+			cands: []store.EntityRef{
+				ref("project", "p1"), ref("goal", "g1"),
 			},
 			wantType: "goal", wantID: "g1", wantOK: true,
 		},
 		{
 			name:     "single v3 outcome attributes (not dropped)",
-			cands:    []focusCandidate{{"outcome", "o1"}},
+			cands:    []store.EntityRef{ref("outcome", "o1")},
 			wantType: "outcome", wantID: "o1", wantOK: true,
 		},
 		{
 			name: "v3 workunit beats its outcome",
-			cands: []focusCandidate{
-				{"outcome", "o1"}, {"workunit", "w1"},
+			cands: []store.EntityRef{
+				ref("outcome", "o1"), ref("workunit", "w1"),
 			},
 			wantType: "workunit", wantID: "w1", wantOK: true,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			et, id, ok := mostSpecific(tc.cands)
+			ref, ok := mostSpecific(tc.cands)
 			if ok != tc.wantOK {
 				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
 			}
-			if ok && (et != tc.wantType || id != tc.wantID) {
-				t.Fatalf("got (%q,%q), want (%q,%q)", et, id, tc.wantType, tc.wantID)
+			if ok && (ref.EntityType != tc.wantType || ref.EntityID != tc.wantID) {
+				t.Fatalf("got (%q,%q), want (%q,%q)", ref.EntityType, ref.EntityID, tc.wantType, tc.wantID)
 			}
 		})
 	}
@@ -95,11 +100,11 @@ func TestMostSpecific(t *testing.T) {
 // SUM(weight)=1 per message_id holds by construction.
 func TestWeightInvariant(t *testing.T) {
 	// A focused message → one attributed row, weight 1.0.
-	if et, _, ok := mostSpecific([]focusCandidate{{"task", "t1"}}); !ok || et != "task" {
+	if got, ok := mostSpecific([]store.EntityRef{ref("task", "t1")}); !ok || got.EntityType != "task" {
 		t.Fatalf("focused message must attribute to its entity")
 	}
 	// An unfocused message → unallocated, still exactly one row of weight 1.0.
-	if _, _, ok := mostSpecific(nil); ok {
+	if _, ok := mostSpecific(nil); ok {
 		t.Fatalf("unfocused message must fall to the unallocated bucket")
 	}
 }
@@ -107,70 +112,39 @@ func TestWeightInvariant(t *testing.T) {
 // --- DB-backed interval-cost harness (B2-rollup) -----------------------------
 //
 // These tests exercise the interval-cost assembly against a throwaway schema and
-// are SKIPPED when TEAMSTER_TEST_MYSQL_DSN is unset. Use the mysql:// URL form
-// (mysql://root:test@127.0.0.1:13306/<schema>) — the tcp(...) form makes the
-// store silently SKIP migrations the assembly depends on. The harness mirrors
-// internal/store/rollup_integration_test.go; its helpers are duplicated here
-// because that suite lives in package store_test (not importable).
+// are SKIPPED when TEAMSTER_TEST_MYSQL_DSN is unset. The schema/store harness
+// lives in internal/store/storetest (shared with internal/store's own
+// conformance suite); fixture shapes with no Store-method equivalent (exact
+// historical timestamps, specific row ids) go through store.RawExecutor via
+// storetest.Exec/QueryRow.
 
-var intervalSchemaCounter int64
-
-// rollupTestDB opens a fresh, fully-migrated throwaway schema (so v19/v20 columns
-// exist) and returns its *sql.DB. Skips when the DSN is unset/unreachable.
-func rollupTestDB(t *testing.T) *sql.DB {
-	t.Helper()
-	dsn := os.Getenv("TEAMSTER_TEST_MYSQL_DSN")
-	if dsn == "" {
-		t.Skip("TEAMSTER_TEST_MYSQL_DSN not set")
-	}
-	if !mysqlReachable(dsn) {
-		t.Skip("mysql not reachable")
-	}
-	schema := fmt.Sprintf("teamster_test_ivl_%d_%d", time.Now().UnixNano(), atomic.AddInt64(&intervalSchemaCounter, 1))
-	if err := mysqlEnsureSchema(dsn, schema); err != nil {
-		t.Fatalf("ensure schema: %v", err)
-	}
-	schemaDSN, err := mysqlRebindSchema(dsn, schema)
-	if err != nil {
-		t.Fatalf("rebind: %v", err)
-	}
-	st, err := mysql.New(schemaDSN) // runs all migrations on the fresh schema
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = st.Close()
-		_ = mysqlDropSchema(dsn, schema)
-	})
-	return st.DB()
+// rollupTestStore opens a fresh, fully-migrated throwaway schema (so v19/v20
+// columns exist). Skips when the DSN is unset/unreachable.
+func rollupTestStore(t *testing.T) store.Store {
+	return storetest.Open(t, "teamster_test_ivl")
 }
 
-func newTestRunner(db *sql.DB) *Runner {
-	return New(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+func newTestRunner(db store.Store) *Runner {
+	return NewRunner(db, db, db, db, db, db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
 // seedFocus opens (and optionally closes) a focus interval for an agent.
-func seedFocus(t *testing.T, db *sql.DB, ctx context.Context, session, agent, etype, eid string, start time.Time, end *time.Time) {
+func seedFocus(t *testing.T, db store.Store, ctx context.Context, session, agent, etype, eid string, start time.Time, end *time.Time) {
 	t.Helper()
-	if _, err := db.ExecContext(ctx,
+	storetest.Exec(t, ctx, db,
 		`INSERT INTO wms_intervals (kind, session_id, agent_name, entity_type, entity_id, started_at, ended_at)
 		 VALUES ('focus',?,?,?,?,?,?)`,
-		session, agent, etype, eid, start, end); err != nil {
-		t.Fatalf("seed focus %s/%s: %v", etype, eid, err)
-	}
+		session, agent, etype, eid, start, end)
 }
 
 // seedEventRecord opens (and optionally closes) a state interval on an entity and
 // returns its id (the cost-attribution target).
-func seedEventRecord(t *testing.T, db *sql.DB, ctx context.Context, etype, eid, state, agent string, start time.Time, end *time.Time) uint64 {
+func seedEventRecord(t *testing.T, db store.Store, ctx context.Context, etype, eid, state, agent string, start time.Time, end *time.Time) uint64 {
 	t.Helper()
-	res, err := db.ExecContext(ctx,
+	res := storetest.Exec(t, ctx, db,
 		`INSERT INTO wms_intervals (kind, entity_type, entity_id, state, started_at, ended_at, agent_name)
 		 VALUES ('state',?,?,?,?,?,?)`,
 		etype, eid, state, start, end, agent)
-	if err != nil {
-		t.Fatalf("seed event_record %s/%s: %v", etype, eid, err)
-	}
 	id, err := res.LastInsertId()
 	if err != nil {
 		t.Fatalf("event_record last id: %v", err)
@@ -178,84 +152,71 @@ func seedEventRecord(t *testing.T, db *sql.DB, ctx context.Context, etype, eid, 
 	return uint64(id)
 }
 
-func seedLedger(t *testing.T, db *sql.DB, ctx context.Context, msgID, session, agent string, ts time.Time, cost float64, tokens int) {
+func seedLedger(t *testing.T, db store.Store, ctx context.Context, msgID, session, agent string, ts time.Time, cost float64, tokens int) {
 	t.Helper()
-	if _, err := db.ExecContext(ctx,
-		`INSERT INTO token_ledger
-			(session_id, message_id, agent_name, host, model, total_input, cost_usd, timestamp)
-		 VALUES (?,?,?,?,?,?,?,?)`,
-		session, msgID, agent, "testhost", "claude-opus-4-8", tokens, cost, ts); err != nil {
-		t.Fatalf("seed ledger %s: %v", msgID, err)
-	}
+	storetest.SeedLedger(t, ctx, db, store.TelemetryRow{
+		SessionID:  session,
+		MessageID:  msgID,
+		AgentName:  agent,
+		Host:       "testhost",
+		Model:      "claude-opus-4-8",
+		TotalInput: int64(tokens),
+		CostUSD:    cost,
+		Timestamp:  ts,
+	})
 }
 
 // intervalCost reads the assembled cost on one wms_intervals (kind='state') row;
 // ok=false when its cost_usd is NULL (not assembled / cleared).
-func intervalCost(t *testing.T, db *sql.DB, ctx context.Context, id uint64) (cost float64, ok bool) {
+func intervalCost(t *testing.T, db store.Store, ctx context.Context, id uint64) (cost float64, ok bool) {
 	t.Helper()
 	var c sql.NullFloat64
-	if err := db.QueryRowContext(ctx,
-		`SELECT cost_usd FROM wms_intervals WHERE id=?`, id).Scan(&c); err != nil {
-		t.Fatalf("read interval cost %d: %v", id, err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT cost_usd FROM wms_intervals WHERE id=?`, []any{id}, &c)
 	return c.Float64, c.Valid
 }
 
 // sumIntervalCost is the left-hand side of the conservation invariant.
-func sumIntervalCost(t *testing.T, db *sql.DB, ctx context.Context) float64 {
+func sumIntervalCost(t *testing.T, db store.Store, ctx context.Context) float64 {
 	t.Helper()
 	var s float64
-	if err := db.QueryRowContext(ctx,
-		`SELECT COALESCE(SUM(cost_usd),0) FROM wms_intervals WHERE kind='state' AND cost_usd IS NOT NULL`).Scan(&s); err != nil {
-		t.Fatalf("sum interval cost: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db,
+		`SELECT COALESCE(SUM(cost_usd),0) FROM wms_intervals WHERE kind='state' AND cost_usd IS NOT NULL`, nil, &s)
 	return s
 }
 
 // sumLedgerForAttributedIntervals is the right-hand side: Σ weight·cost over the
 // attribution rows that DID land on an interval (interval_id <> 0).
-func sumLedgerForAttributedIntervals(t *testing.T, db *sql.DB, ctx context.Context) float64 {
+func sumLedgerForAttributedIntervals(t *testing.T, db store.Store, ctx context.Context) float64 {
 	t.Helper()
 	var s float64
-	if err := db.QueryRowContext(ctx, `
+	storetest.QueryRow(t, ctx, db, `
 		SELECT COALESCE(SUM(t.cost_usd * ua.weight),0)
 		FROM usage_attribution ua
 		JOIN token_ledger t ON t.message_id = ua.message_id
-		WHERE ua.interval_id <> 0`).Scan(&s); err != nil {
-		t.Fatalf("sum ledger for attributed intervals: %v", err)
-	}
+		WHERE ua.interval_id <> 0`, nil, &s)
 	return s
 }
 
-func sumRollup(t *testing.T, db *sql.DB, ctx context.Context) float64 {
+func sumRollup(t *testing.T, db store.Store, ctx context.Context) float64 {
 	t.Helper()
 	var s float64
-	if err := db.QueryRowContext(ctx,
-		`SELECT COALESCE(SUM(cost_usd),0) FROM cost_rollup`).Scan(&s); err != nil {
-		t.Fatalf("sum cost_rollup: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT COALESCE(SUM(cost_usd),0) FROM cost_rollup`, nil, &s)
 	return s
 }
 
-func intervalIDOf(t *testing.T, db *sql.DB, ctx context.Context, msgID string) uint64 {
+func intervalIDOf(t *testing.T, db store.Store, ctx context.Context, msgID string) uint64 {
 	t.Helper()
 	var id uint64
-	if err := db.QueryRowContext(ctx,
-		`SELECT interval_id FROM usage_attribution WHERE message_id=?`, msgID).Scan(&id); err != nil {
-		t.Fatalf("read interval_id %s: %v", msgID, err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT interval_id FROM usage_attribution WHERE message_id=?`, []any{msgID}, &id)
 	return id
 }
 
 // attributionOf reads the resolved entity + method for a message's
 // usage_attribution row.
-func attributionOf(t *testing.T, db *sql.DB, ctx context.Context, msgID string) (etype, eid, method string) {
+func attributionOf(t *testing.T, db store.Store, ctx context.Context, msgID string) (etype, eid, method string) {
 	t.Helper()
-	if err := db.QueryRowContext(ctx,
-		`SELECT entity_type, entity_id, method FROM usage_attribution WHERE message_id=?`, msgID).
-		Scan(&etype, &eid, &method); err != nil {
-		t.Fatalf("read attribution %s: %v", msgID, err)
-	}
+	storetest.QueryRow(t, ctx, db,
+		`SELECT entity_type, entity_id, method FROM usage_attribution WHERE message_id=?`, []any{msgID}, &etype, &eid, &method)
 	return etype, eid, method
 }
 
@@ -266,7 +227,7 @@ const eps = 1e-4
 // messages, AND cost_rollup's entity total is unchanged (no regression to the
 // existing per-entity dashboards).
 func TestAssembleIntervalCost_Conservation(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC)
 
@@ -321,7 +282,7 @@ func TestAssembleIntervalCost_Conservation(t *testing.T) {
 // the source, a re-assemble clears the now-orphaned interval's stale cost back to
 // NULL (true idempotency, not a partial UPDATE...JOIN that leaves it stale).
 func TestAssembleIntervalCost_Idempotent(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC)
 
@@ -350,9 +311,7 @@ func TestAssembleIntervalCost_Idempotent(t *testing.T) {
 	// SB-3 source-changed case: remove m1/m2's attribution from the source so the
 	// interval no longer matches, then re-assemble — its stale cost must clear to
 	// NULL (a plain UPDATE...JOIN would leave the old 30.0 behind).
-	if _, err := db.ExecContext(ctx, `DELETE FROM usage_attribution WHERE message_id IN ('m1','m2')`); err != nil {
-		t.Fatalf("delete attribution: %v", err)
-	}
+	storetest.Exec(t, ctx, db, `DELETE FROM usage_attribution WHERE message_id IN ('m1','m2')`)
 	if _, err := r.AssembleIntervalCost(ctx); err != nil {
 		t.Fatalf("reassemble: %v", err)
 	}
@@ -366,7 +325,7 @@ func TestAssembleIntervalCost_Idempotent(t *testing.T) {
 // messages' cost, and SUM(cost_usd) GROUP BY phase equals the partition, never
 // the doubled total. This is the structural anti-fan-out guarantee.
 func TestAssembleIntervalCost_NoDoubleCountAcrossPhases(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC)
 
@@ -379,14 +338,8 @@ func TestAssembleIntervalCost_NoDoubleCountAcrossPhases(t *testing.T) {
 	ivlReview := seedEventRecord(t, db, ctx, "workunit", "w1", "active", "@spine", base.Add(10*time.Minute), nil)
 
 	// Stamp the phase column (B1) directly so cost-by-phase can group on it.
-	if _, err := db.ExecContext(ctx,
-		`UPDATE wms_intervals SET phase='build',  phase_source='declared' WHERE id=?`, ivlBuild); err != nil {
-		t.Fatalf("set build phase: %v", err)
-	}
-	if _, err := db.ExecContext(ctx,
-		`UPDATE wms_intervals SET phase='review', phase_source='declared' WHERE id=?`, ivlReview); err != nil {
-		t.Fatalf("set review phase: %v", err)
-	}
+	storetest.Exec(t, ctx, db, `UPDATE wms_intervals SET phase='build',  phase_source='declared' WHERE id=?`, ivlBuild)
+	storetest.Exec(t, ctx, db, `UPDATE wms_intervals SET phase='review', phase_source='declared' WHERE id=?`, ivlReview)
 
 	// mb1/mb2 fall in the build window; mr1 falls in the review window.
 	seedLedger(t, db, ctx, "mb1", "s1", "spine", base.Add(2*time.Minute), 10.0, 1000)
@@ -420,21 +373,16 @@ func TestAssembleIntervalCost_NoDoubleCountAcrossPhases(t *testing.T) {
 	// cost-by-phase GROUP BY equals the disjoint partition (25 / 40), total 65 —
 	// never the doubled 130 a fan-out join would produce.
 	phaseCost := map[string]float64{}
-	rows, err := db.QueryContext(ctx,
-		`SELECT phase, SUM(cost_usd) FROM wms_intervals WHERE kind='state' AND cost_usd IS NOT NULL GROUP BY phase`)
-	if err != nil {
-		t.Fatalf("cost-by-phase query: %v", err)
-	}
-	for rows.Next() {
-		var phase string
-		var c float64
-		if err := rows.Scan(&phase, &c); err != nil {
-			rows.Close() //nolint:errcheck
-			t.Fatalf("scan phase row: %v", err)
-		}
-		phaseCost[phase] = c
-	}
-	rows.Close() //nolint:errcheck
+	storetest.Query(t, ctx, db,
+		`SELECT phase, SUM(cost_usd) FROM wms_intervals WHERE kind='state' AND cost_usd IS NOT NULL GROUP BY phase`, nil,
+		func(scan func(dest ...any) error) {
+			var phase string
+			var c float64
+			if err := scan(&phase, &c); err != nil {
+				t.Fatalf("scan phase row: %v", err)
+			}
+			phaseCost[phase] = c
+		})
 	if math.Abs(phaseCost["build"]-25.0) > eps {
 		t.Fatalf("phase=build cost=%.6f, want 25.0", phaseCost["build"])
 	}
@@ -453,7 +401,7 @@ func TestAssembleIntervalCost_NoDoubleCountAcrossPhases(t *testing.T) {
 // and populates historical cost-by-phase. The default Run must NOT do this (it is
 // forward-only by design).
 func TestReassembleIntervals_Backfill(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC)
 
@@ -519,7 +467,7 @@ func TestReassembleIntervals_Backfill(t *testing.T) {
 // vacuously green. Run against the pre-P1 source (restore the `!= ""` clause)
 // and this fails — m1 lands unallocated; with P1 it attributes to w1.
 func TestAllocate_LeadEmptyAgent(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC)
 
@@ -553,7 +501,7 @@ func TestAllocate_LeadEmptyAgent(t *testing.T) {
 // lead's focused entity via the fallback (method temporal_join_lead_fallback)
 // rather than dropping to unallocated.
 func TestAllocate_SubagentLeadFallback(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC)
 
@@ -586,7 +534,7 @@ func TestAllocate_SubagentLeadFallback(t *testing.T) {
 // lead's. It has a covering interval, so it takes the direct temporal_join branch
 // and never reaches the fallback — even though a lead focus also covers ts.
 func TestAllocate_TeammateOwnFocusNoFallback(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC)
 
@@ -619,23 +567,17 @@ func TestAllocate_TeammateOwnFocusNoFallback(t *testing.T) {
 // SUM(token_ledger.cost_usd) == SUM(cost_facts.cost_usd). Recovery and the
 // lead-session fallback only move a dollar from the unallocated entity to a real
 // one, so this delta must stay $0.00 across any allocation change.
-func sumLedger(t *testing.T, db *sql.DB, ctx context.Context) float64 {
+func sumLedger(t *testing.T, db store.Store, ctx context.Context) float64 {
 	t.Helper()
 	var s float64
-	if err := db.QueryRowContext(ctx,
-		`SELECT COALESCE(SUM(cost_usd),0) FROM token_ledger`).Scan(&s); err != nil {
-		t.Fatalf("sum token_ledger: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT COALESCE(SUM(cost_usd),0) FROM token_ledger`, nil, &s)
 	return s
 }
 
-func sumCostFacts(t *testing.T, db *sql.DB, ctx context.Context) float64 {
+func sumCostFacts(t *testing.T, db store.Store, ctx context.Context) float64 {
 	t.Helper()
 	var s float64
-	if err := db.QueryRowContext(ctx,
-		`SELECT COALESCE(SUM(cost_usd),0) FROM cost_facts`).Scan(&s); err != nil {
-		t.Fatalf("sum cost_facts: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT COALESCE(SUM(cost_usd),0) FROM cost_facts`, nil, &s)
 	return s
 }
 
@@ -647,7 +589,7 @@ func sumCostFacts(t *testing.T, db *sql.DB, ctx context.Context) float64 {
 // temporal_join_lead_session_fallback — NOT to the teammate's WorkUnit, and NOT
 // to the unallocated bucket. Conservation (ledger == cost_facts) must hold.
 func TestAllocate_LeadSessionFallback_PrefersOutcome(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC)
 
@@ -693,7 +635,7 @@ func TestAllocate_LeadSessionFallback_PrefersOutcome(t *testing.T) {
 // type — here a teammate's WorkUnit — rather than leaving the lead message
 // unallocated. Still better than the unallocated bucket; conservation holds.
 func TestAllocate_LeadSessionFallback_NoOutcomeFallsToWorkUnit(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC)
 
@@ -724,7 +666,7 @@ func TestAllocate_LeadSessionFallback_NoOutcomeFallsToWorkUnit(t *testing.T) {
 // agents' intervals also cover ts. (The session fallback would prefer a
 // different entity; the lead's own declared focus must win.)
 func TestAllocate_LeadOwnFocusNoSessionFallback(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC)
 
@@ -753,7 +695,7 @@ func TestAllocate_LeadOwnFocusNoSessionFallback(t *testing.T) {
 // session has NO focus interval at all (no agent ever set focus), the lead's
 // message has nothing to attribute to and correctly stays unallocated.
 func TestAllocate_LeadNoSessionFocusStaysUnallocated(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC)
 
@@ -777,8 +719,8 @@ func TestAllocate_LeadNoSessionFocusStaysUnallocated(t *testing.T) {
 // TestStrategicCandidates is a pure-function unit test (no DB) for the
 // prefer-strategic-tier filter used by the lead-session fallback.
 func TestStrategicCandidates(t *testing.T) {
-	in := []focusCandidate{
-		{"workunit", "w1"}, {"outcome", "o1"}, {"task", "t1"}, {"goal", "g1"}, {"project", "p1"},
+	in := []store.EntityRef{
+		ref("workunit", "w1"), ref("outcome", "o1"), ref("task", "t1"), ref("goal", "g1"), ref("project", "p1"),
 	}
 	out := strategicCandidates(in)
 	// Only outcome/goal/project survive.
@@ -786,18 +728,18 @@ func TestStrategicCandidates(t *testing.T) {
 		t.Fatalf("strategicCandidates kept %d, want 3 (outcome/goal/project)", len(out))
 	}
 	for _, c := range out {
-		switch c.entityType {
+		switch c.EntityType {
 		case "outcome", "goal", "project":
 		default:
-			t.Fatalf("strategicCandidates kept non-strategic %q", c.entityType)
+			t.Fatalf("strategicCandidates kept non-strategic %q", c.EntityType)
 		}
 	}
 	// mostSpecific over the strategic set prefers outcome (rank 2) over project (1).
-	if et, _, ok := mostSpecific(out); !ok || et != "outcome" {
-		t.Fatalf("mostSpecific(strategic) = (%q, ok=%v), want outcome", et, ok)
+	if ref, ok := mostSpecific(out); !ok || ref.EntityType != "outcome" {
+		t.Fatalf("mostSpecific(strategic) = (%q, ok=%v), want outcome", ref.EntityType, ok)
 	}
 	// Empty when no strategic entity is present.
-	if got := strategicCandidates([]focusCandidate{{"workunit", "w1"}, {"task", "t1"}}); got != nil {
+	if got := strategicCandidates([]store.EntityRef{ref("workunit", "w1"), ref("task", "t1")}); got != nil {
 		t.Fatalf("strategicCandidates over leaves = %v, want nil", got)
 	}
 }
@@ -807,7 +749,7 @@ func TestStrategicCandidates(t *testing.T) {
 // so it stays unallocated even when a lead focus covers ts — isAttributable still
 // short-circuits it, preserving the ~13K-query elision.
 func TestAllocate_UnknownAgentUnallocated(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC)
 
@@ -888,7 +830,7 @@ func TestSessionCosts_QueryUsesMaxOverTime(t *testing.T) {
 // Prometheus result (series aged out of retention). The GREATEST guard in the
 // upsert must keep the last good reading.
 func TestReconcile_NoOverwriteWithZero(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC)
 
@@ -896,32 +838,26 @@ func TestReconcile_NoOverwriteWithZero(t *testing.T) {
 	seedLedger(t, db, ctx, "m1", "s1", "spine", base.Add(time.Minute), 5.0, 500)
 
 	// First reconcile: Prometheus reports otel_cost_usd=10 for s1.
-	r1 := New(db, &mockOTel{costs: map[string]float64{"s1": 10.0}},
+	r1 := NewRunner(db, db, db, db, db, db, &mockOTel{costs: map[string]float64{"s1": 10.0}},
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if _, err := r1.Reconcile(ctx); err != nil {
 		t.Fatalf("reconcile1: %v", err)
 	}
 	var otel1 float64
-	if err := db.QueryRowContext(ctx,
-		`SELECT otel_cost_usd FROM session_reconciliation WHERE session_id='s1'`).Scan(&otel1); err != nil {
-		t.Fatalf("read otel1: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT otel_cost_usd FROM session_reconciliation WHERE session_id='s1'`, nil, &otel1)
 	if math.Abs(otel1-10.0) > eps {
 		t.Fatalf("after reconcile1 otel_cost_usd=%.4f, want 10.0", otel1)
 	}
 
 	// Second reconcile: Prometheus returns nothing for s1 (series aged out).
 	// The previously recorded 10.0 must be preserved — not overwritten with 0.
-	r2 := New(db, &mockOTel{costs: map[string]float64{}},
+	r2 := NewRunner(db, db, db, db, db, db, &mockOTel{costs: map[string]float64{}},
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if _, err := r2.Reconcile(ctx); err != nil {
 		t.Fatalf("reconcile2: %v", err)
 	}
 	var otel2 float64
-	if err := db.QueryRowContext(ctx,
-		`SELECT otel_cost_usd FROM session_reconciliation WHERE session_id='s1'`).Scan(&otel2); err != nil {
-		t.Fatalf("read otel2: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT otel_cost_usd FROM session_reconciliation WHERE session_id='s1'`, nil, &otel2)
 	if math.Abs(otel2-10.0) > eps {
 		t.Fatalf("after reconcile2 (absent from Prometheus) otel_cost_usd=%.4f, want 10.0 (must not overwrite with 0)", otel2)
 	}
@@ -932,146 +868,28 @@ func TestReconcile_NoOverwriteWithZero(t *testing.T) {
 // previously recorded value — the GREATEST guard only protects against going
 // from non-zero to zero, not from lower to higher.
 func TestReconcile_LiveValueBeatsStale(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC)
 
 	seedLedger(t, db, ctx, "m1", "s1", "spine", base.Add(time.Minute), 5.0, 500)
 
 	// First reconcile with 10.0.
-	r1 := New(db, &mockOTel{costs: map[string]float64{"s1": 10.0}},
+	r1 := NewRunner(db, db, db, db, db, db, &mockOTel{costs: map[string]float64{"s1": 10.0}},
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if _, err := r1.Reconcile(ctx); err != nil {
 		t.Fatalf("reconcile1: %v", err)
 	}
 
 	// Second reconcile with 15.0 (higher live reading).
-	r2 := New(db, &mockOTel{costs: map[string]float64{"s1": 15.0}},
+	r2 := NewRunner(db, db, db, db, db, db, &mockOTel{costs: map[string]float64{"s1": 15.0}},
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if _, err := r2.Reconcile(ctx); err != nil {
 		t.Fatalf("reconcile2: %v", err)
 	}
 	var otel2 float64
-	if err := db.QueryRowContext(ctx,
-		`SELECT otel_cost_usd FROM session_reconciliation WHERE session_id='s1'`).Scan(&otel2); err != nil {
-		t.Fatalf("read otel2: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT otel_cost_usd FROM session_reconciliation WHERE session_id='s1'`, nil, &otel2)
 	if math.Abs(otel2-15.0) > eps {
 		t.Fatalf("live value 15.0 did not update stored 10.0: otel_cost_usd=%.4f", otel2)
 	}
-}
-
-// --- minimal mysql:// test harness (duplicated from store_test, not importable) ---
-
-func mysqlReachable(dsn string) bool {
-	rest := strings.TrimPrefix(dsn, "mysql://")
-	if i := strings.Index(rest, "@"); i >= 0 {
-		rest = rest[i+1:]
-	}
-	if i := strings.Index(rest, "/"); i >= 0 {
-		rest = rest[:i]
-	}
-	conn, err := net.DialTimeout("tcp", rest, 200*time.Millisecond)
-	if err != nil {
-		return false
-	}
-	_ = conn.Close()
-	return true
-}
-
-func mysqlEnsureSchema(dsn, schema string) error {
-	db, err := mysqlConnect(dsn, "")
-	if err != nil {
-		return err
-	}
-	defer db.Close() //nolint:errcheck
-	_, err = db.Exec("CREATE DATABASE IF NOT EXISTS `" + schema + "` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci")
-	return err
-}
-
-func mysqlDropSchema(dsn, schema string) error {
-	db, err := mysqlConnect(dsn, "")
-	if err != nil {
-		return err
-	}
-	defer db.Close() //nolint:errcheck
-	_, err = db.Exec("DROP DATABASE IF EXISTS `" + schema + "`")
-	return err
-}
-
-// mysqlRebindSchema rewrites a mysql://...host[:port]/db?params URL to point at
-// the supplied schema (or no database when schema is "").
-func mysqlRebindSchema(dsn, schema string) (string, error) {
-	rest := strings.TrimPrefix(dsn, "mysql://")
-	creds, hostpath, ok := splitOn(rest, "@")
-	if !ok {
-		return "", fmt.Errorf("mysql DSN missing '@': %q", dsn)
-	}
-	hostport, pathAndQuery, _ := splitOn(hostpath, "/")
-	_, query, _ := splitOn(pathAndQuery, "?")
-	out := "mysql://" + creds + "@" + hostport + "/"
-	if schema != "" {
-		out += schema
-	}
-	if query != "" {
-		out += "?" + query
-	}
-	return out, nil
-}
-
-func splitOn(s, sep string) (head, tail string, ok bool) {
-	i := strings.Index(s, sep)
-	if i < 0 {
-		return s, "", false
-	}
-	return s[:i], s[i+len(sep):], true
-}
-
-// mysqlConnect opens a raw management *sql.DB at the given schema (or server level
-// when schema is ""), bypassing the migration path in mysql.New.
-func mysqlConnect(dsn, schema string) (*sql.DB, error) {
-	drvDSN, err := mysqlDriverDSN(dsn, schema)
-	if err != nil {
-		return nil, err
-	}
-	db, err := sql.Open("mysql", drvDSN)
-	if err != nil {
-		return nil, err
-	}
-	if err := db.Ping(); err != nil {
-		db.Close() //nolint:errcheck
-		return nil, err
-	}
-	return db, nil
-}
-
-// mysqlDriverDSN converts a mysql://user:pass@host:port/db?params URL into the
-// go-sql-driver form, overriding the database with schema (empty = server level).
-func mysqlDriverDSN(raw, schema string) (string, error) {
-	if !strings.HasPrefix(raw, "mysql://") {
-		return "", fmt.Errorf("expected mysql:// DSN, got %q", raw)
-	}
-	rest := strings.TrimPrefix(raw, "mysql://")
-	creds, hostpath, ok := splitOn(rest, "@")
-	if !ok {
-		return "", fmt.Errorf("mysql DSN missing '@': %q", raw)
-	}
-	user, pass, _ := splitOn(creds, ":")
-	hostport, dbAndQuery, _ := splitOn(hostpath, "/")
-	_, query, _ := splitOn(dbAndQuery, "?")
-	// Override unconditionally: an empty schema means a server-level connection
-	// (no database selected) so CREATE/DROP DATABASE can run before the per-test
-	// schema exists. Keeping the original DSN's db name here targets a database
-	// that doesn't exist yet → Error 1049. (Matches the store/mysql harness.)
-	dbname := schema
-	params := "parseTime=true&loc=UTC&time_zone=%27%2B00%3A00%27"
-	if query != "" {
-		params = query + "&" + params
-	}
-	drv := user
-	if pass != "" {
-		drv += ":" + pass
-	}
-	drv += "@tcp(" + hostport + ")/" + dbname + "?" + params
-	return drv, nil
 }

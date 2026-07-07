@@ -87,9 +87,20 @@ src/                          Go source (go.mod: github.com/bmjdotnet/teamster)
     render/                   Display-string rendering helpers
     rollup/                   Cost allocation + recovery passes (gap, synthesize, sweep-llm)
     server/                   HTTP receiver + JSONL writer + focus nudge
-    store/                    Store interface + integration tests
-      mysql/                  MySQL/MariaDB store + migrations (v1–v43); search.go: SQL
-                              behind wms.Search/SearchSessions
+    store/                    Backend-neutral Store interface (store.go: role-based
+                              sub-interfaces — SessionStore, IntervalStore,
+                              MaintenanceStore, AllocationStore, RecoveryStore, etc.),
+                              typed errors (errors.go: ErrNotFound/ErrConflict/
+                              ErrPrecondition), backend registry + store.Open
+                              (factory.go), portable migration framework (migrate.go),
+                              conformance suite (conformance_dim1-4_test.go, dim6_test.go)
+      mysql/                  MySQL/MariaDB backend + migrations (v1–v50); search.go:
+                              SQL behind wms.Search/SearchSessions
+      sqlite/                 SQLite backend (modernc.org/sqlite) — conformance
+                              validation only, not an install-time option
+      storetest/              Shared MySQL test harness (per-test schema isolation,
+                              RawExecutor fixture helpers) for packages needing a
+                              real store.Store
     transcript/               Session transcript reader (focus timeline, window)
     tui/                      Bubbletea TUI (tag setup wizard + editor)
     backup/                   Backup engine (config, drivers, manifest, retention, flock)
@@ -195,10 +206,21 @@ skel/lib/scripts/selftest.sh   # 7 automated checks via claude --print
 skel/lib/scripts/wms-smoketest.sh
 ```
 
-Store and migration tests SKIP (vacuous green) unless `TEAMSTER_TEST_MYSQL_DSN`
-is set. Dedicated test MySQL at `127.0.0.1:13306` (root/test). The DSN must
-point at a server-level connection (no database name) for the per-test-schema
-harness to work.
+In a worktree, `go build`/`go vet`/`go test` need `GOFLAGS=-buildvcs=false` —
+the worktree's `.git` is a pointer file, not a real repo, so Go's VCS stamping
+fails. `lib/installrunner.sh` sets this already; set it yourself for ad-hoc
+`go` invocations in a worktree.
+
+`internal/store`'s conformance suite (`conformance_dim1-4_test.go`,
+`dim6_test.go`) runs the same behavioral tests against every registered
+backend via the `backends()` table in `store_test.go`: CRUD round-trip
+(dim1), transactions/atomicity (dim2), concurrency/locking (dim3), typed
+error sentinels (dim4), migration lifecycle, and cross-backend attribution
+equivalence (dim6). The `sqlite` entry always runs (in-memory, pure Go, no
+external server); only the `mysql` entry SKIPs (vacuous green) unless
+`TEAMSTER_TEST_MYSQL_DSN` is set. Dedicated test MySQL at `127.0.0.1:13306`
+(root/test). The DSN must point at a server-level connection (no database
+name) for the per-test-schema harness to work.
 
 Never present a change as done without running `go build ./...`,
 `go test ./...`, and (for anything touching the installer, hook client, or
@@ -287,6 +309,24 @@ Agent-Teams teammates run as separate top-level sessions (see Pitfalls).
 - **Focus nudge**: hookd checks for any focus interval (open or closed) on
   PreToolUse and injects `additionalContext` if missing. Max 1 nudge per
   (session, agent) per turn. Cache-backed (`src/internal/server/nudge.go`).
+- **Store construction**: every composition root builds its `store.Store` via
+  `store.Open(ctx, dsn)` (`internal/store/factory.go`), never by naming a
+  backend package directly. Backends self-register under a DSN scheme
+  (`mysql`/`mariadb`, `sqlite`) from a blank import's `init()` — a composition
+  root pulls in only the backend(s) it needs (e.g.
+  `_ "github.com/bmjdotnet/teamster/internal/store/mysql"`). There is no
+  `.DB()` escape hatch; callers consume `store.Store`'s role-based
+  sub-interfaces (`SessionStore`, `IntervalStore`, `AllocationStore`, ...)
+  rather than a concrete backend type.
+- **Store error handling**: backends map driver errors onto three sentinels —
+  `store.ErrNotFound`, `store.ErrConflict`, `store.ErrPrecondition`
+  (`internal/store/errors.go`). Check with `errors.Is`, never a driver-specific
+  error string or code.
+- **Admin-plane store capabilities** (`RawExecutor`, `BackupEngine`,
+  `DemoSeeder`, `CredentialProber`) are optional and reached by type-asserting
+  a `store.Store` — they are not part of the core `Store` interface, since a
+  backend may legitimately lack them (e.g. `teamster sql` fails cleanly on a
+  backend with no `RawExecutor`, rather than a compile break).
 - **The protocol lives in the plugin**, not in code. The Eight Rules and
   Field Guide at `skel/lib/plugin/skills/bootstrap/references/` are the canonical
   source. `/teamster:start` is the front door; `/teamster:bootstrap` boots
@@ -332,10 +372,18 @@ Agent-Teams teammates run as separate top-level sessions (see Pitfalls).
 - After changing `feed`, the user must restart it — it's a long-running
   process. Hook client changes take effect on next tool call (forked).
   `hookd` changes need a systemd restart.
-- Store/migration tests SKIP (vacuous green) unless `TEAMSTER_TEST_MYSQL_DSN`
-  is set. The dedicated test MySQL instance is at `127.0.0.1:13306` (root/test).
-  The DSN must point at a server-level connection (no database name) for the
-  per-test-schema harness to work — a pre-existing base database hides bugs.
+- **`TEAMSTER_TEST_MYSQL_DSN` unset means the mysql conformance/migration
+  tests silently SKIP, not fail.** `go test ./...` reports green with the
+  mysql half of the suite never having run — the `sqlite` backend entry still
+  runs and can mask a mysql-only regression. Always export
+  `TEAMSTER_TEST_MYSQL_DSN` (server-level connection, no database name — a
+  pre-existing base database hides bugs) before trusting a "tests pass"
+  result that touches `internal/store`. Dedicated test MySQL instance:
+  `127.0.0.1:13306` (root/test).
+- **Worktrees need `GOFLAGS=-buildvcs=false`.** A `tm wt` worktree's `.git` is
+  a pointer file, not a real repository, so Go's default `-buildvcs=true`
+  fails trying to stamp VCS info. Required for any ad-hoc `go build`/`go
+  vet`/`go test` run outside `lib/installrunner.sh` (which already sets it).
 - `ts` in JSONL is an RFC3339 string, not an epoch float. Float64 mis-decode
   silently zeroes all classifier signals.
 - Migration races: 5 callers can race `migrate()` on a fresh DB. The fix uses

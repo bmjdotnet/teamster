@@ -5,7 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"time"
+
+	"github.com/bmjdotnet/teamster/internal/store"
 )
 
 const (
@@ -26,7 +27,7 @@ type OrphanSession struct {
 
 // OrphanSessions returns sessions that have method='unallocated' rows AND no
 // setFocus in any thread's transcript — the no-focus bucket that only LLM
-// synthesis can attribute. It is host-scoped: only sessions local to opts are
+// synthesis can attribute. Host-scoped: only sessions local to opts are
 // returned, so the caller only sees sessions whose transcripts it can read.
 func (r *Runner) OrphanSessions(ctx context.Context, opts RecoverOptions) ([]OrphanSession, error) {
 	src := opts.Source
@@ -34,21 +35,21 @@ func (r *Runner) OrphanSessions(ctx context.Context, opts RecoverOptions) ([]Orp
 		src = defaultTranscriptSource
 	}
 
-	sessions, err := r.unallocatedSessions(ctx)
+	sessions, err := r.rec.UnallocatedSessions(ctx, store.UnallocatedFilter{})
 	if err != nil {
 		return nil, fmt.Errorf("list unallocated sessions: %w", err)
 	}
 
 	var orphans []OrphanSession
 	for _, s := range sessions {
-		if opts.scoped() && (s.host != opts.Host || !localToUser(s.username, opts.User)) {
+		if opts.scoped() && (s.Host != opts.Host || !localToUser(s.Username, opts.User)) {
 			continue
 		}
 
-		tl, err := src(s.sessionID, opts.ProjectsDir)
+		tl, err := src(s.SessionID, opts.ProjectsDir)
 		if err != nil {
 			r.log.Warn("orphan-check: timeline build failed; skipping",
-				"session_id", s.sessionID, "error", err)
+				"session_id", s.SessionID, "error", err)
 			continue
 		}
 
@@ -57,25 +58,9 @@ func (r *Runner) OrphanSessions(ctx context.Context, opts RecoverOptions) ([]Orp
 			continue
 		}
 
-		// Compute cost for this session's unallocated messages.
-		var costUSD float64
-		err = r.db.QueryRowContext(ctx, `
-			SELECT COALESCE(SUM(t.cost_usd), 0)
-			FROM usage_attribution ua
-			JOIN token_ledger t ON t.message_id = ua.message_id
-			WHERE ua.method = 'unallocated'
-			  AND t.session_id = ? AND t.host = ? AND t.username = ?`,
-			s.sessionID, s.host, s.username).Scan(&costUSD)
-		if err != nil {
-			return nil, fmt.Errorf("session %s: sum cost: %w", s.sessionID, err)
-		}
-
 		orphans = append(orphans, OrphanSession{
-			SessionID: s.sessionID,
-			Host:      s.host,
-			Username:  s.username,
-			MsgCount:  s.msgCount,
-			CostUSD:   costUSD,
+			SessionID: s.SessionID, Host: s.Host, Username: s.Username,
+			MsgCount: int(s.MessageCount), CostUSD: s.CostUSD,
 		})
 	}
 	return orphans, nil
@@ -86,10 +71,10 @@ func (r *Runner) OrphanSessions(ctx context.Context, opts RecoverOptions) ([]Orp
 // creates the Outcome in WMS, tags it, and writes this mapping to a JSON file;
 // the Go mode mechanically applies it to usage_attribution.
 type SynthesisMapping struct {
-	SessionID      string `json:"session_id"`
-	EntityType     string `json:"entity_type"`
-	EntityID       string `json:"entity_id"`
-	Confidence     string `json:"confidence"`
+	SessionID       string `json:"session_id"`
+	EntityType      string `json:"entity_type"`
+	EntityID        string `json:"entity_id"`
+	Confidence      string `json:"confidence"`
 	EvidenceExcerpt string `json:"evidence_excerpt"`
 }
 
@@ -128,17 +113,12 @@ func LoadMappings(path string) ([]SynthesisMapping, error) {
 
 // SynthesizeFocus consumes a session→outcome mapping file (produced by the LLM
 // orchestrator) and re-attributes each mapped session's method='unallocated'
-// messages to the synthesized outcome with method='synthesized_outcome'.
+// messages to the synthesized outcome with method='synthesized_outcome'. This
+// is the deterministic write path — the LLM judgment lives entirely in the
+// orchestrator that produced the mapping file; this mode is mechanical.
 //
-// This is the deterministic write path — the LLM judgment lives entirely in the
-// orchestrator that produced the mapping file; this mode is mechanical. It honors
-// the same contracts as RecoverFocus:
-//
-// CONSERVATION: in-place UPDATE scoped to method='unallocated'; one row/message,
-// weight 1.0; SUM(cost_facts) unchanged.
-//
-// REVERSIBLE: Unsynthesize deletes by method + removes evidence.
-//
+// CONSERVATION: ApplyRecovery's in-place UPDATE is scoped to
+// method='unallocated'; one row/message, weight 1.0.
 // AUDITABLE: synthesis_evidence records the mapping source, confidence, and
 // evidence excerpt per recovered message.
 func (r *Runner) SynthesizeFocus(ctx context.Context, opts SynthesizeOptions) (SynthesizeStats, error) {
@@ -154,7 +134,6 @@ func (r *Runner) SynthesizeFocus(ctx context.Context, opts SynthesizeOptions) (S
 
 	var stats SynthesizeStats
 	stats.MappingsLoaded = len(mappings)
-	now := time.Now().UTC()
 
 	bySession := map[string]*SynthesisMapping{}
 	for i := range mappings {
@@ -172,96 +151,120 @@ func (r *Runner) SynthesizeFocus(ctx context.Context, opts SynthesizeOptions) (S
 		bySession[m.SessionID] = m
 	}
 
-	sessions, err := r.unallocatedSessions(ctx)
+	sessions, err := r.rec.UnallocatedSessions(ctx, store.UnallocatedFilter{})
 	if err != nil {
 		return stats, fmt.Errorf("list unallocated sessions: %w", err)
 	}
 
 	for _, s := range sessions {
-		mapping, ok := bySession[s.sessionID]
+		mapping, ok := bySession[s.SessionID]
 		if !ok {
 			continue
 		}
 
-		// Handle skip entries: entity_type=="skip" means the LLM examined
-		// this session and determined it can't be attributed. Mark it so
-		// future sweeps don't re-examine it.
+		// Handle skip entries: entity_type=="skip" means the LLM examined this
+		// session and determined it can't be attributed. Mark it so future
+		// sweeps don't re-examine it.
 		if mapping.EntityType == "skip" {
 			stats.Sessions++
-			msgs, skipErr := r.unallocatedMessages(ctx, s)
+			msgs, skipErr := r.rec.ReclaimableMessages(ctx, s.SessionID, "", false, []string{"unallocated"})
 			if skipErr != nil {
-				return stats, fmt.Errorf("session %s: list unallocated messages: %w", s.sessionID, skipErr)
+				return stats, fmt.Errorf("session %s: list unallocated messages: %w", s.SessionID, skipErr)
 			}
-			for _, m := range msgs {
-				stats.Examined++
-				if opts.DryRun {
-					stats.Skipped++
-					r.log.Info("synthesize (dry-run): would mark as skipped",
-						"message_id", m.messageID, "session_id", s.sessionID,
-						"reason", mapping.EvidenceExcerpt)
-					continue
-				}
-				if err := r.applySkip(ctx, m, s.sessionID, mapping, opts.MappingFile, now); err != nil {
-					return stats, fmt.Errorf("session %s message %s: apply skip: %w", s.sessionID, m.messageID, err)
-				}
-				stats.Skipped++
+			stats.Examined += len(msgs)
+			if opts.DryRun {
+				stats.Skipped += len(msgs)
+				r.log.Info("synthesize (dry-run): would mark as skipped",
+					"session_id", s.SessionID, "count", len(msgs), "reason", mapping.EvidenceExcerpt)
+				continue
 			}
+			if len(msgs) > 0 {
+				msgIDs := make([]string, len(msgs))
+				for i, m := range msgs {
+					msgIDs[i] = m.MessageID
+				}
+				if err := r.rec.ApplyRecovery(ctx, store.RecoveryBatch{
+					Strategy:   "skip",
+					Method:     skipMethod,
+					MessageIDs: msgIDs,
+					Evidence: map[string]any{
+						"session_id":       s.SessionID,
+						"confidence":       "skip",
+						"evidence_excerpt": mapping.EvidenceExcerpt,
+						"mapping_source":   opts.MappingFile,
+					},
+				}); err != nil {
+					return stats, fmt.Errorf("session %s: apply skip: %w", s.SessionID, err)
+				}
+			}
+			stats.Skipped += len(msgs)
 			continue
 		}
 
 		// M-1: verify the session actually has NO setFocus events. If the
-		// orchestrator mistakenly mapped a session that DID have focus, skip it —
-		// that session belongs to RecoverFocus/RecoverWarmup, not synthesis.
-		tl, tlErr := src(s.sessionID, opts.ProjectsDir)
+		// orchestrator mistakenly mapped a session that DID have focus, skip it
+		// — that session belongs to RecoverFocus/RecoverWarmup, not synthesis.
+		tl, tlErr := src(s.SessionID, opts.ProjectsDir)
 		if tlErr != nil {
 			r.log.Warn("synthesize: timeline check failed; skipping session",
-				"session_id", s.sessionID, "error", tlErr)
+				"session_id", s.SessionID, "error", tlErr)
 			stats.Skipped++
 			continue
 		}
 		if len(tl.Events) > 0 {
 			r.log.Warn("synthesize: mapped session has setFocus events; skipping (belongs to recover-focus/warmup)",
-				"session_id", s.sessionID, "focus_threads", len(tl.Events))
+				"session_id", s.SessionID, "focus_threads", len(tl.Events))
 			stats.Skipped++
 			continue
 		}
 
 		stats.Sessions++
-
-		msgs, err := r.unallocatedMessages(ctx, s)
+		msgs, err := r.rec.ReclaimableMessages(ctx, s.SessionID, "", false, []string{"unallocated"})
 		if err != nil {
-			return stats, fmt.Errorf("session %s: list unallocated messages: %w", s.sessionID, err)
+			return stats, fmt.Errorf("session %s: list unallocated messages: %w", s.SessionID, err)
+		}
+		stats.Examined += len(msgs)
+
+		if opts.DryRun {
+			stats.Recovered += len(msgs)
+			r.log.Info("synthesize (dry-run): would re-attribute",
+				"session_id", s.SessionID, "count", len(msgs),
+				"to_entity_type", mapping.EntityType, "to_entity_id", mapping.EntityID,
+				"confidence", mapping.Confidence)
+			continue
+		}
+		if len(msgs) == 0 {
+			continue
 		}
 
-		for _, m := range msgs {
-			stats.Examined++
-
-			if opts.DryRun {
-				stats.Recovered++
-				r.log.Info("synthesize (dry-run): would re-attribute",
-					"message_id", m.messageID, "session_id", s.sessionID,
-					"to_entity_type", mapping.EntityType, "to_entity_id", mapping.EntityID,
-					"confidence", mapping.Confidence)
-				continue
-			}
-
-			if err := r.applySynthesis(ctx, m, s.sessionID, mapping, opts.MappingFile, now); err != nil {
-				return stats, fmt.Errorf("session %s message %s: apply synthesis: %w", s.sessionID, m.messageID, err)
-			}
-			stats.Recovered++
+		msgIDs := make([]string, len(msgs))
+		for i, m := range msgs {
+			msgIDs[i] = m.MessageID
 		}
+		if err := r.rec.ApplyRecovery(ctx, store.RecoveryBatch{
+			Strategy:   "synthesis",
+			Method:     synthesisMethod,
+			MessageIDs: msgIDs,
+			Entity:     store.EntityRef{EntityType: mapping.EntityType, EntityID: mapping.EntityID},
+			Evidence: map[string]any{
+				"session_id":       s.SessionID,
+				"confidence":       mapping.Confidence,
+				"evidence_excerpt": mapping.EvidenceExcerpt,
+				"mapping_source":   opts.MappingFile,
+			},
+		}); err != nil {
+			return stats, fmt.Errorf("session %s: apply synthesis: %w", s.SessionID, err)
+		}
+		stats.Recovered += len(msgIDs)
 	}
 
 	if !opts.DryRun && stats.Recovered > 0 {
-		rows, err := r.BuildCostRollup(ctx)
-		if err != nil {
+		if err := r.alloc.BuildCostRollup(ctx); err != nil {
 			return stats, fmt.Errorf("synthesize: rebuild cost_rollup: %w", err)
 		}
-		intervals, err := r.AssembleIntervalCost(ctx)
-		if err != nil {
+		if _, err := r.alloc.AssembleIntervalCost(ctx); err != nil {
 			return stats, fmt.Errorf("synthesize: reassemble interval cost: %w", err)
 		}
-		r.log.Info("synthesize rebuilt aggregates", "rollup_rows", rows, "intervals_costed", intervals)
 	}
 
 	r.log.Info("synthesize-focus pass complete",
@@ -271,117 +274,10 @@ func (r *Runner) SynthesizeFocus(ctx context.Context, opts SynthesizeOptions) (S
 	return stats, nil
 }
 
-// applySynthesis re-attributes one unallocated message and records provenance.
-func (r *Runner) applySynthesis(ctx context.Context, m unallocatedMsg, sessionID string, mapping *SynthesisMapping, mappingFile string, now time.Time) error {
-	var intervalID uint64
-	if id, ok, err := r.intervalAt(ctx, mapping.EntityType, mapping.EntityID, m.ts); err != nil {
-		return fmt.Errorf("intervalAt: %w", err)
-	} else if ok {
-		intervalID = id
-	}
-
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback() //nolint:errcheck
-
-	res, err := tx.ExecContext(ctx, `
-		UPDATE usage_attribution
-		SET entity_type = ?, entity_id = ?, method = ?, interval_id = ?, computed_at = ?
-		WHERE message_id = ? AND method = 'unallocated'`,
-		mapping.EntityType, mapping.EntityID, synthesisMethod, intervalID, now, m.messageID)
-	if err != nil {
-		return fmt.Errorf("update attribution: %w", err)
-	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return tx.Commit()
-	}
-
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO synthesis_evidence
-			(message_id, entity_type, entity_id, session_id, confidence, evidence_excerpt, mapping_source, recovered_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-		ON DUPLICATE KEY UPDATE
-			entity_type      = VALUES(entity_type),
-			entity_id        = VALUES(entity_id),
-			session_id       = VALUES(session_id),
-			confidence       = VALUES(confidence),
-			evidence_excerpt = VALUES(evidence_excerpt),
-			mapping_source   = VALUES(mapping_source),
-			recovered_at     = VALUES(recovered_at)`,
-		m.messageID, mapping.EntityType, mapping.EntityID, sessionID,
-		mapping.Confidence, mapping.EvidenceExcerpt, mappingFile, now); err != nil {
-		return fmt.Errorf("insert synthesis evidence: %w", err)
-	}
-
-	return tx.Commit()
-}
-
-// applySkip marks one unallocated message as permanently skipped and records the reason.
-func (r *Runner) applySkip(ctx context.Context, m unallocatedMsg, sessionID string, mapping *SynthesisMapping, mappingFile string, now time.Time) error {
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback() //nolint:errcheck
-
-	res, err := tx.ExecContext(ctx, `
-		UPDATE usage_attribution
-		SET method = ?, computed_at = ?
-		WHERE message_id = ? AND method = 'unallocated'`,
-		skipMethod, now, m.messageID)
-	if err != nil {
-		return fmt.Errorf("update attribution: %w", err)
-	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return tx.Commit()
-	}
-
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO synthesis_evidence
-			(message_id, entity_type, entity_id, session_id, confidence, evidence_excerpt, mapping_source, recovered_at)
-		VALUES (?, 'skip', 'SKIP', ?, 'skip', ?, ?, ?)
-		ON DUPLICATE KEY UPDATE
-			entity_type      = VALUES(entity_type),
-			entity_id        = VALUES(entity_id),
-			confidence       = VALUES(confidence),
-			evidence_excerpt = VALUES(evidence_excerpt),
-			mapping_source   = VALUES(mapping_source),
-			recovered_at     = VALUES(recovered_at)`,
-		m.messageID, sessionID,
-		mapping.EvidenceExcerpt, mappingFile, now); err != nil {
-		return fmt.Errorf("insert skip evidence: %w", err)
-	}
-
-	return tx.Commit()
-}
-
-// Unsynthesize reverses a synthesis pass: deletes every method='synthesized_outcome'
-// attribution and its evidence, returning those messages to the unallocated bucket.
+// Unsynthesize reverses a synthesis pass: deletes every
+// method='synthesized_outcome' attribution and its evidence, returning those
+// messages to the unallocated bucket.
 func (r *Runner) Unsynthesize(ctx context.Context) (int, error) {
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, err
-	}
-	defer tx.Rollback() //nolint:errcheck
-
-	if _, err := tx.ExecContext(ctx, `
-		DELETE se FROM synthesis_evidence se
-		JOIN usage_attribution ua ON ua.message_id = se.message_id
-		WHERE ua.method = ?`, synthesisMethod); err != nil {
-		return 0, fmt.Errorf("delete synthesis evidence: %w", err)
-	}
-	res, err := tx.ExecContext(ctx,
-		`DELETE FROM usage_attribution WHERE method = ?`, synthesisMethod)
-	if err != nil {
-		return 0, fmt.Errorf("delete synthesized attribution: %w", err)
-	}
-	n, _ := res.RowsAffected()
-	if err := tx.Commit(); err != nil {
-		return 0, err
-	}
-	return int(n), nil
+	n, err := r.rec.UncoverRecovery(ctx, "synthesis")
+	return int(n), err
 }

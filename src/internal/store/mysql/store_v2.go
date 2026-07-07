@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/bmjdotnet/teamster/internal/store"
 	"github.com/bmjdotnet/teamster/internal/wms"
 )
 
@@ -47,7 +48,7 @@ func (s *Store) GetOutcome(ctx context.Context, id string) (*wms.Outcome, error)
 	var o wms.Outcome
 	if err := scanOutcome(row, &o); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, fmt.Errorf("outcome not found")
+			return nil, store.NotFound("GetOutcome", "outcome", id)
 		}
 		return nil, err
 	}
@@ -166,7 +167,7 @@ func (s *Store) GetWorkUnit(ctx context.Context, id string) (*wms.WorkUnit, erro
 	var wu wms.WorkUnit
 	if err := scanWorkUnit(row, &wu); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, fmt.Errorf("workunit not found")
+			return nil, store.NotFound("GetWorkUnit", "workunit", id)
 		}
 		return nil, err
 	}
@@ -320,7 +321,7 @@ func (s *Store) UpdateOutcomeStatus(ctx context.Context, id, status string) erro
 	if err != nil {
 		return err
 	}
-	return requireOneRow(res, "outcome", id)
+	return requireOneRow(res, "UpdateOutcomeStatus", "outcome", id)
 }
 
 func (s *Store) UpdateOutcomeFocus(ctx context.Context, id, focus string) error {
@@ -329,7 +330,7 @@ func (s *Store) UpdateOutcomeFocus(ctx context.Context, id, focus string) error 
 	if err != nil {
 		return err
 	}
-	return requireOneRow(res, "outcome", id)
+	return requireOneRow(res, "UpdateOutcomeFocus", "outcome", id)
 }
 
 // --- WorkUnit Writer ---
@@ -371,7 +372,7 @@ func (s *Store) UpdateWorkUnitStatus(ctx context.Context, id, status string) err
 	if err != nil {
 		return err
 	}
-	return requireOneRow(res, "workunit", id)
+	return requireOneRow(res, "UpdateWorkUnitStatus", "workunit", id)
 }
 
 // missingRequiredTags returns the required tag keys (tags.required=1, not
@@ -410,7 +411,7 @@ func (s *Store) UpdateWorkUnitFocus(ctx context.Context, id, focus string) error
 	if err != nil {
 		return err
 	}
-	return requireOneRow(res, "workunit", id)
+	return requireOneRow(res, "UpdateWorkUnitFocus", "workunit", id)
 }
 
 func (s *Store) AssignWorkUnit(ctx context.Context, id, agentID string) error {
@@ -419,9 +420,12 @@ func (s *Store) AssignWorkUnit(ctx context.Context, id, agentID string) error {
 	if err != nil {
 		return err
 	}
-	return requireOneRow(res, "workunit", id)
+	return requireOneRow(res, "AssignWorkUnit", "workunit", id)
 }
 
+// ClaimWorkUnit is a CAS-style guarded update (WHERE status = 'pending'): a
+// zero-row result means the unit was gone or already claimed by a concurrent
+// writer, not that it never existed — ErrPrecondition, not ErrNotFound.
 func (s *Store) ClaimWorkUnit(ctx context.Context, id, agentID string) error {
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE workunits SET agent_id = ?, status = 'active', updated_at = ?
@@ -434,7 +438,7 @@ func (s *Store) ClaimWorkUnit(ctx context.Context, id, agentID string) error {
 		return err
 	}
 	if n == 0 {
-		return fmt.Errorf("workunit %s not available for claim (not pending or already claimed)", id)
+		return store.Precondition("ClaimWorkUnit", "workunit", id)
 	}
 	return nil
 }

@@ -2,11 +2,11 @@ package observability
 
 import (
 	"context"
-	"database/sql"
 	"log/slog"
 	"sync"
 	"time"
 
+	"github.com/bmjdotnet/teamster/internal/store"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -21,31 +21,24 @@ var intervalPhaseCostDesc = prometheus.NewDesc(
 	nil,
 )
 
-// intervalPhaseCostRow is one grouped per-phase cost from wms_intervals (kind='state').
-type intervalPhaseCostRow struct {
-	entityType string
-	phase      string
-	costUSD    float64
-}
-
 // IntervalPhaseCostCollector is a prometheus.Collector that exposes conserved
 // per-phase cost from wms_intervals (kind='state'), grouped by (entity_type, phase). The
 // SQL does the grouping; Collect emits one const metric per row, so no PromQL
 // aggregate downstream can multiply cost across phases. Results are cached for
 // 30s.
 type IntervalPhaseCostCollector struct {
-	db *sql.DB
+	rep store.ReportingStore
 
 	mu        sync.Mutex
 	lastQuery time.Time
-	cached    []intervalPhaseCostRow
+	cached    []store.PhaseCostRow
 	haveCache bool
 }
 
 // NewIntervalPhaseCostCollector creates an IntervalPhaseCostCollector backed by
-// db with a 30s cache TTL.
-func NewIntervalPhaseCostCollector(db *sql.DB) *IntervalPhaseCostCollector {
-	return &IntervalPhaseCostCollector{db: db}
+// rep with a 30s cache TTL.
+func NewIntervalPhaseCostCollector(rep store.ReportingStore) *IntervalPhaseCostCollector {
+	return &IntervalPhaseCostCollector{rep: rep}
 }
 
 // Describe sends the descriptor to ch.
@@ -60,14 +53,14 @@ func (c *IntervalPhaseCostCollector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(
 			intervalPhaseCostDesc,
 			prometheus.GaugeValue,
-			r.costUSD,
-			r.entityType, r.phase,
+			r.CostUSD,
+			r.EntityType, r.Phase,
 		)
 	}
 }
 
 // snapshot returns the cached rows, refreshing them if older than 30s.
-func (c *IntervalPhaseCostCollector) snapshot() []intervalPhaseCostRow {
+func (c *IntervalPhaseCostCollector) snapshot() []store.PhaseCostRow {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -89,35 +82,16 @@ func (c *IntervalPhaseCostCollector) snapshot() []intervalPhaseCostRow {
 // reports its cost under a stable label. ok is false only on a query/scan error
 // so the caller keeps the last good value; a legitimately empty result returns
 // (nil, true) and is cached like any other.
-func (c *IntervalPhaseCostCollector) query() (rows []intervalPhaseCostRow, ok bool) {
-	if c.db == nil {
+func (c *IntervalPhaseCostCollector) query() (rows []store.PhaseCostRow, ok bool) {
+	if c.rep == nil {
 		return nil, false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	r, err := c.db.QueryContext(ctx, `
-		SELECT entity_type, COALESCE(phase,'unclassified'), SUM(cost_usd)
-		FROM wms_intervals
-		WHERE kind = 'state' AND cost_usd IS NOT NULL
-		GROUP BY entity_type, phase`)
+	out, err := c.rep.IntervalCostByPhase(ctx)
 	if err != nil {
 		slog.Warn("IntervalPhaseCostCollector: query failed", "error", err)
-		return nil, false
-	}
-	defer r.Close() //nolint:errcheck
-
-	var out []intervalPhaseCostRow
-	for r.Next() {
-		var row intervalPhaseCostRow
-		if err := r.Scan(&row.entityType, &row.phase, &row.costUSD); err != nil {
-			slog.Warn("IntervalPhaseCostCollector: scan failed", "error", err)
-			return nil, false
-		}
-		out = append(out, row)
-	}
-	if err := r.Err(); err != nil {
-		slog.Warn("IntervalPhaseCostCollector: rows error", "error", err)
 		return nil, false
 	}
 	return out, true

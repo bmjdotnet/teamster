@@ -3,6 +3,23 @@
 All notable changes to Teamster are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## v0.2.3 (2026-07-07)
+
+### Added
+- Backend-neutral persistence API: role-based sub-interfaces, `store.Open` registry, typed error sentinels, portable migration framework
+- SQLite validation backend (`modernc.org/sqlite`) proving zero-callsite backend swap
+- 6-dimension conformance suite (CRUD, atomicity, concurrency, sentinels, migrations, cross-backend equivalence)
+
+### Removed
+- `DB() *sql.DB` escape hatch — all persistence goes through the store interface
+
+### Fixed
+- `TokenLedgerRows` silent zero-row return (DATETIME scan mismatch)
+- `OpenFocusInterval`/`WriteFocusInterval` concurrency race (advisory lock)
+- `CloseSessionIntervals` raw error leak (now `ErrConflict`)
+- Rollup `TRUNCATE`-in-tx non-atomicity (replaced by `AtomicReplace`)
+- Fixed various code test units
+
 ## v0.2.2 (2026-07-06)
 
 ### Added

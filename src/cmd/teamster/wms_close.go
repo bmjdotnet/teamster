@@ -7,7 +7,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/bmjdotnet/teamster/internal/store/mysql"
+	"github.com/bmjdotnet/teamster/internal/wms"
 )
 
 func runWMSClose(args []string) int {
@@ -74,7 +74,7 @@ func runWMSClose(args []string) int {
 	return 0
 }
 
-func resolveEntityType(ctx context.Context, s *mysql.Store, entityID string) (string, error) {
+func resolveEntityType(ctx context.Context, s wms.Reader, entityID string) (string, error) {
 	if strings.HasPrefix(entityID, "wu-") {
 		return "workunit", nil
 	}

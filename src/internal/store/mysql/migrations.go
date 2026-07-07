@@ -19,6 +19,21 @@ import (
 // VARCHAR(64) and ENUM. Timestamps are DATETIME(6) UTC; the Go code always
 // writes time.Now.UTC values (no DDL DEFAULT clauses on timestamps) so both
 // backends round-trip identically (SPEC §6.3).
+//
+// Portable-SQL vs dialect-Func audit (04-migrations.md "Portable vs dialect
+// steps"): of the 47 steps below, 44 are pure Stmts (portable-ish DDL/DML —
+// not yet run through a DDL-normalization pass, but structurally the kind of
+// CREATE TABLE/ADD COLUMN/CREATE INDEX/UPDATE a second backend's Migrator
+// could re-express) and 3 set Func because they need Go logic a portable SQL
+// statement can't express: v16 (backfillV1ToV3, the v1→v3 entity transform),
+// v23 (backfillWmsIntervals, the event-records/focus-intervals unify with
+// MySQL-specific window functions), and v27 (mergeProjectToProduct, a
+// conditional merge-or-rename requiring row-by-row branching plus one
+// portable Stmts block for its accompanying tag seeds). That is a ~94/6
+// split, higher-portable than 04-migrations.md's ~80/20 estimate — this
+// migration list happens to be DDL-heavy with few dialect-specific backfills.
+// Per that doc, the 3 Func steps are not forced into portable SQL; a future
+// second backend implements them natively.
 var migrations = []migrationStep{
 	{
 		Version: 1,
@@ -2058,19 +2073,12 @@ func execMigrationStmt(ctx context.Context, conn *sql.Conn, stmt string) error {
 	return err
 }
 
-// columnExists reports whether table has column in the current schema. DATABASE()
-// scopes the lookup to the connection's active schema on both MySQL and MariaDB.
+// columnExists reports whether table has column in the current schema.
+// Delegates to mysqlSchemaInspector (schema_inspector.go) — same
+// information_schema query, same error text; this is now just the guard's
+// entry point rather than owning the query.
 func columnExists(ctx context.Context, conn *sql.Conn, table, column string) (bool, error) {
-	var n int
-	err := conn.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM information_schema.COLUMNS
-		 WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
-		table, column,
-	).Scan(&n)
-	if err != nil {
-		return false, fmt.Errorf("column-exists check %s.%s: %w", table, column, err)
-	}
-	return n > 0, nil
+	return mysqlSchemaInspector{q: conn}.ColumnExists(ctx, table, column)
 }
 
 type addColumnClause struct {

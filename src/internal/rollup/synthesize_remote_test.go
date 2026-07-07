@@ -5,13 +5,15 @@ import (
 	"math"
 	"testing"
 	"time"
+
+	"github.com/bmjdotnet/teamster/internal/store/storetest"
 )
 
 // TestSynthesizeRemoteOrphans_AttributesByConcurrentFocus is the primary B2
 // test: a remote orphan session with a concurrent focused session on the same
 // host is attributed to that focused entity via temporal correlation.
 func TestSynthesizeRemoteOrphans_AttributesByConcurrentFocus(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 24, 10, 0, 0, 0, time.UTC)
 
@@ -62,9 +64,7 @@ func TestSynthesizeRemoteOrphans_AttributesByConcurrentFocus(t *testing.T) {
 
 	// Evidence recorded.
 	var evN int
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM synthesis_evidence WHERE session_id = 's-orphan'`).Scan(&evN); err != nil {
-		t.Fatalf("count evidence: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT COUNT(*) FROM synthesis_evidence WHERE session_id = 's-orphan'`, nil, &evN)
 	if evN != 2 {
 		t.Fatalf("synthesis_evidence rows=%d, want 2", evN)
 	}
@@ -79,7 +79,7 @@ func TestSynthesizeRemoteOrphans_AttributesByConcurrentFocus(t *testing.T) {
 // no concurrent focused session on its host is counted as NoConcurrentFocus
 // and left unattributed.
 func TestSynthesizeRemoteOrphans_NoConcurrentFocus(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 24, 10, 0, 0, 0, time.UTC)
 
@@ -115,7 +115,7 @@ func TestSynthesizeRemoteOrphans_NoConcurrentFocus(t *testing.T) {
 // multiple concurrent entities exist, the one with the most temporal overlap
 // wins, and among ties, Outcomes are preferred over WorkUnits.
 func TestSynthesizeRemoteOrphans_PrefersOutcomeOverWorkUnit(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 24, 10, 0, 0, 0, time.UTC)
 
@@ -160,7 +160,7 @@ func TestSynthesizeRemoteOrphans_PrefersOutcomeOverWorkUnit(t *testing.T) {
 // TestSynthesizeRemoteOrphans_ExcludesHubSessions verifies that sessions on
 // the hub host are NOT picked up as remote orphans.
 func TestSynthesizeRemoteOrphans_ExcludesHubSessions(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 24, 10, 0, 0, 0, time.UTC)
 
@@ -185,7 +185,7 @@ func TestSynthesizeRemoteOrphans_ExcludesHubSessions(t *testing.T) {
 // session with an existing focus interval is NOT picked up — even if it has
 // unallocated messages.
 func TestSynthesizeRemoteOrphans_ExcludesSessionsWithFocus(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 24, 10, 0, 0, 0, time.UTC)
 
@@ -213,7 +213,7 @@ func TestSynthesizeRemoteOrphans_ExcludesSessionsWithFocus(t *testing.T) {
 // the same result — the second run finds no orphans because the first
 // attributed them.
 func TestSynthesizeRemoteOrphans_Idempotent(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 24, 10, 0, 0, 0, time.UTC)
 
@@ -252,7 +252,7 @@ func TestSynthesizeRemoteOrphans_Idempotent(t *testing.T) {
 // TestSynthesizeRemoteOrphans_UnsynthesizeReverses verifies that
 // UnsynthesizeRemoteFloor reverses the B2 pass.
 func TestSynthesizeRemoteOrphans_UnsynthesizeReverses(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 24, 10, 0, 0, 0, time.UTC)
 
@@ -299,9 +299,7 @@ func TestSynthesizeRemoteOrphans_UnsynthesizeReverses(t *testing.T) {
 
 	// Evidence cleared.
 	var evN int
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM synthesis_evidence WHERE session_id = 's-orphan'`).Scan(&evN); err != nil {
-		t.Fatalf("count evidence: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT COUNT(*) FROM synthesis_evidence WHERE session_id = 's-orphan'`, nil, &evN)
 	if evN != 0 {
 		t.Fatalf("evidence rows=%d after unsynthesize, want 0", evN)
 	}
@@ -315,7 +313,7 @@ func TestSynthesizeRemoteOrphans_UnsynthesizeReverses(t *testing.T) {
 // TestSynthesizeRemoteOrphans_DryRunWritesNothing verifies that dry-run mode
 // reports the plan but writes nothing.
 func TestSynthesizeRemoteOrphans_DryRunWritesNothing(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 24, 10, 0, 0, 0, time.UTC)
 
@@ -343,9 +341,7 @@ func TestSynthesizeRemoteOrphans_DryRunWritesNothing(t *testing.T) {
 		t.Fatalf("dry-run mutated attribution: method=%q, want unallocated", method)
 	}
 	var evN int
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM synthesis_evidence WHERE session_id = 's-orphan'`).Scan(&evN); err != nil {
-		t.Fatalf("count evidence: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT COUNT(*) FROM synthesis_evidence WHERE session_id = 's-orphan'`, nil, &evN)
 	if evN != 0 {
 		t.Fatalf("dry-run wrote %d evidence rows, want 0", evN)
 	}

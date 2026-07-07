@@ -4,130 +4,42 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"net"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
-	mysqldriver "github.com/go-sql-driver/mysql"
-
-	"github.com/bmjdotnet/teamster/internal/store/mysql"
+	"github.com/bmjdotnet/teamster/internal/store"
+	"github.com/bmjdotnet/teamster/internal/store/storetest"
 	"github.com/bmjdotnet/teamster/internal/wms"
 )
 
 // These integration tests exercise the whole B4 engine against a real MySQL: a
 // fully-migrated fresh schema, real JSONL signals (RFC3339 ts), and a real
-// *mysql.Store. They SKIP when TEAMSTER_TEST_MYSQL_DSN is unset. Use the
-// mysql:// URL DSN form ONLY — the tcp(...) driver form makes them silently skip
-// (vacuous green). Honor the -p 1 gate.
+// store.Store. They SKIP when TEAMSTER_TEST_MYSQL_DSN is unset. Honor the -p 1
+// gate.
 
-var classifySchemaCounter int64
-
-// driverDSNFromURL converts a mysql:// URL to the go-sql-driver DSN, optionally
-// overriding the schema. An empty schema yields a server-level connection (no
-// database selected) — required for CREATE/DROP DATABASE so a nonexistent base
-// db never trips Error 1049.
-func driverDSNFromURL(t *testing.T, raw, schema string) string {
-	t.Helper()
-	u, err := url.Parse(raw)
-	if err != nil {
-		t.Fatalf("parse dsn: %v", err)
-	}
-	cfg := mysqldriver.NewConfig()
-	cfg.Net = "tcp"
-	cfg.Addr = u.Host
-	if u.User != nil {
-		cfg.User = u.User.Username()
-		if pw, ok := u.User.Password(); ok {
-			cfg.Passwd = pw
-		}
-	}
-	cfg.DBName = schema
-	cfg.ParseTime = true
-	cfg.Loc = time.UTC
-	cfg.Params = map[string]string{"time_zone": "'+00:00'"}
-	return cfg.FormatDSN()
-}
-
-func reachable(raw string) bool {
-	rest := strings.TrimPrefix(raw, "mysql://")
-	if i := strings.Index(rest, "@"); i >= 0 {
-		rest = rest[i+1:]
-	}
-	if i := strings.Index(rest, "/"); i >= 0 {
-		rest = rest[:i]
-	}
-	conn, err := net.DialTimeout("tcp", rest, 200*time.Millisecond)
-	if err != nil {
-		return false
-	}
-	_ = conn.Close()
-	return true
-}
-
-// freshStore creates an isolated schema and returns a migrated *mysql.Store.
-func freshStore(t *testing.T) *mysql.Store {
-	t.Helper()
-	raw := os.Getenv("TEAMSTER_TEST_MYSQL_DSN")
-	if raw == "" {
-		t.Skip("TEAMSTER_TEST_MYSQL_DSN not set")
-	}
-	if !reachable(raw) {
-		t.Skip("mysql not reachable")
-	}
-	schema := fmt.Sprintf("teamster_clf_%d_%d", time.Now().UnixNano(),
-		atomic.AddInt64(&classifySchemaCounter, 1))
-
-	// Server-level connection (empty DBName) for CREATE/DROP — the Error 1049 fix.
-	srv, err := sql.Open("mysql", driverDSNFromURL(t, raw, ""))
-	if err != nil {
-		t.Fatalf("open server conn: %v", err)
-	}
-	if _, err := srv.Exec("CREATE DATABASE IF NOT EXISTS `" + schema +
-		"` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci"); err != nil {
-		srv.Close() //nolint:errcheck
-		t.Fatalf("create schema: %v", err)
-	}
-
-	// mysql.New migrates fully on open. Rebind the mysql:// URL to the schema.
-	u, _ := url.Parse(raw)
-	u.Path = "/" + schema
-	st, err := mysql.New(u.String())
-	if err != nil {
-		srv.Close() //nolint:errcheck
-		t.Fatalf("mysql.New: %v", err)
-	}
-
-	t.Cleanup(func() {
-		_ = st.Close()
-		_, _ = srv.Exec("DROP DATABASE IF EXISTS `" + schema + "`")
-		_ = srv.Close()
-	})
-	return st
+// freshStore creates an isolated schema and returns a migrated store.Store.
+func freshStore(t *testing.T) store.Store {
+	return storetest.Open(t, "teamster_clf")
 }
 
 // seedClosedInterval inserts one closed kind='state' wms_intervals row and returns its id.
-func seedClosedInterval(t *testing.T, db *sql.DB, entityType, entityID, state, session, agent string,
+func seedClosedInterval(t *testing.T, db store.Store, entityType, entityID, state, session, agent string,
 	start, end time.Time, phase, phaseSource string) int64 {
 	t.Helper()
 	var phaseArg any
 	if phase != "" {
 		phaseArg = phase
 	}
-	res, err := db.Exec(`
+	res := storetest.Exec(t, context.Background(), db, `
 		INSERT INTO wms_intervals
 			(kind, entity_type, entity_id, state, started_at, ended_at, duration_ms,
 			 session_id, agent_name, host, phase, phase_source)
 		VALUES ('state', ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?)`,
 		entityType, entityID, state, start, end, end.Sub(start).Milliseconds(),
 		session, agent, phaseArg, phaseSource)
-	if err != nil {
-		t.Fatalf("seed interval: %v", err)
-	}
 	id, _ := res.LastInsertId()
 	return id
 }
@@ -158,21 +70,18 @@ func jsonlLine(session, agent, ts, tag, bashCmd, file string) string {
 		session, agent, ts, tag, bashCmd, file)
 }
 
-func phaseOf(t *testing.T, db *sql.DB, id int64) (phase, source string) {
+func phaseOf(t *testing.T, db store.Store, id int64) (phase, source string) {
 	t.Helper()
-	row := db.QueryRow(`SELECT COALESCE(phase,''), phase_source FROM wms_intervals WHERE id = ?`, id)
-	if err := row.Scan(&phase, &source); err != nil {
-		t.Fatalf("read phase %d: %v", id, err)
-	}
+	storetest.QueryRow(t, context.Background(), db,
+		`SELECT COALESCE(phase,''), phase_source FROM wms_intervals WHERE id = ?`, []any{id}, &phase, &source)
 	return phase, source
 }
 
-func assembledAtOf(t *testing.T, db *sql.DB, id int64) time.Time {
+func assembledAtOf(t *testing.T, db store.Store, id int64) time.Time {
 	t.Helper()
 	var at sql.NullTime
-	if err := db.QueryRow(`SELECT phase_assembled_at FROM wms_intervals WHERE id = ?`, id).Scan(&at); err != nil {
-		t.Fatalf("read phase_assembled_at %d: %v", id, err)
-	}
+	storetest.QueryRow(t, context.Background(), db,
+		`SELECT phase_assembled_at FROM wms_intervals WHERE id = ?`, []any{id}, &at)
 	return at.Time.UTC()
 }
 
@@ -181,7 +90,7 @@ func assembledAtOf(t *testing.T, db *sql.DB, id int64) time.Time {
 // respected, idempotent re-run, and --reclassify re-derivation.
 func TestClassify_EndToEnd(t *testing.T) {
 	st := freshStore(t)
-	db := st.DB()
+	db := st
 	ctx := context.Background()
 
 	base := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Second)
@@ -309,7 +218,7 @@ func TestClassify_EndToEnd(t *testing.T) {
 // transition) must still stay NULL. Proven against real MySQL through the store.
 func TestClassify_SessionlessCostedIntervalIsBuild(t *testing.T) {
 	st := freshStore(t)
-	db := st.DB()
+	db := st
 	ctx := context.Background()
 
 	base := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Second)
@@ -366,7 +275,7 @@ func TestClassify_SessionlessCostedIntervalIsBuild(t *testing.T) {
 // permanently frozen. The fix queries the entity's full closure history.
 func TestClassify_CrossBatchRework(t *testing.T) {
 	st := freshStore(t)
-	db := st.DB()
+	db := st
 	ctx := context.Background()
 
 	base := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Second)
@@ -418,20 +327,17 @@ func TestClassify_CrossBatchRework(t *testing.T) {
 // seedAssembledInterval inserts a closed interval that is ALREADY phased and
 // assembled (phase_assembled_at fresh, > ended_at), so ListIntervalsNeedingPhase
 // does NOT return it — modelling a predecessor interval phased in an earlier pass.
-func seedAssembledInterval(t *testing.T, db *sql.DB, entityType, entityID, state, session, agent string,
+func seedAssembledInterval(t *testing.T, db store.Store, entityType, entityID, state, session, agent string,
 	start, end time.Time, phase, phaseSource string) int64 {
 	t.Helper()
 	assembledAt := end.Add(time.Minute) // strictly after ended_at → excluded by anti-join
-	res, err := db.Exec(`
+	res := storetest.Exec(t, context.Background(), db, `
 		INSERT INTO wms_intervals
 			(kind, entity_type, entity_id, state, started_at, ended_at, duration_ms,
 			 session_id, agent_name, host, phase, phase_source, phase_assembled_at)
 		VALUES ('state', ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?)`,
 		entityType, entityID, state, start, end, end.Sub(start).Milliseconds(),
 		session, agent, phase, phaseSource, assembledAt)
-	if err != nil {
-		t.Fatalf("seed assembled interval: %v", err)
-	}
 	id, _ := res.LastInsertId()
 	return id
 }
@@ -444,7 +350,7 @@ func seedAssembledInterval(t *testing.T, db *sql.DB, entityType, entityID, state
 // rule-6 build default and was frozen. No first pass, no --reclassify.
 func TestClassify_OutOfBatchPredecessorRework(t *testing.T) {
 	st := freshStore(t)
-	db := st.DB()
+	db := st
 	ctx := context.Background()
 
 	base := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Second)
@@ -502,7 +408,7 @@ func idsOf(recs []wms.EventRecord) []int64 {
 // on the workunit (entity_tags) via the reused RuleClassifier rules.
 func TestClassify_WorkTypeLandsOnWorkunit(t *testing.T) {
 	st := freshStore(t)
-	db := st.DB()
+	db := st
 	ctx := context.Background()
 
 	base := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
@@ -511,18 +417,14 @@ func TestClassify_WorkTypeLandsOnWorkunit(t *testing.T) {
 	ts := base.Add(2 * time.Minute).Format(time.RFC3339)
 
 	// A workunit must exist for TagEntity (validTagEntityType + the workunit row).
-	if _, err := db.Exec(`
+	storetest.Exec(t, ctx, db, `
 		INSERT INTO outcomes (id, title, description, status, prior_status, focus,
 			origin_host, origin_session, origin_agent, created_at, updated_at)
-		VALUES ('out-wt','o','', 'active','','','','','', ?, ?)`, base, base); err != nil {
-		t.Fatalf("seed outcome: %v", err)
-	}
-	if _, err := db.Exec(`
+		VALUES ('out-wt','o','', 'active','','','','','', ?, ?)`, base, base)
+	storetest.Exec(t, ctx, db, `
 		INSERT INTO workunits (id, outcome_id, title, description, status, prior_status,
 			agent_id, focus, origin_host, origin_session, origin_agent, created_at, updated_at)
-		VALUES ('wu-wt','out-wt','w','', 'active','','','','','','', ?, ?)`, base, base); err != nil {
-		t.Fatalf("seed workunit: %v", err)
-	}
+		VALUES ('wu-wt','out-wt','w','', 'active','','','','','','', ?, ?)`, base, base)
 	seedClosedInterval(t, db, wms.EntityWorkUnit, "wu-wt", "active", "sesswt0000001", "agwt", start, end, "", "")
 
 	// READ/GREP-dominant signals → work-type=research on the workunit.

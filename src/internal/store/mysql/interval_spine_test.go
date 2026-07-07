@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bmjdotnet/teamster/internal/store"
 	"github.com/bmjdotnet/teamster/internal/wms"
 )
 
@@ -361,16 +362,17 @@ func TestTagEntity_RejectsPhaseTagOnInterval(t *testing.T) {
 	}
 }
 
-// NB-2: a work unit with no open interval yields GetOpenEventRecord == (nil, nil)
-// — the precondition the wms_setPhase handler treats as a graceful no-op (it must
-// not panic or hard-error). Verifies the nil/nil contract the handler relies on.
-func TestGetOpenEventRecord_NoIntervalIsNilNil(t *testing.T) {
+// NB-2: a work unit with no open interval yields GetOpenEventRecord ==
+// (nil, store.ErrNotFound) — the precondition the wms_setPhase handler treats
+// as a graceful no-op (it must not panic or hard-error). Verifies the
+// ErrNotFound contract the handler relies on via store.IsNotFound.
+func TestGetOpenEventRecord_NoIntervalIsNotFound(t *testing.T) {
 	s, _ := newTestStore(t)
 	ctx := context.Background()
 
 	rec, err := s.GetOpenEventRecord(ctx, wms.EntityWorkUnit, "wu-never-opened")
-	if err != nil {
-		t.Errorf("GetOpenEventRecord(no interval) err = %v, want nil", err)
+	if !store.IsNotFound(err) {
+		t.Errorf("GetOpenEventRecord(no interval) err = %v, want store.ErrNotFound", err)
 	}
 	if rec != nil {
 		t.Errorf("GetOpenEventRecord(no interval) rec = %+v, want nil (handler no-ops on this)", rec)

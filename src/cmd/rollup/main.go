@@ -25,7 +25,8 @@ import (
 	"github.com/bmjdotnet/teamster/internal/logging"
 	"github.com/bmjdotnet/teamster/internal/observability"
 	"github.com/bmjdotnet/teamster/internal/rollup"
-	"github.com/bmjdotnet/teamster/internal/store/mysql"
+	"github.com/bmjdotnet/teamster/internal/store"
+	_ "github.com/bmjdotnet/teamster/internal/store/mysql" // registers mysql, mariadb
 )
 
 func main() {
@@ -89,12 +90,15 @@ func run() int {
 		logger.Error("config load failed", "error", err)
 		return 1
 	}
-	if cfg.StoreDSN.Primary == "" {
+	if cfg.StoreDSN.Raw == "" {
 		logger.Error("TEAMSTER_STORE_DSN is required")
 		return 1
 	}
 
-	st, err := mysql.New(cfg.StoreDSN.Primary)
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	st, err := store.Open(ctx, cfg.StoreDSN.Raw)
 	if err != nil {
 		logger.Error("open store failed", "error", err)
 		return 1
@@ -102,22 +106,12 @@ func run() int {
 	defer st.Close() //nolint:errcheck
 
 	if *countOrphans {
-		rows, err := st.DB().QueryContext(context.Background(),
-			`SELECT DISTINCT t.session_id
-			 FROM usage_attribution ua
-			 JOIN token_ledger t ON t.message_id = ua.message_id
-			 WHERE ua.method = 'unallocated'
-			   AND t.session_id NOT IN (
-			     SELECT DISTINCT t2.session_id
-			     FROM usage_attribution ua2
-			     JOIN token_ledger t2 ON t2.message_id = ua2.message_id
-			     WHERE ua2.method IN ('synthesized_outcome', 'sweep_skipped')
-			   )`)
+		sessionIDs, err := st.OrphanSessionsWithTranscript(context.Background(),
+			[]string{"synthesized_outcome", "sweep_skipped"})
 		if err != nil {
 			logger.Error("count-orphans query failed", "error", err)
 			return 1
 		}
-		defer rows.Close()
 
 		projectsDir := os.Getenv("TEAMSTER_CLAUDE_PROJECTS_DIR")
 		if projectsDir == "" {
@@ -126,11 +120,7 @@ func run() int {
 
 		count := 0
 		var noTranscript []string
-		for rows.Next() {
-			var sessionID string
-			if err := rows.Scan(&sessionID); err != nil {
-				continue
-			}
+		for _, sessionID := range sessionIDs {
 			matches, _ := filepath.Glob(filepath.Join(projectsDir, "*", sessionID+".jsonl"))
 			if len(matches) > 0 {
 				count++
@@ -144,11 +134,9 @@ func run() int {
 		// session for an orphan that can't be processed on this host).
 		if len(noTranscript) > 0 {
 			for _, sid := range noTranscript {
-				_, _ = st.DB().ExecContext(context.Background(),
-					`UPDATE usage_attribution ua
-					 JOIN token_ledger t ON t.message_id = ua.message_id
-					 SET ua.method = 'sweep_skipped'
-					 WHERE ua.method = 'unallocated' AND t.session_id = ?`, sid)
+				if _, err := st.MarkSessionSweepSkipped(context.Background(), sid); err != nil {
+					logger.Warn("count-orphans: mark sweep_skipped failed", "session_id", sid, "error", err)
+				}
 			}
 			logger.Info("count-orphans: marked no-transcript sessions as sweep_skipped",
 				"sessions", len(noTranscript))
@@ -173,10 +161,7 @@ func run() int {
 		logger.Warn("reconciliation disabled: no Prometheus URL")
 	}
 
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
-
-	r := rollup.New(st.DB(), otel, logger)
+	r := rollup.NewRunner(st, st, st, st, st, st, otel, logger)
 
 	if *sweep {
 		return runSweep(ctx, st, r, cfg, logger, *sweepLLM, *dryRun)
@@ -403,7 +388,7 @@ func run() int {
 // idempotent — a re-run fixes 0 if nothing new to fix. The pipeline ordering
 // matters: hygiene first (so dangling intervals don't pollute attribution),
 // allocate before recovery (so recovery targets fresh unallocated rows).
-func runSweep(ctx context.Context, st *mysql.Store, r *rollup.Runner, cfg config.Config, logger *slog.Logger, sweepLLM, dryRun bool) int {
+func runSweep(ctx context.Context, st store.Store, r *rollup.Runner, cfg config.Config, logger *slog.Logger, sweepLLM, dryRun bool) int {
 	logger.Info("sweep: starting attribution sweep", "dry_run", dryRun, "sweep_llm", sweepLLM)
 	start := time.Now()
 

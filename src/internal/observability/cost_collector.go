@@ -2,11 +2,11 @@ package observability
 
 import (
 	"context"
-	"database/sql"
 	"log/slog"
 	"sync"
 	"time"
 
+	"github.com/bmjdotnet/teamster/internal/store"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -20,31 +20,23 @@ var costDesc = prometheus.NewDesc(
 	nil,
 )
 
-// costRow is one grouped per-entity cost from cost_rollup.
-type costRow struct {
-	entityType string
-	entityID   string
-	model      string
-	costUSD    float64
-}
-
 // CostCollector is a prometheus.Collector that exposes per-entity cost from the
 // conserved cost_rollup table, grouped by (entity_type, entity_id, model) over a
 // rolling 30-day window. agent_name is deliberately NOT a label (high
 // cardinality, and cost is entity-attributed not agent-attributed). Results are
 // cached for 30s.
 type CostCollector struct {
-	db *sql.DB
+	rep store.ReportingStore
 
 	mu        sync.Mutex
 	lastQuery time.Time
-	cached    []costRow
+	cached    []store.CostRow
 	haveCache bool
 }
 
-// NewCostCollector creates a CostCollector backed by db with a 30s cache TTL.
-func NewCostCollector(db *sql.DB) *CostCollector {
-	return &CostCollector{db: db}
+// NewCostCollector creates a CostCollector backed by rep with a 30s cache TTL.
+func NewCostCollector(rep store.ReportingStore) *CostCollector {
+	return &CostCollector{rep: rep}
 }
 
 // Describe sends the descriptor to ch.
@@ -59,14 +51,14 @@ func (c *CostCollector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(
 			costDesc,
 			prometheus.GaugeValue,
-			r.costUSD,
-			r.entityType, r.entityID, r.model,
+			r.CostUSD,
+			r.EntityType, r.EntityID, r.Model,
 		)
 	}
 }
 
 // snapshot returns the cached rows, refreshing them if older than 30s.
-func (c *CostCollector) snapshot() []costRow {
+func (c *CostCollector) snapshot() []store.CostRow {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -88,35 +80,16 @@ func (c *CostCollector) snapshot() []costRow {
 // delete) means cost_rollup retains old entities indefinitely. ok is false only
 // on a query/scan error so the caller keeps the last good value; a legitimately
 // empty cost_rollup returns (nil, true) and is cached like any other result.
-func (c *CostCollector) query() (rows []costRow, ok bool) {
-	if c.db == nil {
+func (c *CostCollector) query() (rows []store.CostRow, ok bool) {
+	if c.rep == nil {
 		return nil, false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	r, err := c.db.QueryContext(ctx, `
-		SELECT entity_type, entity_id, model, SUM(cost_usd)
-		FROM cost_rollup
-		WHERE bucket_day >= CURDATE() - INTERVAL 30 DAY
-		GROUP BY entity_type, entity_id, model`)
+	out, err := c.rep.CostByEntityLast30Days(ctx)
 	if err != nil {
 		slog.Warn("CostCollector: query failed", "error", err)
-		return nil, false
-	}
-	defer r.Close() //nolint:errcheck
-
-	var out []costRow
-	for r.Next() {
-		var row costRow
-		if err := r.Scan(&row.entityType, &row.entityID, &row.model, &row.costUSD); err != nil {
-			slog.Warn("CostCollector: scan failed", "error", err)
-			return nil, false
-		}
-		out = append(out, row)
-	}
-	if err := r.Err(); err != nil {
-		slog.Warn("CostCollector: rows error", "error", err)
 		return nil, false
 	}
 	return out, true

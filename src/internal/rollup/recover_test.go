@@ -2,13 +2,15 @@ package rollup
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"math"
 	"testing"
 	"time"
 
+	"github.com/bmjdotnet/teamster/internal/store"
+	"github.com/bmjdotnet/teamster/internal/store/storetest"
 	"github.com/bmjdotnet/teamster/internal/transcript"
+	"github.com/bmjdotnet/teamster/internal/wms"
 )
 
 // stubTimeline builds a FocusTimelineSource that returns a fixed per-session,
@@ -42,7 +44,7 @@ func stubTimeline(evs map[string]map[string][]transcript.FocusEvent) FocusTimeli
 // scraper wrote into token_ledger.message_id, so a transcript message joins its
 // ledger row on it. A join on the BARE message.id would match 0% (spec §2.4).
 func TestDedupKey_JoinsLedgerRow(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 9, 20, 21, 35, 0, time.UTC)
 
@@ -52,14 +54,8 @@ func TestDedupKey_JoinsLedgerRow(t *testing.T) {
 
 	// The composite key joins; the bare id does not.
 	var nComposite, nBare int
-	if err := db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM token_ledger WHERE message_id = ?`, composite).Scan(&nComposite); err != nil {
-		t.Fatalf("composite join: %v", err)
-	}
-	if err := db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM token_ledger WHERE message_id = ?`, msgID).Scan(&nBare); err != nil {
-		t.Fatalf("bare join: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT COUNT(*) FROM token_ledger WHERE message_id = ?`, []any{composite}, &nComposite)
+	storetest.QueryRow(t, ctx, db, `SELECT COUNT(*) FROM token_ledger WHERE message_id = ?`, []any{msgID}, &nBare)
 	if nComposite != 1 {
 		t.Fatalf("composite key matched %d ledger rows, want 1", nComposite)
 	}
@@ -73,7 +69,7 @@ func TestDedupKey_JoinsLedgerRow(t *testing.T) {
 // setFocus names; conservation holds (ledger == cost_facts); and no message ends
 // with >1 attribution row.
 func TestRecoverFocus_ReattributesByTimeline(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 9, 20, 0, 0, 0, time.UTC)
 
@@ -155,11 +151,9 @@ func TestRecoverFocus_ReattributesByTimeline(t *testing.T) {
 	// Provenance: m_mid's evidence records the matched setFocus (o1 at 20:05).
 	var evEType, evEID string
 	var setAt time.Time
-	if err := db.QueryRowContext(ctx,
-		`SELECT entity_type, entity_id, setfocus_at FROM recovery_evidence WHERE message_id = 'm_mid'`).
-		Scan(&evEType, &evEID, &setAt); err != nil {
-		t.Fatalf("read evidence for m_mid: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db,
+		`SELECT entity_type, entity_id, setfocus_at FROM recovery_evidence WHERE message_id = 'm_mid'`, nil,
+		&evEType, &evEID, &setAt)
 	if evEType != "outcome" || evEID != "o1" || !setAt.Equal(base.Add(5*time.Minute)) {
 		t.Fatalf("evidence m_mid = (%q,%q,%v), want (outcome,o1,%v)", evEType, evEID, setAt, base.Add(5*time.Minute))
 	}
@@ -169,7 +163,7 @@ func TestRecoverFocus_ReattributesByTimeline(t *testing.T) {
 // teammate message with no covering setFocus on its OWN thread inherits the
 // lead's intended focus at that instant.
 func TestRecoverFocus_TeammateChainsToLead(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 9, 20, 0, 0, 0, time.UTC)
 
@@ -206,7 +200,7 @@ func TestRecoverFocus_TeammateChainsToLead(t *testing.T) {
 // DryRun the pass performs ZERO writes — every row stays unallocated and no
 // evidence is recorded — yet the stats still report what WOULD be recovered.
 func TestRecoverFocus_DryRunWritesNothing(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 9, 20, 0, 0, 0, time.UTC)
 
@@ -231,9 +225,7 @@ func TestRecoverFocus_DryRunWritesNothing(t *testing.T) {
 		t.Fatalf("dry-run mutated attribution: method=%q, want unallocated", method)
 	}
 	var ev int
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM recovery_evidence`).Scan(&ev); err != nil {
-		t.Fatalf("count evidence: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT COUNT(*) FROM recovery_evidence`, nil, &ev)
 	if ev != 0 {
 		t.Fatalf("dry-run wrote %d evidence rows, want 0", ev)
 	}
@@ -243,7 +235,7 @@ func TestRecoverFocus_DryRunWritesNothing(t *testing.T) {
 // transcript_focus_recovery row and its evidence, and a normal Allocate returns
 // those messages to the unallocated bucket — restoring the pre-recovery state.
 func TestRecoverFocus_Unrecover(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 9, 20, 0, 0, 0, time.UTC)
 
@@ -287,9 +279,7 @@ func TestRecoverFocus_Unrecover(t *testing.T) {
 	}
 	// Evidence cleared.
 	var ev int
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM recovery_evidence`).Scan(&ev); err != nil {
-		t.Fatalf("count evidence: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT COUNT(*) FROM recovery_evidence`, nil, &ev)
 	if ev != 0 {
 		t.Fatalf("unrecover left %d evidence rows, want 0", ev)
 	}
@@ -303,7 +293,7 @@ func TestRecoverFocus_Unrecover(t *testing.T) {
 // by recovery even if a stale timeline names a different entity. Recovery is
 // scoped to method='unallocated'.
 func TestRecoverFocus_NeverTouchesNonUnallocated(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 9, 20, 0, 0, 0, time.UTC)
 
@@ -341,7 +331,7 @@ func TestRecoverFocus_NeverTouchesNonUnallocated(t *testing.T) {
 // is not a usable attribution target, so the message stays unallocated rather
 // than being written as a malformed (type,'') entity.
 func TestRecoverFocus_HalfSpecifiedFocusLeftUnallocated(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 9, 20, 0, 0, 0, time.UTC)
 
@@ -374,7 +364,7 @@ func TestRecoverFocus_HalfSpecifiedFocusLeftUnallocated(t *testing.T) {
 // the workunit (rank 4) over the outcome (rank 2) — matching the live Allocate
 // path's behavior via mostSpecific.
 func TestRecoverFocus_PrefersMoreSpecificFromIntervals(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 9, 20, 0, 0, 0, time.UTC)
 
@@ -394,10 +384,7 @@ func TestRecoverFocus_PrefersMoreSpecificFromIntervals(t *testing.T) {
 	// Precondition: the live Allocate already attributed m1 via temporal_join to
 	// the workunit (mostSpecific picks it). But we want to test recovery, so
 	// force the row back to unallocated.
-	if _, err := db.ExecContext(ctx,
-		`UPDATE usage_attribution SET entity_type='', entity_id='', method='unallocated' WHERE message_id='m1'`); err != nil {
-		t.Fatalf("force unallocated: %v", err)
-	}
+	storetest.Exec(t, ctx, db, `UPDATE usage_attribution SET entity_type='', entity_id='', method='unallocated' WHERE message_id='m1'`)
 
 	// The transcript timeline says the most-recent setFocus at 20:10 is o1 (set
 	// at 20:07, after w1 at 20:03). Without the cross-check, recovery would
@@ -433,7 +420,7 @@ func TestRecoverFocus_PrefersMoreSpecificFromIntervals(t *testing.T) {
 // when the transcript already picked a more specific entity than what
 // wms_intervals covers, the cross-check must NOT downgrade it.
 func TestRecoverFocus_NoOverrideWhenTranscriptIsMoreSpecific(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 9, 20, 0, 0, 0, time.UTC)
 
@@ -446,10 +433,7 @@ func TestRecoverFocus_NoOverrideWhenTranscriptIsMoreSpecific(t *testing.T) {
 	if err := r.Run(ctx, false); err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if _, err := db.ExecContext(ctx,
-		`UPDATE usage_attribution SET entity_type='', entity_id='', method='unallocated' WHERE message_id='m1'`); err != nil {
-		t.Fatalf("force unallocated: %v", err)
-	}
+	storetest.Exec(t, ctx, db, `UPDATE usage_attribution SET entity_type='', entity_id='', method='unallocated' WHERE message_id='m1'`)
 
 	// Transcript says workunit w1 (more specific than the outcome in wms_intervals).
 	src := stubTimeline(map[string]map[string][]transcript.FocusEvent{
@@ -481,7 +465,7 @@ func TestRecoverFocus_NoOverrideWhenTranscriptIsMoreSpecific(t *testing.T) {
 // cross-check must query the lead's wms_intervals (crossCheckAgent="") and
 // prefer the workunit over the outcome the transcript returned.
 func TestRecoverFocus_ViaLeadCrossCheck(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 9, 20, 0, 0, 0, time.UTC)
 
@@ -496,10 +480,7 @@ func TestRecoverFocus_ViaLeadCrossCheck(t *testing.T) {
 		t.Fatalf("run: %v", err)
 	}
 	// Force to unallocated so recovery processes it.
-	if _, err := db.ExecContext(ctx,
-		`UPDATE usage_attribution SET entity_type='', entity_id='', method='unallocated' WHERE message_id='tm1'`); err != nil {
-		t.Fatalf("force unallocated: %v", err)
-	}
+	storetest.Exec(t, ctx, db, `UPDATE usage_attribution SET entity_type='', entity_id='', method='unallocated' WHERE message_id='tm1'`)
 
 	// Transcript: the teammate has no setFocus; the lead's most-recent setFocus
 	// at 20:10 is the outcome o1 (set at 20:07, after w1 at 20:03). viaLead fires
@@ -534,18 +515,16 @@ func TestRecoverFocus_ViaLeadCrossCheck(t *testing.T) {
 // assertNoDoubleAttribution is the §6.3 invariant check: no message_id carries
 // >1 attribution row whose weights deviate from 1.0 (today every message has
 // exactly one row, weight 1.0; recovery must keep it so).
-func assertNoDoubleAttribution(t *testing.T, db *sql.DB, ctx context.Context) {
+func assertNoDoubleAttribution(t *testing.T, db store.Store, ctx context.Context) {
 	t.Helper()
 	var n int
-	if err := db.QueryRowContext(ctx, `
+	storetest.QueryRow(t, ctx, db, `
 		SELECT COUNT(*) FROM (
 			SELECT message_id
 			FROM usage_attribution
 			GROUP BY message_id
 			HAVING COUNT(*) > 1 AND ABS(SUM(weight) - 1.0) > 0.00001
-		) AS bad`).Scan(&n); err != nil {
-		t.Fatalf("double-attribution check: %v", err)
-	}
+		) AS bad`, nil, &n)
 	if n != 0 {
 		t.Fatalf("double-attribution: %d message_ids have >1 row with weights != 1.0", n)
 	}
@@ -553,29 +532,31 @@ func assertNoDoubleAttribution(t *testing.T, db *sql.DB, ctx context.Context) {
 
 // rollupCostFor reads the total cost_rollup cost for one entity (entity_type="",
 // entity_id="" is the unallocated bucket), summed across days/agents/models.
-func rollupCostFor(t *testing.T, db *sql.DB, ctx context.Context, etype, eid string) float64 {
+func rollupCostFor(t *testing.T, db store.Store, ctx context.Context, etype, eid string) float64 {
 	t.Helper()
 	var s float64
-	if err := db.QueryRowContext(ctx,
+	storetest.QueryRow(t, ctx, db,
 		`SELECT COALESCE(SUM(cost_usd),0) FROM cost_rollup WHERE entity_type=? AND entity_id=?`,
-		etype, eid).Scan(&s); err != nil {
-		t.Fatalf("rollup cost %s/%s: %v", etype, eid, err)
-	}
+		[]any{etype, eid}, &s)
 	return s
 }
 
 // seedLedgerHostUser seeds a ledger row stamping host + username (the host-local
 // routing key). seedLedger leaves username='' and host='testhost'; this variant
 // is for the host-scope tests that need rows on a specific host+user.
-func seedLedgerHostUser(t *testing.T, db *sql.DB, ctx context.Context, msgID, session, agent, host, user string, ts time.Time, cost float64, tokens int) {
+func seedLedgerHostUser(t *testing.T, db store.Store, ctx context.Context, msgID, session, agent, host, user string, ts time.Time, cost float64, tokens int) {
 	t.Helper()
-	if _, err := db.ExecContext(ctx,
-		`INSERT INTO token_ledger
-			(session_id, message_id, agent_name, host, username, model, total_input, cost_usd, timestamp)
-		 VALUES (?,?,?,?,?,?,?,?,?)`,
-		session, msgID, agent, host, user, "claude-opus-4-8", tokens, cost, ts); err != nil {
-		t.Fatalf("seed ledger %s: %v", msgID, err)
-	}
+	storetest.SeedLedger(t, ctx, db, store.TelemetryRow{
+		SessionID:  session,
+		MessageID:  msgID,
+		AgentName:  agent,
+		Host:       host,
+		Username:   user,
+		Model:      "claude-opus-4-8",
+		TotalInput: int64(tokens),
+		CostUSD:    cost,
+		Timestamp:  ts,
+	})
 }
 
 // TestRecoverFocus_HostScope is the host+user scope filter, covering the three
@@ -587,7 +568,7 @@ func seedLedgerHostUser(t *testing.T, db *sql.DB, ctx context.Context, msgID, se
 //   (c) a different host → DEFERRED.
 // Deferred sessions are counted + left untouched (no evidence), never warmup.
 func TestRecoverFocus_HostScope(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 9, 20, 0, 0, 0, time.UTC)
 
@@ -648,10 +629,7 @@ func TestRecoverFocus_HostScope(t *testing.T) {
 		}
 	}
 	var deferredEv int
-	if err := db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM recovery_evidence WHERE message_id IN ('bob1','rem1','rem2')`).Scan(&deferredEv); err != nil {
-		t.Fatalf("count deferred evidence: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT COUNT(*) FROM recovery_evidence WHERE message_id IN ('bob1','rem1','rem2')`, nil, &deferredEv)
 	if deferredEv != 0 {
 		t.Fatalf("wrote %d evidence rows for deferred sessions, want 0", deferredEv)
 	}
@@ -684,24 +662,18 @@ func TestLocalToUser(t *testing.T) {
 // Warmup recovery tests (Objective 1 — admin-phase warmup capture)
 // ---------------------------------------------------------------------------
 
-// seedOutcome inserts a minimal outcome row for resolveOutcome to find.
-func seedOutcome(t *testing.T, db *sql.DB, ctx context.Context, id string) {
+// seedOutcome creates a minimal outcome for resolveOutcome to find.
+func seedOutcome(t *testing.T, db store.Store, ctx context.Context, id string) {
 	t.Helper()
-	now := time.Now().UTC()
-	if _, err := db.ExecContext(ctx,
-		`INSERT INTO outcomes (id, title, description, status, created_at, updated_at) VALUES (?,?,?,?,?,?)`,
-		id, "test outcome "+id, "test", "active", now, now); err != nil {
+	if err := db.CreateOutcome(ctx, &wms.Outcome{ID: id, Title: "test outcome " + id, Description: "test", Status: wms.StatusActive}); err != nil {
 		t.Fatalf("seed outcome %s: %v", id, err)
 	}
 }
 
-// seedWorkunit inserts a minimal workunit row with a parent outcome.
-func seedWorkunit(t *testing.T, db *sql.DB, ctx context.Context, id, outcomeID string) {
+// seedWorkunit creates a minimal workunit with a parent outcome.
+func seedWorkunit(t *testing.T, db store.Store, ctx context.Context, id, outcomeID string) {
 	t.Helper()
-	now := time.Now().UTC()
-	if _, err := db.ExecContext(ctx,
-		`INSERT INTO workunits (id, outcome_id, title, description, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?)`,
-		id, outcomeID, "test workunit "+id, "test", "active", now, now); err != nil {
+	if err := db.CreateWorkUnit(ctx, &wms.WorkUnit{ID: id, OutcomeID: outcomeID, Title: "test workunit " + id, Description: "test", Status: wms.StatusActive}); err != nil {
 		t.Fatalf("seed workunit %s: %v", id, err)
 	}
 }
@@ -711,7 +683,7 @@ func seedWorkunit(t *testing.T, db *sql.DB, ctx context.Context, id, outcomeID s
 // resolved outcome with method='admin_warmup', and a synthetic admin state-interval
 // covers [warmup_start, first_focus) with phase='admin'. Conservation holds.
 func TestRecoverWarmup_AttributesWarmupToOutcome(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 9, 20, 0, 0, 0, time.UTC)
 
@@ -775,11 +747,7 @@ func TestRecoverWarmup_AttributesWarmupToOutcome(t *testing.T) {
 
 	// A synthetic admin state-interval was created covering [warmup_start, first_focus).
 	var adminCount int
-	if err := db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM wms_intervals WHERE kind='state' AND phase='admin' AND phase_source='warmup_recovery' AND session_id='s1'`).
-		Scan(&adminCount); err != nil {
-		t.Fatalf("count admin intervals: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT COUNT(*) FROM wms_intervals WHERE kind='state' AND phase='admin' AND phase_source='warmup_recovery' AND session_id='s1'`, nil, &adminCount)
 	if adminCount != 1 {
 		t.Fatalf("admin intervals=%d, want 1", adminCount)
 	}
@@ -797,11 +765,7 @@ func TestRecoverWarmup_AttributesWarmupToOutcome(t *testing.T) {
 	// Provenance: warmup_evidence records the warmup window.
 	var evEType, evEID string
 	var wStart, fAt time.Time
-	if err := db.QueryRowContext(ctx,
-		`SELECT entity_type, entity_id, warmup_start, first_focus_at FROM warmup_evidence WHERE message_id='m_early'`).
-		Scan(&evEType, &evEID, &wStart, &fAt); err != nil {
-		t.Fatalf("read warmup evidence for m_early: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT entity_type, entity_id, warmup_start, first_focus_at FROM warmup_evidence WHERE message_id='m_early'`, nil, &evEType, &evEID, &wStart, &fAt)
 	if evEType != "outcome" || evEID != "o1" {
 		t.Fatalf("evidence m_early = (%q,%q), want (outcome,o1)", evEType, evEID)
 	}
@@ -818,7 +782,7 @@ func TestRecoverWarmup_AttributesWarmupToOutcome(t *testing.T) {
 // TestRecoverWarmup_FirstFocusIsOutcome covers the case where the session's
 // first setFocus is already on an outcome — resolveOutcome returns it directly.
 func TestRecoverWarmup_FirstFocusIsOutcome(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 9, 20, 0, 0, 0, time.UTC)
 
@@ -854,7 +818,7 @@ func TestRecoverWarmup_FirstFocusIsOutcome(t *testing.T) {
 // TestRecoverWarmup_DryRunWritesNothing verifies that --dry-run performs zero
 // writes while still reporting the plan.
 func TestRecoverWarmup_DryRunWritesNothing(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 9, 20, 0, 0, 0, time.UTC)
 
@@ -881,18 +845,12 @@ func TestRecoverWarmup_DryRunWritesNothing(t *testing.T) {
 		t.Fatalf("dry-run mutated attribution: method=%q, want unallocated", method)
 	}
 	var ev int
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM warmup_evidence`).Scan(&ev); err != nil {
-		t.Fatalf("count warmup evidence: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT COUNT(*) FROM warmup_evidence`, nil, &ev)
 	if ev != 0 {
 		t.Fatalf("dry-run wrote %d warmup evidence rows, want 0", ev)
 	}
 	var adminCount int
-	if err := db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM wms_intervals WHERE kind='state' AND phase='admin' AND phase_source='warmup_recovery'`).
-		Scan(&adminCount); err != nil {
-		t.Fatalf("count admin intervals: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT COUNT(*) FROM wms_intervals WHERE kind='state' AND phase='admin' AND phase_source='warmup_recovery'`, nil, &adminCount)
 	if adminCount != 0 {
 		t.Fatalf("dry-run created %d admin intervals, want 0", adminCount)
 	}
@@ -902,7 +860,7 @@ func TestRecoverWarmup_DryRunWritesNothing(t *testing.T) {
 // admin_warmup attribution, its evidence, and synthetic admin intervals, then a
 // normal Allocate returns those messages to unallocated.
 func TestRecoverWarmup_UncoverReverses(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 9, 20, 0, 0, 0, time.UTC)
 
@@ -947,20 +905,14 @@ func TestRecoverWarmup_UncoverReverses(t *testing.T) {
 
 	// Evidence cleared.
 	var ev int
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM warmup_evidence`).Scan(&ev); err != nil {
-		t.Fatalf("count warmup evidence: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT COUNT(*) FROM warmup_evidence`, nil, &ev)
 	if ev != 0 {
 		t.Fatalf("uncover left %d warmup evidence rows, want 0", ev)
 	}
 
 	// Admin intervals cleaned up.
 	var adminCount int
-	if err := db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM wms_intervals WHERE kind='state' AND phase='admin' AND phase_source='warmup_recovery'`).
-		Scan(&adminCount); err != nil {
-		t.Fatalf("count admin intervals: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT COUNT(*) FROM wms_intervals WHERE kind='state' AND phase='admin' AND phase_source='warmup_recovery'`, nil, &adminCount)
 	if adminCount != 0 {
 		t.Fatalf("uncover left %d admin intervals, want 0", adminCount)
 	}
@@ -974,7 +926,7 @@ func TestRecoverWarmup_UncoverReverses(t *testing.T) {
 // TestRecoverWarmup_NoFocusSessionSkipped verifies that a session with NO setFocus
 // at all is skipped — it is Objective 2 territory, not warmup.
 func TestRecoverWarmup_NoFocusSessionSkipped(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 9, 20, 0, 0, 0, time.UTC)
 
@@ -1003,7 +955,7 @@ func TestRecoverWarmup_NoFocusSessionSkipped(t *testing.T) {
 // touches method='unallocated' rows — a message attributed by temporal_join is
 // never rewritten even if it falls in the warmup window by timestamp.
 func TestRecoverWarmup_NeverTouchesNonUnallocated(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 9, 20, 0, 0, 0, time.UTC)
 
@@ -1044,7 +996,7 @@ func TestRecoverWarmup_NeverTouchesNonUnallocated(t *testing.T) {
 // SUM(token_ledger.cost_usd) == SUM(cost_facts.cost_usd) before and after warmup
 // recovery, with $0.00 delta.
 func TestRecoverWarmup_ConservationInvariant(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 9, 20, 0, 0, 0, time.UTC)
 
@@ -1090,14 +1042,12 @@ func TestRecoverWarmup_ConservationInvariant(t *testing.T) {
 
 // seedRemoteFocus inserts a wms_intervals focus row with identity_source='remote_scraper',
 // exactly as the remote token-scraper ships to the hub via /focus-timeline.
-func seedRemoteFocus(t *testing.T, db *sql.DB, ctx context.Context, session, agent, etype, eid string, start time.Time) {
+func seedRemoteFocus(t *testing.T, db store.Store, ctx context.Context, session, agent, etype, eid string, start time.Time) {
 	t.Helper()
-	if _, err := db.ExecContext(ctx,
+	storetest.Exec(t, ctx, db,
 		`INSERT INTO wms_intervals (kind, identity_source, session_id, agent_name, entity_type, entity_id, started_at)
 		 VALUES ('focus','remote_scraper',?,?,?,?,?)`,
-		session, agent, etype, eid, start); err != nil {
-		t.Fatalf("seed remote focus %s/%s: %v", etype, eid, err)
-	}
+		session, agent, etype, eid, start)
 }
 
 // TestRecoverWarmup_RemoteSessionWithDBIntervals verifies the primary remote path:
@@ -1105,7 +1055,7 @@ func seedRemoteFocus(t *testing.T, db *sql.DB, ctx context.Context, session, age
 // wms_intervals focus rows when the DB has at least one focus interval for it.
 // The transcript FocusTimelineSource must NOT be called for the remote session.
 func TestRecoverWarmup_RemoteSessionWithDBIntervals(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 9, 20, 0, 0, 0, time.UTC)
 
@@ -1176,11 +1126,7 @@ func TestRecoverWarmup_RemoteSessionWithDBIntervals(t *testing.T) {
 
 	// A synthetic admin interval must exist for the remote session.
 	var adminCount int
-	if err := db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM wms_intervals WHERE kind='state' AND phase='admin' AND phase_source='warmup_recovery' AND session_id='s-remote'`).
-		Scan(&adminCount); err != nil {
-		t.Fatalf("count admin intervals: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT COUNT(*) FROM wms_intervals WHERE kind='state' AND phase='admin' AND phase_source='warmup_recovery' AND session_id='s-remote'`, nil, &adminCount)
 	if adminCount != 1 {
 		t.Fatalf("admin intervals=%d, want 1 (remote warmup recovery must create synthetic admin interval)", adminCount)
 	}
@@ -1190,7 +1136,7 @@ func TestRecoverWarmup_RemoteSessionWithDBIntervals(t *testing.T) {
 // with NO wms_intervals focus rows is still deferred (Objective 2 territory —
 // the agent never called wms_setFocus, or the scraper hasn't shipped yet).
 func TestRecoverWarmup_RemoteSessionNoDBIntervals(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 9, 20, 0, 0, 0, time.UTC)
 
@@ -1233,7 +1179,7 @@ func TestRecoverWarmup_RemoteSessionNoDBIntervals(t *testing.T) {
 // (same host+user) still uses the transcript FocusTimelineSource and is NOT
 // routed through the DB interval path — the existing behaviour is unchanged.
 func TestRecoverWarmup_LocalSessionUsesTranscript(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 9, 20, 0, 0, 0, time.UTC)
 

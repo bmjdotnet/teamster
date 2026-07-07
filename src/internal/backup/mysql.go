@@ -1,14 +1,15 @@
 package backup
 
 import (
-	"bytes"
 	"context"
 	"fmt"
+	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/bmjdotnet/teamster/internal/store"
 )
 
 func BackupMySQL(ctx context.Context, cfg *MySQLConfig, destDir string) (*StoreResult, error) {
@@ -23,15 +24,6 @@ func BackupMySQL(ctx context.Context, cfg *MySQLConfig, destDir string) (*StoreR
 		}, fmt.Errorf("mysql backup requires store.dsn in teamster.yaml")
 	}
 
-	fields, err := ParseMySQLDSN(cfg.DSN)
-	if err != nil {
-		return &StoreResult{
-			Status:     "error",
-			DurationMS: time.Since(start).Milliseconds(),
-			Error:      fmt.Sprintf("parse mysql dsn: %v", err),
-		}, fmt.Errorf("parse mysql dsn: %w", err)
-	}
-
 	if err := os.MkdirAll(filepath.Join(destDir, "mysql"), 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir mysql: %w", err)
 	}
@@ -39,7 +31,7 @@ func BackupMySQL(ctx context.Context, cfg *MySQLConfig, destDir string) (*StoreR
 	var errs []string
 	for _, db := range cfg.Databases {
 		outPath := filepath.Join(destDir, "mysql", db+".sql.gz")
-		if err := dumpDatabase(ctx, fields, db, outPath); err != nil {
+		if err := dumpDatabase(ctx, cfg.DSN, db, outPath); err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %v", db, err))
 			continue
 		}
@@ -64,88 +56,37 @@ func BackupMySQL(ctx context.Context, cfg *MySQLConfig, destDir string) (*StoreR
 	return result, nil
 }
 
-func dumpDatabase(ctx context.Context, fields MySQLDSNFields, db, outPath string) error {
-	// Write credentials to a temp file with 0600 so they never appear on the
-	// command line (visible in `ps`) or in logs.
-	tmp, err := os.CreateTemp("", "teamster-mysql-*.cnf")
+// dumpDatabase opens db via store.Open (retargeted to the given database name
+// per dsnForDatabase) and dumps it through the backend's BackupEngine — the
+// mysqldump/gzip shell-out mechanism itself is unchanged, just relocated
+// behind the admin-plane interface in internal/store/mysql (ADR-2).
+func dumpDatabase(ctx context.Context, rawDSN, db, outPath string) error {
+	dsn, err := dsnForDatabase(rawDSN, db)
 	if err != nil {
-		return fmt.Errorf("create temp defaults file: %w", err)
+		return fmt.Errorf("build DSN for db %q: %w", db, err)
 	}
-	defer os.Remove(tmp.Name())
+	st, err := store.Open(ctx, dsn, store.WithSkipMigrate())
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
+	}
+	defer st.Close() //nolint:errcheck
 
-	cnf := fmt.Sprintf("[client]\nuser=%s\npassword=%s\nhost=%s\nport=%s\n",
-		fields.User, fields.Password, fields.Host, fields.Port)
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return fmt.Errorf("chmod temp defaults file: %w", err)
+	be, ok := st.(store.BackupEngine)
+	if !ok {
+		return fmt.Errorf("backend has no backup engine")
 	}
-	if _, err := tmp.WriteString(cnf); err != nil {
-		tmp.Close()
-		return fmt.Errorf("write temp defaults file: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close temp defaults file: %w", err)
-	}
-
-	return runDump(ctx, tmp.Name(), db, outPath)
+	return be.Dump(ctx, outPath)
 }
 
-// runDump runs mysqldump --defaults-extra-file=<tmpfile> | gzip > outPath.
-// stderr is captured and included in the error so failures are never silent.
-func runDump(ctx context.Context, defaultsFile, db, outPath string) error {
-	f, err := os.Create(outPath)
+// dsnForDatabase returns rawDSN with its path (database name) replaced by db.
+// mysqldump can target any database the connection's credentials can reach,
+// independent of which database the DSN's own path names — cfg.Databases may
+// list several schemas sharing one set of credentials.
+func dsnForDatabase(rawDSN, db string) (string, error) {
+	u, err := url.Parse(rawDSN)
 	if err != nil {
-		return fmt.Errorf("create output: %w", err)
+		return "", err
 	}
-	ok := false
-	defer func() {
-		f.Close()
-		if !ok {
-			os.Remove(outPath)
-		}
-	}()
-
-	dump := exec.CommandContext(ctx, "mysqldump",
-		"--defaults-extra-file="+defaultsFile,
-		"--single-transaction", "--routines", "--triggers", "--no-tablespaces", db)
-	gzip := exec.CommandContext(ctx, "gzip")
-
-	var dumpStderr, gzipStderr bytes.Buffer
-	dump.Stderr = &dumpStderr
-	gzip.Stderr = &gzipStderr
-
-	dumpOut, err := dump.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("dump stdout pipe: %w", err)
-	}
-	gzip.Stdin = dumpOut
-	gzip.Stdout = f
-
-	if err := dump.Start(); err != nil {
-		return fmt.Errorf("mysqldump start: %w", err)
-	}
-	if err := gzip.Start(); err != nil {
-		dump.Wait() //nolint:errcheck
-		return fmt.Errorf("gzip start: %w", err)
-	}
-
-	dumpErr := dump.Wait()
-	gzipErr := gzip.Wait()
-
-	if dumpErr != nil {
-		stderr := dumpStderr.String()
-		if stderr != "" {
-			return fmt.Errorf("mysqldump: %w: %s", dumpErr, stderr)
-		}
-		return fmt.Errorf("mysqldump: %w", dumpErr)
-	}
-	if gzipErr != nil {
-		return fmt.Errorf("gzip: %w", gzipErr)
-	}
-
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("close output: %w", err)
-	}
-	ok = true
-	return nil
+	u.Path = "/" + db
+	return u.String(), nil
 }

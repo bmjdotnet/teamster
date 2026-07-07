@@ -2,7 +2,6 @@ package rollup
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -12,13 +11,14 @@ import (
 	"time"
 
 	"github.com/bmjdotnet/teamster/internal/llm"
+	"github.com/bmjdotnet/teamster/internal/store"
 	"github.com/bmjdotnet/teamster/internal/transcript"
+	"github.com/bmjdotnet/teamster/internal/wms"
 )
 
 const (
 	maxLLMSessions  = 10
 	llmPhaseTimeout = 5 * time.Minute
-	sweepOutcomeID  = "out-sweep"
 )
 
 var defaultFacetKeys = map[string]bool{
@@ -38,7 +38,6 @@ type SweepLLMStats struct {
 // sessions) and gap LLM fallback (gap threads that RecoverGaps couldn't resolve).
 // It creates WMS outcomes for each synthesized session, writes a mapping file,
 // and feeds it to SynthesizeFocus. Rate-limited to maxLLMSessions per run.
-// Uses claude --print (Claude Code headless mode) — no ANTHROPIC_API_KEY needed.
 func (r *Runner) SweepLLM(ctx context.Context, opts RecoverOptions) (SweepLLMStats, error) {
 	llmCtx, cancel := context.WithTimeout(ctx, llmPhaseTimeout)
 	defer cancel()
@@ -57,7 +56,9 @@ func (r *Runner) SweepLLM(ctx context.Context, opts RecoverOptions) (SweepLLMSta
 		facetKeys = defaultFacetKeys
 	}
 
-	r.ensureSweepOutcome(ctx)
+	if _, err := r.sweep.EnsureSweepOutcome(ctx); err != nil {
+		r.log.Warn("sweep-llm: failed to ensure sweep outcome (non-fatal)", "error", err)
+	}
 
 	var stats SweepLLMStats
 	var mappings []SynthesisMapping
@@ -192,15 +193,15 @@ func (r *Runner) synthesizeGapFallback(ctx context.Context, opts RecoverOptions,
 		if count >= remaining || ctx.Err() != nil {
 			break
 		}
-		if sessionsSeen[gt.sessionID] {
+		if sessionsSeen[gt.SessionID] {
 			continue
 		}
-		sessionsSeen[gt.sessionID] = true
+		sessionsSeen[gt.SessionID] = true
 
-		mapping, err := r.synthesizeSession(ctx, gt.sessionID, opts.ProjectsDir, tagVocab)
+		mapping, err := r.synthesizeSession(ctx, gt.SessionID, opts.ProjectsDir, tagVocab)
 		if err != nil {
 			r.log.Warn("sweep-llm: gap synthesis failed; skipping",
-				"session_id", gt.sessionID, "error", err)
+				"session_id", gt.SessionID, "error", err)
 			stats.errors++
 			continue
 		}
@@ -208,18 +209,18 @@ func (r *Runner) synthesizeGapFallback(ctx context.Context, opts RecoverOptions,
 		if !opts.DryRun {
 			if err := r.createSynthesizedOutcome(ctx, mapping, facetKeys); err != nil {
 				r.log.Warn("sweep-llm: create gap outcome failed; skipping",
-					"session_id", gt.sessionID, "outcome_id", mapping.outcomeID, "error", err)
+					"session_id", gt.SessionID, "outcome_id", mapping.outcomeID, "error", err)
 				stats.errors++
 				continue
 			}
 		} else {
 			r.log.Info("sweep-llm (dry-run): would synthesize gap session",
-				"session_id", gt.sessionID, "outcome_id", mapping.outcomeID,
+				"session_id", gt.SessionID, "outcome_id", mapping.outcomeID,
 				"title", mapping.title, "confidence", mapping.confidence)
 		}
 
 		mappings = append(mappings, SynthesisMapping{
-			SessionID:       gt.sessionID,
+			SessionID:       gt.SessionID,
 			EntityType:      "outcome",
 			EntityID:        mapping.outcomeID,
 			Confidence:      mapping.confidence,
@@ -281,14 +282,22 @@ func (r *Runner) synthesizeSession(ctx context.Context, sessionID, projectsDir, 
 	}, nil
 }
 
+// createSynthesizedOutcome creates the LLM-synthesized outcome via
+// wms.Writer.CreateOutcome — check-then-create for idempotency, since
+// CreateOutcome's current implementation is a plain INSERT, not yet the
+// INSERT-IGNORE-equivalent the interface doc assumes (see store.go's doc
+// comment on SweepStore.EnsureSweepOutcome for the same issue) — and tags it
+// via wms.Writer.TagEntity, replacing the raw INSERT IGNORE + hand-rolled tag
+// SQL (applyTag) the pre-port code used. Dropping the raw applyTag variant
+// entirely, per 01-interfaces.md's note.
 func (r *Runner) createSynthesizedOutcome(ctx context.Context, m *synthesizedMapping, facetKeys map[string]bool) error {
-	now := time.Now().UTC()
-
-	_, err := r.db.ExecContext(ctx, `
-		INSERT IGNORE INTO outcomes (id, title, description, status, created_at, updated_at)
-		VALUES (?, ?, ?, 'active', ?, ?)`,
-		m.outcomeID, m.title, m.description, now, now)
-	if err != nil {
+	if _, err := r.reader.GetOutcome(ctx, m.outcomeID); err == nil {
+		// already exists — fall through to tagging (idempotent)
+	} else if !store.IsNotFound(err) {
+		return fmt.Errorf("check outcome: %w", err)
+	} else if err := r.writer.CreateOutcome(ctx, &wms.Outcome{
+		ID: m.outcomeID, Title: m.title, Description: m.description, Status: "active",
+	}); err != nil {
 		return fmt.Errorf("insert outcome: %w", err)
 	}
 
@@ -315,7 +324,7 @@ func (r *Runner) createSynthesizedOutcome(ctx context.Context, m *synthesizedMap
 	}
 
 	for _, tag := range tags {
-		if err := r.applyTag(ctx, "outcome", m.outcomeID, tag.key, tag.value, "sweep-llm"); err != nil {
+		if err := r.writer.TagEntity(ctx, "outcome", m.outcomeID, tag.key, tag.value, "sweep-llm", ""); err != nil {
 			r.log.Warn("sweep-llm: tag failed (non-fatal)",
 				"outcome_id", m.outcomeID, "key", tag.key, "value", tag.value, "error", err)
 		}
@@ -324,72 +333,19 @@ func (r *Runner) createSynthesizedOutcome(ctx context.Context, m *synthesizedMap
 	return nil
 }
 
-// applyTag applies a single tag to an entity via direct SQL (the rollup binary
-// doesn't have the store.Store interface — it operates on raw *sql.DB).
-func (r *Runner) applyTag(ctx context.Context, entityType, entityID, tagKey, tagValue, source string) error {
-	now := time.Now().UTC()
-
-	var tagID int64
-	err := r.db.QueryRowContext(ctx,
-		`SELECT id FROM tags WHERE tag_key = ? AND tag_value = ?`,
-		tagKey, tagValue).Scan(&tagID)
-	if err == sql.ErrNoRows {
-		// Inherit the key's existing category so lifecycle keys (phase, work-type,
-		// resolution, lifecycle) don't drift to the column DEFAULT 'context'.
-		category := "context"
-		var foundCat string
-		switch catErr := r.db.QueryRowContext(ctx,
-			`SELECT category FROM tags WHERE tag_key = ? AND category != 'context' LIMIT 1`, tagKey,
-		).Scan(&foundCat); catErr {
-		case nil:
-			category = foundCat
-		case sql.ErrNoRows:
-			// new or all-context key — default 'context'
-		default:
-			return fmt.Errorf("lookup category %s: %w", tagKey, catErr)
-		}
-		res, err := r.db.ExecContext(ctx,
-			`INSERT INTO tags (tag_key, tag_value, is_seed, category, cardinality) VALUES (?, ?, 0, ?, 'single')`,
-			tagKey, tagValue, category)
-		if err != nil {
-			return fmt.Errorf("create tag %s:%s: %w", tagKey, tagValue, err)
-		}
-		tagID, _ = res.LastInsertId()
-	} else if err != nil {
-		return fmt.Errorf("lookup tag %s:%s: %w", tagKey, tagValue, err)
-	}
-
-	_, err = r.db.ExecContext(ctx, `
-		INSERT INTO entity_tags (entity_type, entity_id, tag_id, source, applied_at)
-		VALUES (?, ?, ?, ?, ?)
-		ON DUPLICATE KEY UPDATE source = VALUES(source), applied_at = VALUES(applied_at)`,
-		entityType, entityID, tagID, source, now)
-	return err
-}
-
 func (r *Runner) loadTagVocab(ctx context.Context) (string, error) {
-	rows, err := r.db.QueryContext(ctx,
-		`SELECT tag_key, tag_value, facet_source FROM tags WHERE category = 'context' AND tag_value != '' ORDER BY tag_key, tag_value`)
+	rows, err := r.sweep.TagVocab(ctx)
 	if err != nil {
 		return "", err
 	}
-	defer rows.Close() //nolint:errcheck
 
 	byKey := map[string][]string{}
 	facetOf := map[string]string{}
-	for rows.Next() {
-		var k, v string
-		var fs sql.NullString
-		if err := rows.Scan(&k, &v, &fs); err != nil {
-			return "", err
+	for _, row := range rows {
+		byKey[row.Key] = append(byKey[row.Key], row.Value)
+		if row.FacetSource != "" {
+			facetOf[row.Key] = row.FacetSource
 		}
-		byKey[k] = append(byKey[k], v)
-		if fs.Valid && fs.String != "" {
-			facetOf[k] = fs.String
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return "", err
 	}
 
 	var sb strings.Builder
@@ -409,60 +365,33 @@ func (r *Runner) loadTagVocab(ctx context.Context) (string, error) {
 }
 
 func (r *Runner) loadFacetKeys(ctx context.Context, source string) (map[string]bool, error) {
-	rows, err := r.db.QueryContext(ctx,
-		`SELECT DISTINCT tag_key FROM tags WHERE facet_source = ? AND retired = 0`, source)
+	keys, err := r.sweep.FacetKeys(ctx, source)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close() //nolint:errcheck
-
-	keys := make(map[string]bool)
-	for rows.Next() {
-		var k string
-		if err := rows.Scan(&k); err != nil {
-			return nil, err
-		}
-		keys[k] = true
+	out := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		out[k] = true
 	}
-	return keys, rows.Err()
-}
-
-func (r *Runner) ensureSweepOutcome(ctx context.Context) {
-	now := time.Now().UTC()
-	_, err := r.db.ExecContext(ctx, `
-		INSERT IGNORE INTO outcomes (id, title, description, status, created_at, updated_at)
-		VALUES (?, 'Attribution Sweep', 'Standing outcome for the automated sweep process', 'active', ?, ?)`,
-		sweepOutcomeID, now, now)
-	if err != nil {
-		r.log.Warn("sweep-llm: failed to ensure sweep outcome (non-fatal)", "error", err)
-		return
-	}
-	_ = r.applyTag(ctx, "outcome", sweepOutcomeID, "product", "Teamster", "sweep-llm")
-	_ = r.applyTag(ctx, "outcome", sweepOutcomeID, "admin", "data-cleanup", "sweep-llm")
-	// Clean up stale pre-v49 binding.
-	_, _ = r.db.ExecContext(ctx,
-		`DELETE et FROM entity_tags et
-		 JOIN tags t ON et.tag_id = t.id
-		 WHERE et.entity_type = 'outcome' AND et.entity_id = ? AND t.tag_key = 'feature' AND t.tag_value = 'data-cleanup'`,
-		sweepOutcomeID)
+	return out, nil
 }
 
 // unresolvedGapThreads returns gap threads that RecoverGaps skipped (no entity
 // could be resolved from existing attributions). These are the targets for LLM
 // fallback.
-func (r *Runner) unresolvedGapThreads(ctx context.Context) ([]gapThread, error) {
-	threads, err := r.gapThreads(ctx)
+func (r *Runner) unresolvedGapThreads(ctx context.Context) ([]store.GapThread, error) {
+	threads, err := r.rec.GapThreads(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	var unresolved []gapThread
+	var unresolved []store.GapThread
 	for _, gt := range threads {
-		et, eid, _, _, err := r.resolveGapEntity(ctx, gt)
+		entity, _, _, err := r.resolveGapEntity(ctx, gt)
 		if err != nil {
 			continue
 		}
-		if et == "" || eid == "" {
+		if entity.EntityType == "" || entity.EntityID == "" {
 			unresolved = append(unresolved, gt)
 		}
 	}
@@ -479,7 +408,7 @@ func writeTempMappings(mappings []SynthesisMapping) (string, error) {
 		return "", err
 	}
 	if _, err := f.Write(data); err != nil {
-		f.Close() //nolint:errcheck
+		f.Close()            //nolint:errcheck
 		os.Remove(f.Name()) //nolint:errcheck
 		return "", err
 	}

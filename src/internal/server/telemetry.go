@@ -8,9 +8,10 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"strings"
 	"sync"
 	"time"
+
+	"github.com/bmjdotnet/teamster/internal/store"
 )
 
 // TelemetryRow is a single token-usage record posted by the scraper.
@@ -166,53 +167,15 @@ func (s *Server) resolveAgentForTelemetry(sessionID string) string {
 	}
 	s.telemetryAgents.mu.RUnlock()
 
-	rows, err := s.wmsDB.Query(
-		`SELECT agent_name FROM sessions WHERE session_id = ?`, sessionID)
+	agentName, err := s.obsStore.AgentNameForSession(context.Background(), sessionID)
 	if err != nil {
 		return ""
 	}
-	defer rows.Close() //nolint:errcheck
-
-	var names []string
-	for rows.Next() {
-		var n string
-		if rows.Scan(&n) == nil {
-			names = append(names, n)
-		}
-	}
-
-	agentName := resolveAgentFromNames(names)
 
 	s.telemetryAgents.mu.Lock()
 	s.telemetryAgents.cache[sessionID] = agentName
 	s.telemetryAgents.mu.Unlock()
 	return agentName
-}
-
-// resolveAgentFromNames maps the set of agent_name rows recorded for a session
-// to the agent that produced an empty-stamped telemetry row.
-//
-// The scraper stamps subagent (teammate) rows directly with "@<name>" from the
-// sibling .meta.json and only ever sends an empty agent_name for the MAIN
-// session transcript — which is the lead. So an empty-stamped row is always the
-// lead and must resolve to "" even when teammate rows share the session_id (the
-// common team case). Promoting it to a teammate name — the old behavior — stole
-// the lead's main-file cost and assigned it to whichever teammate sorted first.
-//
-// The only case where a non-empty name is returned is a solo session whose sole
-// recorded row is a teammate with no lead row at all (len==1, non-empty), which
-// preserves attribution for that degenerate shape.
-func resolveAgentFromNames(names []string) string {
-	switch len(names) {
-	case 0:
-		return ""
-	case 1:
-		return names[0]
-	default:
-		// Team session: lead + teammates under one session_id. An empty-stamped
-		// row is the lead.
-		return ""
-	}
 }
 
 // telemetryColumnsPerRow is the placeholder count of one VALUES group below.
@@ -224,10 +187,10 @@ const maxTelemetryRowsPerInsert = 1000
 // flushTelemetryBatch inserts batch in chunks of maxTelemetryRowsPerInsert and
 // returns the first chunk error encountered. A failing chunk is logged with its
 // index, row count, and error, and the remaining chunks are still attempted —
-// re-inserts are idempotent via the uq_message unique key + ON DUPLICATE KEY
-// UPDATE, so a later drain of the same rows is harmless.
+// re-inserts are idempotent via UpsertTelemetryBatch's uq_message-keyed
+// conflict resolution, so a later drain of the same rows is harmless.
 func (s *Server) flushTelemetryBatch(batch []TelemetryRow) error {
-	if len(batch) == 0 || s.wmsDB == nil {
+	if len(batch) == 0 || s.obsStore == nil {
 		return nil
 	}
 
@@ -250,17 +213,7 @@ func (s *Server) flushTelemetryBatch(batch []TelemetryRow) error {
 }
 
 func (s *Server) insertTelemetryChunk(chunk []TelemetryRow) error {
-	const queryPrefix = `INSERT INTO token_ledger
-		(session_id, message_id, agent_name, host, username, model,
-		 input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
-		 cache_write_1h, cache_write_5m,
-		 n_text, n_tool_use, n_thinking,
-		 total_input, stop_reason, service_tier, speed,
-		 cost_usd, timestamp)
-	VALUES `
-
-	args := make([]interface{}, 0, len(chunk)*telemetryColumnsPerRow)
-	placeholders := make([]string, 0, len(chunk))
+	rows := make([]store.TelemetryRow, 0, len(chunk))
 
 	for _, row := range chunk {
 		agentName := row.AgentName
@@ -274,53 +227,36 @@ func (s *Server) insertTelemetryChunk(chunk []TelemetryRow) error {
 			continue
 		}
 
-		placeholders = append(placeholders, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-		args = append(args,
-			row.SessionID, row.MessageID, agentName, row.Host, row.Username, row.Model,
-			row.InputTokens, row.OutputTokens, row.CacheReadTokens, row.CacheWriteTokens,
-			row.CacheWrite1h, row.CacheWrite5m,
-			row.NText, row.NToolUse, row.NThinking,
-			row.TotalInput, row.StopReason, row.ServiceTier, row.Speed,
-			row.CostUSD, ts.UTC(),
-		)
+		rows = append(rows, store.TelemetryRow{
+			SessionID:        row.SessionID,
+			MessageID:        row.MessageID,
+			AgentName:        agentName,
+			Host:             row.Host,
+			Username:         row.Username,
+			Model:            row.Model,
+			InputTokens:      row.InputTokens,
+			OutputTokens:     row.OutputTokens,
+			CacheReadTokens:  row.CacheReadTokens,
+			CacheWriteTokens: row.CacheWriteTokens,
+			CacheWrite1h:     row.CacheWrite1h,
+			CacheWrite5m:     row.CacheWrite5m,
+			NText:            int64(row.NText),
+			NToolUse:         int64(row.NToolUse),
+			NThinking:        int64(row.NThinking),
+			TotalInput:       row.TotalInput,
+			StopReason:       row.StopReason,
+			ServiceTier:      row.ServiceTier,
+			Speed:            row.Speed,
+			CostUSD:          row.CostUSD,
+			Timestamp:        ts.UTC(),
+		})
 	}
 
-	if len(placeholders) == 0 {
+	if len(rows) == 0 {
 		return nil
 	}
 
-	// On message_id conflict, keep the row with the greater output_tokens. The
-	// scraper now keys rows by (message.id|requestId) and emits the max-usage
-	// member of each request's content-block lines, but a request whose lines
-	// straddle a scraper poll boundary can arrive as two partial inserts; the
-	// later, more-complete one must win rather than the first writer. Guarding on
-	// output_tokens keeps an equal/lesser re-insert a no-op (idempotent) while
-	// letting a fuller snapshot overwrite the token/cost columns.
-	//
-	// output_tokens MUST be assigned LAST: MySQL evaluates ON DUPLICATE KEY UPDATE
-	// assignments left to right and a later expression sees the already-updated
-	// value of an earlier column. If output_tokens were updated first, every
-	// subsequent IF(VALUES(output_tokens) > output_tokens, …) would compare against
-	// the new value (equal → false) and silently keep the stale partial cost/cache
-	// columns. Keeping it last means all guards compare against the pre-update
-	// output_tokens.
-	query := queryPrefix + strings.Join(placeholders, ", ") +
-		` ON DUPLICATE KEY UPDATE
-			input_tokens       = IF(VALUES(output_tokens) > output_tokens, VALUES(input_tokens), input_tokens),
-			cache_read_tokens  = IF(VALUES(output_tokens) > output_tokens, VALUES(cache_read_tokens), cache_read_tokens),
-			cache_write_tokens = IF(VALUES(output_tokens) > output_tokens, VALUES(cache_write_tokens), cache_write_tokens),
-			cache_write_1h     = IF(VALUES(output_tokens) > output_tokens, VALUES(cache_write_1h), cache_write_1h),
-			cache_write_5m     = IF(VALUES(output_tokens) > output_tokens, VALUES(cache_write_5m), cache_write_5m),
-			n_text             = IF(VALUES(output_tokens) > output_tokens, VALUES(n_text), n_text),
-			n_tool_use         = IF(VALUES(output_tokens) > output_tokens, VALUES(n_tool_use), n_tool_use),
-			n_thinking         = IF(VALUES(output_tokens) > output_tokens, VALUES(n_thinking), n_thinking),
-			total_input        = IF(VALUES(output_tokens) > output_tokens, VALUES(total_input), total_input),
-			stop_reason        = IF(VALUES(output_tokens) > output_tokens, VALUES(stop_reason), stop_reason),
-			cost_usd           = IF(VALUES(output_tokens) > output_tokens, VALUES(cost_usd), cost_usd),
-			session_id         = VALUES(session_id),
-			output_tokens      = IF(VALUES(output_tokens) > output_tokens, VALUES(output_tokens), output_tokens)`
-
-	_, err := s.wmsDB.Exec(query, args...)
+	_, err := s.obsStore.UpsertTelemetryBatch(context.Background(), rows)
 	return err
 }
 
@@ -349,8 +285,9 @@ func (s *Server) drainTelemetryFallback(ctx context.Context) {
 	slog.Info("telemetry: draining fallback", "rows", len(rows))
 	if err := s.flushTelemetryBatch(rows); err != nil {
 		// Retain the spool so the next hookd restart re-drains it (now chunked).
-		// Re-draining already-committed rows is idempotent via uq_message +
-		// ON DUPLICATE KEY UPDATE, so retaining the whole spool is safe.
+		// Re-draining already-committed rows is idempotent via
+		// UpsertTelemetryBatch's conflict-resolution contract, so retaining the
+		// whole spool is safe.
 		slog.Error("telemetry: fallback drain failed, retaining spool for retry",
 			"rows", len(rows), "error", err)
 		return

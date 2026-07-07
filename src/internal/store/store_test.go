@@ -23,6 +23,7 @@ import (
 
 	"github.com/bmjdotnet/teamster/internal/store"
 	"github.com/bmjdotnet/teamster/internal/store/mysql"
+	"github.com/bmjdotnet/teamster/internal/store/sqlite"
 	"github.com/bmjdotnet/teamster/internal/wms"
 )
 
@@ -71,6 +72,21 @@ func backends() []backend {
 				t.Cleanup(func() {
 					_ = s.Close()
 					_ = mysqlDropSchema(dsn, schema)
+				})
+				return s
+			},
+		},
+		{
+			// sqlite always runs: pure Go, in-memory, no external server —
+			// the kit's validation backend (07-conformance.md).
+			name: "sqlite",
+			open: func(t *testing.T) store.Store {
+				s, err := sqlite.New(":memory:")
+				if err != nil {
+					t.Fatalf("sqlite open: %v", err)
+				}
+				t.Cleanup(func() {
+					_ = s.Close()
 				})
 				return s
 			},

@@ -2,11 +2,11 @@ package observability
 
 import (
 	"context"
-	"database/sql"
 	"log/slog"
 	"sync"
 	"time"
 
+	"github.com/bmjdotnet/teamster/internal/store"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -26,7 +26,7 @@ var backlogDesc = prometheus.NewDesc(
 // rollup-liveness signal, not a correctness one — it cannot false-alarm because
 // a healthy pipeline keeps it small and a stalled one makes it grow. Cached 30s.
 type BacklogCollector struct {
-	db *sql.DB
+	rep store.ReportingStore
 
 	mu        sync.Mutex
 	lastQuery time.Time
@@ -34,9 +34,10 @@ type BacklogCollector struct {
 	haveCache bool
 }
 
-// NewBacklogCollector creates a BacklogCollector backed by db with a 30s cache TTL.
-func NewBacklogCollector(db *sql.DB) *BacklogCollector {
-	return &BacklogCollector{db: db}
+// NewBacklogCollector creates a BacklogCollector backed by rep with a 30s
+// cache TTL.
+func NewBacklogCollector(rep store.ReportingStore) *BacklogCollector {
+	return &BacklogCollector{rep: rep}
 }
 
 // Describe sends the descriptor to ch.
@@ -75,20 +76,16 @@ func (c *BacklogCollector) snapshot() float64 {
 // anti-join the allocator's Allocate pass drains. Returns ok=false on error so a
 // transient DB failure keeps the last good value.
 func (c *BacklogCollector) query() (depth float64, ok bool) {
-	if c.db == nil {
+	if c.rep == nil {
 		return 0, false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := c.db.QueryRowContext(ctx, `
-		SELECT COUNT(*)
-		FROM token_ledger t
-		LEFT JOIN usage_attribution ua ON ua.message_id = t.message_id
-		WHERE ua.message_id IS NULL`).Scan(&depth)
+	d, err := c.rep.UnattributedBacklogDepth(ctx)
 	if err != nil {
 		slog.Warn("BacklogCollector: query failed", "error", err)
 		return 0, false
 	}
-	return depth, true
+	return float64(d), true
 }

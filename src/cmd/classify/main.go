@@ -21,7 +21,8 @@ import (
 	"github.com/bmjdotnet/teamster/internal/classify"
 	"github.com/bmjdotnet/teamster/internal/config"
 	"github.com/bmjdotnet/teamster/internal/logging"
-	"github.com/bmjdotnet/teamster/internal/store/mysql"
+	"github.com/bmjdotnet/teamster/internal/store"
+	_ "github.com/bmjdotnet/teamster/internal/store/mysql" // registers mysql, mariadb
 	"github.com/bmjdotnet/teamster/internal/wms"
 )
 
@@ -43,12 +44,15 @@ func run() int {
 		logger.Error("config load failed", "error", err)
 		return 1
 	}
-	if cfg.StoreDSN.Primary == "" {
+	if cfg.StoreDSN.Raw == "" {
 		logger.Error("TEAMSTER_STORE_DSN is required")
 		return 1
 	}
 
-	st, err := mysql.New(cfg.StoreDSN.Primary)
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	st, err := store.Open(ctx, cfg.StoreDSN.Raw)
 	if err != nil {
 		logger.Error("open store failed", "error", err)
 		return 1
@@ -63,9 +67,6 @@ func run() int {
 			logger.Warn("TEAMSTER_RECLASSIFY_LIMIT invalid, using default", "value", v, "default", reclassifyLimit)
 		}
 	}
-
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
 
 	r := classify.New(st, wms.NewJSONLSignalReader(), cfg.LogFile, logger)
 	if err := r.Run(ctx, *reclassify, reclassifyLimit, *dryRun); err != nil {

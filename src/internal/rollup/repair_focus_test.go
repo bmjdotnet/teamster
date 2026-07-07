@@ -5,30 +5,28 @@ import (
 	"database/sql"
 	"testing"
 	"time"
+
+	"github.com/bmjdotnet/teamster/internal/store"
+	"github.com/bmjdotnet/teamster/internal/store/storetest"
 )
 
 // insertInvertedFocus inserts a kind='focus' interval with an explicit
 // (started_at, ended_at) so a test can stage the negative-width rows the
 // dual-writer/async race produced (ended_at < started_at).
-func insertInvertedFocus(t *testing.T, db *sql.DB, ctx context.Context, session, agent, etype, eid string, startedAt time.Time, endedAt *time.Time) uint64 {
+func insertInvertedFocus(t *testing.T, db store.Store, ctx context.Context, session, agent, etype, eid string, startedAt time.Time, endedAt *time.Time) uint64 {
 	t.Helper()
-	res, err := db.ExecContext(ctx, `
+	res := storetest.Exec(t, ctx, db, `
 		INSERT INTO wms_intervals (kind, identity_source, session_id, agent_name, entity_type, entity_id, started_at, ended_at)
 		VALUES ('focus','direct',?,?,?,?,?,?)`,
 		session, agent, etype, eid, startedAt, endedAt)
-	if err != nil {
-		t.Fatalf("insert focus %s/%s: %v", etype, eid, err)
-	}
 	id, _ := res.LastInsertId()
 	return uint64(id)
 }
 
-func intervalBounds(t *testing.T, db *sql.DB, ctx context.Context, id uint64) (started time.Time, ended sql.NullTime) {
+func intervalBounds(t *testing.T, db store.Store, ctx context.Context, id uint64) (started time.Time, ended sql.NullTime) {
 	t.Helper()
-	if err := db.QueryRowContext(ctx,
-		`SELECT started_at, ended_at FROM wms_intervals WHERE id=?`, id).Scan(&started, &ended); err != nil {
-		t.Fatalf("read interval %d: %v", id, err)
-	}
+	storetest.QueryRow(t, ctx, db,
+		`SELECT started_at, ended_at FROM wms_intervals WHERE id=?`, []any{id}, &started, &ended)
 	return started, ended
 }
 
@@ -37,7 +35,7 @@ func intervalBounds(t *testing.T, db *sql.DB, ctx context.Context, id uint64) (s
 // repaired to end at the SECOND interval's start; the last (also inverted) interval
 // is reopened.
 func TestRepairFocusIntervals_FixesChain(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 13, 0, 0, 0, 0, time.UTC)
 
@@ -69,10 +67,8 @@ func TestRepairFocusIntervals_FixesChain(t *testing.T) {
 	}
 	// No inverted rows remain.
 	var inverted int
-	if err := db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM wms_intervals WHERE kind='focus' AND ended_at IS NOT NULL AND ended_at < started_at`).Scan(&inverted); err != nil {
-		t.Fatalf("count inverted: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db,
+		`SELECT COUNT(*) FROM wms_intervals WHERE kind='focus' AND ended_at IS NOT NULL AND ended_at < started_at`, nil, &inverted)
 	if inverted != 0 {
 		t.Fatalf("inverted rows after repair=%d, want 0", inverted)
 	}
@@ -80,7 +76,7 @@ func TestRepairFocusIntervals_FixesChain(t *testing.T) {
 
 // TestRepairFocusIntervals_Idempotent verifies a second pass is a no-op.
 func TestRepairFocusIntervals_Idempotent(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 13, 0, 0, 0, 0, time.UTC)
 	bad := base.Add(-time.Minute)
@@ -102,7 +98,7 @@ func TestRepairFocusIntervals_Idempotent(t *testing.T) {
 // TestRepairFocusIntervals_Reverses verifies UnrepairFocusIntervals restores the
 // prior (bad) ended_at — a true undo of the data change.
 func TestRepairFocusIntervals_Reverses(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 13, 0, 0, 0, 0, time.UTC)
 	t2 := base.Add(10 * time.Minute)
@@ -131,9 +127,7 @@ func TestRepairFocusIntervals_Reverses(t *testing.T) {
 		t.Fatalf("id1 ended_at=%v post-unrepair, want prior %v", ended, bad1)
 	}
 	var ev int
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM focus_interval_repair`).Scan(&ev); err != nil {
-		t.Fatalf("count repair evidence: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT COUNT(*) FROM focus_interval_repair`, nil, &ev)
 	if ev != 0 {
 		t.Fatalf("focus_interval_repair rows=%d after unrepair, want 0", ev)
 	}
@@ -143,7 +137,7 @@ func TestRepairFocusIntervals_Reverses(t *testing.T) {
 // message that fell to 'unallocated' because its only covering focus interval was
 // negative-width gets attributed to that entity once the interval is repaired.
 func TestRepairFocusIntervals_RecoversDroppedCost(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 13, 0, 0, 0, 0, time.UTC)
 

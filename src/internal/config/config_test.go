@@ -21,8 +21,8 @@ func TestLegacyDBEnvVarsAreIgnored(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(cfg.StoreDSN.Primary, "should/be/ignored") {
-		t.Fatalf("legacy TEAMSTER_DB_PATH/WMS_DB leaked into StoreDSN.Primary: %q", cfg.StoreDSN.Primary)
+	if strings.Contains(cfg.StoreDSN.Raw, "should/be/ignored") {
+		t.Fatalf("legacy TEAMSTER_DB_PATH/WMS_DB leaked into StoreDSN.Raw: %q", cfg.StoreDSN.Raw)
 	}
 }
 
@@ -88,31 +88,44 @@ func TestUserOverride(t *testing.T) {
 func TestParseStoreDSN(t *testing.T) {
 	cases := []struct {
 		raw    string
-		driver config.StoreDriver
-		prim   string
+		scheme string
+		rawOut string
 	}{
-		{"mysql://u:p@127.0.0.1:3306/t", config.StoreDriverMySQL, "mysql://u:p@127.0.0.1:3306/t"},
+		{"mysql://u:p@127.0.0.1:3306/t", "mysql", "mysql://u:p@127.0.0.1:3306/t"},
 	}
 	for _, tc := range cases {
 		got, err := config.ParseStoreDSN(tc.raw)
 		if err != nil {
 			t.Fatalf("%q: %v", tc.raw, err)
 		}
-		if got.Driver != tc.driver {
-			t.Fatalf("%q: driver = %q, want %q", tc.raw, got.Driver, tc.driver)
+		if got.Scheme != tc.scheme {
+			t.Fatalf("%q: scheme = %q, want %q", tc.raw, got.Scheme, tc.scheme)
 		}
-		if got.Primary != tc.prim {
-			t.Fatalf("%q: primary = %q, want %q", tc.raw, got.Primary, tc.prim)
+		if got.Raw != tc.rawOut {
+			t.Fatalf("%q: raw = %q, want %q", tc.raw, got.Raw, tc.rawOut)
 		}
 	}
 }
 
-func TestParseStoreDSNRejectsUnknownScheme(t *testing.T) {
-	if _, err := config.ParseStoreDSN("postgres://u@h/d"); err == nil {
-		t.Fatal("expected error for postgres scheme")
+// TestParseStoreDSNAcceptsAnyScheme confirms ParseStoreDSN is scheme-agnostic:
+// any well-formed URL parses into a StoreDSN. Scheme *support* is a registry
+// concern (Phase 04), not a parsing concern — this inverts the pre-refactor
+// assertion that non-mysql schemes were rejected.
+func TestParseStoreDSNAcceptsAnyScheme(t *testing.T) {
+	got, err := config.ParseStoreDSN("postgres://u@h/d")
+	if err != nil {
+		t.Fatalf("postgres scheme: unexpected error: %v", err)
 	}
-	if _, err := config.ParseStoreDSN("sqlite:///tmp/x.db"); err == nil {
-		t.Fatal("expected error for sqlite scheme")
+	if got.Scheme != "postgres" {
+		t.Fatalf("Scheme = %q, want postgres", got.Scheme)
+	}
+
+	got, err = config.ParseStoreDSN("sqlite:///tmp/x.db")
+	if err != nil {
+		t.Fatalf("sqlite scheme: unexpected error: %v", err)
+	}
+	if got.Scheme != "sqlite" {
+		t.Fatalf("Scheme = %q, want sqlite", got.Scheme)
 	}
 }
 

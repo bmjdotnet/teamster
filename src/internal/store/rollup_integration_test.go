@@ -2,18 +2,15 @@ package store_test
 
 import (
 	"context"
-	"database/sql"
-	"fmt"
 	"io"
 	"log/slog"
 	"math"
-	"os"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/bmjdotnet/teamster/internal/rollup"
-	"github.com/bmjdotnet/teamster/internal/store/mysql"
+	"github.com/bmjdotnet/teamster/internal/store"
+	"github.com/bmjdotnet/teamster/internal/store/storetest"
 )
 
 // TestRollupAllocatorInvariants is a DB-backed verification of the attribution
@@ -27,34 +24,9 @@ import (
 // Skips when TEAMSTER_TEST_MYSQL_DSN is unset, matching the store conformance
 // suite. It never touches the live `teamster` database.
 func TestRollupAllocatorInvariants(t *testing.T) {
-	dsn := os.Getenv("TEAMSTER_TEST_MYSQL_DSN")
-	if dsn == "" {
-		t.Skip("TEAMSTER_TEST_MYSQL_DSN not set")
-	}
-	if !mysqlReachable(dsn) {
-		t.Skip("mysql not reachable")
-	}
-
-	schema := fmt.Sprintf("teamster_test_rollup_%d_%d", time.Now().UnixNano(), atomic.AddInt64(&mysqlSchemaCounter, 1))
-	if err := mysqlEnsureSchema(dsn, schema); err != nil {
-		t.Fatalf("ensure schema: %v", err)
-	}
-	schemaDSN, err := mysqlRebindSchema(dsn, schema)
-	if err != nil {
-		t.Fatalf("rebind: %v", err)
-	}
-	// mysql.New runs migrations, including v12 attribution-spine, on the fresh schema.
-	st, err := mysql.New(schemaDSN)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = st.Close()
-		_ = mysqlDropSchema(dsn, schema)
-	})
-
+	st := storetest.Open(t, "teamster_test_rollup")
 	ctx := context.Background()
-	db := st.DB()
+	db := st
 	base := time.Date(2026, 5, 30, 12, 0, 0, 0, time.UTC)
 
 	// Focus history: @spine focuses goal g1 at T+0 (closed at T+10m), then task
@@ -89,20 +61,17 @@ func TestRollupAllocatorInvariants(t *testing.T) {
 	insertLedger(t, db, ctx, "legacy-1", "sess1", "unknown", base.Add(40*time.Minute), 5.0)
 
 	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
-	r := rollup.New(db, nil, discard) // nil OTel → reconciliation skipped
+	r := rollup.NewRunner(st, st, st, st, st, st, nil, discard) // nil OTel → reconciliation skipped
 	if err := r.Run(ctx, false); err != nil {
 		t.Fatalf("rollup run: %v", err)
 	}
 
 	// Invariant 1: exactly one usage_attribution row per message, SUM(weight)=1.
 	var badMessages int
-	if err := db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM (
+	storetest.QueryRow(t, ctx, db, `SELECT COUNT(*) FROM (
 			SELECT message_id, SUM(weight) s FROM usage_attribution GROUP BY message_id
 			HAVING ABS(s - 1.0) > 1e-6
-		) x`).Scan(&badMessages); err != nil {
-		t.Fatalf("weight invariant query: %v", err)
-	}
+		) x`, nil, &badMessages)
 	if badMessages != 0 {
 		t.Fatalf("weight invariant violated: %d messages with SUM(weight) != 1", badMessages)
 	}
@@ -115,12 +84,8 @@ func TestRollupAllocatorInvariants(t *testing.T) {
 
 	// Invariant 3: conservation — cost_rollup total == ledger total == 65.0.
 	var rollupTotal, ledgerTotal float64
-	if err := db.QueryRowContext(ctx, `SELECT COALESCE(SUM(cost_usd),0) FROM cost_rollup`).Scan(&rollupTotal); err != nil {
-		t.Fatalf("rollup total: %v", err)
-	}
-	if err := db.QueryRowContext(ctx, `SELECT COALESCE(SUM(cost_usd),0) FROM token_ledger`).Scan(&ledgerTotal); err != nil {
-		t.Fatalf("ledger total: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT COALESCE(SUM(cost_usd),0) FROM cost_rollup`, nil, &rollupTotal)
+	storetest.QueryRow(t, ctx, db, `SELECT COALESCE(SUM(cost_usd),0) FROM token_ledger`, nil, &ledgerTotal)
 	if math.Abs(rollupTotal-ledgerTotal) > 1e-4 {
 		t.Fatalf("conservation violated: cost_rollup=%.6f ledger=%.6f", rollupTotal, ledgerTotal)
 	}
@@ -130,10 +95,7 @@ func TestRollupAllocatorInvariants(t *testing.T) {
 
 	// Invariant 4: the unallocated bucket holds exactly the legacy row's cost.
 	var unalloc float64
-	if err := db.QueryRowContext(ctx,
-		`SELECT COALESCE(SUM(cost_usd),0) FROM cost_rollup WHERE entity_type='' AND entity_id=''`).Scan(&unalloc); err != nil {
-		t.Fatalf("unallocated total: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT COALESCE(SUM(cost_usd),0) FROM cost_rollup WHERE entity_type='' AND entity_id=''`, nil, &unalloc)
 	if math.Abs(unalloc-5.0) > 1e-4 {
 		t.Fatalf("expected unallocated 5.0, got %.6f", unalloc)
 	}
@@ -143,9 +105,7 @@ func TestRollupAllocatorInvariants(t *testing.T) {
 		t.Fatalf("second rollup run: %v", err)
 	}
 	var ua int
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM usage_attribution`).Scan(&ua); err != nil {
-		t.Fatalf("count ua: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT COUNT(*) FROM usage_attribution`, nil, &ua)
 	if ua != 4 {
 		t.Fatalf("expected 4 usage_attribution rows after re-run, got %d", ua)
 	}
@@ -169,33 +129,9 @@ func TestRollupAllocatorInvariants(t *testing.T) {
 //
 // Skips when TEAMSTER_TEST_MYSQL_DSN is unset.
 func TestRollupAllocatorV3Attribution(t *testing.T) {
-	dsn := os.Getenv("TEAMSTER_TEST_MYSQL_DSN")
-	if dsn == "" {
-		t.Skip("TEAMSTER_TEST_MYSQL_DSN not set")
-	}
-	if !mysqlReachable(dsn) {
-		t.Skip("mysql not reachable")
-	}
-
-	schema := fmt.Sprintf("teamster_test_rollupv3_%d_%d", time.Now().UnixNano(), atomic.AddInt64(&mysqlSchemaCounter, 1))
-	if err := mysqlEnsureSchema(dsn, schema); err != nil {
-		t.Fatalf("ensure schema: %v", err)
-	}
-	schemaDSN, err := mysqlRebindSchema(dsn, schema)
-	if err != nil {
-		t.Fatalf("rebind: %v", err)
-	}
-	st, err := mysql.New(schemaDSN)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = st.Close()
-		_ = mysqlDropSchema(dsn, schema)
-	})
-
+	st := storetest.Open(t, "teamster_test_rollupv3")
 	ctx := context.Background()
-	db := st.DB()
+	db := st
 	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
 
 	// v3 focus history for @spine in sess-v3:
@@ -223,7 +159,7 @@ func TestRollupAllocatorV3Attribution(t *testing.T) {
 	insertLedger(t, db, ctx, "vu", "sess-v3", "unknown", base.Add(30*time.Minute), 7.0)
 
 	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
-	r := rollup.New(db, nil, discard)
+	r := rollup.NewRunner(st, st, st, st, st, st, nil, discard)
 	if err := r.Run(ctx, false); err != nil {
 		t.Fatalf("rollup run: %v", err)
 	}
@@ -236,25 +172,18 @@ func TestRollupAllocatorV3Attribution(t *testing.T) {
 
 	// SUM(weight)=1 per message — no double-counting introduced by the v3 path.
 	var badMessages int
-	if err := db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM (
+	storetest.QueryRow(t, ctx, db, `SELECT COUNT(*) FROM (
 			SELECT message_id, SUM(weight) s FROM usage_attribution GROUP BY message_id
 			HAVING ABS(s - 1.0) > 1e-6
-		) x`).Scan(&badMessages); err != nil {
-		t.Fatalf("weight invariant query: %v", err)
-	}
+		) x`, nil, &badMessages)
 	if badMessages != 0 {
 		t.Fatalf("weight invariant violated: %d messages with SUM(weight) != 1", badMessages)
 	}
 
 	// Conservation: cost_rollup total == ledger total == 73.0.
 	var rollupTotal, ledgerTotal float64
-	if err := db.QueryRowContext(ctx, `SELECT COALESCE(SUM(cost_usd),0) FROM cost_rollup`).Scan(&rollupTotal); err != nil {
-		t.Fatalf("rollup total: %v", err)
-	}
-	if err := db.QueryRowContext(ctx, `SELECT COALESCE(SUM(cost_usd),0) FROM token_ledger`).Scan(&ledgerTotal); err != nil {
-		t.Fatalf("ledger total: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT COALESCE(SUM(cost_usd),0) FROM cost_rollup`, nil, &rollupTotal)
+	storetest.QueryRow(t, ctx, db, `SELECT COALESCE(SUM(cost_usd),0) FROM token_ledger`, nil, &ledgerTotal)
 	if math.Abs(rollupTotal-ledgerTotal) > 1e-4 {
 		t.Fatalf("conservation violated: cost_rollup=%.6f ledger=%.6f", rollupTotal, ledgerTotal)
 	}
@@ -267,11 +196,8 @@ func TestRollupAllocatorV3Attribution(t *testing.T) {
 	// unallocated). After the fix it is 66/73 (v1+v2+v3 attributed, vu only
 	// unallocated).
 	var v3Attributed float64
-	if err := db.QueryRowContext(ctx,
-		`SELECT COALESCE(SUM(cost_usd),0) FROM cost_rollup
-		 WHERE entity_type IN ('outcome','workunit')`).Scan(&v3Attributed); err != nil {
-		t.Fatalf("v3 attributed total: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT COALESCE(SUM(cost_usd),0) FROM cost_rollup
+		 WHERE entity_type IN ('outcome','workunit')`, nil, &v3Attributed)
 	if v3Attributed <= 0 {
 		t.Fatalf("v3 attribution broken: 0 cost attributed to outcome/workunit (specificity map regressed)")
 	}
@@ -281,10 +207,7 @@ func TestRollupAllocatorV3Attribution(t *testing.T) {
 
 	// The unallocated bucket holds exactly the unknown-agent row's cost.
 	var unalloc float64
-	if err := db.QueryRowContext(ctx,
-		`SELECT COALESCE(SUM(cost_usd),0) FROM cost_rollup WHERE entity_type='' AND entity_id=''`).Scan(&unalloc); err != nil {
-		t.Fatalf("unallocated total: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT COALESCE(SUM(cost_usd),0) FROM cost_rollup WHERE entity_type='' AND entity_id=''`, nil, &unalloc)
 	if math.Abs(unalloc-7.0) > 1e-4 {
 		t.Fatalf("expected unallocated 7.0, got %.6f", unalloc)
 	}
@@ -301,9 +224,7 @@ func TestRollupAllocatorV3Attribution(t *testing.T) {
 	assertAttribution(t, db, ctx, "v3", "outcome", "o1", "temporal_join")
 	assertAttribution(t, db, ctx, "vu", "", "", "unallocated")
 	var ua int
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM usage_attribution`).Scan(&ua); err != nil {
-		t.Fatalf("count ua: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT COUNT(*) FROM usage_attribution`, nil, &ua)
 	if ua != 4 {
 		t.Fatalf("expected 4 usage_attribution rows after reallocate, got %d", ua)
 	}
@@ -323,43 +244,38 @@ func TestRollupAllocatorV3Attribution(t *testing.T) {
 	}
 	assertAttribution(t, db, ctx, "vu", "workunit", "w2", "temporal_join")
 	// Still exactly 4 attribution rows — recovery rewrote vu in place, no new rows.
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM usage_attribution`).Scan(&ua); err != nil {
-		t.Fatalf("count ua after recovery: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT COUNT(*) FROM usage_attribution`, nil, &ua)
 	if ua != 4 {
 		t.Fatalf("expected 4 usage_attribution rows after recovery, got %d", ua)
 	}
 }
 
-func mustExec(t *testing.T, db *sql.DB, ctx context.Context, q string, args ...any) {
+func mustExec(t *testing.T, db store.Store, ctx context.Context, q string, args ...any) {
 	t.Helper()
-	if _, err := db.ExecContext(ctx, q, args...); err != nil {
-		t.Fatalf("exec: %v", err)
-	}
+	storetest.Exec(t, ctx, db, q, args...)
 }
 
-func insertLedger(t *testing.T, db *sql.DB, ctx context.Context, messageID, sessionID, agent string, ts time.Time, cost float64) {
+func insertLedger(t *testing.T, db store.Store, ctx context.Context, messageID, sessionID, agent string, ts time.Time, cost float64) {
 	t.Helper()
-	_, err := db.ExecContext(ctx,
-		`INSERT INTO token_ledger
-			(session_id, message_id, agent_name, host, model, total_input, cost_usd, timestamp)
-		 VALUES (?,?,?,?,?,?,?,?)`,
-		sessionID, messageID, agent, "testhost", "claude-opus-4-8", 1000, cost, ts)
-	if err != nil {
-		t.Fatalf("insert ledger %s: %v", messageID, err)
-	}
+	storetest.SeedLedger(t, ctx, db, store.TelemetryRow{
+		SessionID:  sessionID,
+		MessageID:  messageID,
+		AgentName:  agent,
+		Host:       "testhost",
+		Model:      "claude-opus-4-8",
+		TotalInput: 1000,
+		CostUSD:    cost,
+		Timestamp:  ts,
+	})
 }
 
-func assertAttribution(t *testing.T, db *sql.DB, ctx context.Context, messageID, wantType, wantID, wantMethod string) {
+func assertAttribution(t *testing.T, db store.Store, ctx context.Context, messageID, wantType, wantID, wantMethod string) {
 	t.Helper()
 	var et, eid, method string
 	var w float64
-	err := db.QueryRowContext(ctx,
+	storetest.QueryRow(t, ctx, db,
 		`SELECT entity_type, entity_id, weight, method FROM usage_attribution WHERE message_id=?`,
-		messageID).Scan(&et, &eid, &w, &method)
-	if err != nil {
-		t.Fatalf("query attribution %s: %v", messageID, err)
-	}
+		[]any{messageID}, &et, &eid, &w, &method)
 	if et != wantType || eid != wantID || method != wantMethod {
 		t.Fatalf("message %s: got (%q,%q,%q), want (%q,%q,%q)", messageID, et, eid, method, wantType, wantID, wantMethod)
 	}

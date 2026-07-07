@@ -3,8 +3,8 @@ package main
 import (
 	"bufio"
 	"context"
-	"database/sql"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"math"
@@ -14,6 +14,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/bmjdotnet/teamster/internal/store"
 )
 
 func runWMSBackfill(args []string) int {
@@ -45,9 +47,8 @@ func runWMSBackfill(args []string) int {
 	defer s.Close() //nolint:errcheck
 
 	ctx := context.Background()
-	db := s.DB()
 
-	orphans, err := loadOrphanedIntervals(ctx, db)
+	orphans, err := s.OrphanIntervals(ctx)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "wms backfill: load orphans: %v\n", err)
 		return 1
@@ -84,7 +85,7 @@ func runWMSBackfill(args []string) int {
 			if p.skip {
 				continue
 			}
-			parts := []string{fmt.Sprintf("  %s %s (id=%d):", p.orphan.entityType, p.orphan.entityID, p.orphan.id)}
+			parts := []string{fmt.Sprintf("  %s %s (id=%d):", p.orphan.EntityType, p.orphan.EntityID, p.orphan.ID)}
 			if p.sessionID != "" {
 				parts = append(parts, fmt.Sprintf("session_id=%s", p.sessionID))
 			}
@@ -103,8 +104,8 @@ func runWMSBackfill(args []string) int {
 					continue
 				}
 				fmt.Printf("  %s %s (id=%d, state=%s, started=%s): %s\n",
-					p.orphan.entityType, p.orphan.entityID, p.orphan.id,
-					p.orphan.state, p.orphan.startedAt.Format(time.RFC3339), p.skipReason)
+					p.orphan.EntityType, p.orphan.EntityID, p.orphan.ID,
+					p.orphan.State, p.orphan.StartedAt.Format(time.RFC3339), p.skipReason)
 			}
 		}
 		return 0
@@ -116,8 +117,8 @@ func runWMSBackfill(args []string) int {
 		if p.skip {
 			continue
 		}
-		if err := applyBackfill(ctx, db, p); err != nil {
-			fmt.Fprintf(os.Stderr, "  error: %s %s (id=%d): %v\n", p.orphan.entityType, p.orphan.entityID, p.orphan.id, err)
+		if err := applyBackfill(ctx, s, p); err != nil {
+			fmt.Fprintf(os.Stderr, "  error: %s %s (id=%d): %v\n", p.orphan.EntityType, p.orphan.EntityID, p.orphan.ID, err)
 			errCount++
 			continue
 		}
@@ -150,18 +151,6 @@ func resolveEventsPath() string {
 	return ""
 }
 
-type orphanedInterval struct {
-	id         int64
-	kind       string
-	entityType string
-	entityID   string
-	state      string
-	startedAt  time.Time
-	endedAt    *time.Time
-	sessionID  string
-	agentName  string
-}
-
 type statusChangeEvent struct {
 	entityType string
 	entityID   string
@@ -188,7 +177,7 @@ type createEvent struct {
 }
 
 type backfillAction struct {
-	orphan      orphanedInterval
+	orphan      store.Interval
 	sessionID   string
 	agentName   string
 	endedAt     time.Time
@@ -211,33 +200,6 @@ var createToolToEntityType = map[string]string{
 	"mcp__wms__wms_createGoal":     "goal",
 	"mcp__wms__wms_createTask":     "task",
 	"mcp__wms__wms_createWorkItem": "workitem",
-}
-
-func loadOrphanedIntervals(ctx context.Context, db *sql.DB) ([]orphanedInterval, error) {
-	rows, err := db.QueryContext(ctx, `
-		SELECT id, kind, entity_type, entity_id, state, session_id, agent_name,
-		       started_at, ended_at
-		FROM wms_intervals
-		WHERE session_id = '' OR session_id IS NULL`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var result []orphanedInterval
-	for rows.Next() {
-		var o orphanedInterval
-		var endedAt sql.NullTime
-		if err := rows.Scan(&o.id, &o.kind, &o.entityType, &o.entityID, &o.state,
-			&o.sessionID, &o.agentName, &o.startedAt, &endedAt); err != nil {
-			return nil, err
-		}
-		if endedAt.Valid {
-			o.endedAt = &endedAt.Time
-		}
-		result = append(result, o)
-	}
-	return result, rows.Err()
 }
 
 type parsedEvents struct {
@@ -390,7 +352,7 @@ var v1EntityTypes = map[string][]string{
 	"workunit": {"task", "workitem"},
 }
 
-func buildBackfillPlan(orphans []orphanedInterval, p *parsedEvents) []backfillAction {
+func buildBackfillPlan(orphans []store.Interval, p *parsedEvents) []backfillAction {
 	sort.Slice(p.statusChanges, func(i, j int) bool {
 		return p.statusChanges[i].ts.Before(p.statusChanges[j].ts)
 	})
@@ -428,10 +390,10 @@ func buildBackfillPlan(orphans []orphanedInterval, p *parsedEvents) []backfillAc
 	// lookupKeys returns the entity keys to search for an orphaned interval:
 	// the v3 key first, then v1 equivalents (for migration-backfilled entities
 	// whose v3 ID is out-<v1id> or wu-<v1id>).
-	lookupKeys := func(o orphanedInterval) []entityKey {
-		keys := []entityKey{{o.entityType, o.entityID}}
-		if _, v1ID := v3IDToV1(o.entityType, o.entityID); v1ID != "" {
-			for _, v1Type := range v1EntityTypes[o.entityType] {
+	lookupKeys := func(o store.Interval) []entityKey {
+		keys := []entityKey{{o.EntityType, o.EntityID}}
+		if _, v1ID := v3IDToV1(o.EntityType, o.EntityID); v1ID != "" {
+			for _, v1Type := range v1EntityTypes[o.EntityType] {
 				keys = append(keys, entityKey{v1Type, v1ID})
 			}
 		}
@@ -456,10 +418,10 @@ func buildBackfillPlan(orphans []orphanedInterval, p *parsedEvents) []backfillAc
 		openIdx := -1
 		bestDelta := time.Duration(math.MaxInt64)
 		for i, e := range events {
-			if e.newStatus != o.state {
+			if e.newStatus != o.State {
 				continue
 			}
-			delta := absDuration(e.ts.Sub(o.startedAt))
+			delta := absDuration(e.ts.Sub(o.StartedAt))
 			if delta < 10*time.Second && delta < bestDelta {
 				openIdx = i
 				bestDelta = delta
@@ -472,7 +434,7 @@ func buildBackfillPlan(orphans []orphanedInterval, p *parsedEvents) []backfillAc
 				action.sessionID = openEvent.sessionID
 				action.agentName = openEvent.agentName
 			}
-			upgradeFromPreTool(&action, preToolByEntity, o.entityID, openEvent.ts)
+			upgradeFromPreTool(&action, preToolByEntity, o.EntityID, openEvent.ts)
 		}
 
 		// Phase 2: if no WMSStatusChange matched, try a creation event.
@@ -482,7 +444,7 @@ func buildBackfillPlan(orphans []orphanedInterval, p *parsedEvents) []backfillAc
 		if openIdx == -1 {
 			for _, k := range keys {
 				for _, c := range createByEntity[k] {
-					delta := absDuration(c.ts.Sub(o.startedAt))
+					delta := absDuration(c.ts.Sub(o.StartedAt))
 					if delta < 10*time.Second {
 						if c.sessionID != "" {
 							action.sessionID = c.sessionID
@@ -531,7 +493,7 @@ func buildBackfillPlan(orphans []orphanedInterval, p *parsedEvents) []backfillAc
 			action.skip = true
 			if openIdx == -1 {
 				action.skipReason = fmt.Sprintf("no matching event for entity %s",
-					o.entityID)
+					o.EntityID)
 			} else {
 				action.skipReason = "matched event but no session_id available"
 			}
@@ -540,14 +502,14 @@ func buildBackfillPlan(orphans []orphanedInterval, p *parsedEvents) []backfillAc
 		}
 
 		// Find the close time for open intervals.
-		if o.endedAt == nil {
+		if o.EndedAt == nil {
 			closeFound := false
 			searchStart := 0
 			if openIdx >= 0 {
 				searchStart = openIdx + 1
 			}
 			for i := searchStart; i < len(events); i++ {
-				if events[i].oldStatus == o.state && events[i].ts.After(o.startedAt) {
+				if events[i].oldStatus == o.State && events[i].ts.After(o.StartedAt) {
 					action.endedAt = events[i].ts
 					action.closeSource = "next WMSStatusChange"
 					closeFound = true
@@ -588,47 +550,28 @@ func upgradeFromPreTool(action *backfillAction, preToolByEntity map[string][]pre
 	}
 }
 
-func applyBackfill(ctx context.Context, db *sql.DB, action backfillAction) error {
-	if action.endedAt.IsZero() && action.orphan.endedAt != nil {
-		// Only updating session_id/agent_name, no ended_at change.
-		_, err := db.ExecContext(ctx,
-			`UPDATE wms_intervals
-			 SET session_id = ?, agent_name = ?, identity_source = 'backfill'
-			 WHERE id = ?`,
-			action.sessionID, action.agentName, action.orphan.id)
-		return err
-	}
-
+func applyBackfill(ctx context.Context, s store.MaintenanceStore, action backfillAction) error {
 	if action.endedAt.IsZero() {
-		// Only session_id update, no close time found.
-		_, err := db.ExecContext(ctx,
-			`UPDATE wms_intervals
-			 SET session_id = ?, agent_name = ?, identity_source = 'backfill'
-			 WHERE id = ?`,
-			action.sessionID, action.agentName, action.orphan.id)
-		return err
+		// Session_id/agent_name update only — either no close time was found,
+		// or the interval already had an ended_at that doesn't need changing.
+		return s.BackfillInterval(ctx, action.orphan.ID, action.sessionID, action.agentName, nil, nil)
 	}
 
 	endedAt := action.endedAt
-	durationMs := endedAt.Sub(action.orphan.startedAt).Milliseconds()
+	durationMs := endedAt.Sub(action.orphan.StartedAt).Milliseconds()
 	if durationMs < 0 {
 		durationMs = 0
 	}
 
 	// Try the update; if unique constraint collides, offset by 1µs increments.
 	for attempt := 0; attempt < 100; attempt++ {
-		_, err := db.ExecContext(ctx,
-			`UPDATE wms_intervals
-			 SET session_id = ?, agent_name = ?, ended_at = ?, duration_ms = ?,
-			     identity_source = 'backfill'
-			 WHERE id = ?`,
-			action.sessionID, action.agentName, endedAt, durationMs, action.orphan.id)
+		err := s.BackfillInterval(ctx, action.orphan.ID, action.sessionID, action.agentName, &endedAt, &durationMs)
 		if err == nil {
 			return nil
 		}
-		if strings.Contains(err.Error(), "Duplicate entry") || strings.Contains(err.Error(), "1062") {
+		if errors.Is(err, store.ErrConflict) {
 			endedAt = endedAt.Add(time.Microsecond)
-			durationMs = endedAt.Sub(action.orphan.startedAt).Milliseconds()
+			durationMs = endedAt.Sub(action.orphan.StartedAt).Milliseconds()
 			if durationMs < 0 {
 				durationMs = 0
 			}

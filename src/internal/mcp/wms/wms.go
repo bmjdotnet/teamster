@@ -258,7 +258,7 @@ func HandleToolCall(store wms.Store, eng wms.Engine, rawParams json.RawMessage) 
 			return Result{}, &CallError{Code: -32602, Message: "phase is required"}
 		}
 		rec, err := store.GetOpenEventRecord(ctx, wms.EntityWorkUnit, entityID)
-		if err != nil {
+		if err != nil && !storeTypes.IsNotFound(err) {
 			return Result{}, &CallError{Code: -32000, Message: err.Error()}
 		}
 		if rec == nil {

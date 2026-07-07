@@ -12,14 +12,14 @@ import (
 	mysqldriver "github.com/go-sql-driver/mysql"
 )
 
-// TestGrafanaReadonlyAuthorizes proves the authoritative status check: it returns
-// true only when grafana_ro can actually connect + SELECT, and false for a wrong
-// password or an unreachable host. This is what makes `teamster status` honest —
-// a stale password file no longer reads as "Provisioned".
+// TestCredentialProberAuthorizes proves the authoritative status check: it
+// returns true only when grafana_ro can actually connect + SELECT, and false
+// for a wrong password or an unreachable host. This is what makes `teamster
+// status` honest — a stale password file no longer reads as "Provisioned".
 //
 // Needs the dedicated test MySQL (TEAMSTER_TEST_MYSQL_DSN, e.g.
 // mysql://root:test@127.0.0.1:13306/); SKIPs otherwise, like the store tests.
-func TestGrafanaReadonlyAuthorizes(t *testing.T) {
+func TestCredentialProberAuthorizes(t *testing.T) {
 	rawDSN := os.Getenv("TEAMSTER_TEST_MYSQL_DSN")
 	if rawDSN == "" {
 		t.Skip("TEAMSTER_TEST_MYSQL_DSN not set")
@@ -73,14 +73,16 @@ func TestGrafanaReadonlyAuthorizes(t *testing.T) {
 	})
 
 	timeout := 3 * time.Second
+	adminDSN := fmt.Sprintf("mysql://%s:%s@%s:%s/%s", adminUser, adminPass, host, port, schema)
 
-	if !grafanaReadonlyAuthorizes(host, port, schema, roPass, timeout) {
+	if !credentialProberAuthorizes(adminDSN, roPass, timeout) {
 		t.Errorf("correct password should authorize")
 	}
-	if grafanaReadonlyAuthorizes(host, port, schema, "wrong-password", timeout) {
+	if credentialProberAuthorizes(adminDSN, "wrong-password", timeout) {
 		t.Errorf("wrong password must NOT authorize")
 	}
-	if grafanaReadonlyAuthorizes("127.0.0.1", "1", schema, roPass, timeout) {
+	unreachableDSN := fmt.Sprintf("mysql://%s:%s@127.0.0.1:1/%s", adminUser, adminPass, schema)
+	if credentialProberAuthorizes(unreachableDSN, roPass, timeout) {
 		t.Errorf("unreachable host must NOT authorize")
 	}
 }

@@ -16,14 +16,15 @@ const (
 
 // TestStatusRowsNeverRenderPassword proves `teamster status` shows the store as
 // host:port only — the full DSN (which carries the password) must never reach a
-// status column. Guards the NB-1 leak: status.go used to put cfg.StoreDSN.Primary
+// status column. Guards the NB-1 leak: status.go used to put the raw store DSN
 // straight into the endpoint column.
 func TestStatusRowsNeverRenderPassword(t *testing.T) {
+	dsn, err := config.ParseStoreDSN(statusFakeDSN)
+	if err != nil {
+		t.Fatalf("parse fake dsn: %v", err)
+	}
 	cfg := config.Config{
-		StoreDSN: config.StoreDSN{
-			Driver:  config.StoreDriverMySQL,
-			Primary: statusFakeDSN,
-		},
+		StoreDSN:  dsn,
 		StoreMode: "managed",
 	}
 

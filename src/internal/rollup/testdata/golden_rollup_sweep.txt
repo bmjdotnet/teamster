@@ -1,0 +1,33 @@
+=== usage_attribution ===
+message_id=cf1 entity_type=workunit entity_id=w-zeta1 weight=1.00000 method=temporal_join
+message_id=da1 entity_type=workunit entity_id=w-alpha1 weight=1.00000 method=temporal_join
+message_id=dir1 entity_type=workunit entity_id=w-delta1 weight=1.00000 method=brief_directive_recovery
+message_id=dir2 entity_type=workunit entity_id=w-delta1 weight=1.00000 method=brief_directive_recovery
+message_id=fr1 entity_type=outcome entity_id=o-alpha weight=1.00000 method=transcript_focus_recovery
+message_id=lead-gap1 entity_type=outcome entity_id=o-gamma weight=1.00000 method=gap_recovery
+message_id=lead-gap2 entity_type=outcome entity_id=o-gamma weight=1.00000 method=gap_recovery
+message_id=lf1 entity_type=outcome entity_id=o-alpha weight=1.00000 method=temporal_join_lead_session_fallback
+message_id=ro1 entity_type=workunit entity_id=w-zeta1 weight=1.00000 method=synthesized_remote_floor
+message_id=ro2 entity_type=workunit entity_id=w-zeta1 weight=1.00000 method=synthesized_remote_floor
+message_id=sy1 entity_type=outcome entity_id=o-epsilon weight=1.00000 method=synthesized_outcome
+message_id=sy2 entity_type=outcome entity_id=o-epsilon weight=1.00000 method=synthesized_outcome
+message_id=tm-gap entity_type=workunit entity_id=w-gamma1 weight=1.00000 method=temporal_join
+message_id=wu-early entity_type=outcome entity_id=o-alpha weight=1.00000 method=admin_warmup
+=== cost_rollup ===
+bucket_day=2026-05-01 bucket_hour=2026-05-01 09:00:00 entity_type=outcome entity_id=o-alpha agent_name= model=claude-opus-4-8 tokens=2800 cost_usd=28.000000
+bucket_day=2026-05-01 bucket_hour=2026-05-01 09:00:00 entity_type=outcome entity_id=o-epsilon agent_name= model=claude-opus-4-8 tokens=3000 cost_usd=30.000000
+bucket_day=2026-05-01 bucket_hour=2026-05-01 09:00:00 entity_type=outcome entity_id=o-gamma agent_name= model=claude-opus-4-8 tokens=3000 cost_usd=30.000000
+bucket_day=2026-05-01 bucket_hour=2026-05-01 09:00:00 entity_type=workunit entity_id=w-alpha1 agent_name=@store model=claude-opus-4-8 tokens=1000 cost_usd=10.000000
+bucket_day=2026-05-01 bucket_hour=2026-05-01 09:00:00 entity_type=workunit entity_id=w-delta1 agent_name=@PizzaHut model=claude-opus-4-8 tokens=2500 cost_usd=0.250000
+bucket_day=2026-05-01 bucket_hour=2026-05-01 09:00:00 entity_type=workunit entity_id=w-gamma1 agent_name=@store model=claude-opus-4-8 tokens=2500 cost_usd=25.000000
+bucket_day=2026-05-01 bucket_hour=2026-05-01 09:00:00 entity_type=workunit entity_id=w-zeta1 agent_name=@agent1 model=claude-opus-4-8 tokens=3000 cost_usd=0.300000
+bucket_day=2026-05-01 bucket_hour=2026-05-01 09:00:00 entity_type=workunit entity_id=w-zeta1 agent_name=@lead model=claude-opus-4-8 tokens=500 cost_usd=0.050000
+=== outcome_cost_rollup ===
+bucket_day=2026-05-01 bucket_hour=2026-05-01 09:00:00 outcome_id=o-alpha source_type=direct source_id= model=claude-opus-4-8 agent_name= tokens=2800 cost_usd=28.000000
+bucket_day=2026-05-01 bucket_hour=2026-05-01 09:00:00 outcome_id=o-alpha source_type=workunit source_id=w-alpha1 model=claude-opus-4-8 agent_name=@store tokens=1000 cost_usd=10.000000
+bucket_day=2026-05-01 bucket_hour=2026-05-01 09:00:00 outcome_id=o-delta source_type=workunit source_id=w-delta1 model=claude-opus-4-8 agent_name=@PizzaHut tokens=2500 cost_usd=0.250000
+bucket_day=2026-05-01 bucket_hour=2026-05-01 09:00:00 outcome_id=o-epsilon source_type=direct source_id= model=claude-opus-4-8 agent_name= tokens=3000 cost_usd=30.000000
+bucket_day=2026-05-01 bucket_hour=2026-05-01 09:00:00 outcome_id=o-gamma source_type=direct source_id= model=claude-opus-4-8 agent_name= tokens=3000 cost_usd=30.000000
+bucket_day=2026-05-01 bucket_hour=2026-05-01 09:00:00 outcome_id=o-gamma source_type=workunit source_id=w-gamma1 model=claude-opus-4-8 agent_name=@store tokens=2500 cost_usd=25.000000
+bucket_day=2026-05-01 bucket_hour=2026-05-01 09:00:00 outcome_id=o-zeta source_type=workunit source_id=w-zeta1 model=claude-opus-4-8 agent_name=@agent1 tokens=3000 cost_usd=0.300000
+bucket_day=2026-05-01 bucket_hour=2026-05-01 09:00:00 outcome_id=o-zeta source_type=workunit source_id=w-zeta1 model=claude-opus-4-8 agent_name=@lead tokens=500 cost_usd=0.050000

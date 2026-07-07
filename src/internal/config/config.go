@@ -2,7 +2,9 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -14,18 +16,19 @@ import (
 	"github.com/bmjdotnet/teamster/internal/wms"
 )
 
-// StoreDriver identifies which backend [StoreDSN] selects after parsing.
-type StoreDriver string
-
-const (
-	StoreDriverMySQL StoreDriver = "mysql"
-)
-
-// StoreDSN is the parsed shape of TEAMSTER_STORE_DSN. The only supported form
-// is mysql://user:pass@host:port/db.
+// StoreDSN is the parsed shape of TEAMSTER_STORE_DSN, decomposed once here and
+// consumed by everyone who needs the pieces (backup, grafana, status, and the
+// store registry). Parsing is scheme-agnostic — any well-formed URL parses;
+// scheme *support* is a registry concern (store.Open), not this parser's.
 type StoreDSN struct {
-	Driver  StoreDriver
-	Primary string // full mysql:// URL
+	Scheme   string
+	Raw      string
+	User     string
+	Password string
+	Host     string
+	Port     int
+	Database string
+	Params   map[string]string
 }
 
 // Config holds all runtime configuration for Teamster components.
@@ -478,23 +481,68 @@ func (c Config) TagSpecs() []wms.TagSpec {
 	return specs
 }
 
-// ParseStoreDSN parses a TEAMSTER_STORE_DSN value. The only accepted form is
-// mysql://user:pass@host:port/db.
+// ParseStoreDSN parses a TEAMSTER_STORE_DSN value as a well-formed URL of any
+// scheme — scheme support is a registry concern (store.Open), not this
+// parser's.
 func ParseStoreDSN(raw string) (StoreDSN, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return StoreDSN{}, fmt.Errorf("empty DSN")
 	}
-	if strings.HasPrefix(raw, "mysql://") {
-		return StoreDSN{Driver: StoreDriverMySQL, Primary: raw}, nil
+	u, err := url.Parse(raw)
+	if err != nil {
+		// net/url returns a *url.Error whose string embeds the raw DSN (and
+		// thus the password) via its URL field. This error wraps up through
+		// config.Load and the tags/wms CLIs to stderr/the feed, and a
+		// password containing a space defeats redact's userinfo masking, so
+		// report only the scheme, never the raw DSN or the wrapped error.
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			err = ue.Err
+		}
+		return StoreDSN{}, fmt.Errorf("parse DSN (scheme %q): %v", dsnScheme(raw), err)
 	}
-	// raw carries userinfo with the password. Report only the scheme, never the
-	// userinfo — this error wraps up through config.Load and the tags/wms CLIs to
-	// stderr/the feed, and a password containing a space defeats redact's
-	// userinfo masking, so echoing even a redacted raw is not leak-proof.
-	scheme := "<none>"
+	if u.Scheme == "" {
+		return StoreDSN{}, fmt.Errorf("DSN missing scheme")
+	}
+
+	dsn := StoreDSN{
+		Scheme:   u.Scheme,
+		Raw:      raw,
+		User:     u.User.Username(),
+		Host:     u.Hostname(),
+		Database: strings.TrimPrefix(u.Path, "/"),
+	}
+	if pw, ok := u.User.Password(); ok {
+		dsn.Password = pw
+	}
+	if p := u.Port(); p != "" {
+		n, err := strconv.Atoi(p)
+		if err != nil {
+			return StoreDSN{}, fmt.Errorf("DSN port: %w", err)
+		}
+		dsn.Port = n
+	}
+	if q := u.Query(); len(q) > 0 {
+		params := make(map[string]string, len(q))
+		for k, vs := range q {
+			if len(vs) > 0 {
+				params[k] = vs[0]
+			}
+		}
+		dsn.Params = params
+	}
+	return dsn, nil
+}
+
+// dsnScheme returns the scheme portion (before "://") of a DSN, or "<none>" if
+// there is no scheme separator. It deliberately never returns userinfo, so it
+// is safe to print in an error regardless of password shape (a password with a
+// space defeats redact.Redact's userinfo masking). Mirrors
+// internal/store/mysql.dsnScheme.
+func dsnScheme(raw string) string {
 	if i := strings.Index(raw, "://"); i >= 0 {
-		scheme = raw[:i]
+		return raw[:i]
 	}
-	return StoreDSN{}, fmt.Errorf("unknown DSN scheme: %q (want mysql://)", scheme)
+	return "<none>"
 }

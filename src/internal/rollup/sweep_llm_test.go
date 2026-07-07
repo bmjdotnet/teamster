@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"os"
 	"testing"
+
+	"github.com/bmjdotnet/teamster/internal/store/mysql"
 )
 
 func TestWriteTempMappings_RoundTrips(t *testing.T) {
@@ -54,8 +56,8 @@ func TestWriteTempMappings_EmptySlice(t *testing.T) {
 }
 
 func TestSweepOutcomeID_IsStable(t *testing.T) {
-	if sweepOutcomeID != "out-sweep" {
-		t.Fatalf("sweepOutcomeID = %q, want out-sweep", sweepOutcomeID)
+	if mysql.SweepOutcomeID != "out-sweep" {
+		t.Fatalf("mysql.SweepOutcomeID = %q, want out-sweep", mysql.SweepOutcomeID)
 	}
 }
 

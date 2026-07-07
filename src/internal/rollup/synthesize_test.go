@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bmjdotnet/teamster/internal/store/storetest"
 	"github.com/bmjdotnet/teamster/internal/transcript"
 )
 
@@ -32,7 +33,7 @@ func writeMappingFile(t *testing.T, mappings []SynthesisMapping) string {
 // unallocated session mapped to a synthesized outcome is re-attributed with
 // method='synthesized_outcome', conservation holds, evidence is recorded.
 func TestSynthesizeFocus_ReattributesByMapping(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 9, 20, 0, 0, 0, time.UTC)
 
@@ -93,12 +94,10 @@ func TestSynthesizeFocus_ReattributesByMapping(t *testing.T) {
 
 	// Provenance: synthesis_evidence records the mapping source + confidence.
 	var evEType, evEID, evConf, evExcerpt, evSource string
-	if err := db.QueryRowContext(ctx,
+	storetest.QueryRow(t, ctx, db,
 		`SELECT entity_type, entity_id, confidence, evidence_excerpt, mapping_source
-		 FROM synthesis_evidence WHERE message_id = 'sm1'`).
-		Scan(&evEType, &evEID, &evConf, &evExcerpt, &evSource); err != nil {
-		t.Fatalf("read synthesis evidence for sm1: %v", err)
-	}
+		 FROM synthesis_evidence WHERE message_id = 'sm1'`, nil,
+		&evEType, &evEID, &evConf, &evExcerpt, &evSource)
 	if evEType != "outcome" || evEID != "out-synth-1" {
 		t.Fatalf("evidence sm1 entity = (%q,%q), want (outcome,out-synth-1)", evEType, evEID)
 	}
@@ -121,7 +120,7 @@ func TestSynthesizeFocus_ReattributesByMapping(t *testing.T) {
 // TestSynthesizeFocus_DryRunWritesNothing verifies that --dry-run performs zero
 // writes while still reporting the plan.
 func TestSynthesizeFocus_DryRunWritesNothing(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 9, 20, 0, 0, 0, time.UTC)
 
@@ -148,9 +147,7 @@ func TestSynthesizeFocus_DryRunWritesNothing(t *testing.T) {
 		t.Fatalf("dry-run mutated attribution: method=%q, want unallocated", method)
 	}
 	var ev int
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM synthesis_evidence`).Scan(&ev); err != nil {
-		t.Fatalf("count synthesis evidence: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT COUNT(*) FROM synthesis_evidence`, nil, &ev)
 	if ev != 0 {
 		t.Fatalf("dry-run wrote %d synthesis evidence rows, want 0", ev)
 	}
@@ -158,7 +155,7 @@ func TestSynthesizeFocus_DryRunWritesNothing(t *testing.T) {
 
 // TestSynthesizeFocus_UnsynthesizeReverses verifies full reversibility.
 func TestSynthesizeFocus_UnsynthesizeReverses(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 9, 20, 0, 0, 0, time.UTC)
 
@@ -203,9 +200,7 @@ func TestSynthesizeFocus_UnsynthesizeReverses(t *testing.T) {
 
 	// Evidence cleared.
 	var ev int
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM synthesis_evidence`).Scan(&ev); err != nil {
-		t.Fatalf("count synthesis evidence: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT COUNT(*) FROM synthesis_evidence`, nil, &ev)
 	if ev != 0 {
 		t.Fatalf("unsynthesize left %d evidence rows, want 0", ev)
 	}
@@ -219,7 +214,7 @@ func TestSynthesizeFocus_UnsynthesizeReverses(t *testing.T) {
 // TestSynthesizeFocus_NeverTouchesNonUnallocated verifies that synthesis only
 // touches method='unallocated' rows — a temporal_join row is never rewritten.
 func TestSynthesizeFocus_NeverTouchesNonUnallocated(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 9, 20, 0, 0, 0, time.UTC)
 
@@ -258,7 +253,7 @@ func TestSynthesizeFocus_NeverTouchesNonUnallocated(t *testing.T) {
 // TestSynthesizeFocus_SkipsIncompleteMappings verifies that mappings with
 // missing session_id, entity_type, or entity_id are skipped.
 func TestSynthesizeFocus_SkipsIncompleteMappings(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 9, 20, 0, 0, 0, time.UTC)
 
@@ -292,7 +287,7 @@ func TestSynthesizeFocus_SkipsIncompleteMappings(t *testing.T) {
 
 // TestSynthesizeFocus_ConservationInvariant explicitly asserts $0.00 delta.
 func TestSynthesizeFocus_ConservationInvariant(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 9, 20, 0, 0, 0, time.UTC)
 
@@ -333,7 +328,7 @@ func TestSynthesizeFocus_ConservationInvariant(t *testing.T) {
 // TestSynthesizeFocus_UnmappedSessionUntouched verifies that a session NOT in the
 // mapping file is left untouched.
 func TestSynthesizeFocus_UnmappedSessionUntouched(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 9, 20, 0, 0, 0, time.UTC)
 
@@ -372,7 +367,7 @@ func TestSynthesizeFocus_UnmappedSessionUntouched(t *testing.T) {
 // excludes sessions that DID set focus (those are RecoverFocus/RecoverWarmup
 // territory). Also verifies host-scoping and cost computation.
 func TestOrphanSessions_IdentifiesNoFocusSessions(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 9, 20, 0, 0, 0, time.UTC)
 
@@ -418,7 +413,7 @@ func TestOrphanSessions_IdentifiesNoFocusSessions(t *testing.T) {
 // DOES have setFocus events in its transcript should be skipped — it belongs to
 // RecoverFocus/RecoverWarmup, not synthesis.
 func TestSynthesizeFocus_SkipsFocusSession(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 9, 20, 0, 0, 0, time.UTC)
 
@@ -476,7 +471,7 @@ func TestSynthesizeFocus_SkipsFocusSession(t *testing.T) {
 // TestSynthesizeFocus_DuplicateSessionWarns is the L-3 guard: duplicate session_id
 // entries in the mapping file should produce a warning (last entry wins).
 func TestSynthesizeFocus_DuplicateSessionWarns(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 9, 20, 0, 0, 0, time.UTC)
 

@@ -1,11 +1,11 @@
-package server
+package mysql
 
 import "testing"
 
-// TestResolveAgentFromNames covers the server-side resolution of an
-// empty-stamped telemetry row (the MAIN transcript, i.e. the lead) against the
-// agent_name rows recorded for its session. Teammate rows are stamped directly
-// by the scraper and never reach this path, so an empty-stamped row in a team
+// TestResolveAgentFromNames covers the resolution of an empty-stamped
+// telemetry row (the MAIN transcript, i.e. the lead) against the agent_name
+// rows recorded for its session. Teammate rows are stamped directly by the
+// scraper and never reach this path, so an empty-stamped row in a team
 // session must resolve to the lead ("") rather than being promoted to a
 // teammate — the bug that mis-attributed the lead's main-file cost.
 func TestResolveAgentFromNames(t *testing.T) {

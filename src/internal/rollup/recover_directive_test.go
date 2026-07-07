@@ -2,10 +2,12 @@ package rollup
 
 import (
 	"context"
-	"database/sql"
 	"math"
 	"testing"
 	"time"
+
+	"github.com/bmjdotnet/teamster/internal/store"
+	"github.com/bmjdotnet/teamster/internal/store/storetest"
 )
 
 // seedBriefDirective inserts a kind='focus' wms_intervals row with
@@ -13,32 +15,27 @@ import (
 // writeBriefDirectiveInterval writes when the remote scraper ships a focus-less
 // teammate's dispatch-brief directive. Open-ended (no ended_at): the directive
 // is the teammate's first instruction, so it covers the whole session.
-func seedBriefDirective(t *testing.T, db *sql.DB, ctx context.Context, session, agent, etype, eid string, start time.Time) {
+func seedBriefDirective(t *testing.T, db store.Store, ctx context.Context, session, agent, etype, eid string, start time.Time) {
 	t.Helper()
-	if _, err := db.ExecContext(ctx,
+	storetest.Exec(t, ctx, db,
 		`INSERT INTO wms_intervals (kind, identity_source, session_id, agent_name, entity_type, entity_id, started_at)
 		 VALUES ('focus','brief_directive',?,?,?,?,?)`,
-		session, agent, etype, eid, start); err != nil {
-		t.Fatalf("seed brief directive %s/%s: %v", etype, eid, err)
-	}
+		session, agent, etype, eid, start)
 }
 
 // markSweepSkipped flips a message's attribution method to 'sweep_skipped',
 // emulating the LLM sweep having examined a focus-less remote session and given
 // up (it could not read the Mac transcript). RecoverDirective must reclaim it.
-func markSweepSkipped(t *testing.T, db *sql.DB, ctx context.Context, msgID string) {
+func markSweepSkipped(t *testing.T, db store.Store, ctx context.Context, msgID string) {
 	t.Helper()
-	if _, err := db.ExecContext(ctx,
-		`UPDATE usage_attribution SET method='sweep_skipped' WHERE message_id=?`, msgID); err != nil {
-		t.Fatalf("mark sweep_skipped %s: %v", msgID, err)
-	}
+	storetest.Exec(t, ctx, db, `UPDATE usage_attribution SET method='sweep_skipped' WHERE message_id=?`, msgID)
 }
 
 // TestRecoverDirective_AttributesFocusLessTeammate is the primary test: a
 // focus-less remote teammate session — one unallocated message and one already
 // marked sweep_skipped — is attributed to the workunit its brief named.
 func TestRecoverDirective_AttributesFocusLessTeammate(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 23, 3, 45, 0, 0, time.UTC)
 
@@ -87,9 +84,7 @@ func TestRecoverDirective_AttributesFocusLessTeammate(t *testing.T) {
 
 	// Evidence recorded for each.
 	var evN int
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM directive_evidence`).Scan(&evN); err != nil {
-		t.Fatalf("count evidence: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT COUNT(*) FROM directive_evidence`, nil, &evN)
 	if evN != 3 {
 		t.Fatalf("directive_evidence rows=%d, want 3", evN)
 	}
@@ -99,7 +94,7 @@ func TestRecoverDirective_AttributesFocusLessTeammate(t *testing.T) {
 // unallocated and deletes the evidence, while leaving the directive interval in
 // place (durable provenance).
 func TestRecoverDirective_Reverses(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 23, 3, 45, 0, 0, time.UTC)
 
@@ -137,18 +132,14 @@ func TestRecoverDirective_Reverses(t *testing.T) {
 		}
 	}
 	var evN int
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM directive_evidence`).Scan(&evN); err != nil {
-		t.Fatalf("count evidence: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT COUNT(*) FROM directive_evidence`, nil, &evN)
 	if evN != 0 {
 		t.Fatalf("directive_evidence rows=%d after uncover, want 0", evN)
 	}
 	// The directive interval is durable provenance — left in place.
 	var ivN int
-	if err := db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM wms_intervals WHERE kind='focus' AND identity_source='brief_directive'`).Scan(&ivN); err != nil {
-		t.Fatalf("count intervals: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db,
+		`SELECT COUNT(*) FROM wms_intervals WHERE kind='focus' AND identity_source='brief_directive'`, nil, &ivN)
 	if ivN != 1 {
 		t.Fatalf("brief_directive intervals=%d after uncover, want 1 (provenance retained)", ivN)
 	}
@@ -159,7 +150,7 @@ func TestRecoverDirective_Reverses(t *testing.T) {
 // and is NEVER touched by directive recovery — the load-bearing "did set focus is
 // unaffected" guarantee.
 func TestRecoverDirective_LeavesRealFocusUntouched(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 23, 3, 45, 0, 0, time.UTC)
 
@@ -197,7 +188,7 @@ func TestRecoverDirective_LeavesRealFocusUntouched(t *testing.T) {
 // that does not exist is skipped (NoEntity) and leaves the cost unallocated rather
 // than inventing attribution to a ghost.
 func TestRecoverDirective_DanglingEntitySkipped(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 23, 3, 45, 0, 0, time.UTC)
 
@@ -222,7 +213,7 @@ func TestRecoverDirective_DanglingEntitySkipped(t *testing.T) {
 
 // TestRecoverDirective_DryRunWritesNothing verifies --dry-run performs zero writes.
 func TestRecoverDirective_DryRunWritesNothing(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 23, 3, 45, 0, 0, time.UTC)
 
@@ -246,9 +237,7 @@ func TestRecoverDirective_DryRunWritesNothing(t *testing.T) {
 		t.Fatalf("ph1 method=%q after dry-run, want unallocated (no writes)", method)
 	}
 	var evN int
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM directive_evidence`).Scan(&evN); err != nil {
-		t.Fatalf("count evidence: %v", err)
-	}
+	storetest.QueryRow(t, ctx, db, `SELECT COUNT(*) FROM directive_evidence`, nil, &evN)
 	if evN != 0 {
 		t.Fatalf("dry-run wrote %d evidence rows, want 0", evN)
 	}
@@ -257,7 +246,7 @@ func TestRecoverDirective_DryRunWritesNothing(t *testing.T) {
 // TestRecoverDirective_Conservation verifies SUM(ledger) == SUM(cost_facts) before
 // and after directive recovery — no cost created or destroyed.
 func TestRecoverDirective_Conservation(t *testing.T) {
-	db := rollupTestDB(t)
+	db := rollupTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 6, 23, 3, 45, 0, 0, time.UTC)
 
