@@ -399,11 +399,34 @@ download_prometheus() {
 # --build-otelcol builds from source; default downloads the pinned release.
 install_otelcol() {
     local builddir="$1"
-    local version="0.95.0"
-    # SHA256 of the release tarballs. Update when pinning a new version.
-    # TODO(release): pin from actual release artifacts (https://github.com/open-telemetry/opentelemetry-collector-releases/releases)
-    local sha256_amd64="PLACEHOLDER_UPDATE_AT_PIN_TIME"
-    local sha256_arm64="PLACEHOLDER_UPDATE_AT_PIN_TIME"
+    # Bumped from 0.95.0 to 0.156.0 (2026-07-07, otelcol-temporality-bump WU):
+    # 0.95.0 has no delta-to-cumulative processor, so Codex's OTLP metrics
+    # (all delta temporality — live-verified) were silently dropped by
+    # prometheusremotewrite ("invalid temporality and type combination").
+    # deltatocumulativeprocessor is confirmed present in this version's
+    # manifest. Changelog reviewed for the 8 components this template uses
+    # (otlp receiver, memory_limiter/batch/transform/resource/deltatocumulative
+    # processors, debug/prometheusremotewrite exporters) across the whole
+    # 0.95.0->0.156.0 span: no schema-breaking changes found for any of them.
+    # prometheusremotewrite's "Remote Write 2.0" changelog entries all concern
+    # an opt-in feature gate (exporter.prometheusremotewritexporter.enableSendingRW2)
+    # that defaults off and remains flagged not-production-ready upstream — our
+    # config never sets `protobuf_message`, so we stay on Remote Write 1.0
+    # (`prometheus.WriteRequest`, still the default), compatible with the
+    # bundled Prometheus 2.51.2 above. Full write-up + dual-runtime boot/traffic
+    # proof: teamster-codex-kit research/evidence-round3/otelcol-temporality-bump/.
+    local version="0.156.0"
+    # SHA256 of the release tarballs, computed locally from the artifacts
+    # downloaded over HTTPS, then cross-checked against the project's own
+    # published (cosign-signed) checksums.txt asset on this release — both
+    # match exactly. Resolves the prior PLACEHOLDER/TODO(release) pin.
+    # https://github.com/open-telemetry/opentelemetry-collector-releases/releases/tag/v0.156.0
+    # https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v0.156.0/opentelemetry-collector-releases_otelcol-contrib_checksums.txt
+    # A stronger supply-chain option for later: verify that checksums.txt's
+    # cosign signature (the accompanying .sig/.pem) instead of trusting a
+    # self-downloaded tarball — not done here, flagged for a future pass.
+    local sha256_amd64="ee70d7b1221be8a9cc4700f48bf985c04b1ab8aaeef24409fe79623849e2f9f2"
+    local sha256_arm64="1f9afe1d245b4babbb4bcb7d6b57ba2836b3b23c5f61b38abc00ab461f049288"
 
     if [[ "$OTELCOL_BUILD_FROM_SRC" -eq 1 ]]; then
         echo ""
