@@ -56,13 +56,19 @@ func (s HookSpec) render() string {
 const DefaultHookTimeoutSec = 10
 
 // TeamsterHookSpecs builds the three hooks WP8 registers — SessionStart,
-// PreToolUse, PostToolUse — all pointed at codex-hook.py with the same
-// matcher (".*", matching every event and every tool — the live feed wants
-// everything) and timeoutSec. basedir is BASEDIR (lib/hook/codex-hook.py
-// lives under it, alongside teamster.py — the installer must chmod +x it
-// at copy time, the same way it already does for teamster.py/token-scraper
-// on remote installs); pass DefaultHookTimeoutSec absent an operator
-// override.
+// PreToolUse, PostToolUse — all pointed at codex-hook.py via an explicit
+// `python3` invocation, with the same matcher (".*", matching every event
+// and every tool — the live feed wants everything) and timeoutSec. basedir
+// is BASEDIR (lib/hook/codex-hook.py lives under it, alongside teamster.py —
+// both must ship together since codex-hook.py imports teamster.py); pass
+// DefaultHookTimeoutSec absent an operator override.
+//
+// Command is "python3 <path>", not a bare path relying on the shebang +
+// executable bit: explicit interpreter invocation removes any dependency on
+// the installer preserving the executable bit when it copies this file,
+// and was confirmed live (this package's tests) to dispatch correctly —
+// Codex's hook command execution handles a multi-word command string, not
+// just the single-path strings every prior kit specimen happened to use.
 //
 // Python, not a compiled Go binary (operator directive, superseding an
 // earlier Go cmd/codex-hook prototype): client-side hook code should avoid
@@ -72,7 +78,7 @@ const DefaultHookTimeoutSec = 10
 // re-implementing them — both files must ship together in the same
 // lib/hook/ directory.
 func TeamsterHookSpecs(basedir string, timeoutSec int) []HookSpec {
-	command := filepath.Join(basedir, "lib", "hook", "codex-hook.py")
+	command := "python3 " + filepath.Join(basedir, "lib", "hook", "codex-hook.py")
 	events := []string{"SessionStart", "PreToolUse", "PostToolUse"}
 	specs := make([]HookSpec, 0, len(events))
 	for _, event := range events {
