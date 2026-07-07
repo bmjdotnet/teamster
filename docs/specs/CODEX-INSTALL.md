@@ -81,6 +81,18 @@ binary finds no rollout files under `$CODEX_HOME`, and exits 0 every run.
   content-derived unique id the way Claude's `message.id`+`requestId` do.
   Sequence numbers are derived purely from scan order, which is why this
   survives a full re-scan (see Retention below) without double-counting.
+- **No fresh-vs-resume discriminator exists in rollout JSONL, and the tailer
+  doesn't need one.** `session_meta` does carry a `source` field (e.g.
+  `"exec"` — the entry-surface the session was launched through), but there
+  is exactly ONE `session_meta` record per file even after `codex exec
+  resume` appends a second turn — the plan's "discriminate via `source`
+  (startup/resume)" language describes the separate **hook** `SessionStart`
+  stdin payload (a WP8 concern), not anything present in rollout JSONL
+  content. Verified live (settled in the kit's `verification-round3.md`
+  Addendum 2). The tailer's scan-order sequence-number design (above) needs
+  no such discriminator regardless — every `token_count` event is ledgered
+  independently of whether its turn came from the original launch or a
+  later resume.
 
 ### Schema additions (mysql migration v51 / sqlite v51, additive-only)
 
@@ -138,5 +150,16 @@ existing batching/fallback-spool/idempotent-upsert machinery, same as
 an open design question in the WP3 brief (hookd's `/telemetry` never touches
 `sessions` today); direct-store access for a periodic Go binary is an
 established pattern in this codebase, not a new one, and avoids extending
-hookd's wire contract for a low-frequency, non-batched write. Flagged here in
-case a reviewer prefers a hookd-endpoint alternative instead.
+hookd's wire contract for a low-frequency, non-batched write.
+
+**Decided (lead, 2026-07-07): keep direct-store for v1.** The precedent
+(classify/rollup) is exactly right, and v1 is hub-local by scope — no
+rework needed. **Migration path for later:** `codex-scraper` only makes
+sense running on the same host as the `codex` CLI it tails, which for a
+Codex **remote** (by analogy with Claude Code's hub/remote model) would be
+a machine that cannot reach the hub's `TEAMSTER_STORE_DSN` directly. When
+Codex remote support lands ([later], not in this kit's v1 scope), the
+sessions-row upsert must move behind a hookd HTTP endpoint (the
+hookd-endpoint alternative flagged above) so a remote-side scraper can
+reach it the same way remote Claude Code hook clients already reach hookd
+over HTTP — the direct-store path only works hub-local.
