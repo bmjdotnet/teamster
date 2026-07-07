@@ -142,8 +142,8 @@ func fallbackEligible() bool {
 }
 
 // runtimeTag classifies the calling connection into one of three buckets for
-// tagging freshly created entities: "codex", "claude", or "unknown" (a third
-// MCP client we can't positively identify as either — inspector tools,
+// tagging freshly created entities: "codex", "claude_code", or "unknown" (a
+// third MCP client we can't positively identify as either — inspector tools,
 // another agent CLI, etc.). Independent of whether Codex's turn metadata was
 // present on this particular call; a Codex connection that dropped turn
 // metadata for one call is still "codex" here even though resolveSessionID
@@ -155,7 +155,7 @@ func runtimeTag() string {
 	case ConnectionClientName == codexClientName:
 		return "codex"
 	case ConnectionClientName == claudeCodeClientName, ConnectionClientName == "":
-		return "claude"
+		return "claude_code"
 	default:
 		return "unknown"
 	}
@@ -188,10 +188,11 @@ func resolveSessionID(m *Meta) {
 	m.SessionID = "unknown-" + runtimeTag()
 }
 
-// applyRuntimeTag auto-applies runtime:<codex|claude|unknown> to a freshly
-// created entity, mirroring applyCreatorUserTag's pattern: best-effort, never
-// blocks the create. "unknown" means the call arrived over a connection that
-// could not be positively identified as Claude Code or Codex.
+// applyRuntimeTag auto-applies runtime:<codex|claude_code|unknown> to a
+// freshly created entity, mirroring applyCreatorUserTag's pattern:
+// best-effort, never blocks the create. "unknown" means the call arrived
+// over a connection that could not be positively identified as Claude Code
+// or Codex.
 func applyRuntimeTag(ctx context.Context, store wms.Store, entityType, entityID, runtime string) {
 	if err := store.TagEntity(ctx, entityType, entityID, "runtime", runtime, "classifier", ""); err != nil {
 		slog.Warn("wms-mcp: auto runtime-tag failed",

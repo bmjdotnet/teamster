@@ -52,8 +52,8 @@ func TestResolveSessionID_ClaudeWithFallback(t *testing.T) {
 	if m.SessionID != fallbackSentinel {
 		t.Errorf("SessionID = %q, want the fallback file value %q", m.SessionID, fallbackSentinel)
 	}
-	if got := runtimeTag(); got != "claude" {
-		t.Errorf("runtimeTag() = %q, want claude", got)
+	if got := runtimeTag(); got != "claude_code" {
+		t.Errorf("runtimeTag() = %q, want claude_code", got)
 	}
 }
 
@@ -173,7 +173,7 @@ func TestFallbackEligible_RuntimeEnvOverridesClientInfo(t *testing.T) {
 
 // TestRuntimeTagAppliedOnCreate: end-to-end through HandleToolCall — creating
 // an outcome over a simulated Codex connection (turn metadata present) tags
-// the entity runtime:codex; over a plain Claude connection, runtime:claude;
+// the entity runtime:codex; over a plain Claude connection, runtime:claude_code;
 // over an unrecognized client, runtime:unknown. Source is "classifier",
 // mirroring applyCreatorUserTag. Requires TEAMSTER_TEST_MYSQL_DSN (see
 // newStewardStore); SKIPs otherwise.
@@ -212,7 +212,7 @@ func TestRuntimeTagAppliedOnCreate(t *testing.T) {
 	}); ce != nil {
 		t.Fatalf("createOutcome (claude): %v", ce)
 	}
-	if ok, src := entityHasTag(t, store, wms.EntityOutcome, "out-claude", "runtime", "claude"); !ok || src != "classifier" {
+	if ok, src := entityHasTag(t, store, wms.EntityOutcome, "out-claude", "runtime", "claude_code"); !ok || src != "classifier" {
 		t.Errorf("claude outcome runtime tag: ok=%v source=%q, want true/classifier", ok, src)
 	}
 
