@@ -40,8 +40,8 @@ func TestTeamsterHookSpecs(t *testing.T) {
 			t.Errorf("unexpected event %q", s.Event)
 		}
 		wantEvents[s.Event] = true
-		if s.Command != "/home/bmj/teamster/lib/hook/codex-hook.py" {
-			t.Errorf("event %s: command = %q, want the codex-hook.py path", s.Event, s.Command)
+		if s.Command != "python3 /home/bmj/teamster/lib/hook/codex-hook.py" {
+			t.Errorf("event %s: command = %q, want the python3-prefixed codex-hook.py invocation", s.Event, s.Command)
 		}
 		if s.Matcher != ".*" {
 			t.Errorf("event %s: matcher = %q, want \".*\"", s.Event, s.Matcher)
