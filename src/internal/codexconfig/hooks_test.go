@@ -8,12 +8,12 @@ import (
 )
 
 func TestHookSpec_Render(t *testing.T) {
-	spec := HookSpec{Event: "PreToolUse", Matcher: ".*", Command: "/home/bmj/teamster/bin/codex-hook", TimeoutSec: 10}
+	spec := HookSpec{Event: "PreToolUse", Matcher: ".*", Command: "/home/bmj/teamster/lib/hook/codex-hook.py", TimeoutSec: 10}
 	want := `[[hooks.PreToolUse]]
 matcher = ".*"
 [[hooks.PreToolUse.hooks]]
 type = "command"
-command = "/home/bmj/teamster/bin/codex-hook"
+command = "/home/bmj/teamster/lib/hook/codex-hook.py"
 timeout = 10
 `
 	if got := spec.render(); got != want {
@@ -22,7 +22,7 @@ timeout = 10
 }
 
 func TestHookSpec_Render_OmitsMatcherWhenEmpty(t *testing.T) {
-	spec := HookSpec{Event: "SessionStart", Command: "/x/bin/codex-hook", TimeoutSec: 10}
+	spec := HookSpec{Event: "SessionStart", Command: "/x/lib/hook/codex-hook.py", TimeoutSec: 10}
 	got := spec.render()
 	if strings.Contains(got, "matcher") {
 		t.Errorf("expected no matcher line when Matcher is empty, got:\n%s", got)
@@ -40,8 +40,8 @@ func TestTeamsterHookSpecs(t *testing.T) {
 			t.Errorf("unexpected event %q", s.Event)
 		}
 		wantEvents[s.Event] = true
-		if s.Command != "/home/bmj/teamster/bin/codex-hook" {
-			t.Errorf("event %s: command = %q, want the codex-hook binary path", s.Event, s.Command)
+		if s.Command != "/home/bmj/teamster/lib/hook/codex-hook.py" {
+			t.Errorf("event %s: command = %q, want the codex-hook.py path", s.Event, s.Command)
 		}
 		if s.Matcher != ".*" {
 			t.Errorf("event %s: matcher = %q, want \".*\"", s.Event, s.Matcher)

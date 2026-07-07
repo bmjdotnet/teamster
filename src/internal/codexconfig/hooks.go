@@ -56,12 +56,23 @@ func (s HookSpec) render() string {
 const DefaultHookTimeoutSec = 10
 
 // TeamsterHookSpecs builds the three hooks WP8 registers — SessionStart,
-// PreToolUse, PostToolUse — all pointed at codex-hook with the same matcher
-// (".*", matching every event and every tool — the live feed wants
-// everything) and timeoutSec. basedir is BASEDIR (bin/codex-hook lives
-// under it); pass DefaultHookTimeoutSec absent an operator override.
+// PreToolUse, PostToolUse — all pointed at codex-hook.py with the same
+// matcher (".*", matching every event and every tool — the live feed wants
+// everything) and timeoutSec. basedir is BASEDIR (lib/hook/codex-hook.py
+// lives under it, alongside teamster.py — the installer must chmod +x it
+// at copy time, the same way it already does for teamster.py/token-scraper
+// on remote installs); pass DefaultHookTimeoutSec absent an operator
+// override.
+//
+// Python, not a compiled Go binary (operator directive, superseding an
+// earlier Go cmd/codex-hook prototype): client-side hook code should avoid
+// requiring a Go toolchain wherever Python already fills the role, the same
+// reasoning that keeps teamster.py itself in Python. codex-hook.py imports
+// teamster.py's own redaction/error-logging helpers directly rather than
+// re-implementing them — both files must ship together in the same
+// lib/hook/ directory.
 func TeamsterHookSpecs(basedir string, timeoutSec int) []HookSpec {
-	command := filepath.Join(basedir, "bin", "codex-hook")
+	command := filepath.Join(basedir, "lib", "hook", "codex-hook.py")
 	events := []string{"SessionStart", "PreToolUse", "PostToolUse"}
 	specs := make([]HookSpec, 0, len(events))
 	for _, event := range events {

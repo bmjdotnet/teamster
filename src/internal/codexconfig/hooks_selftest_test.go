@@ -22,7 +22,10 @@ import (
 // makes an installer upgrade self-heal instead of leaving the live feed
 // silently dead:
 //
-//  1. Build the real codex-hook binary (not a stand-in script).
+//  1. Stage the real codex-hook.py + teamster.py into a scratch
+//     lib/hook/ dir (not a stand-in script) — codex-hook.py imports
+//     teamster.py, so both must be copied together, exactly as the real
+//     installer must ship them.
 //  2. "Install": WriteHooks into a fresh isolated CODEX_HOME, then run a real
 //     `codex exec` and confirm SessionStart/PreToolUse/PostToolUse all reach
 //     a capture endpoint with NO interactive trust step.
@@ -47,17 +50,20 @@ func TestPostInstallAndPostUpgrade_RealCodex_HookFires(t *testing.T) {
 		t.Skip("set TEAMSTER_TEST_CODEX_LIVE_EXEC=1 to run this test — it makes real `codex exec` calls (real tokens, real network, requires `codex login`)")
 	}
 
-	// 1. Build the real codex-hook binary into a scratch bin dir.
+	// 1. Stage the real codex-hook.py alongside teamster.py (its import
+	// dependency) into a scratch lib/hook/ dir.
 	basedir := t.TempDir()
-	binDir := filepath.Join(basedir, "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
+	hookDir := filepath.Join(basedir, "lib", "hook")
+	if err := os.MkdirAll(hookDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	hookBin := filepath.Join(binDir, "codex-hook")
-	build := exec.Command("go", "build", "-o", hookBin, "../../cmd/codex-hook")
-	build.Env = append(os.Environ(), "GOFLAGS=-buildvcs=false")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("go build codex-hook: %v\n%s", err, out)
+	for _, name := range []string{"codex-hook.py", "teamster.py"} {
+		if err := copyFileForTest(t, filepath.Join("../../../skel/lib/hook", name), filepath.Join(hookDir, name)); err != nil {
+			t.Fatalf("stage %s: %v", name, err)
+		}
+	}
+	if err := os.Chmod(filepath.Join(hookDir, "codex-hook.py"), 0o755); err != nil {
+		t.Fatal(err)
 	}
 
 	// Capture server: records hook_event_name for every POST /event.
