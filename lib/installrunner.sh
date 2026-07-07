@@ -1162,7 +1162,7 @@ LDFLAGS="-X ${_vpkg}.Version=${TEAMSTER_VERSION} -X ${_vpkg}.Commit=${TEAMSTER_C
 dlog INFO install.compile "version" "version=$TEAMSTER_VERSION" "commit=$TEAMSTER_COMMIT" "build_time=$TEAMSTER_BUILD_TIME"
 
 cd "$REPO/src"
-for _target in teamster hookd feed activity-mcp wms-mcp teamster-install token-scraper rollup classify demogen relay backup; do
+for _target in teamster hookd feed activity-mcp wms-mcp teamster-install token-scraper codex-scraper rollup classify demogen relay backup; do
     if go build -trimpath -ldflags "$LDFLAGS" -o "$BUILDDIR/$_target" "./cmd/$_target"; then
         dlog INFO install.compile "built" "target=$_target" "rc=0"
     else
@@ -1417,6 +1417,29 @@ if [[ "$WIRE" -eq 1 ]] && [[ "$HOOKD_READ_ONLY" -eq 0 ]] && [[ "$HOOKD_MODE" != 
         dlog INFO install.classify-timer "installed" "svc=$CLASSIFY_SVC_SRC" "timer=$CLASSIFY_TIMER_SRC"
     else
         dlog WARN install.classify-timer "src units not present" "svc=$CLASSIFY_SVC_SRC"
+    fi
+fi
+
+# Sync the codex-scraper service + timer (Codex rollout-JSONL tailer — sole
+# writer of Codex cost/ledger data and the Codex sessions row) into systemd
+# and enable the timer. Same guards as the classify unit: only when wiring
+# locally-managed systemd. The service is Type=oneshot driven by the timer.
+# Graceful on a host with no `codex` CLI: the binary finds no rollout files
+# and exits 0 every run.
+if [[ "$WIRE" -eq 1 ]] && [[ "$HOOKD_READ_ONLY" -eq 0 ]] && [[ "$HOOKD_MODE" != "supervisor" ]] && [[ "$HOOKD_MODE" != "external" ]] && command -v systemctl &>/dev/null; then
+    CODEX_SCRAPER_SVC_SRC="$BASEDIR/etc/teamster-codex-scraper.service"
+    CODEX_SCRAPER_TIMER_SRC="$BASEDIR/etc/teamster-codex-scraper.timer"
+    if [[ -f "$CODEX_SCRAPER_SVC_SRC" ]] && [[ -f "$CODEX_SCRAPER_TIMER_SRC" ]]; then
+        printf -- "${C_BOLD_CYAN}--- Syncing codex-scraper timer ---${C_RESET}\n"
+        sudo install -m 0644 "$CODEX_SCRAPER_SVC_SRC" /etc/systemd/system/teamster-codex-scraper.service
+        sudo install -m 0644 "$CODEX_SCRAPER_TIMER_SRC" /etc/systemd/system/teamster-codex-scraper.timer
+        sudo systemctl daemon-reload
+        sudo systemctl enable --now teamster-codex-scraper.timer 2>/dev/null \
+            && echo "    enabled teamster-codex-scraper.timer" \
+            || printf -- "${C_YELLOW}    WARN: could not enable teamster-codex-scraper.timer${C_RESET}\n"
+        dlog INFO install.codex-scraper-timer "installed" "svc=$CODEX_SCRAPER_SVC_SRC" "timer=$CODEX_SCRAPER_TIMER_SRC"
+    else
+        dlog WARN install.codex-scraper-timer "src units not present" "svc=$CODEX_SCRAPER_SVC_SRC"
     fi
 fi
 

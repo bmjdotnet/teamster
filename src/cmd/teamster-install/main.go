@@ -413,7 +413,7 @@ func run() error {
 	}
 
 	// 2. Copy runtime binaries (not teamster-install itself).
-	for _, b := range []string{"teamster", "hookd", "feed", "activity-mcp", "wms-mcp", "token-scraper", "rollup", "classify", "demogen", "relay", "backup"} {
+	for _, b := range []string{"teamster", "hookd", "feed", "activity-mcp", "wms-mcp", "token-scraper", "codex-scraper", "rollup", "classify", "demogen", "relay", "backup"} {
 		src := filepath.Join(*buildDir, b)
 		dst := filepath.Join(*basedir, "bin", b)
 		if err := copyFile(src, dst, 0o755); err != nil {
@@ -686,6 +686,35 @@ func run() error {
 	if data, err := os.ReadFile(classifyTimerTmpl); err == nil {
 		if werr := os.WriteFile(classifyTimerOut, data, 0o644); werr != nil {
 			fmt.Fprintf(os.Stderr, "warning: writing classify timer unit: %v\n", werr)
+		}
+	}
+
+	// 5c2. Materialize the codex-scraper service + timer (Codex rollout-JSONL
+	// tailer — the sole writer of Codex cost/ledger data and the Codex
+	// sessions row; hookd's hook-event pipeline never fires for Codex, so
+	// WMS/cost cannot depend on hooks). Needs the store DSN like
+	// classify/rollup (it upserts the sessions row via a direct store
+	// connection, alongside POSTing ledger rows to hookd's /telemetry).
+	// Graceful no-op on a host with no `codex` installed: the timer still
+	// fires, the binary finds no rollout files under $CODEX_HOME and exits 0.
+	codexScraperSvcTmpl := filepath.Join(*basedir, "etc", "teamster-codex-scraper.service.tmpl")
+	codexScraperSvcOut := filepath.Join(*basedir, "etc", "teamster-codex-scraper.service")
+	if data, err := os.ReadFile(codexScraperSvcTmpl); err == nil {
+		user := currentUsername()
+		m := strings.ReplaceAll(string(data), "__BASEDIR__", *basedir)
+		m = strings.ReplaceAll(m, "__USER__", user)
+		if effectiveDSN != "" {
+			m = strings.TrimRight(m, "\n") + "\n" + dsnEnvLine(secretsPath)
+		}
+		if werr := os.WriteFile(codexScraperSvcOut, []byte(m), 0o644); werr != nil {
+			fmt.Fprintf(os.Stderr, "warning: writing codex-scraper service unit: %v\n", werr)
+		}
+	}
+	codexScraperTimerTmpl := filepath.Join(*basedir, "etc", "teamster-codex-scraper.timer.tmpl")
+	codexScraperTimerOut := filepath.Join(*basedir, "etc", "teamster-codex-scraper.timer")
+	if data, err := os.ReadFile(codexScraperTimerTmpl); err == nil {
+		if werr := os.WriteFile(codexScraperTimerOut, data, 0o644); werr != nil {
+			fmt.Fprintf(os.Stderr, "warning: writing codex-scraper timer unit: %v\n", werr)
 		}
 	}
 

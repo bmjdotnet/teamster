@@ -58,6 +58,17 @@ type Session struct {
 	FirstSeen  time.Time
 	LastSeen   time.Time
 	Status     SessionStatus
+
+	// Runtime distinguishes the CLI that produced this session: "claude_code"
+	// (default, zero value normalizes to it) or "codex". Codex sessions are
+	// upserted directly by the codex-scraper tailer (hookd's hook pipeline
+	// never fires for Codex), which is also the only writer of the four
+	// fields below.
+	Runtime    string
+	Cwd        string // Codex session_meta.cwd; empty for Claude sessions
+	Model      string // last-known model for the session; empty for Claude sessions
+	Originator string // Codex session_meta.originator ("codex-tui" / "codex_exec")
+	CliVersion string // Codex session_meta.cli_version
 }
 
 // ActivityEvent is a single activity report (reportActivity / setOverallIntent /
@@ -374,6 +385,15 @@ type TelemetryRow struct {
 	Speed            string
 	CostUSD          float64
 	Timestamp        time.Time
+
+	// Runtime distinguishes the CLI that produced this row: "claude_code"
+	// (default, zero value normalizes to it) or "codex". ReasoningOutputTokens is
+	// Codex-only (OpenAI's reasoning token count from token_count.last_token_usage);
+	// it prices at the output rate (folded into OutputTokens for
+	// pricing.ComputeCost, which has no separate bucket) but is kept as its
+	// own column for raw-count fidelity.
+	Runtime               string
+	ReasoningOutputTokens int64
 }
 
 // TelemetryStore is token_ledger ingest: the per-message token-usage rows

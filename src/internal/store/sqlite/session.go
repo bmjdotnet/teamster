@@ -43,12 +43,16 @@ func (s *Store) UpsertSession(ctx context.Context, sess store.Session) error {
 	if sess.Status == "" {
 		sess.Status = store.SessionStatusActive
 	}
+	if sess.Runtime == "" {
+		sess.Runtime = "claude_code"
+	}
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO sessions (
 			session_id, agent_name, host, username, team_name,
 			project_id, goal_id, task_id, workitem_id,
-			focus, first_seen, last_seen, status
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			focus, first_seen, last_seen, status,
+			runtime, cwd, model, originator, cli_version
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(session_id, agent_name) DO UPDATE SET
 			host = excluded.host,
 			username = excluded.username,
@@ -59,10 +63,16 @@ func (s *Store) UpsertSession(ctx context.Context, sess store.Session) error {
 			workitem_id = excluded.workitem_id,
 			focus = excluded.focus,
 			last_seen = excluded.last_seen,
-			status = excluded.status`,
+			status = excluded.status,
+			runtime = excluded.runtime,
+			cwd = excluded.cwd,
+			model = excluded.model,
+			originator = excluded.originator,
+			cli_version = excluded.cli_version`,
 		sess.SessionID, sess.AgentName, sess.Host, sess.Username, sess.TeamName,
 		sess.ProjectID, sess.GoalID, sess.TaskID, sess.WorkitemID,
 		sess.Focus, sess.FirstSeen, sess.LastSeen, string(sess.Status),
+		sess.Runtime, sess.Cwd, sess.Model, sess.Originator, sess.CliVersion,
 	)
 	return err
 }
@@ -80,15 +90,20 @@ func (s *Store) CreateSession(ctx context.Context, sess store.Session) error {
 	if sess.Status == "" {
 		sess.Status = store.SessionStatusActive
 	}
+	if sess.Runtime == "" {
+		sess.Runtime = "claude_code"
+	}
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO sessions (
 			session_id, agent_name, host, username, team_name,
 			project_id, goal_id, task_id, workitem_id,
-			focus, first_seen, last_seen, status
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			focus, first_seen, last_seen, status,
+			runtime, cwd, model, originator, cli_version
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		sess.SessionID, sess.AgentName, sess.Host, sess.Username, sess.TeamName,
 		sess.ProjectID, sess.GoalID, sess.TaskID, sess.WorkitemID,
 		sess.Focus, sess.FirstSeen, sess.LastSeen, string(sess.Status),
+		sess.Runtime, sess.Cwd, sess.Model, sess.Originator, sess.CliVersion,
 	)
 	return err
 }
@@ -97,7 +112,8 @@ func (s *Store) GetSession(ctx context.Context, key store.SessionKey) (store.Ses
 	row := s.db.QueryRowContext(ctx, `
 		SELECT session_id, agent_name, host, username, team_name,
 		       project_id, goal_id, task_id, workitem_id,
-		       focus, first_seen, last_seen, status
+		       focus, first_seen, last_seen, status,
+		       runtime, cwd, model, originator, cli_version
 		FROM sessions WHERE session_id = ? AND agent_name = ?`,
 		key.SessionID, key.AgentName,
 	)
@@ -107,6 +123,7 @@ func (s *Store) GetSession(ctx context.Context, key store.SessionKey) (store.Ses
 		&sess.SessionID, &sess.AgentName, &sess.Host, &sess.Username, &sess.TeamName,
 		&sess.ProjectID, &sess.GoalID, &sess.TaskID, &sess.WorkitemID,
 		&sess.Focus, &sess.FirstSeen, &sess.LastSeen, &status,
+		&sess.Runtime, &sess.Cwd, &sess.Model, &sess.Originator, &sess.CliVersion,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return store.Session{}, store.NotFound("GetSession", "session", key.SessionID+"/"+key.AgentName)

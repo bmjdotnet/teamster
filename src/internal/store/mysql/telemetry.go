@@ -9,8 +9,8 @@ import (
 
 // telemetryColumnsPerRow is the placeholder count of one VALUES group below.
 // MySQL caps a prepared statement at 65535 placeholders; maxTelemetryRowsPerInsert
-// keeps every chunk well under that ceiling (1000*21 = 21000).
-const telemetryColumnsPerRow = 21
+// keeps every chunk well under that ceiling (1000*23 = 23000).
+const telemetryColumnsPerRow = 23
 const maxTelemetryRowsPerInsert = 1000
 
 // UpsertTelemetryBatch implements store.TelemetryStore. It chunks rows into
@@ -47,21 +47,25 @@ func (s *Store) upsertTelemetryChunk(ctx context.Context, chunk []store.Telemetr
 		 cache_write_1h, cache_write_5m,
 		 n_text, n_tool_use, n_thinking,
 		 total_input, stop_reason, service_tier, speed,
-		 cost_usd, timestamp)
+		 cost_usd, timestamp, runtime, reasoning_output_tokens)
 	VALUES `
 
 	args := make([]interface{}, 0, len(chunk)*telemetryColumnsPerRow)
 	placeholders := make([]string, 0, len(chunk))
 
 	for _, row := range chunk {
-		placeholders = append(placeholders, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+		runtime := row.Runtime
+		if runtime == "" {
+			runtime = "claude_code"
+		}
+		placeholders = append(placeholders, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
 		args = append(args,
 			row.SessionID, row.MessageID, row.AgentName, row.Host, row.Username, row.Model,
 			row.InputTokens, row.OutputTokens, row.CacheReadTokens, row.CacheWriteTokens,
 			row.CacheWrite1h, row.CacheWrite5m,
 			row.NText, row.NToolUse, row.NThinking,
 			row.TotalInput, row.StopReason, row.ServiceTier, row.Speed,
-			row.CostUSD, row.Timestamp.UTC(),
+			row.CostUSD, row.Timestamp.UTC(), runtime, row.ReasoningOutputTokens,
 		)
 	}
 
@@ -93,7 +97,9 @@ func (s *Store) upsertTelemetryChunk(ctx context.Context, chunk []store.Telemetr
 			total_input        = IF(VALUES(output_tokens) > output_tokens, VALUES(total_input), total_input),
 			stop_reason        = IF(VALUES(output_tokens) > output_tokens, VALUES(stop_reason), stop_reason),
 			cost_usd           = IF(VALUES(output_tokens) > output_tokens, VALUES(cost_usd), cost_usd),
+			reasoning_output_tokens = IF(VALUES(output_tokens) > output_tokens, VALUES(reasoning_output_tokens), reasoning_output_tokens),
 			session_id         = VALUES(session_id),
+			runtime            = VALUES(runtime),
 			output_tokens      = IF(VALUES(output_tokens) > output_tokens, VALUES(output_tokens), output_tokens)`
 
 	res, err := s.db.ExecContext(ctx, query, args...)
