@@ -61,26 +61,32 @@ processors:
   # a case-insensitive substring rather than a literal, and falls back to
   # `claude_code` (the pre-existing default) for anything else, including no
   # `service.name` at all.
+  #
+  # `resource.attributes[...]` (context-prefixed) rather than bare
+  # `attributes[...]`: otelcol-contrib 0.156.0 (otelcol-temporality-bump WU)
+  # auto-corrects the bare form with a startup log warning ("one or more
+  # paths were modified to include their context prefix"); writing it
+  # explicitly avoids relying on that shim.
   transform/source_label:
     error_mode: ignore
     metric_statements:
       - context: resource
         statements:
-          - set(attributes["source"], "codex") where attributes["source"] == nil and attributes["service.name"] != nil and IsMatch(attributes["service.name"], "(?i)codex")
-          - set(attributes["source"], "claude_code") where attributes["source"] == nil and attributes["service.name"] != nil and IsMatch(attributes["service.name"], "(?i)claude")
-          - set(attributes["source"], "claude_code") where attributes["source"] == nil
+          - set(resource.attributes["source"], "codex") where resource.attributes["source"] == nil and resource.attributes["service.name"] != nil and IsMatch(resource.attributes["service.name"], "(?i)codex")
+          - set(resource.attributes["source"], "claude_code") where resource.attributes["source"] == nil and resource.attributes["service.name"] != nil and IsMatch(resource.attributes["service.name"], "(?i)claude")
+          - set(resource.attributes["source"], "claude_code") where resource.attributes["source"] == nil
     log_statements:
       - context: resource
         statements:
-          - set(attributes["source"], "codex") where attributes["source"] == nil and attributes["service.name"] != nil and IsMatch(attributes["service.name"], "(?i)codex")
-          - set(attributes["source"], "claude_code") where attributes["source"] == nil and attributes["service.name"] != nil and IsMatch(attributes["service.name"], "(?i)claude")
-          - set(attributes["source"], "claude_code") where attributes["source"] == nil
+          - set(resource.attributes["source"], "codex") where resource.attributes["source"] == nil and resource.attributes["service.name"] != nil and IsMatch(resource.attributes["service.name"], "(?i)codex")
+          - set(resource.attributes["source"], "claude_code") where resource.attributes["source"] == nil and resource.attributes["service.name"] != nil and IsMatch(resource.attributes["service.name"], "(?i)claude")
+          - set(resource.attributes["source"], "claude_code") where resource.attributes["source"] == nil
     trace_statements:
       - context: resource
         statements:
-          - set(attributes["source"], "codex") where attributes["source"] == nil and attributes["service.name"] != nil and IsMatch(attributes["service.name"], "(?i)codex")
-          - set(attributes["source"], "claude_code") where attributes["source"] == nil and attributes["service.name"] != nil and IsMatch(attributes["service.name"], "(?i)claude")
-          - set(attributes["source"], "claude_code") where attributes["source"] == nil
+          - set(resource.attributes["source"], "codex") where resource.attributes["source"] == nil and resource.attributes["service.name"] != nil and IsMatch(resource.attributes["service.name"], "(?i)codex")
+          - set(resource.attributes["source"], "claude_code") where resource.attributes["source"] == nil and resource.attributes["service.name"] != nil and IsMatch(resource.attributes["service.name"], "(?i)claude")
+          - set(resource.attributes["source"], "claude_code") where resource.attributes["source"] == nil
 
   resource:
     attributes:
@@ -88,11 +94,25 @@ processors:
         value: {{ .Env }}
         action: upsert
 
+  # Accumulates delta-temporality metric samples into cumulative series
+  # before they reach prometheus_remote_write. Required for Codex's metrics
+  # (verified live 2026-07-07: every Codex metric observed, including
+  # codex.turn.token_usage, is delta temporality; without this processor
+  # prometheus_remote_write rejects them outright with "invalid temporality
+  # and type combination", dropping the data). A no-op passthrough for any
+  # metric that's already cumulative (Claude Code's), so it's safe on the
+  # shared pipeline. Metrics-only (no log_statements/trace_statements exist
+  # for this processor).
+  deltatocumulative:
+    max_stale: 5m
+
 exporters:
   debug:
     verbosity: basic
 
-  prometheusremotewrite:
+  # Canonical name as of otelcol-contrib 0.156.0 — the old "prometheusremotewrite"
+  # key still works but is a deprecated alias (startup log warning).
+  prometheus_remote_write:
     endpoint: http://127.0.0.1:{{ .PrometheusPort }}/api/v1/write
     resource_to_telemetry_conversion:
       enabled: true
@@ -108,8 +128,8 @@ service:
   pipelines:
     metrics:
       receivers: [otlp, otlp/codex]
-      processors: [memory_limiter, transform/source_label, resource, batch]
-      exporters: [prometheusremotewrite{{ if .ForwardEndpoint }}, otlp/forward{{ end }}]
+      processors: [memory_limiter, transform/source_label, resource, deltatocumulative, batch]
+      exporters: [prometheus_remote_write{{ if .ForwardEndpoint }}, otlp/forward{{ end }}]
     logs:
       receivers: [otlp]
       processors: [memory_limiter, transform/source_label, resource, batch]
