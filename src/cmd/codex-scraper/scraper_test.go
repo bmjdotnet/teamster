@@ -294,6 +294,26 @@ func TestMcpCallOK(t *testing.T) {
 	}
 }
 
+// TestDiscoverFiles_MissingRoot covers the common fresh-install case: a host
+// that has never run `codex archive` has no archived_sessions/ directory at
+// all. filepath.WalkDir errors on a non-existent root; discoverFiles must
+// swallow that and still return results from the roots that do exist.
+func TestDiscoverFiles_MissingRoot(t *testing.T) {
+	dir := t.TempDir()
+	existing := filepath.Join(dir, "sessions")
+	if err := os.MkdirAll(existing, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeLines(t, filepath.Join(existing, "rollout-a.jsonl"), []string{sessionMetaLine("a", "/tmp", "codex_exec", "0.137.0")})
+	missing := filepath.Join(dir, "archived_sessions") // never created
+
+	s := &scraper{roots: []string{existing, missing}}
+	files := s.discoverFiles()
+	if len(files) != 1 {
+		t.Fatalf("expected 1 file from the existing root, got %d: %v", len(files), files)
+	}
+}
+
 func TestDiscoverFiles(t *testing.T) {
 	dir := t.TempDir()
 	sessionsDir := filepath.Join(dir, "sessions", "2026", "07", "07")
