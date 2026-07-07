@@ -209,6 +209,80 @@ Codex has no Agent Teams layer — every Codex session runs solo, and its
 subagents (where used) are ephemeral spawn-wait-collect calls, not
 persistent teammates.
 
+## Known limitation: deferred MCP tool loading on newer Codex builds
+
+**The behavior.** Codex CLI has an internal feature flag,
+`tool_search_always_defer_mcp_tools`, that gates whether MCP tools
+(`wms_*`, `reportActivity`/`setOverallIntent`/`completeActivity`, etc.) are
+directly callable or defer-loaded behind a client-side tool search the model
+must run itself. When the flag is on, a tool that was never surfaced by a
+search is **hard-uncallable** — not merely discouraged: an operator VM triage
+confirmed at the wire level that the model never even emitted a
+`tools/call` attempt for a non-surfaced tool, because it simply wasn't in the
+model's declared function set. The `wms` server has 31 tools regardless of
+this flag; the flag only changes how many of them a given turn can see
+without searching first.
+
+**The version story.** This kit is pinned and verified at Codex **0.137.0**,
+where `tool_search_always_defer_mcp_tools` is off and all 31 `wms` tools are
+directly callable with no search step — confirmed live, twice (a raw
+JSON-RPC probe against the real `wms-mcp` binary, and a real `codex exec`
+session), both returning the complete 31-tool catalog with no losses. An
+operator VM running a **0.142.5** build (which Codex had auto-updated itself
+to — Teamster does not pin or manage the Codex CLI version) showed the flag
+baked in as `true`. Reproduced in an isolated container built to match
+0.142.5's exact behavior (`codex features list` byte-identical to the VM's),
+confirming this is a real, version-gated Codex change, not anything specific
+to the operator's host or something Teamster's installer wrote.
+
+**No config override exists.** Three independent attempts to flip the flag
+back off were all silently ignored (no parse error, no effect on the reported
+state): `-c features.tool_search_always_defer_mcp_tools=false`,
+`--disable tool_search_always_defer_mcp_tools`, and a persistent
+`[features]` table written directly into `config.toml`. This is not a
+settings problem an installer or operator can work around — it is baked into
+the binary at this version.
+
+**The mitigation — search-style guidance, not a code fix.** There is no lever
+Teamster's installer can pull to restore direct tool visibility, so the
+mitigation is prompting discipline, burned into `AGENTS.md`/
+`AGENTS.override.md` by `mergeCodexAgentsMD` (see AGENTS.md merge above): a
+query that reads as natural language describing the intended action —
+"create a new outcome," "tag entities," "update work unit status" — reliably
+surfaces a substantial subset of the catalog (17-20 of 31 tools observed
+across query variations). A query that is a bare tool name or a `wms_`
+prefix with no descriptive framing reliably returns **zero** results —
+exactly the shape of query that produced the VM's original "5 tools" report,
+and exactly the shape `AGENTS.md` now tells every fresh Codex session to
+avoid. Recall is not total even with good query style: **7 of 31 tools never
+surfaced across every query variation tried** in this kit's own testing
+(`wms_addDependency`, `wms_removeDependency`, `wms_getFocus`,
+`wms_getHistory`, `wms_getTimeline`, `wms_listBlockers`,
+`wms_listDependents` — skewing toward dependency-management and
+read/history tools). Whether that remaining gap is a hard ceiling or a
+further query-phrasing/limit artifact is unsettled; `AGENTS.md`'s guidance to
+retry with different descriptive wording before concluding a tool doesn't
+exist is the best mitigation this kit can offer without a Codex-side fix.
+
+**What's still verified intact at 0.142.5.** The identity and ledger paths
+this kit's acceptance criteria gate on do not depend on direct tool
+visibility: `x-codex-turn-metadata` (WP1's session-identity mechanism) is
+still present and correct on every `tools/call` that does get made — a real
+`wms_createOutcome` call in the 0.142.5 reproduction container carried
+correct turn metadata and produced a real, attributed outcome. `codex-scraper`
+parsed a 0.142.5 rollout file cleanly in dry-run mode with no schema-mismatch
+warnings — the tool-search mechanism is additive to the rollout format
+(new `response_item` types), not a change to the `token_count`/
+`session_meta`/`turn_context` shapes the tailer depends on. This limitation
+is a **discovery/enumeration UX gap**, not a regression in WMS attribution or
+cost capture.
+
+**Evidence:** `research/evidence-round3/wp7-vm-triage/` in the
+teamster-codex-kit — `README.md` (0.137.0 baseline, 31/31 tools, the
+free-text-self-report methodology caveat) and `0142-causal/README.md` (the
+causal reproduction, the three override attempts, and the four search-query
+mitigation runs).
+
 ## Audit trail limits on default-approve
 
 This installer writes `default_tools_approval_mode = "approve"` for both

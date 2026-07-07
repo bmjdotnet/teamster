@@ -1939,6 +1939,21 @@ const codexAgentsMarker = "## Getting Started with Teamster (Codex)"
 // focus discipline, which apply identically to a solo Codex session. The
 // skill it points at (teamster-solo) is this WP's ported entry point,
 // analogous to activityProtocol's `/teamster:start` pointer.
+//
+// The "Available skills" and "Finding WMS/activity MCP tools" sections were
+// added after a live operator VM triage (research/evidence-round3/
+// wp7-vm-triage/ in the teamster-codex-kit): on Codex builds where
+// tool_search_always_defer_mcp_tools is baked in (confirmed at 0.142.5, no
+// override — three independent override attempts all silently ignored), MCP
+// tools are defer-loaded behind an internal search the model must run itself,
+// and a vague first query reliably lands on the same narrow ~5-tool cluster
+// the operator saw. This is burned into every session's context rather than
+// left to a skill body, since the gap bites before any skill is even
+// invoked. Separately, teamster-status was the only one of the four ported
+// skills without an agents/openai.yaml, so skill listings showed it by raw
+// id while the other three showed their display_name — the explicit
+// name-pairing below closes that inconsistency without relying on the
+// listing UI.
 const codexAgentsProtocol = `
 ## Getting Started with Teamster (Codex)
 
@@ -1948,6 +1963,40 @@ so none of Claude Code's team-coordination rules apply. When you begin a
 session with non-trivial work (not just a quick question), use the
 ` + "`$teamster-solo`" + ` skill first. It creates the WMS Outcome, runs the context-tag
 interview, sets focus, and hands off to the work itself.
+
+## Available skills
+
+Four Teamster skills are installed. A skill listing may show either name —
+both refer to the same skill:
+
+- "Teamster Solo" -- invoke by typing ` + "`$teamster-solo`" + ` -- start a WMS-tracked
+  session (Outcome, context tags, focus).
+- "Teamster Status" -- invoke by typing ` + "`$teamster-status`" + ` -- show current
+  outcomes and work units.
+- "Teamster Tag Steward" -- invoke by typing ` + "`$teamster-tags`" + ` -- refine the
+  tag vocabulary conversationally.
+- "Teamster Readiness Review" -- invoke by typing ` + "`$teamster-review`" + ` --
+  check git/WMS/build/test before presenting work.
+
+` + "`$teamster-solo`" + `, ` + "`$teamster-tags`" + `, and ` + "`$teamster-review`" + ` are
+explicit-invocation-only -- they will NOT appear if you ask "what skills do
+you have" or list skills generically (` + "`$teamster-status`" + ` is the only one
+that does). That is by design, not a sign they are missing -- invoke them by
+name anyway whenever the situation calls for them.
+
+## Finding WMS/activity MCP tools
+
+On some Codex builds, MCP tools (` + "`wms_*`" + `, ` + "`reportActivity`" + `, etc.) are
+defer-loaded behind an internal tool search rather than directly callable --
+the ` + "`wms`" + ` server alone has 31 tools even if only a handful show up
+unprompted. If a tool you expect isn't callable:
+
+- Search using natural-language verbs describing what you want to DO --
+  "create a new outcome," "tag entities," "update work unit status" -- never
+  a bare tool name or a ` + "`wms_`" + ` prefix (those searches reliably return zero
+  results).
+- If the first search doesn't surface what you need, search again with
+  different descriptive wording before concluding the tool doesn't exist.
 
 ## Activity Reporting
 
