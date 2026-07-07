@@ -51,11 +51,19 @@ type tokenCountInfo struct {
 	LastTokenUsage  tokenUsage `json:"last_token_usage"`
 }
 
+// tokenUsage's fields are NOT disjoint buckets: cached_input_tokens is a
+// subset of input_tokens, and reasoning_output_tokens is a subset of
+// output_tokens (both are informational breakdowns, not additional tokens).
+// Verified against live evidence (surface-map.md, and this package's own
+// resumed-rollout fixture): total_tokens == input_tokens + output_tokens
+// always, with cached_input/reasoning_output never adding to that sum. See
+// emitLedgerRow's derivation and its sanity check.
 type tokenUsage struct {
 	InputTokens           int64 `json:"input_tokens"`
 	CachedInputTokens     int64 `json:"cached_input_tokens"`
 	OutputTokens          int64 `json:"output_tokens"`
 	ReasoningOutputTokens int64 `json:"reasoning_output_tokens"`
+	TotalTokens           int64 `json:"total_tokens"`
 }
 
 // mcpInvocation is the payload.invocation of an mcp_tool_call_end event_msg.

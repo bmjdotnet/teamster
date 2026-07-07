@@ -87,10 +87,16 @@ func TestProcessFile_ResumedRollout(t *testing.T) {
 
 	wantSessionID := "019f3b4a-3808-7fa3-bc1d-e99cdc0f1f4e"
 	type want struct{ input, output, cacheRead int64 }
+	// input/cacheRead/output are the CORRECTED (non-additive) derivation:
+	// cached_input_tokens is a subset of the fixture's raw input_tokens, so
+	// input here is (raw input_tokens - cached_input_tokens); output is raw
+	// output_tokens as-is (reasoning_output_tokens, 0 in this fixture, is
+	// already inside it, never added). Raw last_token_usage values:
+	// (23215,2432,36), (23300,22912,5), (23318,22912,5).
 	wants := []want{
-		{input: 23215, output: 36, cacheRead: 2432},
-		{input: 23300, output: 5, cacheRead: 22912},
-		{input: 23318, output: 5, cacheRead: 22912},
+		{input: 23215 - 2432, output: 36, cacheRead: 2432},
+		{input: 23300 - 22912, output: 5, cacheRead: 22912},
+		{input: 23318 - 22912, output: 5, cacheRead: 22912},
 	}
 	for i, row := range cap.rows {
 		if row.SessionID != wantSessionID {
@@ -104,7 +110,7 @@ func TestProcessFile_ResumedRollout(t *testing.T) {
 		}
 		w := wants[i]
 		if row.InputTokens != w.input || row.OutputTokens != w.output || row.CacheReadTokens != w.cacheRead {
-			t.Errorf("row %d: got input=%d output=%d cache_read=%d, want input=%d output=%d cache_read=%d (last_token_usage, not cumulative)",
+			t.Errorf("row %d: got input=%d output=%d cache_read=%d, want input=%d output=%d cache_read=%d (uncached-input derivation, not raw/additive)",
 				i, row.InputTokens, row.OutputTokens, row.CacheReadTokens, w.input, w.output, w.cacheRead)
 		}
 	}
@@ -163,6 +169,74 @@ func TestProcessFile_ArchiveRescanIdempotent(t *testing.T) {
 		if cap1.rows[i].MessageID != cap2.rows[i].MessageID {
 			t.Errorf("row %d: message_id differs across rescans: %q vs %q — a post-archive rescan would NOT be an idempotent DB no-op",
 				i, cap1.rows[i].MessageID, cap2.rows[i].MessageID)
+		}
+	}
+}
+
+// TestEmitLedgerRow_CachedAndReasoningAreSubsets is the regression test for
+// the double-counting bug caught in review: cached_input_tokens and
+// reasoning_output_tokens are SUBSETS of input_tokens/output_tokens, not
+// additional tokens. Uses a synthetic event with non-zero reasoning_output
+// (the real fixture happens to have reasoning_output=0 throughout, so it
+// can't exercise this half of the derivation).
+func TestEmitLedgerRow_CachedAndReasoningAreSubsets(t *testing.T) {
+	s, cap, _ := newTestScraper(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rollout-subset.jsonl")
+
+	// input=1000, cached_input=400 (subset of input), output=200,
+	// reasoning_output=50 (subset of output). total_tokens = 1000+200=1200.
+	writeLines(t, path, []string{
+		sessionMetaLine("sess-subset", "/tmp", "codex_exec", "0.137.0"),
+		turnContextLine("gpt-5.5"),
+		tokenCountLine(1000, 200, 400, 50),
+	})
+	if err := s.processFile(context.Background(), path); err != nil {
+		t.Fatalf("processFile: %v", err)
+	}
+	if len(cap.rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(cap.rows))
+	}
+	row := cap.rows[0]
+	if row.InputTokens != 600 { // 1000 - 400 cached, NOT 1000
+		t.Errorf("InputTokens = %d, want 600 (input_tokens - cached_input_tokens)", row.InputTokens)
+	}
+	if row.CacheReadTokens != 400 {
+		t.Errorf("CacheReadTokens = %d, want 400", row.CacheReadTokens)
+	}
+	if row.OutputTokens != 200 { // as-is, NOT 200+50
+		t.Errorf("OutputTokens = %d, want 200 (output_tokens as-is, reasoning already inside)", row.OutputTokens)
+	}
+	if row.ReasoningOutputTokens != 50 {
+		t.Errorf("ReasoningOutputTokens = %d, want 50 (stored for fidelity, not summed into OutputTokens)", row.ReasoningOutputTokens)
+	}
+}
+
+// TestProcessLine_IgnoresCodexAutoReviewModelSentinel covers the upstream
+// bug (openai/codex#20981) where some internal Codex sub-tasks report the
+// literal model string "codex-auto-review" instead of the real model. The
+// tailer must not let that sentinel overwrite the last real model seen.
+func TestProcessLine_IgnoresCodexAutoReviewModelSentinel(t *testing.T) {
+	s, cap, _ := newTestScraper(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rollout-sentinel.jsonl")
+
+	writeLines(t, path, []string{
+		sessionMetaLine("sess-sentinel", "/tmp", "codex_exec", "0.137.0"),
+		turnContextLine("gpt-5.5"),
+		tokenCountLine(100, 10, 0, 0),
+		turnContextLine("codex-auto-review"), // must be ignored
+		tokenCountLine(50, 5, 0, 0),
+	})
+	if err := s.processFile(context.Background(), path); err != nil {
+		t.Fatalf("processFile: %v", err)
+	}
+	if len(cap.rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(cap.rows))
+	}
+	for i, row := range cap.rows {
+		if row.Model != "gpt-5.5" {
+			t.Errorf("row %d: model = %q, want gpt-5.5 (codex-auto-review sentinel must not overwrite it)", i, row.Model)
 		}
 	}
 }
@@ -376,21 +450,27 @@ func turnContextLine(model string) string {
 	return string(b)
 }
 
+// tokenCountLine builds a synthetic token_count event_msg line. cachedInput
+// and reasoningOutput are SUBSETS of input/output respectively (matching
+// real Codex semantics: total_tokens == input_tokens + output_tokens always),
+// not additional tokens on top — callers must pass cachedInput <= input and
+// reasoningOutput <= output.
 func tokenCountLine(input, output, cachedInput, reasoningOutput int64) string {
+	usage := func(mult int64) map[string]any {
+		return map[string]any{
+			"input_tokens": input * mult, "output_tokens": output * mult,
+			"cached_input_tokens": cachedInput * mult, "reasoning_output_tokens": reasoningOutput * mult,
+			"total_tokens": (input + output) * mult,
+		}
+	}
 	b, _ := json.Marshal(map[string]any{
 		"timestamp": "2026-07-07T00:00:02.000Z",
 		"type":      "event_msg",
 		"payload": map[string]any{
 			"type": "token_count",
 			"info": map[string]any{
-				"total_token_usage": map[string]any{
-					"input_tokens": input * 100, "output_tokens": output * 100,
-					"cached_input_tokens": cachedInput * 100, "reasoning_output_tokens": reasoningOutput * 100,
-				},
-				"last_token_usage": map[string]any{
-					"input_tokens": input, "output_tokens": output,
-					"cached_input_tokens": cachedInput, "reasoning_output_tokens": reasoningOutput,
-				},
+				"total_token_usage": usage(100), // cumulative session total, always ignored by the tailer
+				"last_token_usage":  usage(1),
 			},
 		},
 	})

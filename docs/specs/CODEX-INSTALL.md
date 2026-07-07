@@ -45,11 +45,37 @@ binary finds no rollout files under `$CODEX_HOME`, and exits 0 every run.
 - **Ledger rows** (`token_ledger`) come from `event_msg.token_count` events'
   **`last_token_usage`** field only — never `total_token_usage`, which is
   cumulative across the whole session and would double-count on every
-  subsequent event if summed. Cost is priced via `internal/pricing`
-  (`pricing.ComputeCost`): `reasoning_output_tokens` folds into the output
-  bucket (prices at the output rate — OpenAI has no separate reasoning
-  rate), `cached_input_tokens` maps to the cache-read bucket, and there is no
-  Codex equivalent of a cache-write cost (always 0).
+  subsequent event if summed.
+
+  **`cached_input_tokens` and `reasoning_output_tokens` are SUBSETS, not
+  additional tokens** — verified against live evidence: `total_tokens ==
+  input_tokens + output_tokens` always, with the cached/reasoning fields
+  never adding to that sum (an earlier version of this tailer got this
+  wrong and double-counted/overcounted; caught in review before merge).
+  Derivation fed to `pricing.ComputeCost(model, inputTokens, outputTokens,
+  cacheReadTokens, cacheWriteTokens)`:
+  - `inputTokens` = `input_tokens - cached_input_tokens` (the uncached
+    remainder, billed at the full input rate)
+  - `cacheReadTokens` = `cached_input_tokens` (billed at the cheaper
+    cache-read rate)
+  - `outputTokens` = `output_tokens` as-is — `reasoning_output_tokens` is
+    already inside this number (OpenAI bills reasoning at the output rate
+    by inclusion, not by adding it again) but is also stored in its own
+    `token_ledger.reasoning_output_tokens` column for raw-count fidelity
+  - `cacheWriteTokens` = 0 always (no Codex/OpenAI equivalent)
+
+  This differs from Claude Code's transcript semantics, where
+  `input_tokens` already excludes cache reads — the tailer does not reuse
+  `token-scraper`'s bucket-handling assumptions. A runtime sanity check
+  logs loudly if `total_tokens != input_tokens + output_tokens` for a given
+  event (a signal upstream semantics have drifted).
+
+  **Known upstream quirk (openai/codex#20981):** some internal Codex
+  sub-tasks (e.g. an auto-review pass) report the literal model string
+  `"codex-auto-review"` in `turn_context` instead of the real underlying
+  model. The tailer ignores that sentinel and keeps whichever real model
+  was last seen, rather than mispricing the turn against a non-existent
+  model ID.
 - **message_id** (the ledger's dedup/idempotency key) is manufactured as
   `codex:<session_id>:<sequence>`, since Codex's `token_count` events carry no
   content-derived unique id the way Claude's `message.id`+`requestId` do.

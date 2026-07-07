@@ -256,7 +256,14 @@ func (s *scraper) processLine(ctx context.Context, raw []byte, cursor *cursorEnt
 		if err := json.Unmarshal(env.Payload, &p); err != nil {
 			return fmt.Errorf("parse turn_context: %w", err)
 		}
-		if p.Model != "" && p.Model != cursor.Model {
+		// Upstream bug (openai/codex#20981): some internal Codex sub-tasks
+		// (e.g. an auto-review pass) report the literal model string
+		// "codex-auto-review" instead of the real underlying model. That
+		// string is not a billable model ID and pricing.ComputeCost would
+		// just log a loud unknown-model warning and price it at 0 — instead,
+		// ignore the sentinel and keep whichever real model was last seen,
+		// which is a much better cost approximation for that turn.
+		if p.Model != "" && p.Model != "codex-auto-review" && p.Model != cursor.Model {
 			cursor.Model = p.Model
 			cursor.dirty = true
 		}
@@ -297,16 +304,45 @@ func (s *scraper) processLine(ctx context.Context, raw []byte, cursor *cursorEnt
 // emitLedgerRow builds and posts one telemetry row from a token_count event's
 // last_token_usage. Ledger derivation rule (binding, redteam m4): use
 // last_token_usage only, never total_token_usage (cumulative — summing it
-// double-counts). Pricing: reasoning_output folds into the output bucket
-// (prices at the output rate per WP4/otel-v1.md), cached_input maps to the
-// cache-read bucket, and there is no Codex equivalent of a cache-write cost.
+// double-counts).
+//
+// Token bucket derivation (corrected 2026-07-07 — the first version of this
+// function wrongly treated cached_input_tokens/reasoning_output_tokens as
+// additional tokens on top of input/output; they are SUBSETS already
+// counted inside input_tokens/output_tokens respectively). Verified against
+// live evidence (surface-map.md and this package's own resumed-rollout
+// fixture): total_tokens == input_tokens + output_tokens exactly, with
+// cached_input never adding to that sum. So:
+//   - uncached input (billed at the full input rate) = input_tokens - cached_input_tokens
+//   - cache-read tokens (billed at the cheaper cache-read rate) = cached_input_tokens
+//   - output tokens, as-is (reasoning_output_tokens is already inside this
+//     number — OpenAI bills it at the output rate by inclusion, not by adding
+//     it again)
+//   - cache-write is always 0 (no Codex/OpenAI equivalent)
+//
+// This differs from Claude Code's transcript semantics, where input_tokens
+// already excludes cache reads — do not copy that assumption here.
 func (s *scraper) emitLedgerRow(timestamp string, u tokenUsage, cursor *cursorEntry) error {
 	seq := cursor.Seq
 	cursor.Seq++
 
 	messageID := fmt.Sprintf("codex:%s:%06d", cursor.SessionID, seq)
-	outputTokens := u.OutputTokens + u.ReasoningOutputTokens
-	costUSD := pricing.ComputeCost(cursor.Model, u.InputTokens, outputTokens, u.CachedInputTokens, 0)
+
+	if u.TotalTokens != 0 && u.TotalTokens != u.InputTokens+u.OutputTokens {
+		slog.Warn("codex-scraper: token_count arithmetic violated expected invariant "+
+			"(total_tokens != input_tokens + output_tokens) — upstream semantics may have "+
+			"drifted; derivation below may be wrong for this row",
+			"session_id", cursor.SessionID, "input", u.InputTokens, "output", u.OutputTokens,
+			"total", u.TotalTokens)
+	}
+
+	uncachedInput := u.InputTokens - u.CachedInputTokens
+	if uncachedInput < 0 {
+		slog.Warn("codex-scraper: cached_input_tokens exceeds input_tokens, clamping to 0",
+			"session_id", cursor.SessionID, "input", u.InputTokens, "cached_input", u.CachedInputTokens)
+		uncachedInput = 0
+	}
+	costUSD := pricing.ComputeCost(cursor.Model, uncachedInput, u.OutputTokens, u.CachedInputTokens, 0)
 
 	ts, err := time.Parse(time.RFC3339Nano, timestamp)
 	if err != nil {
@@ -324,8 +360,8 @@ func (s *scraper) emitLedgerRow(timestamp string, u tokenUsage, cursor *cursorEn
 		Host:                  s.host,
 		Username:              s.username,
 		Model:                 cursor.Model,
-		InputTokens:           u.InputTokens,
-		OutputTokens:          outputTokens,
+		InputTokens:           uncachedInput,
+		OutputTokens:          u.OutputTokens,
 		CacheReadTokens:       u.CachedInputTokens,
 		CacheWriteTokens:      0,
 		CostUSD:               costUSD,
