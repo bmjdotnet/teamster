@@ -198,9 +198,21 @@ lxc exec "$CONTAINER" -- su - "$USER" -c "
 
 echo "=== Starting hookd ==="
 lxc exec "$CONTAINER" -- su - "$USER" -c "pkill hookd 2>/dev/null; sleep 1; nohup /home/$USER/teamster/bin/hookd > /dev/null 2>&1 &"
-sleep 1
-lxc exec "$CONTAINER" -- su - "$USER" -c "curl -s http://localhost:9125/health"
+# curl exit 7 ("failed to connect") under `set -e` was aborting the whole
+# script here on a slow container if hookd hadn't finished binding its port
+# yet — retry briefly instead of a single fixed sleep + unguarded curl.
+HOOKD_UP=0
+for _ in 1 2 3 4 5; do
+    if lxc exec "$CONTAINER" -- su - "$USER" -c "curl -sf http://localhost:9125/health" 2>/dev/null; then
+        HOOKD_UP=1
+        break
+    fi
+    sleep 1
+done
 echo ""
+if [[ "$HOOKD_UP" -eq 0 ]]; then
+    echo "  WARNING: hookd did not respond to /health after 5s — continuing anyway, check manually"
+fi
 
 echo "=== Transporting Claude auth credentials ==="
 HOST_HOME="$(getent passwd "${SUDO_USER:-$(whoami)}" | cut -d: -f6)"

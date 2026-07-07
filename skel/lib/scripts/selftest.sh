@@ -168,20 +168,31 @@ except Exception:
 
     echo ""
     echo "--- Test E: Codex client-config backups exist (both runtimes) ---"
+    # A .pre-teamster backup is only created for a file that EXISTED before
+    # Teamster's first write to it (installbackup.Backup's documented no-op
+    # semantics — nothing to preserve on a target that didn't exist yet). On
+    # a from-scratch container, settings.json/CLAUDE.md are typically
+    # created BY this install run (no prior file), so those two legitimately
+    # have no backup on a first run — expect them to start passing from a
+    # second (reinstall) run onward. config.toml and .claude.json usually
+    # DO pre-exist by first-install time (Codex/Claude Code's own install
+    # step creates a stub), so those two are meaningful checks even on a
+    # fresh single-install run.
     check_file "/home/$USER/.codex/config.toml.pre-teamster" "codex config.toml backup"
     check_file "/home/$USER/.claude/settings.json.pre-teamster" "claude settings.json backup"
     check_file "/home/$USER/.claude.json.pre-teamster" "claude .claude.json backup"
     check_file "/home/$USER/.claude/CLAUDE.md.pre-teamster" "claude CLAUDE.md backup"
 
     echo ""
-    echo "--- Test F: codex-scraper systemd timer present ---"
-    TOTAL=$((TOTAL + 1))
-    if lxc exec "$CONTAINER" -- systemctl is-enabled teamster-codex-scraper.timer >/dev/null 2>&1; then
-        echo "  PASS: [SCRAPER] teamster-codex-scraper.timer enabled"
-    else
-        echo "  FAIL: [SCRAPER] teamster-codex-scraper.timer not enabled"
-        FAILURES=$((FAILURES + 1))
-    fi
+    echo "--- Test F: codex-scraper systemd unit staged ---"
+    # This harness invokes teamster-install directly (never
+    # lib/installrunner.sh's systemd orchestration — true of the pre-existing
+    # Claude-only cleanroom too, which never enables teamster-hookd.service
+    # either), so `systemctl is-enabled` would fail regardless of whether
+    # staging worked correctly. Check that the unit file itself was staged
+    # under BASEDIR/etc — the thing this harness can actually speak to.
+    check_file "$BASEDIR/etc/teamster-codex-scraper.service" "codex-scraper unit staged"
+    check_file "$BASEDIR/etc/teamster-codex-scraper.timer" "codex-scraper timer staged"
 
     echo ""
     echo "--- Test G: Codex hook fires with zero interactive trust ---"
