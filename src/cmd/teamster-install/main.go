@@ -1782,6 +1782,113 @@ func mergeClaudeMD(path string) error {
 	return os.WriteFile(path, []byte(content), 0o644)
 }
 
+// codexAgentsMarker is the substring mergeCodexAgentsMD checks for to decide
+// whether the protocol block is already present — distinctive enough that an
+// operator's own AGENTS.md/AGENTS.override.md content is vanishingly
+// unlikely to contain it by coincidence.
+const codexAgentsMarker = "## Getting Started with Teamster (Codex)"
+
+// codexAgentsProtocol is the Codex counterpart to activityProtocol, merged
+// into AGENTS.md (or AGENTS.override.md — see mergeCodexAgentsMD) instead of
+// CLAUDE.md. Codex has no Agent Teams layer: every Codex session is
+// inherently solo, so unlike activityProtocol this carries none of the
+// Eight Rules / team-dispatch content — only activity reporting and WMS
+// focus discipline, which apply identically to a solo Codex session. The
+// skill it points at (teamster-solo) is this WP's ported entry point,
+// analogous to activityProtocol's `/teamster:start` pointer.
+const codexAgentsProtocol = `
+## Getting Started with Teamster (Codex)
+
+Teamster tracks this session's work in WMS (Outcome -> WorkUnit) and the live
+activity feed. Codex sessions run solo -- there is no Agent Teams layer here,
+so none of Claude Code's team-coordination rules apply. When you begin a
+session with non-trivial work (not just a quick question), use the
+` + "`$teamster-solo`" + ` skill first. It creates the WMS Outcome, runs the context-tag
+interview, sets focus, and hands off to the work itself.
+
+## Activity Reporting
+
+You have three MCP tools from the ` + "`activity`" + ` server. Use them:
+
+1. ` + "`reportActivity(type, message)`" + ` -- call at the start of each turn before
+   doing work. Types: thought, reading, writing, executing, planning, reviewing.
+   Keep messages under 8 words, imperative: 'fix auth bug', 'explore disk layout'.
+
+2. ` + "`setOverallIntent(message)`" + ` -- call on your first turn to declare your
+   mission. Update when your focus shifts to something fundamentally new.
+
+3. ` + "`completeActivity(message)`" + ` -- call when you finish a task or turn
+   objective. Short phrase: 'fixed auth bug, tests pass'.
+
+4. ` + "`wms_setFocus(entityType, entityID, focus)`" + ` -- call once when you
+   start working on a WMS entity (Outcome or WorkUnit). This is the
+   cost-bearing focus: every token you spend lands on the entity your
+   WMS focus points at. Set it once; it stays active until you change it.
+   Without it, your cost lands in ` + "`unallocated`" + `.
+
+This is how Teamster monitors what you're doing. Every turn. No exceptions.
+
+## Working discipline
+
+- Decompose work into WorkUnits, advance status as you go, tag lifecycle keys
+  before starting each WorkUnit, and close out (mark done, resolution tag) at
+  the end -- ` + "`$teamster-solo`" + ` documents the full ritual.
+- Verify before presenting: build, test, and vet (or the project's
+  equivalent) before calling anything done. Spawn a subagent for
+  fresh-context review on multi-file or interface-touching changes --
+  Codex's subagents are ephemeral (spawn, wait, collect), which is exactly
+  what a bounded review step needs; there is no persistent-teammate concept
+  to manage.
+`
+
+// mergeCodexAgentsMD appends the Codex solo-mode Teamster protocol to
+// whichever file actually governs Codex's global instructions on this host:
+// codexHome/AGENTS.override.md if the operator has one, else
+// codexHome/AGENTS.md. AGENTS.override.md fully wins over AGENTS.md on
+// Codex 0.137.0 (confirmed live, verification-round2.md P7) -- merging only
+// into AGENTS.md when an override file is present would leave Teamster's
+// protocol text silently dead, so this targets whichever file Codex will
+// actually read and logs a note explaining the substitution. Idempotent: a
+// no-op if the target already contains codexAgentsMarker. Backs up the
+// target before any write (installbackup, same semantics as mergeClaudeMD).
+func mergeCodexAgentsMD(codexHome string) error {
+	target := filepath.Join(codexHome, "AGENTS.md")
+	overridePath := filepath.Join(codexHome, "AGENTS.override.md")
+	usingOverride := false
+	if _, err := os.Stat(overridePath); err == nil {
+		target = overridePath
+		usingOverride = true
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+
+	existing, err := os.ReadFile(target)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if strings.Contains(string(existing), codexAgentsMarker) {
+		return nil
+	}
+
+	if usingOverride {
+		fmt.Printf("Note: %s exists and fully overrides AGENTS.md on this Codex install -- merging Teamster's protocol there instead so it actually takes effect.\n", overridePath)
+	}
+
+	content := string(existing)
+	if len(content) > 0 {
+		content = strings.TrimRight(content, "\n") + "\n"
+	}
+	content += codexAgentsProtocol
+
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return err
+	}
+	if _, err := installbackup.Backup(target); err != nil {
+		fmt.Printf("Warning: could not back up %s before write: %v\n", target, err)
+	}
+	return os.WriteFile(target, []byte(content), 0o644)
+}
+
 // mergeBackupSection adds a default backup: section to teamster.yaml when the
 // key is absent. Uses operator-supplied backupDir/backupSchedule; falls back to
 // sensible defaults when empty. Never overwrites an existing backup: key.

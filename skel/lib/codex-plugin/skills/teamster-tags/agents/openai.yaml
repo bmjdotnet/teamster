@@ -1,0 +1,16 @@
+interface:
+  display_name: "Teamster Tag Steward"
+  short_description: "Refine the WMS tag vocabulary conversationally"
+  default_prompt: "Use $teamster-tags to review and refine the WMS tag vocabulary."
+
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "wms"
+      description: "Tag CRUD, entity tagging, snapshot/rollback"
+    - type: "mcp"
+      value: "activity"
+      description: "Activity feed narration"
+
+policy:
+  allow_implicit_invocation: false
