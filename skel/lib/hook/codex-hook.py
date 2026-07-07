@@ -63,9 +63,86 @@ import urllib.request
 from teamster import _log_error, _redact_event  # noqa: E402
 
 
+def _hookd_port_from_yaml(path):
+    """Extract hookd.port from ~/teamster/etc/teamster.yaml without a YAML
+    parser — this client stays pure stdlib, and PyYAML is a third-party
+    dependency neither this file nor teamster.py may take on. Only
+    understands the one shape this field needs: a top-level, unindented
+    `hookd:` mapping containing an indented `port: N` line — matching what
+    gopkg.in/yaml.v3's default marshaling of FileConfig
+    (src/internal/config/yaml.go) actually produces (the file is written by
+    cmd/teamster-install/yaml_config.go's yaml.Marshal call, not a static
+    template, so this is the real on-disk shape, not a guess). Returns 0
+    ("not found" / "use the default") on a missing file, an unexpected
+    shape, or a non-integer value — never raises.
+    """
+    try:
+        with open(path) as f:
+            lines = f.readlines()
+    except OSError:
+        return 0
+    in_hookd = False
+    for raw_line in lines:
+        line = raw_line.rstrip("\n")
+        if not line.strip():
+            continue
+        indented = line[0] in (" ", "\t")
+        key = line.strip()
+        if not indented:
+            in_hookd = key.split(":", 1)[0].strip() == "hookd"
+            continue
+        if in_hookd and key.startswith("port:"):
+            try:
+                return int(key.split(":", 1)[1].strip())
+            except ValueError:
+                return 0
+    return 0
+
+
+def _resolve_host_and_url():
+    """Mirror the minimal subset of internal/config.Config this client
+    needs (Host, HookServerURL), by hand — pure stdlib, so it cannot
+    literally call config.LoadFile()'s gopkg.in/yaml.v3 parser. Precedence
+    matches Go's Default()-then-Load(): compute the hub-local defaults
+    (hostname + the hardcoded 9125 hookd port, exactly like
+    internal/config.Default()), overlay ~/teamster/etc/teamster.yaml's
+    hookd.port if present, then let TEAMSTER_HOST/TEAMSTER_HOOK_SERVER_URL
+    env vars win outright if set (yaml < env, same precedence Go's Load()
+    documents).
+
+    Host intentionally does NOT split at the first dot the way this
+    file's own TEAMSTER_HOST-absent fallback for a REMOTE client would
+    (see teamster.py, whose fallback is a short hostname for noisy FQDNs) —
+    it matches internal/hook.getHostID()'s hub-local convention (the full
+    os.Hostname()) instead, since Codex v1 is hub-local only and its
+    sessions should be labeled the same way a Claude Code session on the
+    same host already is.
+
+    This matters specifically because Codex hook handlers have no `env`
+    field in config.toml (checked codex-rs's HookHandlerConfig struct) —
+    unlike Claude Code hooks/MCP servers, there is no way to inject
+    TEAMSTER_HOOK_SERVER_URL for this one process the way the installer
+    already does for wms-mcp/activity-mcp. Falling through to env-only
+    (teamster.py's own convention, fine for remotes whose settings.json DOES
+    carry an env block) would leave this client silently non-functional on
+    a plain `codex exec` unless the operator happened to export these vars
+    in whatever shell launched codex.
+    """
+    hostname = socket.gethostname()
+    host = os.environ.get("TEAMSTER_HOST") or hostname
+
+    port = 9125
+    yaml_path = os.path.join(os.path.expanduser("~"), "teamster", "etc", "teamster.yaml")
+    yaml_port = _hookd_port_from_yaml(yaml_path)
+    if yaml_port:
+        port = yaml_port
+
+    url = os.environ.get("TEAMSTER_HOOK_SERVER_URL") or f"http://{hostname}:{port}/event"
+    return host, url
+
+
 def main():
-    host = os.environ.get("TEAMSTER_HOST") or socket.gethostname().split(".")[0]
-    url = os.environ.get("TEAMSTER_HOOK_SERVER_URL", "")
+    host, url = _resolve_host_and_url()
 
     try:
         raw = sys.stdin.read()
