@@ -45,6 +45,18 @@ type sessionUpserter interface {
 // onto the same codex:<id>:<seq> key (which SessionID-keying would cause,
 // since multiple subagent files can share one SessionID).
 //
+// THIS IS THE SINGLE POINT OF SESSION-IDENTITY RESOLUTION for codex
+// subagents — lead ruling (2026-07-07, evidence: chunk-test2 row-level join
+// diagnosis, research/evidence-round3/chunk-test2/data/11-rowlevel-join-diagnosis.txt).
+// Do NOT also add a child→parent mapping in internal/rollup: once a thread's
+// rows are booked under the parent's session_id here, rollup's existing
+// temporal_join + temporal_join_lead_session_fallback machinery attributes
+// them like any other parent-session message with no further change needed
+// (confirmed: subagent message timestamps fall entirely within the parent's
+// own focus-interval windows). A second resolution layer in rollup would
+// double up on this one and risk double-attribution — this scraper-time
+// resolution is the only place child→parent mapping may happen.
+//
 // Seq is the number of token_count events already ledgered from this file.
 // Codex's token_count events carry no content-derived unique id (unlike
 // Claude's message.id+requestId), so the tailer manufactures one from
