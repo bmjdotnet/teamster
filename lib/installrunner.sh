@@ -1137,15 +1137,54 @@ restore_hookd_if_needed() {
 }
 trap restore_hookd_if_needed EXIT
 
+# hookd_unit_basedir echoes the basedir baked into an installed
+# teamster-hookd.service unit's ExecStart= line (skel/etc/teamster-hookd.service.tmpl
+# writes "__BASEDIR__/bin/hookd" verbatim) — or fails if the unit file is
+# absent or doesn't parse. Takes the unit file path as $1 so it's testable
+# without touching the real systemd directory; defaults to the real path.
+hookd_unit_basedir() {
+    local unit_file="${1:-/etc/systemd/system/teamster-hookd.service}"
+    [[ -f "$unit_file" ]] || return 1
+    local exec_start
+    exec_start=$(grep -m1 '^ExecStart=' "$unit_file" | cut -d= -f2-)
+    [[ -n "$exec_start" ]] || return 1
+    echo "${exec_start%/bin/hookd}"
+}
+
+# hookd_unit_matches_basedir reports, via exit code, whether the currently
+# installed teamster-hookd systemd unit's own basedir equals THIS run's
+# $BASEDIR — the only condition under which it's safe for this run to
+# stop/restart it. A unit that doesn't exist, or belongs to a different
+# basedir (a live install this run isn't even targeting), must never be
+# touched.
+#
+# This exists because of a live incident (installrunner-wire-guard WU): an
+# unconditional `systemctl stop teamster-hookd`, keyed only on the fixed unit
+# name with no basedir check — and in one call site, no --wire check either —
+# stopped the LIVE hookd from a completely unrelated
+# `--basedir=/tmp/scratch` stage-only run, and its restart/EXIT-trap
+# bookkeeping (RESTORE_HOOKD below) was never wired to that call site, so the
+# live service stayed down. `--basedir=PATH` without `--wire` must be fully
+# side-effect-free on any running system — see repo CLAUDE.md's "safe, no
+# global state touched" claim, which this incident showed was incomplete.
+hookd_unit_matches_basedir() {
+    local unit_basedir
+    unit_basedir=$(hookd_unit_basedir) || return 1
+    [[ "$unit_basedir" == "$BASEDIR" ]]
+}
+
 if [[ "$WIRE" -eq 1 ]]; then
-    if command -v systemctl &>/dev/null && systemctl is-active --quiet teamster-hookd 2>/dev/null; then
+    if command -v systemctl &>/dev/null && systemctl is-active --quiet teamster-hookd 2>/dev/null && hookd_unit_matches_basedir; then
         RUNNING_MODE="systemd"
         printf -- "${C_BOLD_WHITE}--> Stopping teamster-hookd via systemd...${C_RESET}\n"
         dlog INFO install.hookd "stop" "mode=systemd"
         sudo systemctl stop teamster-hookd
         dlog INFO install.hookd "stopped" "mode=systemd" "rc=$?"
         RESTORE_HOOKD=1
-    elif HOOKD_PIDS=$(pgrep -f 'teamster/bin/hookd' 2>/dev/null); then
+    elif command -v systemctl &>/dev/null && systemctl is-active --quiet teamster-hookd 2>/dev/null; then
+        printf -- "${C_YELLOW}--> teamster-hookd is running under a different --basedir — leaving it alone${C_RESET}\n"
+        dlog INFO install.hookd "skip stop — active unit belongs to a different basedir" "basedir=$BASEDIR"
+    elif HOOKD_PIDS=$(pgrep -f "$BASEDIR/bin/hookd" 2>/dev/null); then
         RUNNING_MODE="manual"
         printf -- "${C_BOLD_WHITE}--> Stopping hookd (PIDs: %s, manual mode)...${C_RESET}\n" "$HOOKD_PIDS"
         dlog INFO install.hookd "stop" "mode=manual" "pids=$HOOKD_PIDS"
@@ -1253,13 +1292,23 @@ fi
 unset _sup_pid_file
 
 # Stop existing services before re-install so port scan finds default ports free.
+# "$BASEDIR/bin/teamster stop" is inherently basedir-scoped (it's a specific
+# binary at a specific path — a different basedir has no such binary to run),
+# which is exactly why the live supervisor+Prometheus+Grafana survived the
+# wire-guard incident this comment references (installrunner-wire-guard WU)
+# unscathed. The systemd hookd stop below did NOT have that same protection
+# before this fix — it must carry the identical --wire + basedir-match guard
+# as the Step 1 stop above, and set the same RESTORE_HOOKD/RUNNING_MODE state
+# so the one EXIT trap (restore_hookd_if_needed) covers this site too.
 if [[ -x "$BASEDIR/bin/teamster" ]]; then
     echo "Stopping existing services before re-install..."
     dlog INFO install.pre "stopping existing services"
     "$BASEDIR/bin/teamster" stop 2>/dev/null || true
 fi
-if systemctl is-active --quiet teamster-hookd 2>/dev/null; then
+if [[ "$WIRE" -eq 1 ]] && command -v systemctl &>/dev/null && systemctl is-active --quiet teamster-hookd 2>/dev/null && hookd_unit_matches_basedir; then
     sudo systemctl stop teamster-hookd 2>/dev/null || true
+    RESTORE_HOOKD=1
+    RUNNING_MODE="systemd"
 fi
 
 # Detect and disable legacy pre-Teamster systemd units that conflict with
@@ -1300,8 +1349,24 @@ if [[ -x "$BASEDIR/bin/teamster" ]]; then
             if [[ $i -eq 25 ]]; then
                 printf -- "${C_YELLOW}WARNING: port %s still bound after 5s${C_RESET}\n" "$port"
                 dlog WARN install.pre "port still bound after 5s" "port=$port"
-                sudo fuser -k "${port}/tcp" 2>/dev/null || true
-                sleep 1
+                # Never kill by port number alone — a live install on the
+                # default port (e.g. hookd on 9125) could otherwise be killed
+                # by an unrelated --basedir run whose own freshly-compiled
+                # binary happens to want the same default port (this is the
+                # same class of bug as the systemd-unit-name issue above —
+                # see installrunner-wire-guard WU). Only kill a process we can
+                # positively confirm is OUR OWN basedir's binary; refuse and
+                # fail loudly otherwise.
+                _port_pid=$(sudo fuser "${port}/tcp" 2>/dev/null | awk '{print $1}')
+                if [[ -n "$_port_pid" ]] && sudo readlink -f "/proc/$_port_pid/exe" 2>/dev/null | grep -qF "$BASEDIR/"; then
+                    sudo kill -9 "$_port_pid" 2>/dev/null || true
+                    dlog INFO install.pre "killed port holder — confirmed our own basedir binary" "port=$port" "pid=$_port_pid"
+                    sleep 1
+                else
+                    dlog ERROR install.pre "port bound by a process outside this basedir — refusing to kill" "port=$port" "pid=${_port_pid:-unknown}"
+                    die "port $port is bound by a process this run doesn't own (pid ${_port_pid:-unknown}) — refusing to kill it. If this is a stray Teamster process from a DIFFERENT basedir/install, stop it manually; do not assume it's safe to remove."
+                fi
+                unset _port_pid
             fi
             sleep 0.2
         done

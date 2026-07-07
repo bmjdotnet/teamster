@@ -37,11 +37,23 @@ Rules of thumb:
 - Running `./install.sh` in this repo will **replace your live instance**.
   It interviews you, builds the right flags, then calls `lib/installrunner.sh`
   which compiles, stages, and restarts.
-- `lib/installrunner.sh --basedir=PATH` **stages** binaries and skel into PATH
-  but does **not** touch `/etc/systemd/system/`, `~/.claude/settings.json`, or
-  MCP registration. Safe for verification. Adding `--wire` makes it touch
-  global state — only use `--wire` on a disposable test VM or when you
-  explicitly intend to replace the live config.
+- `lib/installrunner.sh --basedir=PATH` (no `--wire`) **stages** binaries and
+  skel into PATH and does not touch `~/.claude/settings.json` or MCP
+  registration. `--wire` is the intended sole gate for global-state mutation
+  — only use it on a disposable test VM or when you explicitly intend to
+  replace the live config. **Incident history (2026-07-07,
+  installrunner-wire-guard WU):** this same claim, worded unconditionally
+  ("safe, no global state touched"), was wrong in practice — two systemd
+  hookd-stop call sites keyed off the fixed `teamster-hookd` unit name with
+  no `--wire` gate (one) or no basedir check (both), so a `--basedir=`-only
+  run on a host with a live `teamster-hookd` running under a *different*
+  basedir stopped it anyway. Both sites are now gated on `$WIRE -eq 1` AND on
+  the currently-installed unit's own `ExecStart=` basedir matching this run's
+  `$BASEDIR` (`hookd_unit_matches_basedir` in `lib/installrunner.sh`) — a
+  `--basedir=PATH` run without `--wire` is now genuinely a no-op against any
+  running service, verified live in an isolated container against an
+  unrelated systemd unit. Trust the code path, not just this sentence, if
+  you're ever unsure — the whole reason this note now has this much detail.
 - For true isolation, use a **disposable test VM**: reset it, then run a full
   `lib/installrunner.sh --wire` there, never touching your dev host's systemd
   or settings.
@@ -162,7 +174,7 @@ assembled flags. `install.sh` itself only accepts `--debug-log` and
 ./install.sh --debug-log=/tmp/install.log         # guided install with debug logging
 
 # Direct backend invocation (advanced / scripted installs):
-lib/installrunner.sh --basedir=PATH                       # stage to PATH only — safe, no global state touched
+lib/installrunner.sh --basedir=PATH                       # stage to PATH only — no --wire, no global-state mutation (see "Three Teamsters" above for the incident this now-corrected claim caused)
 lib/installrunner.sh --basedir=PATH --wire                # stage + wire to PATH (dangerous: touches systemd + settings.json)
 lib/installrunner.sh --relay-mode=install --relay-target=http://replica:9125/event --repl-push-remote=user@replica  # hub: set up replication
 ```
