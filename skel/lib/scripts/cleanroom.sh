@@ -79,14 +79,18 @@ echo "=== Building Go binaries ==="
 mkdir -p /tmp/teamster-bins
 cd "$REPO/src"
 export GOFLAGS=-buildvcs=false
-go build -o /tmp/teamster-bins/teamster ./cmd/teamster/
-go build -o /tmp/teamster-bins/hookd ./cmd/hookd/
-go build -o /tmp/teamster-bins/feed ./cmd/feed/
-go build -o /tmp/teamster-bins/activity-mcp ./cmd/activity-mcp/
-go build -o /tmp/teamster-bins/wms-mcp ./cmd/wms-mcp/
-go build -o /tmp/teamster-bins/teamster-install ./cmd/teamster-install/
-go build -o /tmp/teamster-bins/codex-scraper ./cmd/codex-scraper/
-echo "  7 binaries built"
+# Full set teamster-install's own binary-copy step expects (main.go's "2. Copy
+# runtime binaries" list) plus teamster-install itself and codex-scraper. The
+# pre-Codex-support cleanroom built only a subset (teamster, hookd, feed,
+# activity-mcp, wms-mcp, teamster-install) — that had silently drifted behind
+# main.go's actual copy list (token-scraper/rollup/classify/demogen/relay/
+# backup all missing), a latent bug this Phase C run surfaced, not something
+# Codex support introduced.
+for cmd in teamster hookd feed activity-mcp wms-mcp teamster-install codex-scraper \
+           token-scraper rollup classify demogen relay backup; do
+    go build -o "/tmp/teamster-bins/$cmd" "./cmd/$cmd/"
+done
+echo "  13 binaries built"
 
 if [[ "$REINSTALL_ONLY" -eq 1 ]]; then
     echo ""
@@ -146,10 +150,15 @@ chmod +x /home/$USER/.codex/packages/standalone/current/bin/codex
 fi
 
 echo "=== Pushing binaries ==="
-for bin in teamster hookd feed activity-mcp wms-mcp teamster-install codex-scraper; do
+for bin in teamster hookd feed activity-mcp wms-mcp teamster-install codex-scraper \
+           token-scraper rollup classify demogen relay backup; do
     lxc file push "/tmp/teamster-bins/$bin" "$CONTAINER/tmp/teamster-bins/$bin" --create-dirs 2>/dev/null
 done
-lxc exec "$CONTAINER" -- bash -c "chmod +x /tmp/teamster-bins/*"
+# --create-dirs leaves /tmp/teamster-bins at 0750 owner:group (whatever LXD's
+# push defaults to) — the $USER account (a different user/group) can't even
+# traverse the directory to reach files inside, regardless of the files' own
+# mode. chmod the directory itself, not just its contents.
+lxc exec "$CONTAINER" -- bash -c "chmod 755 /tmp/teamster-bins && chmod +x /tmp/teamster-bins/*"
 echo "  7 binaries pushed"
 
 echo "=== Pushing skel assets ==="
@@ -157,6 +166,11 @@ tar -C "$REPO" -czf /tmp/teamster-skel.tar.gz skel/
 lxc file push /tmp/teamster-skel.tar.gz "$CONTAINER/tmp/teamster-skel.tar.gz"
 lxc exec "$CONTAINER" -- bash -c "mkdir -p /tmp/teamster-repo && tar -xzf /tmp/teamster-skel.tar.gz -C /tmp/teamster-repo"
 rm -f /tmp/teamster-skel.tar.gz
+# tar preserves the host tarball's UID/GID, which the container's unprivileged
+# idmap remaps to a large, unrelated UID (e.g. 8000+) with no "other" access —
+# $USER can't read skel/ at all otherwise. World-readable/traversable is safe
+# here: throwaway container, no secrets in skel/.
+lxc exec "$CONTAINER" -- bash -c "chmod -R a+rX /tmp/teamster-repo"
 echo "  skel pushed"
 
 # Throwaway MySQL schema on the LXD bridge — wms-mcp is MySQL-only and the

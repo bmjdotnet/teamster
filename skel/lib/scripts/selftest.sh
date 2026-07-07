@@ -8,12 +8,22 @@
 # Override the defaults for your environment:
 #   SELFTEST_CONTAINER  LXD container name        (default: teamster-test)
 #   SELFTEST_USER       user inside the container  (default: teamster)
-#   SELFTEST_JSONL      event log path             (default: ~USER/.local/share/teamster/events.jsonl)
+#   SELFTEST_BASEDIR    Teamster BASEDIR in-container (default: ~USER/teamster)
+#   SELFTEST_JSONL      event log path             (default: $SELFTEST_BASEDIR/var/events.jsonl)
 set -euo pipefail
 
 CONTAINER="${SELFTEST_CONTAINER:-teamster-test}"
 USER="${SELFTEST_USER:-teamster}"
-JSONL="${SELFTEST_JSONL:-/home/$USER/.local/share/teamster/events.jsonl}"
+BASEDIR="${SELFTEST_BASEDIR:-/home/$USER/teamster}"
+# JSONL lives at $BASEDIR/var/events.jsonl (skel/CLAUDE.md's documented
+# layout) — a prior default here pointed at ~/.local/share/teamster/, a path
+# nothing in the current architecture ever writes to. That stale default made
+# every check_tag/check_focus call fail regardless of whether hooks actually
+# fired (found running this script for real against a fresh cleanroom
+# container: events.jsonl had the exact expected tags, but every check still
+# reported FAIL until this was fixed) — not a Codex-support regression, a
+# pre-existing latent bug this was the first real end-to-end run to surface.
+JSONL="${SELFTEST_JSONL:-$BASEDIR/var/events.jsonl}"
 FAILURES=0
 TOTAL=0
 
