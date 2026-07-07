@@ -66,6 +66,24 @@ dtrace() {
     dlog TRACE "$1" "$2 $3"
 }
 
+# log_service_action announces a destructive action (stopping/starting/
+# killing a service or process this script doesn't own outright) to stderr,
+# UNCONDITIONALLY — never gated on --debug-log like dlog above, and never
+# only on stdout. Two real gaps this closes, both from the same incident
+# (installrunner-wire-guard WU): (1) dlog is a silent no-op unless
+# --debug-log was explicitly passed, so a destructive action logged only via
+# dlog left no record at all on a plain run; (2) the actual culprit call site
+# (the port-release/pre-reinstall systemd stop) had NO announcement of any
+# kind, not even a conditional one — this function exists so every such site
+# gets one, unconditionally, going forward. Still no guarantee against a
+# caller that explicitly merges stderr into a truncated pipe (`2>&1 | tail`,
+# exactly what hid this from @installer's own view) — that's the caller's
+# choice to make with both eyes open, not something this script can prevent;
+# see CLAUDE.md's corrected note on this same incident.
+log_service_action() {
+    printf -- "${C_BOLD_WHITE}--> %s${C_RESET}\n" "$*" >&2
+}
+
 # sed_escape_replacement escapes a string for safe use on the REPLACEMENT side
 # of a sed `s|...|...|` command that uses `|` as the delimiter. Without this, a
 # value containing sed metachars (`\`, `&`), the `|` delimiter, or a newline
@@ -1111,27 +1129,31 @@ SCRIPT_OK=0      # set to 1 only at the very end of normal flow
 
 restore_hookd_if_needed() {
     local rc=$?
+    # Everything in this trap goes to stderr, unconditionally — this is the
+    # script's last chance to tell the operator it stopped their hookd and
+    # whether it got restored. A caller piping stdout through `tail` (exactly
+    # what hid the original incident) must not be able to hide this too.
     if [[ "$SCRIPT_OK" -eq 0 ]]; then
-        echo ""
-        printf -- "${C_BOLD_RED}================================================================\n"
-        printf "  INSTALL FAILED (exit %s)\n" "$rc"
-        printf "  Check the scrollback above for the error.\n"
-        printf "================================================================${C_RESET}\n"
+        echo "" >&2
+        printf -- "${C_BOLD_RED}================================================================\n" >&2
+        printf "  INSTALL FAILED (exit %s)\n" "$rc" >&2
+        printf "  Check the scrollback above for the error.\n" >&2
+        printf "================================================================${C_RESET}\n" >&2
     fi
     [[ "$RESTORE_HOOKD" -eq 1 ]] || return 0
-    echo ""
-    echo "!!! install.sh exited before restarting hookd — attempting recovery."
+    echo "" >&2
+    echo "!!! install.sh exited before restarting hookd — attempting recovery." >&2
     case "$RUNNING_MODE" in
         systemd)
             sudo systemctl start teamster-hookd 2>/dev/null \
-                && printf -- "${C_GREEN}    hookd restored via systemd${C_RESET}\n" \
-                || printf -- "${C_YELLOW}    WARN: recovery failed — run: sudo systemctl start teamster-hookd${C_RESET}\n"
+                && printf -- "${C_GREEN}    hookd restored via systemd${C_RESET}\n" >&2 \
+                || printf -- "${C_YELLOW}    WARN: recovery failed — run: sudo systemctl start teamster-hookd${C_RESET}\n" >&2
             ;;
         manual)
             mkdir -p "$BASEDIR/var"
             nohup "$BASEDIR/bin/hookd" > "$BASEDIR/var/hookd.log" 2>&1 &
             disown
-            echo "    hookd restored manually (PID $!)"
+            echo "    hookd restored manually (PID $!)" >&2
             ;;
     esac
 }
@@ -1176,17 +1198,17 @@ hookd_unit_matches_basedir() {
 if [[ "$WIRE" -eq 1 ]]; then
     if command -v systemctl &>/dev/null && systemctl is-active --quiet teamster-hookd 2>/dev/null && hookd_unit_matches_basedir; then
         RUNNING_MODE="systemd"
-        printf -- "${C_BOLD_WHITE}--> Stopping teamster-hookd via systemd...${C_RESET}\n"
+        log_service_action "Stopping teamster-hookd via systemd (basedir=$BASEDIR)..."
         dlog INFO install.hookd "stop" "mode=systemd"
         sudo systemctl stop teamster-hookd
         dlog INFO install.hookd "stopped" "mode=systemd" "rc=$?"
         RESTORE_HOOKD=1
     elif command -v systemctl &>/dev/null && systemctl is-active --quiet teamster-hookd 2>/dev/null; then
-        printf -- "${C_YELLOW}--> teamster-hookd is running under a different --basedir — leaving it alone${C_RESET}\n"
+        log_service_action "teamster-hookd is running under a different --basedir — leaving it alone"
         dlog INFO install.hookd "skip stop — active unit belongs to a different basedir" "basedir=$BASEDIR"
     elif HOOKD_PIDS=$(pgrep -f "$BASEDIR/bin/hookd" 2>/dev/null); then
         RUNNING_MODE="manual"
-        printf -- "${C_BOLD_WHITE}--> Stopping hookd (PIDs: %s, manual mode)...${C_RESET}\n" "$HOOKD_PIDS"
+        log_service_action "Stopping hookd (PIDs: $HOOKD_PIDS, manual mode, basedir=$BASEDIR)..."
         dlog INFO install.hookd "stop" "mode=manual" "pids=$HOOKD_PIDS"
         # shellcheck disable=SC2086 — word-split intentional to pass multiple PIDs
         kill $HOOKD_PIDS 2>/dev/null || true
@@ -1301,11 +1323,13 @@ unset _sup_pid_file
 # as the Step 1 stop above, and set the same RESTORE_HOOKD/RUNNING_MODE state
 # so the one EXIT trap (restore_hookd_if_needed) covers this site too.
 if [[ -x "$BASEDIR/bin/teamster" ]]; then
-    echo "Stopping existing services before re-install..."
+    log_service_action "Stopping existing services before re-install (basedir=$BASEDIR)..."
     dlog INFO install.pre "stopping existing services"
     "$BASEDIR/bin/teamster" stop 2>/dev/null || true
 fi
 if [[ "$WIRE" -eq 1 ]] && command -v systemctl &>/dev/null && systemctl is-active --quiet teamster-hookd 2>/dev/null && hookd_unit_matches_basedir; then
+    log_service_action "Stopping teamster-hookd via systemd, pre-reinstall port check (basedir=$BASEDIR)..."
+    dlog INFO install.pre "stopping teamster-hookd (pre-reinstall port check)" "mode=systemd"
     sudo systemctl stop teamster-hookd 2>/dev/null || true
     RESTORE_HOOKD=1
     RUNNING_MODE="systemd"
@@ -1347,7 +1371,7 @@ if [[ -x "$BASEDIR/bin/teamster" ]]; then
                 break
             fi
             if [[ $i -eq 25 ]]; then
-                printf -- "${C_YELLOW}WARNING: port %s still bound after 5s${C_RESET}\n" "$port"
+                printf -- "${C_YELLOW}WARNING: port %s still bound after 5s${C_RESET}\n" "$port" >&2
                 dlog WARN install.pre "port still bound after 5s" "port=$port"
                 # Never kill by port number alone — a live install on the
                 # default port (e.g. hookd on 9125) could otherwise be killed
@@ -1359,6 +1383,7 @@ if [[ -x "$BASEDIR/bin/teamster" ]]; then
                 # fail loudly otherwise.
                 _port_pid=$(sudo fuser "${port}/tcp" 2>/dev/null | awk '{print $1}')
                 if [[ -n "$_port_pid" ]] && sudo readlink -f "/proc/$_port_pid/exe" 2>/dev/null | grep -qF "$BASEDIR/"; then
+                    log_service_action "Killing pid $_port_pid holding port $port — confirmed it's our own basedir's binary ($BASEDIR)"
                     sudo kill -9 "$_port_pid" 2>/dev/null || true
                     dlog INFO install.pre "killed port holder — confirmed our own basedir binary" "port=$port" "pid=$_port_pid"
                     sleep 1
