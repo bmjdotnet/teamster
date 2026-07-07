@@ -411,6 +411,7 @@ Agent-Teams teammates run as separate top-level sessions (see Pitfalls).
 | `README.md` | **Current** — user-facing quick start | What Teamster is, install, first team, dashboard, subagent-mode opt-in |
 | `docs/specs/REMOTE-INSTALL.md` | **Current** | Hub/remote install model |
 | `docs/specs/replication.md` | **Current** | Hub→replica replication topology (relay + repl-push) |
+| `docs/specs/CODEX-INSTALL.md` | **Current** | Codex CLI support: `--codex-mode` flag, MCP server wiring + default-approve audit-trail risk, OTEL, skills delivery, hooks channel + trust provisioning, codex-scraper (cost/ledger tailer), `runtime` enum, uninstall |
 | `docs/wizard.md` | **Current** | Guided interactive installer (`install.sh`) + tag setup TUI + per-project subagent-mode opt-in |
 | `docs/session-explorer-guide.md` | **Current** | 9-point primer for driving programs via tmux |
 | `skel/doc/specs/architecture.md` | **Current** — full system | Hub/remote topology, all components, data flows, env vars, operating modes, cost attribution, focus nudge |
