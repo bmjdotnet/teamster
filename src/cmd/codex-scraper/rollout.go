@@ -13,13 +13,35 @@ type envelope struct {
 }
 
 // sessionMetaPayload is the payload of the first line of every rollout file.
-// id is the session UUID — same as the filename and threads.id in
+// id is the file's OWN thread UUID — same as the filename and threads.id in
 // state_5.sqlite (surface-map.md §2.1).
+//
+// Codex 0.142.x's thread_spawn (subagent) feature: a subagent runs as its own
+// thread with its own rollout file, whose session_meta carries session_id ==
+// the PARENT thread's id and parent_thread_id == the same parent id (both
+// empty/absent for a top-level, non-subagent file). Confirmed live
+// (chunk-test2 evidence, 06-rollout-subagent-meta.txt): a top-level file has
+// id == session_id and no parent_thread_id; a subagent file has id != session_id,
+// with session_id carrying the parent's id. 0.137.0's session_meta has NO
+// session_id field at all (this package's own redteam fixture) — SessionID
+// must fall back to ID when absent, which also makes non-subagent files on
+// 0.142.x (session_id == id) behave identically either way.
+//
+// AgentRole/AgentNickname are only present on subagent files (e.g. "explorer"/
+// "Mencius") — same fields as state_5.sqlite's threads table. Verified live
+// that wms-mcp's existing identity handling already opens focus intervals for
+// subagent work under agent_name "@"+role (e.g. "@explorer") — matching that
+// exactly (role, not nickname) is what lets rollup's temporal_join attribute
+// subagent spend precisely instead of falling back to the lead's own focus.
 type sessionMetaPayload struct {
-	ID         string `json:"id"`
-	Cwd        string `json:"cwd"`
-	Originator string `json:"originator"` // "codex-tui" | "codex_exec"
-	CliVersion string `json:"cli_version"`
+	ID             string `json:"id"`
+	SessionID      string `json:"session_id"`
+	ParentThreadID string `json:"parent_thread_id"`
+	Cwd            string `json:"cwd"`
+	Originator     string `json:"originator"` // "codex-tui" | "codex_exec"
+	CliVersion     string `json:"cli_version"`
+	AgentRole      string `json:"agent_role"`
+	AgentNickname  string `json:"agent_nickname"`
 }
 
 // turnContextPayload carries the model in effect for the turn that follows.

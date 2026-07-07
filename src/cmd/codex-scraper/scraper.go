@@ -32,10 +32,23 @@ type sessionUpserter interface {
 // `codex archive`/`unarchive`, which moves the file to a new path without
 // changing its content) never loses track of what's already been ledgered.
 //
+// SessionID vs ThreadID (subagent fix, 2026-07-07): Codex's thread_spawn
+// subagents write their OWN rollout file whose session_meta.session_id is the
+// PARENT thread's id (session_meta.id is the file's own thread id). SessionID
+// here is the parent-resolved id (session_meta.session_id, falling back to
+// session_meta.id on 0.137.0 files that lack session_id entirely) — it is
+// what ledger rows and the sessions-table upsert use, so subagent spend books
+// under the SAME session as the parent's own focus intervals and rollup's
+// temporal_join can bridge them. ThreadID is always the file's own id,
+// regardless of parent/subagent — used ONLY for message_id derivation so a
+// parent file's seq 1..N and a subagent file's seq 1..M can never collide
+// onto the same codex:<id>:<seq> key (which SessionID-keying would cause,
+// since multiple subagent files can share one SessionID).
+//
 // Seq is the number of token_count events already ledgered from this file.
 // Codex's token_count events carry no content-derived unique id (unlike
 // Claude's message.id+requestId), so the tailer manufactures one from
-// (session_id, Seq) — stable because rollout files are strictly append-only:
+// (ThreadID, Seq) — stable because rollout files are strictly append-only:
 // re-scanning the same bytes from offset 0 (e.g. after an archive-triggered
 // path change loses the cursor) reproduces the identical sequence, so the
 // derived message_id matches what's already in token_ledger and the DB's
@@ -44,6 +57,8 @@ type cursorEntry struct {
 	Offset     int64  `json:"offset"`
 	Seq        int64  `json:"seq"`
 	SessionID  string `json:"session_id"`
+	ThreadID   string `json:"thread_id"`
+	AgentName  string `json:"agent_name"` // "@"+agent_role for a subagent thread, else ""
 	Cwd        string `json:"cwd"`
 	Originator string `json:"originator"`
 	CliVersion string `json:"cli_version"`
@@ -244,7 +259,19 @@ func (s *scraper) processLine(ctx context.Context, raw []byte, cursor *cursorEnt
 			return fmt.Errorf("parse session_meta: %w", err)
 		}
 		if p.ID != "" {
-			cursor.SessionID = p.ID
+			cursor.ThreadID = p.ID
+			// session_id is the parent thread's id for a subagent file (or
+			// this file's own id for a top-level file on 0.142.x, where
+			// session_id == id); fall back to id on 0.137.0 files, which
+			// have no session_id field at all.
+			if p.SessionID != "" {
+				cursor.SessionID = p.SessionID
+			} else {
+				cursor.SessionID = p.ID
+			}
+			if p.AgentRole != "" {
+				cursor.AgentName = "@" + p.AgentRole
+			}
 			cursor.Cwd = p.Cwd
 			cursor.Originator = p.Originator
 			cursor.CliVersion = p.CliVersion
@@ -326,7 +353,12 @@ func (s *scraper) emitLedgerRow(timestamp string, u tokenUsage, cursor *cursorEn
 	seq := cursor.Seq
 	cursor.Seq++
 
-	messageID := fmt.Sprintf("codex:%s:%06d", cursor.SessionID, seq)
+	// Keyed by ThreadID (this file's own id), never SessionID: SessionID is
+	// shared across a parent and all its subagent files (see cursorEntry
+	// doc), so keying on it here would let two different files' seq counters
+	// collide onto the same codex:<id>:<seq> message_id and silently swallow
+	// one file's rows via the uq_message upsert.
+	messageID := fmt.Sprintf("codex:%s:%06d", cursor.ThreadID, seq)
 
 	if u.TotalTokens != 0 && u.TotalTokens != u.InputTokens+u.OutputTokens {
 		slog.Warn("codex-scraper: token_count arithmetic violated expected invariant "+
@@ -356,7 +388,7 @@ func (s *scraper) emitLedgerRow(timestamp string, u tokenUsage, cursor *cursorEn
 	row := telemetryRow{
 		MessageID:             messageID,
 		SessionID:             cursor.SessionID,
-		AgentName:             "", // solo-only in v1 — no Codex Agent Teams
+		AgentName:             cursor.AgentName, // "" for direct/parent spend, "@"+role for a subagent thread
 		Host:                  s.host,
 		Username:              s.username,
 		Model:                 cursor.Model,
@@ -418,7 +450,7 @@ func (s *scraper) upsertCodexSession(ctx context.Context, cursor *cursorEntry) {
 	now := time.Now().UTC()
 	err := s.st.UpsertSession(ctx, store.Session{
 		SessionID:  cursor.SessionID,
-		AgentName:  "", // solo-only in v1
+		AgentName:  cursor.AgentName, // "" for the parent/direct-spend row, "@"+role for a subagent thread's own row
 		Host:       s.host,
 		Username:   s.username,
 		FirstSeen:  now,

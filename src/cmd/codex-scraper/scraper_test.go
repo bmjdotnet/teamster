@@ -173,6 +173,158 @@ func TestProcessFile_ArchiveRescanIdempotent(t *testing.T) {
 	}
 }
 
+// TestProcessFile_SubagentThreadBooksUnderParentSession is the regression
+// test for the subagent cost-attribution bug (chunk-test2 evidence, live
+// codex 0.142.5): a thread_spawn subagent's rollout file has session_meta.id
+// == its own thread id, but session_meta.session_id == the PARENT's id.
+// Ledger rows and the sessions upsert must use the PARENT id (session_id) so
+// rollup's temporal_join can bridge subagent spend to the parent's focus
+// intervals — booking under the thread's own id (the pre-fix behavior)
+// orphans subagent spend into permanently-unallocated cost. Uses a synthetic
+// fixture, not raw chunk rollouts (which carry operator content).
+func TestProcessFile_SubagentThreadBooksUnderParentSession(t *testing.T) {
+	s, cap, up := newTestScraper(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rollout-subagent.jsonl")
+
+	const parentID = "019f3ed6-1354-7731-b35e-5356dd9af6d4"
+	const threadID = "019f3ed8-17a7-7dc3-b11a-6cca251d9c86"
+	writeLines(t, path, []string{
+		subagentSessionMetaLine(threadID, parentID, parentID, "/tmp", "codex_exec", "0.142.5", "explorer", "Mencius"),
+		turnContextLine("gpt-5.4"),
+		tokenCountLine(100, 10, 0, 0),
+	})
+	if err := s.processFile(context.Background(), path); err != nil {
+		t.Fatalf("processFile: %v", err)
+	}
+
+	if len(cap.rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(cap.rows))
+	}
+	row := cap.rows[0]
+	if row.SessionID != parentID {
+		t.Errorf("ledger SessionID = %q, want parent id %q (booking under the thread's own id orphans subagent spend)", row.SessionID, parentID)
+	}
+	if row.MessageID != "codex:"+threadID+":000000" {
+		t.Errorf("MessageID = %q, want keyed by thread id %q, not the parent session id", row.MessageID, threadID)
+	}
+	if row.AgentName != "@explorer" {
+		t.Errorf("AgentName = %q, want \"@explorer\" (role-based, matching wms-mcp's existing focus-interval identity) — NOT \"@Mencius\" (nickname)", row.AgentName)
+	}
+
+	if len(up.calls) != 1 {
+		t.Fatalf("expected 1 session upsert call, got %d", len(up.calls))
+	}
+	sess := up.calls[0]
+	if sess.SessionID != parentID {
+		t.Errorf("session upsert SessionID = %q, want parent id %q", sess.SessionID, parentID)
+	}
+	if sess.AgentName != "@explorer" {
+		t.Errorf("session upsert AgentName = %q, want \"@explorer\"", sess.AgentName)
+	}
+}
+
+// TestProcessFile_PreThreadSpawnSessionMetaFallsBackToID is the regression
+// guard for 0.137.0-shaped rollout files (this package's original fixture
+// era): session_meta has NO session_id field at all (the field is new
+// somewhere in the 0.137→0.142 range). SessionID must fall back to the
+// file's own id — the pre-fix behavior — so nothing regresses for hosts still
+// on an older Codex CLI.
+func TestProcessFile_PreThreadSpawnSessionMetaFallsBackToID(t *testing.T) {
+	s, cap, up := newTestScraper(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rollout-pre-0142.jsonl")
+
+	const id = "019f0000-0000-7000-8000-000000000001"
+	writeLines(t, path, []string{
+		sessionMetaLine(id, "/tmp", "codex_exec", "0.137.0"), // no session_id field, matches a real 0.137.0 file
+		turnContextLine("gpt-5.5"),
+		tokenCountLine(100, 10, 0, 0),
+	})
+	if err := s.processFile(context.Background(), path); err != nil {
+		t.Fatalf("processFile: %v", err)
+	}
+
+	if len(cap.rows) != 1 || cap.rows[0].SessionID != id {
+		t.Fatalf("SessionID = %q, want fallback to file id %q", cap.rows[0].SessionID, id)
+	}
+	if cap.rows[0].MessageID != "codex:"+id+":000000" {
+		t.Errorf("MessageID = %q, want keyed by %q", cap.rows[0].MessageID, id)
+	}
+	if cap.rows[0].AgentName != "" {
+		t.Errorf("AgentName = %q, want empty (no agent_role on a non-subagent file)", cap.rows[0].AgentName)
+	}
+	if up.calls[0].AgentName != "" {
+		t.Errorf("session upsert AgentName = %q, want empty", up.calls[0].AgentName)
+	}
+}
+
+// TestProcessFile_ParentAndSubagentNoMessageIDCollision proves the collision
+// trap the fix must avoid: a parent file and its subagent file share the same
+// SessionID (the parent's id) but each has its own independent seq counter.
+// If message_id were derived from SessionID instead of ThreadID, the parent's
+// seq-0 row and the subagent's seq-0 row would both produce
+// "codex:<parentID>:000000" and the DB's uq_message upsert would silently
+// swallow one of them. Also asserts exactly one sessions row is upserted for
+// the parent (agent_name="") and one for the subagent (agent_name="@worker") —
+// same SessionID, different AgentName, matching the Claude Code Agent Teams
+// sessions convention (one row per (session_id, agent_name) pair).
+func TestProcessFile_ParentAndSubagentNoMessageIDCollision(t *testing.T) {
+	s, cap, up := newTestScraper(t)
+	dir := t.TempDir()
+
+	const parentID = "019f3ed6-1354-7731-b35e-5356dd9af6d4"
+	const threadID = "019f3ed8-1843-7d61-992b-f7a012bfa313"
+
+	parentPath := filepath.Join(dir, "rollout-parent.jsonl")
+	writeLines(t, parentPath, []string{
+		sessionMetaLine(parentID, "/mnt/ai/gh", "codex-tui", "0.142.5"),
+		turnContextLine("gpt-5.4"),
+		tokenCountLine(100, 10, 0, 0),
+	})
+	subagentPath := filepath.Join(dir, "rollout-subagent.jsonl")
+	writeLines(t, subagentPath, []string{
+		subagentSessionMetaLine(threadID, parentID, parentID, "/mnt/ai/gh", "codex_exec", "0.142.5", "worker", "Dirac"),
+		turnContextLine("gpt-5.4"),
+		tokenCountLine(200, 20, 0, 0),
+	})
+
+	if err := s.processFile(context.Background(), parentPath); err != nil {
+		t.Fatalf("processFile(parent): %v", err)
+	}
+	if err := s.processFile(context.Background(), subagentPath); err != nil {
+		t.Fatalf("processFile(subagent): %v", err)
+	}
+
+	if len(cap.rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d: %+v", len(cap.rows), cap.rows)
+	}
+	seen := map[string]bool{}
+	for _, row := range cap.rows {
+		if row.SessionID != parentID {
+			t.Errorf("row session_id = %q, want parent id %q for both parent and subagent rows", row.SessionID, parentID)
+		}
+		if seen[row.MessageID] {
+			t.Fatalf("message_id collision: %q emitted by both parent and subagent files", row.MessageID)
+		}
+		seen[row.MessageID] = true
+	}
+
+	if len(up.calls) != 2 {
+		t.Fatalf("expected 2 session upsert calls (one per (session_id, agent_name) pair), got %d: %+v", len(up.calls), up.calls)
+	}
+	byAgent := map[string]store.Session{}
+	for _, c := range up.calls {
+		byAgent[c.AgentName] = c
+	}
+	if s, ok := byAgent[""]; !ok || s.SessionID != parentID {
+		t.Errorf("missing/wrong parent session upsert (agent_name=\"\"): %+v", byAgent[""])
+	}
+	if s, ok := byAgent["@worker"]; !ok || s.SessionID != parentID {
+		t.Errorf("missing/wrong subagent session upsert (agent_name=\"@worker\"): %+v", byAgent["@worker"])
+	}
+}
+
 // TestEmitLedgerRow_CachedAndReasoningAreSubsets is the regression test for
 // the double-counting bug caught in review: cached_input_tokens and
 // reasoning_output_tokens are SUBSETS of input_tokens/output_tokens, not
@@ -425,6 +577,11 @@ func writeLines(t *testing.T, path string, lines []string) {
 	}
 }
 
+// sessionMetaLine builds a top-level (non-subagent) session_meta line —
+// deliberately with NO session_id field, matching both a real 0.137.0 file
+// (which never has one) and being harmless on 0.142.x (where a top-level
+// file's session_id equals its own id, so the id-fallback produces the same
+// result).
 func sessionMetaLine(id, cwd, originator, cliVersion string) string {
 	b, _ := json.Marshal(map[string]any{
 		"timestamp": "2026-07-07T00:00:00.000Z",
@@ -434,6 +591,28 @@ func sessionMetaLine(id, cwd, originator, cliVersion string) string {
 			"cwd":         cwd,
 			"originator":  originator,
 			"cli_version": cliVersion,
+		},
+	})
+	return string(b)
+}
+
+// subagentSessionMetaLine builds a thread_spawn subagent's session_meta line:
+// id is the file's OWN thread id, sessionID/parentThreadID are the parent's
+// id (both set — matches real chunk-test2 evidence), and role/nickname are
+// the subagent's identity (e.g. "explorer"/"Mencius").
+func subagentSessionMetaLine(id, sessionID, parentThreadID, cwd, originator, cliVersion, role, nickname string) string {
+	b, _ := json.Marshal(map[string]any{
+		"timestamp": "2026-07-07T00:00:00.000Z",
+		"type":      "session_meta",
+		"payload": map[string]any{
+			"id":               id,
+			"session_id":       sessionID,
+			"parent_thread_id": parentThreadID,
+			"cwd":              cwd,
+			"originator":       originator,
+			"cli_version":      cliVersion,
+			"agent_role":       role,
+			"agent_nickname":   nickname,
 		},
 	})
 	return string(b)
