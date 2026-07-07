@@ -2000,7 +2000,9 @@ unprompted. If a tool you expect isn't callable:
 
 ## Activity Reporting
 
-You have three MCP tools from the ` + "`activity`" + ` server. Use them:
+The ` + "`activity`" + ` server provides three tools (search for them first if your
+build defer-loads MCP tools — see "Finding WMS/activity MCP tools" above).
+Use them:
 
 1. ` + "`reportActivity(type, message)`" + ` -- call at the start of each turn before
    doing work. Types: thought, reading, writing, executing, planning, reviewing.
