@@ -417,10 +417,14 @@ install_otelcol() {
     # proof: teamster-codex-kit research/evidence-round3/otelcol-temporality-bump/.
     local version="0.156.0"
     # SHA256 of the release tarballs, computed locally from the artifacts
-    # downloaded over HTTPS from the URL below (no separate checksums.txt is
-    # published for this distribution's assets) — resolves the prior
-    # PLACEHOLDER/TODO(release) pin.
+    # downloaded over HTTPS, then cross-checked against the project's own
+    # published (cosign-signed) checksums.txt asset on this release — both
+    # match exactly. Resolves the prior PLACEHOLDER/TODO(release) pin.
     # https://github.com/open-telemetry/opentelemetry-collector-releases/releases/tag/v0.156.0
+    # https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v0.156.0/opentelemetry-collector-releases_otelcol-contrib_checksums.txt
+    # A stronger supply-chain option for later: verify that checksums.txt's
+    # cosign signature (the accompanying .sig/.pem) instead of trusting a
+    # self-downloaded tarball — not done here, flagged for a future pass.
     local sha256_amd64="ee70d7b1221be8a9cc4700f48bf985c04b1ab8aaeef24409fe79623849e2f9f2"
     local sha256_arm64="1f9afe1d245b4babbb4bcb7d6b57ba2836b3b23c5f61b38abc00ab461f049288"
 
