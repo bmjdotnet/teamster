@@ -34,6 +34,12 @@ const (
 	// rollback reverts steward-sourced bindings from that snapshot.
 	ToolSnapshotEntityTags = "wms_snapshotEntityTags"
 	ToolRollbackTags       = "wms_rollbackTags"
+
+	// ToolGetEntityTags reads the tags bound to one entity: direct bindings plus
+	// (for a workunit) tags inherited from its parent outcome. Read-only —
+	// distinct from wms_getOutcome/wms_getWorkUnit, whose response shapes this
+	// tool must not change.
+	ToolGetEntityTags = "wms_getEntityTags"
 )
 
 // v2 tool name constants
