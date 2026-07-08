@@ -174,6 +174,13 @@ func TestGetEntityTagsEmptyAndUnknown(t *testing.T) {
 	}); ce != nil {
 		t.Fatalf("createWorkUnit: %v", ce)
 	}
+	// createWorkUnit auto-applies runtime:<...> (classifier-sourced); strip it
+	// so this is a genuine zero-tags case rather than fighting that feature.
+	if _, ce := call(t, store, ToolUntagEntity, map[string]interface{}{
+		"entityType": wms.EntityWorkUnit, "entityID": wuID, "tagKey": "runtime",
+	}); ce != nil {
+		t.Fatalf("untagEntity runtime: %v", ce)
+	}
 
 	got, ce := getEntityTags(t, store, wms.EntityWorkUnit, wuID)
 	if ce != nil {
