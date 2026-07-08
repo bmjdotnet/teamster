@@ -148,6 +148,15 @@ by design, not a bug (confirmed in Phase C testing: `teamster-solo`/
 `teamster-tags`/`teamster-review` are explicit-only; `teamster-status` is
 ambient).
 
+`start` is a fifth skill, added after the initial four to give Codex a
+discoverable front door analogous to Claude Code's `/teamster:start` —
+Codex has no slash-command namespace, but a skill directory literally named
+`start` gets the trigger `$start` for free, since the trigger is just the
+directory name under `~/.codex/skills/`. It ships ambient (like
+`teamster-status`) and is a thin pointer: its `SKILL.md` tells the agent to
+read and follow the sibling `teamster-solo` skill inline rather than
+duplicating that flow.
+
 ### Hooks channel
 
 Codex reads hook registrations **only** from inline `[[hooks.<Event>]]`
@@ -585,8 +594,9 @@ done
 
 # Skills Teamster installed via file-copy (not the plugin system — see
 # InstallSkills's doc comment for why):
-rm -rf ~/.codex/skills/teamster-solo ~/.codex/skills/teamster-status \
-       ~/.codex/skills/teamster-tags ~/.codex/skills/teamster-review
+rm -rf ~/.codex/skills/start ~/.codex/skills/teamster-solo \
+       ~/.codex/skills/teamster-status ~/.codex/skills/teamster-tags \
+       ~/.codex/skills/teamster-review
 
 # codex-scraper systemd timer/service:
 sudo systemctl disable --now teamster-codex-scraper.timer 2>/dev/null || true

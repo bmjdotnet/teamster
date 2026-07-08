@@ -210,13 +210,14 @@ detection, pass `--codex-mode=install` or `--codex-mode=none` to
 `lib/installrunner.sh` — an advanced/scripted flag; the guided `install.sh`
 interview doesn't ask.
 
-**Starting a session.** In a Codex session, invoke `$teamster-solo` — the Codex
-counterpart of `/teamster:start`. It creates the WMS Outcome, runs the tag
-interview, and sets focus. `$teamster-status`, `$teamster-tags`, and
-`$teamster-review` are also installed. Skills are invoked by name with a
-leading `$`; only `$teamster-status` appears in a generic "what skills do you
-have" listing — the other three are explicit-invocation-only by design, so
-invoke them by name when you need them.
+**Starting a session.** In a Codex session, invoke `$start` — the Codex
+counterpart of `/teamster:start`. It hands off to `$teamster-solo`, which
+creates the WMS Outcome, runs the tag interview, and sets focus.
+`$teamster-status`, `$teamster-tags`, and `$teamster-review` are also
+installed. Skills are invoked by name with a leading `$`; only `$start` and
+`$teamster-status` appear in a generic "what skills do you have" listing —
+the other three are explicit-invocation-only by design, so invoke them by
+name when you need them.
 
 **Cost shows up on a delay.** Codex spend is scraped from Codex's session logs
 on a 10-minute timer and rolled up on another, so a fresh Codex session's cost
