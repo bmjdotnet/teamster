@@ -11,4 +11,6 @@ the context-tag interview, and sets focus.
 
 Read the sibling skill directory `teamster-solo` (installed alongside this
 one under `~/.codex/skills/`) and follow its `SKILL.md` inline, exactly as if
-the operator had typed `$teamster-solo` directly.
+the operator had typed `$teamster-solo` directly. That flow includes
+verifying any local files/paths/kits the brief names actually exist before
+you act on them — don't skip that check.
