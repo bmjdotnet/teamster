@@ -1961,14 +1961,17 @@ Teamster tracks this session's work in WMS (Outcome -> WorkUnit) and the live
 activity feed. Codex sessions run solo -- there is no Agent Teams layer here,
 so none of Claude Code's team-coordination rules apply. When you begin a
 session with non-trivial work (not just a quick question), use the
-` + "`$teamster-solo`" + ` skill first. It creates the WMS Outcome, runs the context-tag
-interview, sets focus, and hands off to the work itself.
+` + "`$start`" + ` skill first. It hands off to ` + "`$teamster-solo`" + `, which creates
+the WMS Outcome, runs the context-tag interview, sets focus, and hands off to
+the work itself.
 
 ## Available skills
 
-Four Teamster skills are installed. A skill listing may show either name —
+Five Teamster skills are installed. A skill listing may show either name —
 both refer to the same skill:
 
+- "Teamster Start" -- invoke by typing ` + "`$start`" + ` -- the front door for a
+  session; hands off to ` + "`$teamster-solo`" + `.
 - "Teamster Solo" -- invoke by typing ` + "`$teamster-solo`" + ` -- start a WMS-tracked
   session (Outcome, context tags, focus).
 - "Teamster Status" -- invoke by typing ` + "`$teamster-status`" + ` -- show current
@@ -1980,9 +1983,9 @@ both refer to the same skill:
 
 ` + "`$teamster-solo`" + `, ` + "`$teamster-tags`" + `, and ` + "`$teamster-review`" + ` are
 explicit-invocation-only -- they will NOT appear if you ask "what skills do
-you have" or list skills generically (` + "`$teamster-status`" + ` is the only one
-that does). That is by design, not a sign they are missing -- invoke them by
-name anyway whenever the situation calls for them.
+you have" or list skills generically (` + "`$start`" + ` and ` + "`$teamster-status`" + `
+are the only ones that do). That is by design, not a sign they are missing --
+invoke them by name anyway whenever the situation calls for them.
 
 ## Finding WMS/activity MCP tools
 
