@@ -66,6 +66,24 @@ dtrace() {
     dlog TRACE "$1" "$2 $3"
 }
 
+# log_service_action announces a destructive action (stopping/starting/
+# killing a service or process this script doesn't own outright) to stderr,
+# UNCONDITIONALLY — never gated on --debug-log like dlog above, and never
+# only on stdout. Two real gaps this closes, both from the same incident
+# (installrunner-wire-guard WU): (1) dlog is a silent no-op unless
+# --debug-log was explicitly passed, so a destructive action logged only via
+# dlog left no record at all on a plain run; (2) the actual culprit call site
+# (the port-release/pre-reinstall systemd stop) had NO announcement of any
+# kind, not even a conditional one — this function exists so every such site
+# gets one, unconditionally, going forward. Still no guarantee against a
+# caller that explicitly merges stderr into a truncated pipe (`2>&1 | tail`,
+# exactly what hid this from @installer's own view) — that's the caller's
+# choice to make with both eyes open, not something this script can prevent;
+# see CLAUDE.md's corrected note on this same incident.
+log_service_action() {
+    printf -- "${C_BOLD_WHITE}--> %s${C_RESET}\n" "$*" >&2
+}
+
 # sed_escape_replacement escapes a string for safe use on the REPLACEMENT side
 # of a sed `s|...|...|` command that uses `|` as the delimiter. Without this, a
 # value containing sed metachars (`\`, `&`), the `|` delimiter, or a newline
@@ -106,6 +124,7 @@ OTELCOL_MODE=""       # --otelcol-mode=install|external|managed|none
 PROMETHEUS_MODE=""    # --prometheus-mode=install|external|managed|none
 GRAFANA_MODE=""       # --grafana-mode=install|external|managed|none
 RELAY_MODE=""         # --relay-mode=none|install
+CODEX_MODE=""         # --codex-mode=install|none (unset = auto-detect)
 
 # Per-service endpoint flags
 STORE_DSN=""             # --store-dsn=<mysql://...>
@@ -174,6 +193,8 @@ while [[ $# -gt 0 ]]; do
         --grafana-mode)         require_value "$1" "${2-}"; GRAFANA_MODE="$2"; shift 2 ;;
         --relay-mode=*)         RELAY_MODE="${1#--relay-mode=}"; shift ;;
         --relay-mode)           require_value "$1" "${2-}"; RELAY_MODE="$2"; shift 2 ;;
+        --codex-mode=*)         CODEX_MODE="${1#--codex-mode=}"; shift ;;
+        --codex-mode)           require_value "$1" "${2-}"; CODEX_MODE="$2"; shift 2 ;;
         # --- per-service endpoint flags ---
         --store-dsn=*)          STORE_DSN="${1#--store-dsn=}"; shift ;;
         --store-dsn)            require_value "$1" "${2-}"; STORE_DSN="$2"; shift 2 ;;
@@ -237,6 +258,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --prometheus-mode=MODE   prometheus mode: install (default) | external | managed | none"
             echo "  --grafana-mode=MODE      grafana mode: none (default) | install | external | managed"
             echo "  --relay-mode=MODE        relay mode: none (default) | install"
+            echo "  --codex-mode=MODE        codex wiring: auto-detect (default) | install | none"
             echo ""
             echo "Per-service endpoint flags:"
             echo "  --store-dsn=DSN              MySQL DSN (mysql://user:pass@host:port/db)"
@@ -329,6 +351,8 @@ if [[ "${RELAY_MODE:-none}" == "install" ]]; then
     [[ -z "$RELAY_TARGET" ]]     && die "--relay-target is required when --relay-mode=install"
     [[ -z "$REPL_PUSH_REMOTE" ]] && die "--repl-push-remote is required when --relay-mode=install"
 fi
+[[ -n "$CODEX_MODE" ]] && [[ "$CODEX_MODE" != "install" && "$CODEX_MODE" != "none" ]] \
+    && die "--codex-mode must be 'install' or 'none' (unset = auto-detect), got: $CODEX_MODE"
 [[ "$OTELCOL_BUILD_FROM_SRC" -eq 1 ]] && [[ "$OTELCOL_MODE" != "install" ]] \
     && die "--otelcol-build-from-src requires --otelcol-mode=install"
 [[ "$PROMETHEUS_BUILD_FROM_SRC" -eq 1 ]] && [[ "$PROMETHEUS_MODE" != "install" ]] \
@@ -399,11 +423,34 @@ download_prometheus() {
 # --build-otelcol builds from source; default downloads the pinned release.
 install_otelcol() {
     local builddir="$1"
-    local version="0.95.0"
-    # SHA256 of the release tarballs. Update when pinning a new version.
-    # TODO(release): pin from actual release artifacts (https://github.com/open-telemetry/opentelemetry-collector-releases/releases)
-    local sha256_amd64="PLACEHOLDER_UPDATE_AT_PIN_TIME"
-    local sha256_arm64="PLACEHOLDER_UPDATE_AT_PIN_TIME"
+    # Bumped from 0.95.0 to 0.156.0 (2026-07-07, otelcol-temporality-bump WU):
+    # 0.95.0 has no delta-to-cumulative processor, so Codex's OTLP metrics
+    # (all delta temporality — live-verified) were silently dropped by
+    # prometheusremotewrite ("invalid temporality and type combination").
+    # deltatocumulativeprocessor is confirmed present in this version's
+    # manifest. Changelog reviewed for the 8 components this template uses
+    # (otlp receiver, memory_limiter/batch/transform/resource/deltatocumulative
+    # processors, debug/prometheusremotewrite exporters) across the whole
+    # 0.95.0->0.156.0 span: no schema-breaking changes found for any of them.
+    # prometheusremotewrite's "Remote Write 2.0" changelog entries all concern
+    # an opt-in feature gate (exporter.prometheusremotewritexporter.enableSendingRW2)
+    # that defaults off and remains flagged not-production-ready upstream — our
+    # config never sets `protobuf_message`, so we stay on Remote Write 1.0
+    # (`prometheus.WriteRequest`, still the default), compatible with the
+    # bundled Prometheus 2.51.2 above. Full write-up + dual-runtime boot/traffic
+    # proof: teamster-codex-kit research/evidence-round3/otelcol-temporality-bump/.
+    local version="0.156.0"
+    # SHA256 of the release tarballs, computed locally from the artifacts
+    # downloaded over HTTPS, then cross-checked against the project's own
+    # published (cosign-signed) checksums.txt asset on this release — both
+    # match exactly. Resolves the prior PLACEHOLDER/TODO(release) pin.
+    # https://github.com/open-telemetry/opentelemetry-collector-releases/releases/tag/v0.156.0
+    # https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v0.156.0/opentelemetry-collector-releases_otelcol-contrib_checksums.txt
+    # A stronger supply-chain option for later: verify that checksums.txt's
+    # cosign signature (the accompanying .sig/.pem) instead of trusting a
+    # self-downloaded tarball — not done here, flagged for a future pass.
+    local sha256_amd64="ee70d7b1221be8a9cc4700f48bf985c04b1ab8aaeef24409fe79623849e2f9f2"
+    local sha256_arm64="1f9afe1d245b4babbb4bcb7d6b57ba2836b3b23c5f61b38abc00ab461f049288"
 
     if [[ "$OTELCOL_BUILD_FROM_SRC" -eq 1 ]]; then
         echo ""
@@ -835,10 +882,22 @@ if [[ "$HOOKD_MODE" == "external" ]]; then
         exit 1
     fi
     echo "Prerequisites OK: python3 $(python3 --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+'), claude $(claude --version 2>/dev/null | head -1)"
+
+    # Codex probe — informational only, mirrors hub mode's own probe further
+    # below (never fails the install here; remote-codex-setup.py re-probes and
+    # does the actual gating, including the --codex-mode=install hard-error
+    # case, when Configuring runs).
+    if [[ "$CODEX_MODE" == "none" ]]; then
+        echo "Codex: skipping (--codex-mode=none)"
+    elif command -v codex &>/dev/null; then
+        echo "Codex: found ($(codex --version 2>/dev/null | tail -1)) — will be wired"
+    else
+        echo "Codex: not found — skipping (informational; install https://developers.openai.com/codex/cli if you want it wired)"
+    fi
     echo ""
 
     echo "--- Staging ---"
-    mkdir -p "$BASEDIR/bin" "$BASEDIR/lib" "$BASEDIR/lib/scripts"
+    mkdir -p "$BASEDIR/bin" "$BASEDIR/lib/hook" "$BASEDIR/lib/scripts"
 
     cp "$REPO/skel/lib/hook/teamster.py" "$BASEDIR/bin/teamster"
     chmod +x "$BASEDIR/bin/teamster"
@@ -847,6 +906,21 @@ if [[ "$HOOKD_MODE" == "external" ]]; then
 
     cp -r "$REPO/skel/lib/plugin"         "$BASEDIR/lib/"
     cp -r "$REPO/skel/lib/.claude-plugin"  "$BASEDIR/lib/"
+
+    # Codex remote support (WP-R4c parity with install-remote.sh). Staged
+    # unconditionally — remote-codex-setup.py probes for the codex CLI itself
+    # and no-ops (CODEX_STATUS=skipped) when it's absent or --codex-mode=none.
+    cp "$REPO/skel/lib/scripts/codex-scraper.py" "$BASEDIR/bin/codex-scraper"
+    chmod +x "$BASEDIR/bin/codex-scraper"
+    # codex-hook.py + teamster.py ship together in lib/hook/ (codex-hook.py
+    # imports teamster.py as a same-directory module) — a SECOND copy of
+    # teamster.py from the one already staged (renamed, executable) at
+    # bin/teamster above, since that copy can't double as an importable
+    # `teamster` module.
+    cp "$REPO/skel/lib/hook/codex-hook.py" "$BASEDIR/lib/hook/codex-hook.py"
+    cp "$REPO/skel/lib/hook/teamster.py"   "$BASEDIR/lib/hook/teamster.py"
+    cp "$REPO/skel/lib/scripts/remote-codex-setup.py" "$BASEDIR/lib/scripts/remote-codex-setup.py"
+    cp -r "$REPO/skel/lib/codex-plugin"    "$BASEDIR/lib/"
 
     cp "$REPO/skel/lib/scripts/remote-setup.sh" "$BASEDIR/lib/scripts/remote-setup.sh"
     chmod +x "$BASEDIR/lib/scripts/remote-setup.sh"
@@ -861,7 +935,14 @@ if [[ "$HOOKD_MODE" == "external" ]]; then
 
     echo ""
     echo "--- Configuring ---"
-    bash "$BASEDIR/lib/scripts/remote-setup.sh" --server "$HOOKD_ENDPOINT"
+    # No --otel-codex-port/--otel-environment here: unlike `teamster
+    # install-remote` (SSH'd from a hub that can read its OWN local
+    # teamster.yaml for otelcol.mode/codex_http_port), this client-mode install
+    # runs ON the client itself, pointed at a hub reachable only over HTTP via
+    # $HOOKD_ENDPOINT — there is no local filesystem path to the hub's config
+    # to probe. Auto-detect-only for Codex OTEL wiring in this topology; a
+    # codex-less host or --codex-mode=none installs unaffected either way.
+    bash "$BASEDIR/lib/scripts/remote-setup.sh" --server "$HOOKD_ENDPOINT" --codex-mode "${CODEX_MODE:-auto}"
 
     echo ""
     echo "--- Verifying hook path ---"
@@ -1006,6 +1087,22 @@ if [ -n "$MISSING" ]; then
     exit 1
 fi
 
+# Codex probe — opposite polarity from the claude check above: informational
+# only, never fails the install. teamster-install (Go) re-probes and does the
+# actual gating (including the --codex-mode=install hard-error case); this is
+# purely so the operator sees Codex's status alongside the other prereqs.
+if [[ "$CODEX_MODE" == "none" ]]; then
+    echo "Codex: skipping (--codex-mode=none)"
+elif command -v codex &>/dev/null; then
+    echo "Codex: found ($(codex --version 2>/dev/null | tail -1)) — will be wired"
+else
+    if [[ "$CODEX_MODE" == "install" ]]; then
+        printf -- "${C_BOLD_RED}ERROR: --codex-mode=install requires the codex CLI in PATH${C_RESET}\n"
+        exit 1
+    fi
+    echo "Codex: not found — skipping (informational; install https://developers.openai.com/codex/cli if you want it wired)"
+fi
+
 printf -- "${C_GREEN}Prerequisites OK: go %s, claude %s${C_RESET}\n" "$(go version | grep -oP '\d+\.\d+\.\d+')" "$(claude --version 2>/dev/null | head -1)"
 echo ""
 
@@ -1066,43 +1163,86 @@ SCRIPT_OK=0      # set to 1 only at the very end of normal flow
 
 restore_hookd_if_needed() {
     local rc=$?
+    # Everything in this trap goes to stderr, unconditionally — this is the
+    # script's last chance to tell the operator it stopped their hookd and
+    # whether it got restored. A caller piping stdout through `tail` (exactly
+    # what hid the original incident) must not be able to hide this too.
     if [[ "$SCRIPT_OK" -eq 0 ]]; then
-        echo ""
-        printf -- "${C_BOLD_RED}================================================================\n"
-        printf "  INSTALL FAILED (exit %s)\n" "$rc"
-        printf "  Check the scrollback above for the error.\n"
-        printf "================================================================${C_RESET}\n"
+        echo "" >&2
+        printf -- "${C_BOLD_RED}================================================================\n" >&2
+        printf "  INSTALL FAILED (exit %s)\n" "$rc" >&2
+        printf "  Check the scrollback above for the error.\n" >&2
+        printf "================================================================${C_RESET}\n" >&2
     fi
     [[ "$RESTORE_HOOKD" -eq 1 ]] || return 0
-    echo ""
-    echo "!!! install.sh exited before restarting hookd — attempting recovery."
+    echo "" >&2
+    echo "!!! install.sh exited before restarting hookd — attempting recovery." >&2
     case "$RUNNING_MODE" in
         systemd)
             sudo systemctl start teamster-hookd 2>/dev/null \
-                && printf -- "${C_GREEN}    hookd restored via systemd${C_RESET}\n" \
-                || printf -- "${C_YELLOW}    WARN: recovery failed — run: sudo systemctl start teamster-hookd${C_RESET}\n"
+                && printf -- "${C_GREEN}    hookd restored via systemd${C_RESET}\n" >&2 \
+                || printf -- "${C_YELLOW}    WARN: recovery failed — run: sudo systemctl start teamster-hookd${C_RESET}\n" >&2
             ;;
         manual)
             mkdir -p "$BASEDIR/var"
             nohup "$BASEDIR/bin/hookd" > "$BASEDIR/var/hookd.log" 2>&1 &
             disown
-            echo "    hookd restored manually (PID $!)"
+            echo "    hookd restored manually (PID $!)" >&2
             ;;
     esac
 }
 trap restore_hookd_if_needed EXIT
 
+# hookd_unit_basedir echoes the basedir baked into an installed
+# teamster-hookd.service unit's ExecStart= line (skel/etc/teamster-hookd.service.tmpl
+# writes "__BASEDIR__/bin/hookd" verbatim) — or fails if the unit file is
+# absent or doesn't parse. Takes the unit file path as $1 so it's testable
+# without touching the real systemd directory; defaults to the real path.
+hookd_unit_basedir() {
+    local unit_file="${1:-/etc/systemd/system/teamster-hookd.service}"
+    [[ -f "$unit_file" ]] || return 1
+    local exec_start
+    exec_start=$(grep -m1 '^ExecStart=' "$unit_file" | cut -d= -f2-)
+    [[ -n "$exec_start" ]] || return 1
+    echo "${exec_start%/bin/hookd}"
+}
+
+# hookd_unit_matches_basedir reports, via exit code, whether the currently
+# installed teamster-hookd systemd unit's own basedir equals THIS run's
+# $BASEDIR — the only condition under which it's safe for this run to
+# stop/restart it. A unit that doesn't exist, or belongs to a different
+# basedir (a live install this run isn't even targeting), must never be
+# touched.
+#
+# This exists because of a live incident (installrunner-wire-guard WU): an
+# unconditional `systemctl stop teamster-hookd`, keyed only on the fixed unit
+# name with no basedir check — and in one call site, no --wire check either —
+# stopped the LIVE hookd from a completely unrelated
+# `--basedir=/tmp/scratch` stage-only run, and its restart/EXIT-trap
+# bookkeeping (RESTORE_HOOKD below) was never wired to that call site, so the
+# live service stayed down. `--basedir=PATH` without `--wire` must be fully
+# side-effect-free on any running system — see repo CLAUDE.md's "safe, no
+# global state touched" claim, which this incident showed was incomplete.
+hookd_unit_matches_basedir() {
+    local unit_basedir
+    unit_basedir=$(hookd_unit_basedir) || return 1
+    [[ "$unit_basedir" == "$BASEDIR" ]]
+}
+
 if [[ "$WIRE" -eq 1 ]]; then
-    if command -v systemctl &>/dev/null && systemctl is-active --quiet teamster-hookd 2>/dev/null; then
+    if command -v systemctl &>/dev/null && systemctl is-active --quiet teamster-hookd 2>/dev/null && hookd_unit_matches_basedir; then
         RUNNING_MODE="systemd"
-        printf -- "${C_BOLD_WHITE}--> Stopping teamster-hookd via systemd...${C_RESET}\n"
+        log_service_action "Stopping teamster-hookd via systemd (basedir=$BASEDIR)..."
         dlog INFO install.hookd "stop" "mode=systemd"
         sudo systemctl stop teamster-hookd
         dlog INFO install.hookd "stopped" "mode=systemd" "rc=$?"
         RESTORE_HOOKD=1
-    elif HOOKD_PIDS=$(pgrep -f 'teamster/bin/hookd' 2>/dev/null); then
+    elif command -v systemctl &>/dev/null && systemctl is-active --quiet teamster-hookd 2>/dev/null; then
+        log_service_action "teamster-hookd is running under a different --basedir — leaving it alone"
+        dlog INFO install.hookd "skip stop — active unit belongs to a different basedir" "basedir=$BASEDIR"
+    elif HOOKD_PIDS=$(pgrep -f "$BASEDIR/bin/hookd" 2>/dev/null); then
         RUNNING_MODE="manual"
-        printf -- "${C_BOLD_WHITE}--> Stopping hookd (PIDs: %s, manual mode)...${C_RESET}\n" "$HOOKD_PIDS"
+        log_service_action "Stopping hookd (PIDs: $HOOKD_PIDS, manual mode, basedir=$BASEDIR)..."
         dlog INFO install.hookd "stop" "mode=manual" "pids=$HOOKD_PIDS"
         # shellcheck disable=SC2086 — word-split intentional to pass multiple PIDs
         kill $HOOKD_PIDS 2>/dev/null || true
@@ -1162,7 +1302,7 @@ LDFLAGS="-X ${_vpkg}.Version=${TEAMSTER_VERSION} -X ${_vpkg}.Commit=${TEAMSTER_C
 dlog INFO install.compile "version" "version=$TEAMSTER_VERSION" "commit=$TEAMSTER_COMMIT" "build_time=$TEAMSTER_BUILD_TIME"
 
 cd "$REPO/src"
-for _target in teamster hookd feed activity-mcp wms-mcp teamster-install token-scraper rollup classify demogen relay backup; do
+for _target in teamster hookd feed activity-mcp wms-mcp teamster-install token-scraper codex-scraper rollup classify demogen relay backup; do
     if go build -trimpath -ldflags "$LDFLAGS" -o "$BUILDDIR/$_target" "./cmd/$_target"; then
         dlog INFO install.compile "built" "target=$_target" "rc=0"
     else
@@ -1208,13 +1348,25 @@ fi
 unset _sup_pid_file
 
 # Stop existing services before re-install so port scan finds default ports free.
+# "$BASEDIR/bin/teamster stop" is inherently basedir-scoped (it's a specific
+# binary at a specific path — a different basedir has no such binary to run),
+# which is exactly why the live supervisor+Prometheus+Grafana survived the
+# wire-guard incident this comment references (installrunner-wire-guard WU)
+# unscathed. The systemd hookd stop below did NOT have that same protection
+# before this fix — it must carry the identical --wire + basedir-match guard
+# as the Step 1 stop above, and set the same RESTORE_HOOKD/RUNNING_MODE state
+# so the one EXIT trap (restore_hookd_if_needed) covers this site too.
 if [[ -x "$BASEDIR/bin/teamster" ]]; then
-    echo "Stopping existing services before re-install..."
+    log_service_action "Stopping existing services before re-install (basedir=$BASEDIR)..."
     dlog INFO install.pre "stopping existing services"
     "$BASEDIR/bin/teamster" stop 2>/dev/null || true
 fi
-if systemctl is-active --quiet teamster-hookd 2>/dev/null; then
+if [[ "$WIRE" -eq 1 ]] && command -v systemctl &>/dev/null && systemctl is-active --quiet teamster-hookd 2>/dev/null && hookd_unit_matches_basedir; then
+    log_service_action "Stopping teamster-hookd via systemd, pre-reinstall port check (basedir=$BASEDIR)..."
+    dlog INFO install.pre "stopping teamster-hookd (pre-reinstall port check)" "mode=systemd"
     sudo systemctl stop teamster-hookd 2>/dev/null || true
+    RESTORE_HOOKD=1
+    RUNNING_MODE="systemd"
 fi
 
 # Detect and disable legacy pre-Teamster systemd units that conflict with
@@ -1253,10 +1405,27 @@ if [[ -x "$BASEDIR/bin/teamster" ]]; then
                 break
             fi
             if [[ $i -eq 25 ]]; then
-                printf -- "${C_YELLOW}WARNING: port %s still bound after 5s${C_RESET}\n" "$port"
+                printf -- "${C_YELLOW}WARNING: port %s still bound after 5s${C_RESET}\n" "$port" >&2
                 dlog WARN install.pre "port still bound after 5s" "port=$port"
-                sudo fuser -k "${port}/tcp" 2>/dev/null || true
-                sleep 1
+                # Never kill by port number alone — a live install on the
+                # default port (e.g. hookd on 9125) could otherwise be killed
+                # by an unrelated --basedir run whose own freshly-compiled
+                # binary happens to want the same default port (this is the
+                # same class of bug as the systemd-unit-name issue above —
+                # see installrunner-wire-guard WU). Only kill a process we can
+                # positively confirm is OUR OWN basedir's binary; refuse and
+                # fail loudly otherwise.
+                _port_pid=$(sudo fuser "${port}/tcp" 2>/dev/null | awk '{print $1}')
+                if [[ -n "$_port_pid" ]] && sudo readlink -f "/proc/$_port_pid/exe" 2>/dev/null | grep -qF "$BASEDIR/"; then
+                    log_service_action "Killing pid $_port_pid holding port $port — confirmed it's our own basedir's binary ($BASEDIR)"
+                    sudo kill -9 "$_port_pid" 2>/dev/null || true
+                    dlog INFO install.pre "killed port holder — confirmed our own basedir binary" "port=$port" "pid=$_port_pid"
+                    sleep 1
+                else
+                    dlog ERROR install.pre "port bound by a process outside this basedir — refusing to kill" "port=$port" "pid=${_port_pid:-unknown}"
+                    die "port $port is bound by a process this run doesn't own (pid ${_port_pid:-unknown}) — refusing to kill it. If this is a stray Teamster process from a DIFFERENT basedir/install, stop it manually; do not assume it's safe to remove."
+                fi
+                unset _port_pid
             fi
             sleep 0.2
         done
@@ -1290,6 +1459,7 @@ INSTALL_FLAGS=(--basedir="$BASEDIR" --repo="$REPO" --builddir="$BUILDDIR")
 [[ -n "$RELAY_MODE" && "$RELAY_MODE" != "none" ]] && INSTALL_FLAGS+=(--relay-mode="$RELAY_MODE")
 [[ -n "$RELAY_TARGET" ]]         && INSTALL_FLAGS+=(--relay-target="$RELAY_TARGET")
 [[ -n "$REPL_PUSH_REMOTE" ]]    && INSTALL_FLAGS+=(--repl-push-remote="$REPL_PUSH_REMOTE")
+[[ -n "$CODEX_MODE" ]]          && INSTALL_FLAGS+=(--codex-mode="$CODEX_MODE")
 dlog INFO install.subproc "exec teamster-install" "cmd=$(printf '%q ' "$BUILDDIR/teamster-install" "${INSTALL_FLAGS[@]}")"
 if "$BUILDDIR/teamster-install" "${INSTALL_FLAGS[@]}"; then
     dlog INFO install.subproc "teamster-install done" "rc=0"
@@ -1417,6 +1587,29 @@ if [[ "$WIRE" -eq 1 ]] && [[ "$HOOKD_READ_ONLY" -eq 0 ]] && [[ "$HOOKD_MODE" != 
         dlog INFO install.classify-timer "installed" "svc=$CLASSIFY_SVC_SRC" "timer=$CLASSIFY_TIMER_SRC"
     else
         dlog WARN install.classify-timer "src units not present" "svc=$CLASSIFY_SVC_SRC"
+    fi
+fi
+
+# Sync the codex-scraper service + timer (Codex rollout-JSONL tailer — sole
+# writer of Codex cost/ledger data and the Codex sessions row) into systemd
+# and enable the timer. Same guards as the classify unit: only when wiring
+# locally-managed systemd. The service is Type=oneshot driven by the timer.
+# Graceful on a host with no `codex` CLI: the binary finds no rollout files
+# and exits 0 every run.
+if [[ "$WIRE" -eq 1 ]] && [[ "$HOOKD_READ_ONLY" -eq 0 ]] && [[ "$HOOKD_MODE" != "supervisor" ]] && [[ "$HOOKD_MODE" != "external" ]] && command -v systemctl &>/dev/null; then
+    CODEX_SCRAPER_SVC_SRC="$BASEDIR/etc/teamster-codex-scraper.service"
+    CODEX_SCRAPER_TIMER_SRC="$BASEDIR/etc/teamster-codex-scraper.timer"
+    if [[ -f "$CODEX_SCRAPER_SVC_SRC" ]] && [[ -f "$CODEX_SCRAPER_TIMER_SRC" ]]; then
+        printf -- "${C_BOLD_CYAN}--- Syncing codex-scraper timer ---${C_RESET}\n"
+        sudo install -m 0644 "$CODEX_SCRAPER_SVC_SRC" /etc/systemd/system/teamster-codex-scraper.service
+        sudo install -m 0644 "$CODEX_SCRAPER_TIMER_SRC" /etc/systemd/system/teamster-codex-scraper.timer
+        sudo systemctl daemon-reload
+        sudo systemctl enable --now teamster-codex-scraper.timer 2>/dev/null \
+            && echo "    enabled teamster-codex-scraper.timer" \
+            || printf -- "${C_YELLOW}    WARN: could not enable teamster-codex-scraper.timer${C_RESET}\n"
+        dlog INFO install.codex-scraper-timer "installed" "svc=$CODEX_SCRAPER_SVC_SRC" "timer=$CODEX_SCRAPER_TIMER_SRC"
+    else
+        dlog WARN install.codex-scraper-timer "src units not present" "svc=$CODEX_SCRAPER_SVC_SRC"
     fi
 fi
 

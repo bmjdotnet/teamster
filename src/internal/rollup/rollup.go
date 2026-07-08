@@ -280,13 +280,38 @@ func isAttributable(agentName string) bool {
 	return agentName != "unknown"
 }
 
-// Reallocate deletes the usage_attribution rows that landed in the unallocated
-// bucket so the next Allocate re-derives them. It is scoped to
-// method='unallocated' ONLY — a correctly attributed (temporal_join) row is
-// never touched, so this cannot disturb good attribution or introduce double-
-// counting.
+// Reallocate deletes every usage_attribution row not allocated to an entity
+// (entity_type='') so the next Allocate re-derives it. This is the complete
+// not-yet-really-attributed set: the method='unallocated' bucket AND rows a
+// prior pass relabeled method='sweep_skipped' (the "tried, still unallocatable"
+// give-up marker MarkSessionSweepSkipped/applySkip write, always with
+// entity_type=''). A row carrying a REAL entity (entity_type != '') is never
+// touched, so this cannot disturb good attribution or introduce double-counting
+// — the same hard invariant the old method='unallocated' scope had, now
+// expressed structurally by the entity_type='' predicate.
+//
+// Scoping by entity_type rather than by method is what makes --reallocate
+// reliable after an agent-identity backfill. The automatic rollup timer runs a
+// plain sweep, whose hourly sweep-llm guard relabels a no-local-transcript
+// session's unallocated rows to 'sweep_skipped' (MarkSessionSweepSkipped). A
+// method='unallocated'-only clear then no-ops on exactly the rows the operator
+// ran --reallocate to recover, because Allocate's anti-join also skips them
+// (they already hold an attribution row). Any give-up marker with entity_type=''
+// is in this trap class; the entity_type predicate covers all of them and any
+// future one. Encoding the invariant (entity_type='' => not really attributed =>
+// re-derivable) rather than a method list is deliberate and load-bearing: this
+// race existed precisely because Reallocate enumerated method='unallocated' and
+// nobody updated the list when the 'sweep_skipped' give-up state was added
+// elsewhere (the 2026-07 sweep_skipped incident). A new method list would re-arm
+// the identical trap for the next marker; the entity_type predicate cannot.
+//
+// The plain sweep's unallocated->sweep_skipped relabel is deliberately left
+// intact: it is a legitimate optimization (it stops the hourly sweep-llm timer
+// from re-launching claude --print for an orphan with no local transcript, and
+// keeps OrphanSessionsWithTranscript from re-listing it). The defect was the
+// narrow clear-set here, not the relabel there.
 func (r *Runner) Reallocate(ctx context.Context) (int, error) {
-	n, err := r.alloc.DeleteAttributionByMethod(ctx, "unallocated")
+	n, err := r.alloc.ClearUnallocatedAttribution(ctx)
 	return int(n), err
 }
 

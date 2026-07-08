@@ -86,6 +86,20 @@ type Config struct {
 	GrafanaPort    int
 	OtelGRPCPort   int
 	OtelHTTPPort   int
+	// OtelCodexHTTPPort is a SEPARATE otlp/http receiver instance
+	// (skel/etc/otelcol.yaml.tmpl's otlp/codex receiver), metrics-only, at
+	// url path "/". It cannot share OtelHTTPPort's receiver: Codex's own
+	// OTLP HTTP exporter (OTel-OTLP-Exporter-Rust, verified live 2026-07-07
+	// against Codex 0.137.0) always POSTs to the bare endpoint root
+	// regardless of any path configured, which 404s against the standard
+	// /v1/metrics path Claude Code's exporter uses on OtelHTTPPort — and
+	// registering both metrics AND logs at "/" on one receiver instance
+	// panics the collector at startup ("multiple registrations for /").
+	// Codex's gRPC exporter was also tested live and never even attempted a
+	// TCP connection on OtelGRPCPort, so HTTP-with-a-dedicated-receiver is
+	// the only verified-working path (research/otel-v1.md's "no receiver
+	// changes needed" assumption did not hold up under live traffic).
+	OtelCodexHTTPPort int
 	// PrometheusRetention is the --storage.tsdb.retention.time value (e.g. "365d").
 	PrometheusRetention string
 	// PrometheusRetentionSize is the --storage.tsdb.retention.size value (e.g. "50GB").
@@ -189,6 +203,7 @@ func Default() Config {
 		GrafanaPort:          3100,
 		OtelGRPCPort:         4327,
 		OtelHTTPPort:         4328,
+		OtelCodexHTTPPort:    4329,
 		PrometheusRetention:  "365d",
 		Env:                  "production",
 		HookdMode:            "systemd",
@@ -243,6 +258,9 @@ func Load() (Config, error) {
 	}
 	if fc.Otelcol.HTTPPort != 0 {
 		cfg.OtelHTTPPort = fc.Otelcol.HTTPPort
+	}
+	if fc.Otelcol.CodexHTTPPort != 0 {
+		cfg.OtelCodexHTTPPort = fc.Otelcol.CodexHTTPPort
 	}
 	if fc.Env != "" {
 		cfg.Env = fc.Env
@@ -386,6 +404,13 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("TEAMSTER_OTEL_HTTP_PORT: %w", err)
 		}
 		cfg.OtelHTTPPort = n
+	}
+	if v := os.Getenv("TEAMSTER_OTEL_CODEX_HTTP_PORT"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("TEAMSTER_OTEL_CODEX_HTTP_PORT: %w", err)
+		}
+		cfg.OtelCodexHTTPPort = n
 	}
 	if v := os.Getenv("TEAMSTER_PROMETHEUS_RETENTION"); v != "" {
 		cfg.PrometheusRetention = v

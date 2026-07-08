@@ -37,11 +37,23 @@ Rules of thumb:
 - Running `./install.sh` in this repo will **replace your live instance**.
   It interviews you, builds the right flags, then calls `lib/installrunner.sh`
   which compiles, stages, and restarts.
-- `lib/installrunner.sh --basedir=PATH` **stages** binaries and skel into PATH
-  but does **not** touch `/etc/systemd/system/`, `~/.claude/settings.json`, or
-  MCP registration. Safe for verification. Adding `--wire` makes it touch
-  global state — only use `--wire` on a disposable test VM or when you
-  explicitly intend to replace the live config.
+- `lib/installrunner.sh --basedir=PATH` (no `--wire`) **stages** binaries and
+  skel into PATH and does not touch `~/.claude/settings.json` or MCP
+  registration. `--wire` is the intended sole gate for global-state mutation
+  — only use it on a disposable test VM or when you explicitly intend to
+  replace the live config. **Incident history (2026-07-07,
+  installrunner-wire-guard WU):** this same claim, worded unconditionally
+  ("safe, no global state touched"), was wrong in practice — two systemd
+  hookd-stop call sites keyed off the fixed `teamster-hookd` unit name with
+  no `--wire` gate (one) or no basedir check (both), so a `--basedir=`-only
+  run on a host with a live `teamster-hookd` running under a *different*
+  basedir stopped it anyway. Both sites are now gated on `$WIRE -eq 1` AND on
+  the currently-installed unit's own `ExecStart=` basedir matching this run's
+  `$BASEDIR` (`hookd_unit_matches_basedir` in `lib/installrunner.sh`) — a
+  `--basedir=PATH` run without `--wire` is now genuinely a no-op against any
+  running service, verified live in an isolated container against an
+  unrelated systemd unit. Trust the code path, not just this sentence, if
+  you're ever unsure — the whole reason this note now has this much detail.
 - For true isolation, use a **disposable test VM**: reset it, then run a full
   `lib/installrunner.sh --wire` there, never touching your dev host's systemd
   or settings.
@@ -66,7 +78,8 @@ src/                          Go source (go.mod: github.com/bmjdotnet/teamster)
     wms-mcp/                  MCP stdio: outcome/workunit CRUD, tags, focus, dependencies, search
     rollup/                   Cost-attribution pipeline (allocate, recover, sweep)
     classify/                 Interval phase + work-type classifier (systemd timer)
-    token-scraper/            Session transcript token-usage scraper
+    token-scraper/            Session transcript token-usage scraper (Claude Code)
+    codex-scraper/            Codex rollout-JSONL cost/ledger tailer (systemd timer, oneshot)
     teamster-install/         Installer binary (called by lib/installrunner.sh)
     demogen/                  Synthetic data generator for dashboards
     backup/                   Standalone backup binary (systemd timer)
@@ -74,6 +87,9 @@ src/                          Go source (go.mod: github.com/bmjdotnet/teamster)
     activity/                 Shared activity-tool handler logic
     classify/                 Rule-based classifier engine (work-type, phase)
     config/                   Env-var config (TEAMSTER_* namespace)
+    codexconfig/              Codex CLI config wiring: ~/.codex/config.toml MCP
+                              servers, OTEL, hooks + trust state, skills file-copy,
+                              AGENTS.md merge — all backup-then-doctor-gated
     display/                  Entity colors, tag colors, ANSI rendering
     hook/                     Tool extraction, tag taxonomy, enrichment
     llm/                      Anthropic API client (used by sweep-llm)
@@ -121,6 +137,8 @@ skel/                         Assets copied to BASEDIR at install time
     teamster-sweep.timer.tmpl        Sweep timer (every hour)
     teamster-backup.service.tmpl     Backup one-shot service
     teamster-backup.timer.tmpl       Backup timer (configurable, default 1h)
+    teamster-codex-scraper.service.tmpl  Codex rollout-tailer one-shot service
+    teamster-codex-scraper.timer.tmpl    Codex-scraper timer (every 10 min)
     teamster-relay.service.tmpl      Event relay (hub→replica), --relay-mode=install
     teamster-repl-push.service.tmpl  Repl-push MySQL sync server (hub side)
     teamster-prometheus-replica.yml.tmpl  Replica Prometheus scrape config
@@ -133,8 +151,21 @@ skel/                         Assets copied to BASEDIR at install time
       skills/bootstrap/references/{eight-rules.md, execution-loop.md, field-guide.md, rubrics.md}
       skills/tags/references/
     hook/teamster.py          Python hook client used on remote installs
+    hook/codex-hook.py        Python hook client for Codex (imports teamster.py's
+                              redaction/error helpers; the two ship together)
+    codex-plugin/             skills/ (file-copy installed, hub and remote alike) +
+                              agents-protocol.md (the AGENTS.md merge text, single-
+                              sourced — both the Go installer's loadCodexAgentsProtocol
+                              and the Python remote-codex-setup.py read this same file,
+                              never two copies); plugin-shaped assets also shipped here
+                              as a documented fallback (v1 installs skills by file-copy,
+                              not the Codex plugin system)
+    .agents/                  Codex agents/ assets (openai.yaml) for that fallback
     scripts/                  selftest, remote-setup, session-explorer, wms-smoketest,
-                              install-remote.sh, token-scraper.py, ccusage-scraper.py
+                              install-remote.sh, token-scraper.py, ccusage-scraper.py,
+                              codex-scraper.py (Python rollout tailer, remote/client-mode),
+                              remote-codex-setup.py (Python codexconfig port, remote/client-mode),
+                              test_codex_scraper.py, test_remote_codex_setup.py
 
 install.sh                    Interactive installer entrypoint (guided, interview-driven)
 lib/installrunner.sh          Build/install backend (called by install.sh)
@@ -162,7 +193,7 @@ assembled flags. `install.sh` itself only accepts `--debug-log` and
 ./install.sh --debug-log=/tmp/install.log         # guided install with debug logging
 
 # Direct backend invocation (advanced / scripted installs):
-lib/installrunner.sh --basedir=PATH                       # stage to PATH only — safe, no global state touched
+lib/installrunner.sh --basedir=PATH                       # stage to PATH only — no --wire, no global-state mutation (see "Three Teamsters" above for the incident this now-corrected claim caused)
 lib/installrunner.sh --basedir=PATH --wire                # stage + wire to PATH (dangerous: touches systemd + settings.json)
 lib/installrunner.sh --relay-mode=install --relay-target=http://replica:9125/event --repl-push-remote=user@replica  # hub: set up replication
 ```
@@ -182,8 +213,11 @@ replica side, `--hookd-read-only` materializes `TEAMSTER_HOOKD_READ_ONLY=1`
 into the hookd unit so hookd rejects MCP/telemetry/drain while still serving
 reads + `/event`. See `docs/specs/replication.md`.
 
-**Client mode** is for remote hosts: stages only the Python hook client +
-the plugin, points settings.json at a hub URL. No Go required on the remote.
+**Client mode** is for remote hosts: stages the Python hook client + the
+plugin, points settings.json at a hub URL, and (unconditionally, auto-detect
+by default) stages + wires Codex support the same way `teamster install-remote`
+does — see "Hub vs remote install model" and `docs/specs/CODEX-INSTALL.md`'s
+Remote Codex support section. No Go required on the remote.
 
 `teamster install-remote user@host [--server hub:9125]` is the hub-side
 command that drives the client install over SSH. It execs the shell script
@@ -261,13 +295,14 @@ Agent-Teams teammates run as separate top-level sessions (see Pitfalls).
 |--------|---------|-------|
 | `teamster` (Go) | Hook client + CLI on the hub | Forked per hook event. Reads JSON from stdin, enriches, POSTs to hookd. Must exit 0 always. Also serves as the CLI: `start`/`stop`/`status`/`wms-reset`/`tags`/`setup tags`/`wms drain`/`wms list`/`wms close`/`install-remote`/`backup`/`restore`. |
 | `teamster.py` (Python) | Hook client on remotes | Pure stdlib, no third-party deps. Same wire contract as Go version. On macOS, derives teammate identity from the transcript's `agentName` (sets `agent_type` when the payload lacks one) and echoes hookd's `additionalContext` on PreToolUse **and** UserPromptSubmit. `TEAMSTER_DEBUG_RAW=1` dumps raw hook stdin to `var/raw-hook-debug.jsonl`. |
-| `hookd` | HTTP event server | POST `/event` → JSONL append. Serves dashboard at `/`, WMS at `/wms`, SSE at `/events/stream`. Focus-absent nudge on PreToolUse (max 1 per session+agent per turn). Returns activity + team-dispatch `additionalContext` on UserPromptSubmit so remote Python clients get the nudge (the hub Go client ignores it — no double-inject; hookd can't see a remote's solo/team marker, so it always sends team context). |
+| `hookd` | HTTP event server | POST `/event` → JSONL append. Serves dashboard at `/`, WMS at `/wms`, SSE at `/events/stream`. POST `/telemetry` (Claude Code + Codex ledger rows) and POST `/session` (Codex sessions-row upsert, `internal/server/session.go`, wraps `store.UpsertSession` via `store.ValidateSession`) are both hub-local- and remote-callable, and both rejected in read-only mode like `/mcp/*`. Focus-absent nudge on PreToolUse (max 1 per session+agent per turn). Returns activity + team-dispatch `additionalContext` on UserPromptSubmit so remote Python clients get the nudge (the hub Go client ignores it — no double-inject; hookd can't see a remote's solo/team marker, so it always sends team context). |
 | `feed` | Terminal activity viewer | Tails JSONL, ANSI colorizes. Built from `cmd/feed/`. |
 | `activity-mcp` | MCP stdio (activity) | **No-op.** Tools just return confirmation strings. Real data extraction happens in the hook from PreToolUse payloads — that's how we get `agent_type` for teammate attribution. Includes `setMode` for session mode switching. |
 | `wms-mcp` | MCP stdio (WMS) | Outcome/WorkUnit CRUD, tags, focus, dependencies over MySQL/MariaDB via `TEAMSTER_STORE_DSN`. Includes `wms_search`, exposing the `wms.Search` primitive as granular `[]Hit` (the same engine `teamster search sessions` groups into session rollups). State changes posted to hookd via `HookObserver` when `TEAMSTER_HOOK_SERVER_URL` is set. |
 | `rollup` | Cost-attribution pipeline | Allocates token spend to WMS entities via focus intervals. Flags: `--reallocate`, `--recover-focus`, `--recover-warmup`, `--recover-gaps`, `--recover-directives` (focus-less remote teammates → entity named in their dispatch brief), `--repair-focus-intervals` (one-time fix of negative-width focus intervals from the dual-writer/async race), `--synthesize-remote-orphans` (remote sessions with no focus/directive/transcript → temporal correlation with concurrent focused sessions on the same host), `--synthesize-focus <file>`, `--sweep` (chains all deterministic passes), `--sweep-llm` (adds LLM-assisted synthesis), `--count-orphans` (print processable orphan count; checks local transcript existence). Reversible: `--unrecover`, `--unrecover-warmup`, `--unrecover-gaps`, `--unrecover-directives`, `--unrepair-focus-intervals`, `--unsynthesize-remote-floor`, `--unsynthesize`. |
 | `classify` | Interval phase + work-type classifier | Derives `phase` and `work-type` tags on intervals/workunits from rule-based signals. Recovers missing required lifecycle tags on work units (safety net for dispatch gaps). Run by systemd timer every 5 min. `--reclassify` re-derives from scratch. `--dry-run` logs lifecycle recovery intent without writing. |
-| `token-scraper` | Session transcript scraper | Reads Claude Code session JSONL transcripts and POSTs per-message token usage to hookd's `/telemetry` endpoint. |
+| `token-scraper` | Session transcript scraper | Reads **Claude Code** session JSONL transcripts and POSTs per-message token usage to hookd's `/telemetry` endpoint. Codex has its own tailer (`codex-scraper`) — this one never reads Codex data. |
+| `codex-scraper` | Codex rollout-JSONL cost/ledger tailer | Oneshot (systemd timer, every 10 min), **not** a daemon. Tails `~/.codex/sessions/**/rollout-*.jsonl` (+ `archived_sessions/`) and is the **sole writer** of Codex cost data: POSTs per-`token_count` ledger rows to hookd's `/telemetry` (cost derived from `last_token_usage`) and upserts the Codex `sessions` row via hookd's `POST /session` (no direct store connection anymore — migrated so the hub binary and the Python remote port (`skel/lib/scripts/codex-scraper.py`, staged on remotes/client-mode installs) share one HTTP code path; hookd's hook pipeline never fires for Codex either way). Every row carries `runtime='codex'`. Codex 0.142.x `thread_spawn` subagents write their own rollout file whose `session_meta.session_id` is the **parent** thread's id, so subagent spend books under the parent `session_id` (falls back to the file's own `id` on 0.137.0, which lacks `session_id`); `message_id` is keyed by the file's own thread id to avoid sibling collisions, and `agent_name` is `@<agent_role>`. See `docs/specs/CODEX-INSTALL.md`. |
 | `teamster-install` | Installer | Called by `lib/installrunner.sh`. Explicit `--basedir/--repo/--builddir` flags — no path inference. |
 | `demogen` | Synthetic data generator | Creates correlated demo data across token_ledger/wms_intervals/usage_attribution/entity_tags/cost_rollup. `--clean` for teardown. |
 | `backup` | Backup engine | Standalone binary for systemd timer. Takes timestamped snapshots of MySQL, OTel, and teamster config/state. No sudo. CLI also accessible via `teamster backup` and `teamster restore`. |
@@ -284,6 +319,7 @@ Agent-Teams teammates run as separate top-level sessions (see Pitfalls).
 | `teamster-classify.timer` | Every 5 minutes | Runs `classify` to derive phase/work-type |
 | `teamster-sweep.timer` | Every hour | Runs `claude --print /teamster:sweep` for LLM-assisted synthesis, gated on `--count-orphans` (skips when nothing to process) |
 | `teamster-backup.timer` | Configurable (default 1h) | Runs backup to snapshot all stores |
+| `teamster-codex-scraper.timer` | Every 10 minutes | Runs `codex-scraper` (oneshot) to tail Codex rollout JSONL and ledger Codex cost. Installed only when Codex is wired; a no-op on a host with no `codex` CLI (finds no rollout files, exits 0). |
 
 ## Key conventions
 
@@ -391,19 +427,28 @@ Agent-Teams teammates run as separate top-level sessions (see Pitfalls).
   guards. Must work on both MySQL 8.0 and MariaDB 11.8.
 - The hub's Grafana is `mode=external` (shared with other apps). Teamster is a
   tenant. The installer must never auto-restart a shared `grafana-server`.
+- **`crontab` is not scoped by `$HOME` overrides.** Testing `remote-setup.sh`'s
+  (or client-mode install's) cron-wiring step (`token-scraper`/`codex-scraper`
+  registration via `crontab -l | ... | crontab -`) with a redirected `$HOME`
+  for isolation does **not** prevent it from writing to the real, current
+  OS user's crontab — `crontab` reads/writes the user's job table, not a path
+  under `$HOME`. Any manual test of this step on a real host installs a REAL
+  cron entry for that user. Container or VM isolation is mandatory for this
+  test, not merely convenient.
 
 ## Documentation — what to trust
 
 | File | Status | Use for |
 |------|--------|---------|
 | `README.md` | **Current** — user-facing quick start | What Teamster is, install, first team, dashboard, subagent-mode opt-in |
-| `docs/specs/REMOTE-INSTALL.md` | **Current** | Hub/remote install model |
+| `docs/specs/REMOTE-INSTALL.md` | **Current** | Hub/remote install model, incl. Codex support on remotes (direct-HTTP MCP transport, what's staged, OTEL scoping) |
 | `docs/specs/replication.md` | **Current** | Hub→replica replication topology (relay + repl-push) |
+| `docs/specs/CODEX-INSTALL.md` | **Current** | Codex CLI support: `--codex-mode` flag, MCP server wiring + default-approve audit-trail risk, OTEL, skills delivery, hooks channel + trust provisioning, codex-scraper (cost/ledger tailer + subagent→parent attribution, now HTTP-only via hookd `/session`), `runtime` enum, deferred-MCP-tool-loading known limitation (newer Codex builds), remote Codex support (Python port, direct-HTTP MCP transport), uninstall (hub + remote) |
 | `docs/wizard.md` | **Current** | Guided interactive installer (`install.sh`) + tag setup TUI + per-project subagent-mode opt-in |
 | `docs/session-explorer-guide.md` | **Current** | 9-point primer for driving programs via tmux |
-| `skel/doc/specs/architecture.md` | **Current** — full system | Hub/remote topology, all components, data flows, env vars, operating modes, cost attribution, focus nudge |
+| `skel/doc/specs/architecture.md` | **Current** — full system | Hub/remote topology, all components, data flows (incl. Codex runtime), env vars, operating modes, cost attribution, focus nudge |
 | `skel/doc/specs/wms-dashboard-spec.md` | Forward-looking + implemented | What `/wms` should become (phases 2/3 not built) + implemented pages (cost-flow, tags, Grafana dashboards) |
-| `skel/doc/specs/semantic-conventions.md` | **Current** | JSONL field conventions, tag taxonomy, WMS entity types, state machine, session mode / `setMode` signal, cost attribution methods, close-out warnings, two-focus distinction |
+| `skel/doc/specs/semantic-conventions.md` | **Current** | JSONL field conventions, tag taxonomy, WMS entity types, state machine, session mode / `setMode` signal, cost attribution methods, close-out warnings, two-focus distinction, Codex runtime conventions (`runtime` enum, session identity, subagent thread model) |
 | `skel/lib/plugin/skills/bootstrap/references/eight-rules.md` | **Canonical protocol** | The Eight Rules |
 | `skel/lib/plugin/skills/bootstrap/references/field-guide.md` | **Canonical lessons** | Practical operating and development lessons |
 | `skel/lib/plugin/skills/seasoning/SKILL.md` | **Current** | Iterative spec refinement skill |

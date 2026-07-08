@@ -53,6 +53,18 @@ Outcome's id and frames the context-tag interview.
 
 There is no team name to generate — solo sessions have no team.
 
+### Verify referenced artifacts before proceeding
+
+If the focus slug or the operator's brief names specific local files, paths,
+or kits (e.g. "apply the fix from the pricing kit," "pick up the devkit at
+`/path/to/thing`"), verify each one exists — `ls` the path or `Read` the
+file — before treating it as real. If something named is missing, say so
+and confirm intent with the operator (wrong path? not built yet? proceed
+without it?) rather than silently assuming it exists or improvising its
+contents. A session that burns its first several turns acting on a kit that
+was never actually delivered is a worse outcome than a 10-second existence
+check up front.
+
 **Set the session mode (first action).** Load and call the mode signal so the
 Teamster hook records that this is a subagent session (this is what relaxes the
 team-dispatch mandate and the bare-`Agent` block for this session):

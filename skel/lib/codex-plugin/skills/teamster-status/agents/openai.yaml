@@ -1,0 +1,10 @@
+interface:
+  display_name: "Teamster Status"
+  short_description: "Show current WMS outcomes and work units"
+  default_prompt: "Use $teamster-status to check outcome and work-unit progress."
+
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "wms"
+      description: "Outcome/WorkUnit listing"
