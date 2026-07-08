@@ -12,6 +12,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/bmjdotnet/teamster/internal/wms"
@@ -58,6 +59,30 @@ type Session struct {
 	FirstSeen  time.Time
 	LastSeen   time.Time
 	Status     SessionStatus
+
+	// Runtime distinguishes the CLI that produced this session: "claude_code"
+	// (default, zero value normalizes to it) or "codex". Codex sessions are
+	// upserted via hookd's POST /session endpoint (hookd's hook pipeline never
+	// fires for Codex), which is also the only writer of the four fields below.
+	Runtime    string
+	Cwd        string // Codex session_meta.cwd; empty for Claude sessions
+	Model      string // last-known model for the session; empty for Claude sessions
+	Originator string // Codex session_meta.originator ("codex-tui" / "codex_exec")
+	CliVersion string // Codex session_meta.cli_version
+}
+
+// ValidateSession checks the one requirement every backend enforces before
+// writing a sessions row. Both UpsertSession/CreateSession implementations
+// (mysql, sqlite) call this rather than re-declaring the rule, and hookd's
+// POST /session handler calls it too so an HTTP caller (the codex-scraper
+// tailer, hub-local or eventually remote) gets the identical validation a
+// direct-store caller would — one definition of a valid session row, not a
+// copy per call site.
+func ValidateSession(s Session) error {
+	if s.SessionID == "" {
+		return errors.New("SessionID is required")
+	}
+	return nil
 }
 
 // ActivityEvent is a single activity report (reportActivity / setOverallIntent /
@@ -374,6 +399,15 @@ type TelemetryRow struct {
 	Speed            string
 	CostUSD          float64
 	Timestamp        time.Time
+
+	// Runtime distinguishes the CLI that produced this row: "claude_code"
+	// (default, zero value normalizes to it) or "codex". ReasoningOutputTokens is
+	// Codex-only (OpenAI's reasoning token count from token_count.last_token_usage);
+	// it prices at the output rate (folded into OutputTokens for
+	// pricing.ComputeCost, which has no separate bucket) but is kept as its
+	// own column for raw-count fidelity.
+	Runtime               string
+	ReasoningOutputTokens int64
 }
 
 // TelemetryStore is token_ledger ingest: the per-message token-usage rows
@@ -567,7 +601,15 @@ type AllocationStore interface {
 	// ApplyAttribution upserts one usage_attribution row atomically (was
 	// INSERT ... ON DUPLICATE KEY UPDATE). method is the attribution strategy.
 	ApplyAttribution(ctx context.Context, messageID, method string, entity EntityRef, intervalID *int64) error
-	DeleteAttributionByMethod(ctx context.Context, method string) (int64, error)
+	// ClearUnallocatedAttribution deletes every usage_attribution row not
+	// allocated to an entity (entity_type=''), regardless of method — the
+	// complete not-yet-really-attributed set: the method='unallocated' bucket
+	// plus the 'sweep_skipped' give-up marker a prior sweep may have relabeled
+	// it to (both always carry entity_type=''). Backs Runner.Reallocate. Scoped
+	// by the entity_type='' invariant rather than a method enumeration so a row
+	// carrying a REAL entity is never cleared and no future give-up marker can
+	// re-open the reallocate race. Returns the number of rows deleted.
+	ClearUnallocatedAttribution(ctx context.Context) (int64, error)
 
 	// Set-based aggregations — per-backend implementations (SQL stays SQL).
 	// BuildCostRollup atomically replaces cost_rollup (see AtomicReplace —
@@ -605,8 +647,8 @@ type RecoveryStore interface {
 	ApplyRecovery(ctx context.Context, batch RecoveryBatch) error
 	UncoverRecovery(ctx context.Context, strategy string) (int64, error)
 	// ReleaseSessionAttribution deletes a session's attribution rows matching
-	// any of methods — the session-scoped generalization of
-	// DeleteAttributionByMethod that internal/rollup's focus-interval repair
+	// any of methods — the session-scoped, method-explicit counterpart of
+	// ClearUnallocatedAttribution that internal/rollup's focus-interval repair
 	// needs (release the cost a now-fixed interval covers so a reallocate
 	// re-derives it), added here rather than left as raw SQL against a
 	// leftover *sql.DB handle so Runner can drop that handle entirely.

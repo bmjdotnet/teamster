@@ -4,11 +4,11 @@
 ![Platform: Linux](https://img.shields.io/badge/platform-linux-lightgrey.svg)
 
 Teamster is a self-hosted observability and cost-attribution system for
-Claude Code. It records what every agent does in real time, attributes
-per-message token spend to declared work items, and presents both through
-Grafana dashboards and a terminal activity feed. Every dollar lands somewhere
-visible: attributed cost carries its attribution method, and whatever cannot
-be attributed is shown as a residual, not hidden.
+Claude Code and OpenAI's Codex CLI. It records what every agent does in real
+time, attributes per-message token spend to declared work items, and presents
+both through Grafana dashboards and a terminal activity feed. Every dollar lands
+somewhere visible: attributed cost carries its attribution method, and whatever
+cannot be attributed is shown as a residual, not hidden.
 
 See the creator's personal Teamster dashboard at [teamster.bmj.net](https://teamster.bmj.net).
 
@@ -188,6 +188,47 @@ and session shape, or with optional LLM-assisted synthesis. Every attributed
 dollar records how it was attributed, so confidence is always inspectable.
 A scheduled sweep runs all recovery passes automatically.
 
+## Codex CLI support
+
+Teamster also records **OpenAI Codex CLI** sessions alongside Claude Code.
+Every session and cost-ledger row carries a `runtime` (`claude_code` or
+`codex`), so Codex spend lands in the same dashboards and outcome ledgers as
+everything else — slice or filter by runtime wherever you already slice by
+product or engineer.
+
+This is a **solo-only overlay** (v1): a Codex session has no Agent Teams layer,
+so the team rules and `/teamster:*` slash commands don't apply. Codex's own
+subagents are supported, and their cost attributes correctly.
+
+**Enabling it.** Codex wiring is **auto-detected** at install — if the `codex`
+CLI is on `PATH`, the installer wires it; if not, it's skipped silently (a host
+without Codex installs exactly as before). The installer writes into Codex's
+own `~/.codex/config.toml` and `AGENTS.md`: the `activity` and `wms` MCP
+servers, the Teamster skills, hook registrations, and (when Teamster installs
+the OTEL collector) an OTEL exporter. To force or suppress wiring regardless of
+detection, pass `--codex-mode=install` or `--codex-mode=none` to
+`lib/installrunner.sh` — an advanced/scripted flag; the guided `install.sh`
+interview doesn't ask.
+
+**Starting a session.** In a Codex session, invoke `$start` — the Codex
+counterpart of `/teamster:start`. It hands off to `$teamster-solo`, which
+creates the WMS Outcome, runs the tag interview, and sets focus.
+`$teamster-status`, `$teamster-tags`, and `$teamster-review` are also
+installed. Skills are invoked by name with a leading `$`; only `$start` and
+`$teamster-status` appear in a generic "what skills do you have" listing —
+the other three are explicit-invocation-only by design, so invoke them by
+name when you need them.
+
+**Cost shows up on a delay.** Codex spend is scraped from Codex's session logs
+on a 10-minute timer and rolled up on another, so a fresh Codex session's cost
+can take up to ~20 minutes to appear in the dashboards. That lag is expected,
+not a sign anything is broken.
+
+For the full picture — MCP wiring, the cost tailer, OTEL, hooks, uninstall, and
+a known limitation where newer Codex builds defer-load MCP tools behind an
+internal tool search (Teamster doesn't pin the Codex CLI version) — see
+[docs/specs/CODEX-INSTALL.md](docs/specs/CODEX-INSTALL.md).
+
 ## Requirements
 
 - **Linux** — required for the hub
@@ -196,6 +237,8 @@ A scheduled sweep runs all recovery passes automatically.
 - **MySQL or MariaDB** — backs the work-management store
 - **Grafana** — local or external; the installer provisions dashboards either way
 - **Claude Code CLI** (`claude`)
+- **OpenAI Codex CLI** (`codex`) — *optional*; auto-detected and wired if present
+  (see [Codex CLI support](#codex-cli-support))
 - **python3** — used by the installer for JSON parsing and config detection
 - **unzip** — required for extracting Grafana plugin archives
 - **Node.js / npm** — required for `ccusage` (token usage scraping)
@@ -229,6 +272,18 @@ runs as a launchd LaunchAgent rather than cron, and Agent-Teams teammates run as
 separate top-level sessions, so the remote clients derive each teammate's
 identity (and cost) from its transcript. See
 [docs/specs/REMOTE-INSTALL.md](docs/specs/REMOTE-INSTALL.md) for details.
+
+**Codex on remotes** gets the same treatment as Codex on the hub (see
+[Codex CLI support](#codex-cli-support) above): auto-detected on the remote
+(override with `--codex-mode=install|none`), wired straight at the hub's MCP
+servers over HTTP (Codex speaks the same HTTP MCP transport remote Claude Code
+already uses — no extra process, no proxy), plus its own cron/launchd job
+tailing the remote's Codex session logs. Same delay characteristics as
+hub-local Codex: allow up to ~20 minutes (scraper cadence + rollup cadence)
+for a fresh remote Codex session's cost to reach the dashboards — an empty
+panel right after the session isn't a broken install. See
+[docs/specs/CODEX-INSTALL.md](docs/specs/CODEX-INSTALL.md#remote-codex-support)
+for the full wiring detail.
 
 ## Replication
 
@@ -332,6 +387,7 @@ Early alpha, but built for multi-user environments and trustable data.
 
 - [docs/quickstart.md](docs/quickstart.md) — fresh clone to running dashboard
 - [docs/wizard.md](docs/wizard.md) — installer and tag setup walkthrough
+- [docs/specs/CODEX-INSTALL.md](docs/specs/CODEX-INSTALL.md) — Codex CLI support: install wiring, cost tailer, known limitations
 - `skel/doc/specs/architecture.md` — system design and data flows
 - [docs/specs/replication.md](docs/specs/replication.md) — read-only replica topology
 - `skel/lib/plugin/skills/bootstrap/references/eight-rules.md` — the team protocol

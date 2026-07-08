@@ -90,6 +90,11 @@ On a remote, `TEAMSTER_HOOK_SERVER_URL` and the MCP endpoints point at the hub.
 `TEAMSTER_HOST` carries the short hostname so the hub can attribute events to
 the right machine.
 
+A remote that also runs the Codex CLI is wired the same way: Codex's
+`config.toml` gets `url =`-form MCP servers pointed at the same hub, and a
+Python `codex-scraper` (cron/launchd) tails Codex's own rollout JSONL. See
+"Codex runtime (second runtime)" below for the full remote-Codex data flow.
+
 **Hub URL uses the hub's hostname, not `localhost`.** The installer writes
 `TEAMSTER_HOOK_SERVER_URL` as `http://<hub-hostname>:9125/event` (from
 `os.Hostname()`, falling back to `localhost` only if the hostname can't be
@@ -226,6 +231,12 @@ Claude Code session (remote)
 
 ~/teamster/bin/classify     → interval phase + work-type classifier (systemd timer)
 
+~/teamster/bin/codex-scraper → Codex rollout-JSONL cost/ledger tailer (systemd timer, oneshot)
+  ├─ tails ~/.codex/sessions/**/rollout-*.jsonl (+ archived_sessions/)
+  ├─ POST hookd /telemetry → token_ledger rows (runtime='codex')
+  ├─ upserts the Codex sessions row via a direct store connection
+  └─ books thread_spawn subagent spend under the parent session (@<role>)
+
 ~/teamster/bin/backup       → timestamped snapshots of MySQL, OTel, and teamster config/state
   ├─ no sudo required (uses --defaults-extra-file for MySQL, DSN from teamster.yaml)
   ├─ Prometheus disabled by default (ephemeral data)
@@ -358,6 +369,88 @@ classify runs (systemd timer, every 5 min)
   → derives phase (spec/build/test/review/admin) and work-type (docs/test/infra)
   → writes tags to entity_tags via classifier rules
 ```
+
+### Codex runtime (second runtime)
+
+Codex CLI sessions are captured as a parallel, identically-shaped stream: every
+`sessions` and `token_ledger` row carries a `runtime` column
+(`claude_code` / `codex` / `unknown`), so Codex data is never merged with Claude
+Code's. Codex support is opt-in and solo (no persistent Agent Teams); a host
+with no `codex` binary installs unchanged. Cost and session identity do **not**
+flow through the hook pipeline (Codex hook events are an optional channel
+WMS/cost must not depend on) — they come from `codex-scraper` tailing Codex's
+own rollout JSONL:
+
+```
+codex-scraper runs (systemd timer, every 10 min; oneshot, not a daemon)
+  → tails ~/.codex/sessions/**/rollout-*.jsonl (+ archived_sessions/)
+    from a persisted per-file byte-offset cursor
+  → per token_count event: derive cost from last_token_usage
+    (cached_input / reasoning_output are SUBSETS, not extra tokens)
+  → POST hookd /telemetry → token_ledger row (runtime='codex')
+  → upsert the Codex sessions row via a DIRECT store connection
+    (hookd's /telemetry never touches sessions; codex-scraper is its sole writer)
+
+rollup --sweep (unchanged) then attributes those ledger rows to WMS entities
+  by the same temporal join used for Claude Code cost.
+```
+
+**Subagent sessions.** Codex 0.142.x `thread_spawn` subagents write their own
+rollout file whose `session_meta.session_id` is the PARENT thread's id (and
+`agent_role` names the subagent). codex-scraper books the ledger + sessions
+rows under the parent `session_id` with `agent_name=@<role>` (falling back to
+the file's own id on 0.137.0, which has no `session_id`); `message_id` is keyed
+by the file's own thread id so sibling files never collide. Because the
+`sessions` primary key is `(session_id, agent_name)`, the `(parent, @role)` row
+coexists with the parent's `(parent, "")` row exactly like a Claude Code
+teammate, and rollup's existing temporal join attributes it with no rollup-side
+change. See `docs/specs/CODEX-INSTALL.md` and semantic-conventions §10.
+
+**OTEL.** When the monitoring bundle includes the collector, Codex exports its
+metrics to a **dedicated** OTLP receiver (`otlp/codex`, default port 4329,
+`metrics_url_path: /`), separate from Claude Code's `otlp` receiver. Codex's
+metrics are delta-temporality, so the collector runs a `deltatocumulative`
+processor before Prometheus; the `transform/source_label` processor tags
+`source=codex` to keep the runtime distinguishable.
+
+**Hooks channel.** The optional Codex hooks channel (`SessionStart` /
+`PreToolUse` / `PostToolUse` → `codex-hook.py`) is a **feed-only** signal —
+WMS and cost attribution never depend on it (they run off codex-scraper and the
+wms-mcp `x-codex-turn-metadata` identity).
+
+**Remote Codex.** A remote host running Codex (enrolled via `teamster
+install-remote` or a `--hookd-mode=external` client-mode install) gets the
+identical data flow, ported to pure-stdlib Python since remotes carry no Go
+toolchain:
+
+```
+Remote MCP call (WMS/activity tools):
+  codex config.toml: [mcp_servers.wms] url = "http://<hub>:9125/mcp/wms"
+    (direct HTTP — no proxy, no local MCP process; codex mcp add --url /
+     the bare url= form is wire-verified at both the 0.137.0 pin and 0.142.5)
+  → same hookd mcpwms handler hub-local Claude Code and remote Claude Code
+    already share; x-codex-turn-metadata + clientInfo unchanged by transport
+
+Remote cost/session flow:
+  codex-scraper.py (cron every 10 min / launchd on macOS) tails the remote's
+    own $CODEX_HOME/sessions/**/rollout-*.jsonl (+ archived_sessions/)
+  → POST http://<hub>:9125/telemetry   (ledger rows, runtime='codex')
+  → POST http://<hub>:9125/session     (sessions-row upsert — the hub's own
+                                         Go codex-scraper now uses this same
+                                         endpoint too, not a direct store
+                                         connection)
+  → rollup --sweep (unchanged) attributes those ledger rows by the same
+    temporal join used for hub-local Codex cost
+
+Remote OTEL (only if the hub's own otelcol is running):
+  codex [otel] metrics_exporter = { otlp-http = { endpoint =
+    "http://<hub>:4329/", protocol = "binary" } }
+  → hub's dedicated otlp/codex receiver, same as hub-local Codex metrics
+```
+
+See `docs/specs/REMOTE-INSTALL.md`'s "Codex support on remotes" section and
+`docs/specs/CODEX-INSTALL.md`'s "Remote Codex support" section for the full
+staging layout, flags, and design rationale.
 
 ---
 
@@ -703,7 +796,9 @@ Backup configuration lives in the `backup:` section of `teamster.yaml` (merged i
 │   ├── teamster-sweep.service    (sweep one-shot)
 │   ├── teamster-sweep.timer      (sweep timer)
 │   ├── teamster-backup.service   (backup one-shot)
-│   └── teamster-backup.timer     (backup timer, configurable, default 1h)
+│   ├── teamster-backup.timer     (backup timer, configurable, default 1h)
+│   ├── teamster-codex-scraper.service (Codex rollout tailer one-shot, when Codex wired)
+│   └── teamster-codex-scraper.timer   (Codex-scraper timer, every 10 min)
 ├── lib/
 │   ├── .claude-plugin/
 │   │   └── marketplace.json     (plugin marketplace root)
@@ -742,7 +837,8 @@ the token scraper, and the plugin. MCP endpoints point at the hub over HTTP.
 | `wms-mcp` | Go | hub | MCP stdio for WMS CRUD (hub-local sessions). Outcome/WorkUnit lifecycle, tags, focus, dependencies. Writes MySQL, emits status events via HookObserver. |
 | `rollup` | Go | hub | Cost-attribution pipeline. Allocates token spend to WMS entities. Recovery passes for unallocated messages. Run by systemd timer. |
 | `classify` | Go | hub | Derives phase and work-type tags on intervals/workunits from rule-based signals. Run by systemd timer every 5 min. |
-| `token-scraper` | Go | hub | Reads session transcripts, extracts per-message token usage, writes to token_ledger. |
+| `token-scraper` | Go | hub | Reads **Claude Code** session transcripts, extracts per-message token usage, writes to token_ledger. Never reads Codex data. |
+| `codex-scraper` | Go | hub | Codex rollout-JSONL cost/ledger tailer (systemd timer, oneshot). Sole writer of Codex `token_ledger` rows (via hookd `/telemetry`) and Codex `sessions` rows (direct store). Books `thread_spawn` subagent spend under the parent session as `@<role>`. No-op on hosts with no `codex` CLI. |
 | `teamster-install` | Go | hub | Called by `lib/installrunner.sh`. Copies binaries, materializes systemd units, merges settings.json. |
 | `demogen` | Go | hub | Synthetic data generator for dashboards. Creates correlated demo data. `--clean` for teardown. |
 | `backup` | Go | hub | Backup engine. Takes timestamped snapshots of MySQL, OTel, and teamster config/state. No sudo. Also reachable via `teamster backup` and `teamster restore`. Run by systemd timer. |

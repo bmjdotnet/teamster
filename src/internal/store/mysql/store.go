@@ -1411,8 +1411,8 @@ func (s *Store) RetireTag(ctx context.Context, tagKey string) error {
 // --- Sessions ---
 
 func (s *Store) UpsertSession(ctx context.Context, sess store.Session) error {
-	if sess.SessionID == "" {
-		return errors.New("UpsertSession: SessionID is required")
+	if err := store.ValidateSession(sess); err != nil {
+		return fmt.Errorf("UpsertSession: %w", err)
 	}
 	if sess.FirstSeen.IsZero() {
 		sess.FirstSeen = nowUTC()
@@ -1423,12 +1423,16 @@ func (s *Store) UpsertSession(ctx context.Context, sess store.Session) error {
 	if sess.Status == "" {
 		sess.Status = store.SessionStatusActive
 	}
+	if sess.Runtime == "" {
+		sess.Runtime = "claude_code"
+	}
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO sessions (
 			session_id, agent_name, host, username, team_name,
 			project_id, goal_id, task_id, workitem_id,
-			focus, first_seen, last_seen, status
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			focus, first_seen, last_seen, status,
+			runtime, cwd, model, originator, cli_version
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON DUPLICATE KEY UPDATE
 			host = VALUES(host),
 			username = VALUES(username),
@@ -1439,17 +1443,23 @@ func (s *Store) UpsertSession(ctx context.Context, sess store.Session) error {
 			workitem_id = VALUES(workitem_id),
 			focus = VALUES(focus),
 			last_seen = VALUES(last_seen),
-			status = VALUES(status)`,
+			status = VALUES(status),
+			runtime = VALUES(runtime),
+			cwd = VALUES(cwd),
+			model = VALUES(model),
+			originator = VALUES(originator),
+			cli_version = VALUES(cli_version)`,
 		sess.SessionID, sess.AgentName, sess.Host, sess.Username, sess.TeamName,
 		sess.ProjectID, sess.GoalID, sess.TaskID, sess.WorkitemID,
 		sess.Focus, sess.FirstSeen, sess.LastSeen, string(sess.Status),
+		sess.Runtime, sess.Cwd, sess.Model, sess.Originator, sess.CliVersion,
 	)
 	return err
 }
 
 func (s *Store) CreateSession(ctx context.Context, sess store.Session) error {
-	if sess.SessionID == "" {
-		return errors.New("CreateSession: SessionID is required")
+	if err := store.ValidateSession(sess); err != nil {
+		return fmt.Errorf("CreateSession: %w", err)
 	}
 	if sess.FirstSeen.IsZero() {
 		sess.FirstSeen = nowUTC()
@@ -1460,15 +1470,20 @@ func (s *Store) CreateSession(ctx context.Context, sess store.Session) error {
 	if sess.Status == "" {
 		sess.Status = store.SessionStatusActive
 	}
+	if sess.Runtime == "" {
+		sess.Runtime = "claude_code"
+	}
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO sessions (
 			session_id, agent_name, host, username, team_name,
 			project_id, goal_id, task_id, workitem_id,
-			focus, first_seen, last_seen, status
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			focus, first_seen, last_seen, status,
+			runtime, cwd, model, originator, cli_version
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		sess.SessionID, sess.AgentName, sess.Host, sess.Username, sess.TeamName,
 		sess.ProjectID, sess.GoalID, sess.TaskID, sess.WorkitemID,
 		sess.Focus, sess.FirstSeen, sess.LastSeen, string(sess.Status),
+		sess.Runtime, sess.Cwd, sess.Model, sess.Originator, sess.CliVersion,
 	)
 	return err
 }
@@ -1477,7 +1492,8 @@ func (s *Store) GetSession(ctx context.Context, key store.SessionKey) (store.Ses
 	row := s.db.QueryRowContext(ctx, `
 		SELECT session_id, agent_name, host, username, team_name,
 		       project_id, goal_id, task_id, workitem_id,
-		       focus, first_seen, last_seen, status
+		       focus, first_seen, last_seen, status,
+		       runtime, cwd, model, originator, cli_version
 		FROM sessions WHERE session_id = ? AND agent_name = ?`,
 		key.SessionID, key.AgentName,
 	)
@@ -1487,6 +1503,7 @@ func (s *Store) GetSession(ctx context.Context, key store.SessionKey) (store.Ses
 		&sess.SessionID, &sess.AgentName, &sess.Host, &sess.Username, &sess.TeamName,
 		&sess.ProjectID, &sess.GoalID, &sess.TaskID, &sess.WorkitemID,
 		&sess.Focus, &sess.FirstSeen, &sess.LastSeen, &status,
+		&sess.Runtime, &sess.Cwd, &sess.Model, &sess.Originator, &sess.CliVersion,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return store.Session{}, store.NotFound("GetSession", "session", key.SessionID+"/"+key.AgentName)

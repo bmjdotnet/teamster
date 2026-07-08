@@ -95,7 +95,7 @@ func TestDSNEnvLineNeverInlinesSecret(t *testing.T) {
 	}
 }
 
-// TestMaterializedUnitHasNoInlineDSN renders the four DSN-bearing service
+// TestMaterializedUnitHasNoInlineDSN renders the five DSN-bearing service
 // templates the way the installer does — substituting __BASEDIR__/__USER__ and
 // appending the DSN env line — and asserts (a) no [Service] text contains the
 // DSN/password inline, and (b) each unit references the secrets EnvironmentFile.
@@ -103,7 +103,7 @@ func TestMaterializedUnitHasNoInlineDSN(t *testing.T) {
 	base := t.TempDir()
 	secretsPath := secretsEnvPath(base)
 
-	// The four real shipped templates that receive the DSN. We read them from
+	// The five real shipped templates that receive the DSN. We read them from
 	// skel/etc/ (not stand-in strings) and apply the same materialization the
 	// installer does — so a future edit that re-introduces an inline DSN in any
 	// real template fails this test.
@@ -113,6 +113,7 @@ func TestMaterializedUnitHasNoInlineDSN(t *testing.T) {
 		"teamster-rollup.service.tmpl",
 		"teamster-classify.service.tmpl",
 		"teamster-sweep.service.tmpl",
+		"teamster-codex-scraper.service.tmpl",
 	}
 	for _, fname := range templates {
 		data, err := os.ReadFile(filepath.Join(repoRoot, "skel", "etc", fname))

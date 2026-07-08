@@ -1,0 +1,18 @@
+# My personal codex config
+# I like high reasoning effort for everything
+model = "gpt-5.5"
+model_reasoning_effort = "high"
+
+# trust my main dev tree
+[projects."/mnt/ai/gh"]
+trust_level = "trusted"
+
+# --- MCP servers ---
+# my custom search server, do not remove
+[mcp_servers.mysearch]
+command = "/home/bmj/bin/mysearch-mcp"
+args = []
+enabled = true
+
+[tui.model_availability_nux]
+"gpt-5.5" = 1
