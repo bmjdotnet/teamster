@@ -477,18 +477,15 @@ sessions, and incremental polling won't re-read those bytes to heal them. To
 repair such an install: reset the scraper cursor for the affected rollout files
 (delete or trim `var/codex-scraper-cursors.json`) so the next run re-scrapes
 them under the parent `session_id`, then run `rollup --sweep --reallocate`
-once. `--reallocate` "clear[s] unallocated attribution rows and re-derive[s]
-them before the pass (recovery after agent-identity backfill)" and leaves the
-parent's already-allocated rows untouched; a plain `--sweep` will **not**
-retro-heal, because allocate skips messages that already carry an attribution
-row. **Ordering matters:** run this `--reallocate` pass *before* the next
-automatic `rollup --sweep` (the `teamster-rollup.timer` runs a plain sweep
-every 10 min) reaches the re-scraped rows — a plain timer sweep that gets there
-first relabels them `method='sweep_skipped'`, which `--reallocate` does **not**
-clear, and recovering from that state then needs a manual `method` reset on
-those rows first. This applies **only to pre-release test installs** — the
-first shipped build derives identity correctly from the start, so fresh
-sessions never need a reallocate (or this ordering care).
+once. `--reallocate` clears every attribution row not allocated to a real
+entity (`entity_type=''` — the `unallocated` bucket plus `sweep_skipped`
+give-up markers) and re-derives it, leaving rows that already carry a real
+entity structurally untouched (so the parent's allocated cost is never
+disturbed). An automatic `rollup --sweep` from `teamster-rollup.timer` firing
+in between is harmless — whatever method it leaves the re-scraped rows in, the
+one-time `--reallocate` still clears and re-derives them. This applies **only
+to pre-release test installs** — the first shipped build derives identity
+correctly from the start, so fresh sessions never need a reallocate.
 
 ### Schema additions (mysql migration v51 / sqlite v51, additive-only)
 
