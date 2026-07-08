@@ -519,6 +519,21 @@ func HandleToolCall(store wms.Store, eng wms.Engine, rawParams json.RawMessage) 
 		}
 		return JSONResult(map[string]interface{}{"removed": removed, "snapshot": path}), nil
 
+	case ToolGetEntityTags:
+		entityType := strArg("entityType")
+		entityID := strArg("entityID")
+		if entityType != wms.EntityOutcome && entityType != wms.EntityWorkUnit {
+			return Result{}, &CallError{Code: -32602, Message: "getEntityTags supports entityType=outcome|workunit only"}
+		}
+		if entityID == "" {
+			return Result{}, &CallError{Code: -32602, Message: "entityID is required"}
+		}
+		tags, err := resolveEntityTags(ctx, store, entityType, entityID)
+		if err != nil {
+			return Result{}, &CallError{Code: -32000, Message: err.Error()}
+		}
+		return JSONResult(tags), nil
+
 	case ToolGetHistory:
 		limit := 50
 		if v, ok := p.Arguments["limit"].(float64); ok && v > 0 {
@@ -1024,6 +1039,66 @@ func snapshotEntityTags(ctx context.Context, store wms.Store, entityType string,
 	return abs, nil
 }
 
+// EntityTagView is one tag binding as surfaced by wms_getEntityTags: the
+// underlying wms.EntityTag fields (tag_key, tag_value, category, source,
+// description, applied_at), embedded and promoted flat into the JSON, plus
+// Inherited and Origin. Direct bindings have Inherited=false and Origin equal
+// to the queried entity's own ID; inherited bindings have Inherited=true and
+// Origin set to the parent outcome ID the binding actually lives on.
+type EntityTagView struct {
+	wms.EntityTag
+	Inherited bool   `json:"inherited"`
+	Origin    string `json:"origin"`
+}
+
+// resolveEntityTags returns entityType/entityID's direct tag bindings plus,
+// for a workunit, tags inherited from its parent outcome — mirroring the
+// mysql entity_tags_resolved view's per-key-override union (a workunit's own
+// binding for a key always shadows the outcome's inherited row for that same
+// key) without requiring that view to exist on every backend. entityType must
+// already be validated by the caller; existence of entityID is checked here
+// via GetOutcome/GetWorkUnit, so an unknown entity surfaces the store's
+// not-found error rather than silently returning an empty list.
+func resolveEntityTags(ctx context.Context, store wms.Store, entityType, entityID string) ([]EntityTagView, error) {
+	var outcomeID string
+	if entityType == wms.EntityWorkUnit {
+		wu, err := store.GetWorkUnit(ctx, entityID)
+		if err != nil {
+			return nil, err
+		}
+		outcomeID = wu.OutcomeID
+	} else {
+		if _, err := store.GetOutcome(ctx, entityID); err != nil {
+			return nil, err
+		}
+	}
+
+	direct, err := store.GetEntityTags(ctx, entityType, entityID)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool, len(direct))
+	out := make([]EntityTagView, 0, len(direct))
+	for _, et := range direct {
+		seen[et.TagKey] = true
+		out = append(out, EntityTagView{EntityTag: et, Inherited: false, Origin: entityID})
+	}
+	if outcomeID == "" {
+		return out, nil
+	}
+	parentTags, err := store.GetEntityTags(ctx, wms.EntityOutcome, outcomeID)
+	if err != nil {
+		return nil, err
+	}
+	for _, et := range parentTags {
+		if seen[et.TagKey] {
+			continue // per-key override: the workunit's own binding wins
+		}
+		out = append(out, EntityTagView{EntityTag: et, Inherited: true, Origin: outcomeID})
+	}
+	return out, nil
+}
+
 // untagEntity surgically removes one entity's tag binding(s) for tagKey: a
 // single (entity, key, value) when tagValue is non-empty, or ALL of the key's
 // bindings on the entity when tagValue is empty (a multi-cardinality key such as
@@ -1497,6 +1572,18 @@ var ToolDefs = []map[string]interface{}{
 				"tagValue":   map[string]interface{}{"type": "string", "description": "Optional. The specific value to remove; omit to remove ALL of the key's bindings on this entity."},
 			},
 			"required": []string{"entityType", "entityID", "tagKey"},
+		},
+	},
+	{
+		"name":        ToolGetEntityTags,
+		"description": "Read the tags bound to one entity (outcome or workunit): direct bindings PLUS, for a workunit, tags inherited from its parent outcome (outcomes do not inherit further). Each row is tag_key/tag_value/category/source/description/applied_at plus inherited (bool) and origin (the entity_id the binding actually lives on — the queried entity itself when direct, the parent outcome's ID when inherited). A workunit's own binding for a key always shadows the outcome's inherited row for that key. Read-only — does not modify wms_getOutcome or wms_getWorkUnit's response shape. Returns an empty array (not an error) when the entity has no tags; errors if the entity does not exist.",
+		"inputSchema": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"entityType": map[string]interface{}{"type": "string", "description": "outcome or workunit"},
+				"entityID":   map[string]interface{}{"type": "string"},
+			},
+			"required": []string{"entityType", "entityID"},
 		},
 	},
 	{
