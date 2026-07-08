@@ -4,13 +4,13 @@ model = "gpt-5.5"
 model_reasoning_effort = "high"
 
 # trust my main dev tree
-[projects."/mnt/ai/gh"]
+[projects."/tmp/test-workspace"]
 trust_level = "trusted"
 
 # --- MCP servers ---
 # my custom search server, do not remove
 [mcp_servers.mysearch]
-command = "/home/bmj/bin/mysearch-mcp"
+command = "/home/testuser/bin/mysearch-mcp"
 args = []
 enabled = true
 

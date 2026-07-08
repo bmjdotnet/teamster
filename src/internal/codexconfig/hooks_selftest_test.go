@@ -41,7 +41,7 @@ import (
 // `codex --strict-config doctor`. Gated behind TEAMSTER_TEST_CODEX_LIVE_EXEC
 // so it never runs by default under a plain `go test ./...` (matching the
 // TEAMSTER_TEST_MYSQL_DSN opt-in-for-a-real-external-resource precedent
-// elsewhere in this repo — see /mnt/ai/gh/CLAUDE.md's test section).
+// elsewhere in this repo — see this repo's CLAUDE.md test section).
 func TestPostInstallAndPostUpgrade_RealCodex_HookFires(t *testing.T) {
 	if !codexAvailable(t) {
 		t.Skip("codex not found in PATH — skipping real-binary integration test")

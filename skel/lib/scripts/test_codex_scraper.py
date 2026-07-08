@@ -307,13 +307,13 @@ class TestParentAndSubagentNoMessageIDCollision(unittest.TestCase):
 
         parent_path = os.path.join(self.tmpdir, "rollout-parent.jsonl")
         write_lines(parent_path, [
-            session_meta_line(parent_id, "/mnt/ai/gh", "codex-tui", "0.142.5"),
+            session_meta_line(parent_id, "/tmp/test-workspace", "codex-tui", "0.142.5"),
             turn_context_line("gpt-5.4"),
             token_count_line(100, 10, 0, 0),
         ])
         subagent_path = os.path.join(self.tmpdir, "rollout-subagent.jsonl")
         write_lines(subagent_path, [
-            subagent_session_meta_line(thread_id, parent_id, parent_id, "/mnt/ai/gh",
+            subagent_session_meta_line(thread_id, parent_id, parent_id, "/tmp/test-workspace",
                                        "codex_exec", "0.142.5", "worker", "Dirac"),
             turn_context_line("gpt-5.4"),
             token_count_line(200, 20, 0, 0),
@@ -426,7 +426,7 @@ class TestResumedRolloutDedup(unittest.TestCase):
         session_id = "019f3b4a-3808-7fa3-bc1d-e99cdc0f1f4e"
         path = os.path.join(self.tmpdir, "rollout-resumed.jsonl")
         write_lines(path, [
-            session_meta_line(session_id, "/mnt/ai/gh", "codex_exec", "0.142.5"),
+            session_meta_line(session_id, "/tmp/test-workspace", "codex_exec", "0.142.5"),
             turn_context_line("gpt-5.5"),
             token_count_line(23215, 36, 2432, 0),
             token_count_line(23300, 5, 22912, 0),
@@ -458,7 +458,7 @@ class TestResumedRolloutDedup(unittest.TestCase):
                          "exactly one session upsert per file scan")
         sess = self.server.session_calls[0]
         self.assertEqual(session_id, sess["session_id"])
-        self.assertEqual("/mnt/ai/gh", sess["cwd"])
+        self.assertEqual("/tmp/test-workspace", sess["cwd"])
         self.assertEqual("codex_exec", sess["originator"])
         self.assertEqual("codex", sess["runtime"])
         self.assertEqual("gpt-5.5", sess["model"])

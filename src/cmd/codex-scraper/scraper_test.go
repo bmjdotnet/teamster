@@ -129,9 +129,9 @@ func TestProcessFile_ResumedRollout(t *testing.T) {
 		t.Fatalf("expected 1 session upsert call, got %d: %+v", len(up.calls), up.calls)
 	}
 	sess := up.calls[0]
-	if sess.SessionID != wantSessionID || sess.Cwd != "/mnt/ai/gh" || sess.Originator != "codex_exec" ||
+	if sess.SessionID != wantSessionID || sess.Cwd != "/tmp/test-workspace" || sess.Originator != "codex_exec" ||
 		sess.Runtime != "codex" || sess.Model != "gpt-5.5" {
-		t.Errorf("session upsert = %+v, want session_id=%s cwd=/mnt/ai/gh originator=codex_exec runtime=codex model=gpt-5.5",
+		t.Errorf("session upsert = %+v, want session_id=%s cwd=/tmp/test-workspace originator=codex_exec runtime=codex model=gpt-5.5",
 			sess, wantSessionID)
 	}
 }
@@ -278,13 +278,13 @@ func TestProcessFile_ParentAndSubagentNoMessageIDCollision(t *testing.T) {
 
 	parentPath := filepath.Join(dir, "rollout-parent.jsonl")
 	writeLines(t, parentPath, []string{
-		sessionMetaLine(parentID, "/mnt/ai/gh", "codex-tui", "0.142.5"),
+		sessionMetaLine(parentID, "/tmp/test-workspace", "codex-tui", "0.142.5"),
 		turnContextLine("gpt-5.4"),
 		tokenCountLine(100, 10, 0, 0),
 	})
 	subagentPath := filepath.Join(dir, "rollout-subagent.jsonl")
 	writeLines(t, subagentPath, []string{
-		subagentSessionMetaLine(threadID, parentID, parentID, "/mnt/ai/gh", "codex_exec", "0.142.5", "worker", "Dirac"),
+		subagentSessionMetaLine(threadID, parentID, parentID, "/tmp/test-workspace", "codex_exec", "0.142.5", "worker", "Dirac"),
 		turnContextLine("gpt-5.4"),
 		tokenCountLine(200, 20, 0, 0),
 	})

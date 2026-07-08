@@ -18,43 +18,45 @@ func TestTrustedHash_MatchesKitEvidence(t *testing.T) {
 	}{
 		// research/evidence/round2-config-with-hook-trust-state.toml and
 		// review/evidence-redteam/redteam-directly-written-trust-config.toml
-		// — both at /mnt/ai/tmp/codex-verify-home/config.toml.
+		// — both originally captured at the same real config.toml path
+		// (genericized here to a placeholder scratch path; the hashes below
+		// are recomputed for that placeholder, not copied verbatim from the
+		// evidence files).
 		{
 			name: "round2/redteam pre_tool_use",
-			def:  HookDefinition{Event: "PreToolUse", Matcher: ".*", Command: "/mnt/ai/tmp/codex-hookcap.sh", TimeoutSec: 10},
-			want: "sha256:dbba32597606070005010bedf00d498285f4e449c45e71335cd859560b5c3d7f",
+			def:  HookDefinition{Event: "PreToolUse", Matcher: ".*", Command: "/tmp/test-scratch/codex-hookcap.sh", TimeoutSec: 10},
+			want: "sha256:674b218d60aa92f2b268dba36e643c8264807b9d53db289c4b4688980a0938e5",
 		},
 		{
 			name: "round2/redteam post_tool_use",
-			def:  HookDefinition{Event: "PostToolUse", Matcher: ".*", Command: "/mnt/ai/tmp/codex-hookcap.sh", TimeoutSec: 10},
-			want: "sha256:423c08fe9a34d152f806798fcba4d0f8e17114b6a448af0e99625784bac4d2aa",
+			def:  HookDefinition{Event: "PostToolUse", Matcher: ".*", Command: "/tmp/test-scratch/codex-hookcap.sh", TimeoutSec: 10},
+			want: "sha256:87c46ca52628fa63cf7ee70de1e6ba4b3ef93c9f6c82ae2d7d126a02fd34717f",
 		},
 		{
 			name: "round2/redteam session_start",
-			def:  HookDefinition{Event: "SessionStart", Matcher: "startup|resume", Command: "/mnt/ai/tmp/codex-hookcap.sh", TimeoutSec: 10},
-			want: "sha256:2dc3ec4398def2528992553b1f9eaff6b20c03d005ce4089dd07d89d7b2d46f7",
+			def:  HookDefinition{Event: "SessionStart", Matcher: "startup|resume", Command: "/tmp/test-scratch/codex-hookcap.sh", TimeoutSec: 10},
+			want: "sha256:c0e6fd9c335d97cf164a808e077d1254bb368919d12685a8bcaf4e36f68d5dc8",
 		},
 		// research/evidence-round3/round3-final-config-with-trust-state.toml
-		// — a genuinely different config path
-		// (/mnt/ai/tmp/codex-verify-round3/home/config.toml) AND a
-		// different hook command
-		// (/mnt/ai/tmp/codex-verify-round3/scripts/hookcap.sh). PreToolUse's
+		// — a genuinely different config path AND a different hook command
+		// (both genericized here to placeholder scratch paths, with hashes
+		// recomputed accordingly). PreToolUse's
 		// timeout is 15 here (post the trust-re-provisioning upgrade test);
 		// PostToolUse/SessionStart are still 10 (untouched by that test).
 		{
 			name: "round3 post_tool_use (different path+command, timeout unchanged)",
-			def:  HookDefinition{Event: "PostToolUse", Matcher: ".*", Command: "/mnt/ai/tmp/codex-verify-round3/scripts/hookcap.sh", TimeoutSec: 10},
-			want: "sha256:358d5b9487e393e1bd6e1a64ea52d07feda57c50b62ba55873b43a62d23bcb7f",
+			def:  HookDefinition{Event: "PostToolUse", Matcher: ".*", Command: "/tmp/test-scratch/codex-verify-round3/scripts/hookcap.sh", TimeoutSec: 10},
+			want: "sha256:855aaf102328f9f83f915ac44cd635f430b4482d7549abd0d1b4d4ed339793ba",
 		},
 		{
 			name: "round3 session_start (different path+command, timeout unchanged)",
-			def:  HookDefinition{Event: "SessionStart", Matcher: "startup|resume", Command: "/mnt/ai/tmp/codex-verify-round3/scripts/hookcap.sh", TimeoutSec: 10},
-			want: "sha256:feb5a3b95dbd300d4c05452670543f352ca81ab74a61b44015f70db1d2d2516f",
+			def:  HookDefinition{Event: "SessionStart", Matcher: "startup|resume", Command: "/tmp/test-scratch/codex-verify-round3/scripts/hookcap.sh", TimeoutSec: 10},
+			want: "sha256:30cf35a246946bbdfa22f03c7542c76d0fa18ae7cd00952d0b0f76506ab73ad1",
 		},
 		{
 			name: "round3 pre_tool_use (different path+command, AND post-upgrade timeout=15)",
-			def:  HookDefinition{Event: "PreToolUse", Matcher: ".*", Command: "/mnt/ai/tmp/codex-verify-round3/scripts/hookcap.sh", TimeoutSec: 15},
-			want: "sha256:e0b146be9c43d3a5a488fe64558d6274efef189f5a6eafe4f741ef81aedc3428",
+			def:  HookDefinition{Event: "PreToolUse", Matcher: ".*", Command: "/tmp/test-scratch/codex-verify-round3/scripts/hookcap.sh", TimeoutSec: 15},
+			want: "sha256:d0780c44bb19c6be482b5e24c42923f3660d8633f843029b0de5da5c4cdc4c2a",
 		},
 	}
 
@@ -114,11 +116,11 @@ func TestTrustedHash_UnknownEvent(t *testing.T) {
 }
 
 func TestHookStateKey_Format(t *testing.T) {
-	key, err := HookStateKey("/home/bmj/.codex/config.toml", "SessionStart", 0, 0)
+	key, err := HookStateKey("/home/testuser/.codex/config.toml", "SessionStart", 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "/home/bmj/.codex/config.toml:session_start:0:0"
+	want := "/home/testuser/.codex/config.toml:session_start:0:0"
 	if key != want {
 		t.Fatalf("HookStateKey = %q, want %q", key, want)
 	}

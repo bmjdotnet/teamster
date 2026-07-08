@@ -7,9 +7,9 @@ import (
 )
 
 func TestDefaultConfigPath_UsesCodexHomeWhenSet(t *testing.T) {
-	t.Setenv("CODEX_HOME", "/mnt/ai/tmp/some-codex-home")
+	t.Setenv("CODEX_HOME", "/tmp/test-scratch/some-codex-home")
 	got := DefaultConfigPath("/home/someone")
-	want := filepath.Join("/mnt/ai/tmp/some-codex-home", "config.toml")
+	want := filepath.Join("/tmp/test-scratch/some-codex-home", "config.toml")
 	if got != want {
 		t.Fatalf("DefaultConfigPath = %q, want %q", got, want)
 	}
@@ -25,7 +25,7 @@ func TestDefaultConfigPath_FallsBackToHomeDotCodex(t *testing.T) {
 }
 
 func TestTeamsterMCPServerSpecs_ShapeAndIndependentEnvMaps(t *testing.T) {
-	specs := TeamsterMCPServerSpecs("/opt/teamster", "mysql://u:p@h/db", "http://hub:9125/event", "plex")
+	specs := TeamsterMCPServerSpecs("/opt/teamster", "mysql://u:p@h/db", "http://hub:9125/event", "testhost")
 	if len(specs) != 2 {
 		t.Fatalf("expected 2 specs, got %d", len(specs))
 	}

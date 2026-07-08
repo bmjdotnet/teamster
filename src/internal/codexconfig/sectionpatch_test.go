@@ -24,7 +24,7 @@ func TestUpsertSection_OperatorCommentsSurviveThreeRuns(t *testing.T) {
 	original := readTestdata(t, "operator-authored.toml")
 
 	wmsBody := "[mcp_servers.wms]\n" +
-		"command = \"/home/bmj/teamster/bin/wms-mcp\"\n" +
+		"command = \"/home/testuser/teamster/bin/wms-mcp\"\n" +
 		"default_tools_approval_mode = \"approve\"\n"
 
 	content := original
@@ -109,7 +109,7 @@ func TestUpsertSection_UnmarkedCollisionNeverTouchesForeignContent(t *testing.T)
 	// bounded by Teamster's markers.
 	content := "model = \"gpt-5.5\"\n\n[mcp_servers.wms]\ncommand = \"/some/operator/path\"\n"
 
-	result, ur := UpsertSection(content, "mcp_servers.wms", "[mcp_servers.wms]\ncommand = \"/home/bmj/teamster/bin/wms-mcp\"\n", "[mcp_servers.wms]", SkipIfPresent)
+	result, ur := UpsertSection(content, "mcp_servers.wms", "[mcp_servers.wms]\ncommand = \"/home/testuser/teamster/bin/wms-mcp\"\n", "[mcp_servers.wms]", SkipIfPresent)
 	if !ur.UnmarkedCollision {
 		t.Fatalf("expected UnmarkedCollision=true, got %+v", ur)
 	}

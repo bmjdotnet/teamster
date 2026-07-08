@@ -433,7 +433,7 @@ func TestHandleEvent_PostToolUse_ObjectToolResponse_Codex(t *testing.T) {
 	s.bus.subscribers = make(map[uint64]chan []byte)
 
 	// Shape captured live off a Codex mcp__activity__reportActivity call
-	// (see /mnt/ai/projects/teamster-codex-remote-kit/research/wp-r7-verification/).
+	// (see the codex-remote-kit research notes, wp-r7-verification).
 	payload, _ := json.Marshal(map[string]interface{}{
 		"hook_event_name": "PostToolUse",
 		"session_id":      "sess-codex-1",

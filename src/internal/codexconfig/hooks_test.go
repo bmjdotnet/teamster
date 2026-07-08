@@ -8,12 +8,12 @@ import (
 )
 
 func TestHookSpec_Render(t *testing.T) {
-	spec := HookSpec{Event: "PreToolUse", Matcher: ".*", Command: "/home/bmj/teamster/lib/hook/codex-hook.py", TimeoutSec: 10}
+	spec := HookSpec{Event: "PreToolUse", Matcher: ".*", Command: "/home/testuser/teamster/lib/hook/codex-hook.py", TimeoutSec: 10}
 	want := `[[hooks.PreToolUse]]
 matcher = ".*"
 [[hooks.PreToolUse.hooks]]
 type = "command"
-command = "/home/bmj/teamster/lib/hook/codex-hook.py"
+command = "/home/testuser/teamster/lib/hook/codex-hook.py"
 timeout = 10
 `
 	if got := spec.render(); got != want {
@@ -30,7 +30,7 @@ func TestHookSpec_Render_OmitsMatcherWhenEmpty(t *testing.T) {
 }
 
 func TestTeamsterHookSpecs(t *testing.T) {
-	specs := TeamsterHookSpecs("/home/bmj/teamster", DefaultHookTimeoutSec)
+	specs := TeamsterHookSpecs("/home/testuser/teamster", DefaultHookTimeoutSec)
 	if len(specs) != 3 {
 		t.Fatalf("expected 3 hook specs, got %d", len(specs))
 	}
@@ -40,7 +40,7 @@ func TestTeamsterHookSpecs(t *testing.T) {
 			t.Errorf("unexpected event %q", s.Event)
 		}
 		wantEvents[s.Event] = true
-		if s.Command != "python3 /home/bmj/teamster/lib/hook/codex-hook.py" {
+		if s.Command != "python3 /home/testuser/teamster/lib/hook/codex-hook.py" {
 			t.Errorf("event %s: command = %q, want the python3-prefixed codex-hook.py invocation", s.Event, s.Command)
 		}
 		if s.Matcher != ".*" {

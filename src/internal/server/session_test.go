@@ -28,8 +28,8 @@ func freshSessionDB(t *testing.T) (*Server, store.Store) {
 func TestHandleSession_Upsert(t *testing.T) {
 	s, db := freshSessionDB(t)
 
-	body := `{"session_id":"sess-1","agent_name":"@worker","host":"hub-1","username":"bmj",` +
-		`"runtime":"codex","cwd":"/mnt/ai/gh","model":"gpt-5-codex","originator":"codex_exec","cli_version":"0.142.5"}`
+	body := `{"session_id":"sess-1","agent_name":"@worker","host":"hub-1","username":"testuser",` +
+		`"runtime":"codex","cwd":"/tmp/test-workspace","model":"gpt-5-codex","originator":"codex_exec","cli_version":"0.142.5"}`
 	req := httptest.NewRequest(http.MethodPost, "/session", strings.NewReader(body))
 	w := httptest.NewRecorder()
 	s.handleSession(w, req)
@@ -42,8 +42,8 @@ func TestHandleSession_Upsert(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSession: %v", err)
 	}
-	if sess.Host != "hub-1" || sess.Username != "bmj" || sess.Runtime != "codex" ||
-		sess.Cwd != "/mnt/ai/gh" || sess.Model != "gpt-5-codex" ||
+	if sess.Host != "hub-1" || sess.Username != "testuser" || sess.Runtime != "codex" ||
+		sess.Cwd != "/tmp/test-workspace" || sess.Model != "gpt-5-codex" ||
 		sess.Originator != "codex_exec" || sess.CliVersion != "0.142.5" {
 		t.Fatalf("session row = %+v, fields did not round-trip", sess)
 	}
@@ -54,7 +54,7 @@ func TestHandleSession_Upsert(t *testing.T) {
 // creates a second row for the same (session_id, agent_name) key.
 func TestHandleSession_Idempotent(t *testing.T) {
 	s, db := freshSessionDB(t)
-	body := `{"session_id":"sess-2","host":"hub-1","username":"bmj","runtime":"codex"}`
+	body := `{"session_id":"sess-2","host":"hub-1","username":"testuser","runtime":"codex"}`
 
 	for i := 0; i < 3; i++ {
 		req := httptest.NewRequest(http.MethodPost, "/session", strings.NewReader(body))

@@ -46,7 +46,7 @@
 #   claude    # auth pre-loaded if credentials were found; otherwise /login
 #   codex     # same, if installed
 #
-# Watch from plex:
+# Watch from the hub host:
 #   lxc exec teamster-test -- su - teamster -c '~/teamster/bin/feed'
 
 set -euo pipefail
@@ -128,7 +128,7 @@ echo '  deps installed'
 
     if [[ "$INSTALL_CODEX" -eq 1 ]]; then
         echo "=== Installing Codex CLI (pinned 0.137.0 standalone package push) ==="
-        CODEX_PKG_SRC="/home/bmj/.codex/packages/standalone/releases/0.137.0-x86_64-unknown-linux-musl"
+        CODEX_PKG_SRC="$HOME/.codex/packages/standalone/releases/0.137.0-x86_64-unknown-linux-musl"
         if [[ ! -d "$CODEX_PKG_SRC" ]]; then
             echo "ERROR: pinned codex package not found at $CODEX_PKG_SRC" >&2
             exit 1
@@ -176,8 +176,8 @@ echo "  skel pushed"
 # Throwaway MySQL schema on the LXD bridge — wms-mcp is MySQL-only and the
 # pre-Codex-support cleanroom never gave it a store, so WMS/Codex-identity
 # criteria (README §5 item 2) had nothing to write to. Reuses the dedicated
-# test MySQL instance (127.0.0.1:13306 on the host, root/test — see
-# /mnt/ai/gh/CLAUDE.md's test section) via the lxdbr0 gateway IP, never the
+# test MySQL instance (127.0.0.1:13306 on the host, root/test — see the
+# repo's dev CLAUDE.md test section) via the lxdbr0 gateway IP, never the
 # live hub DSN (README risk / v51-migration hazard).
 LXDBR_GATEWAY="$(ip -4 addr show lxdbr0 | grep -oP 'inet \K[\d.]+')"
 SCHEMA="teamster_cleanroom_$(echo "$CONTAINER" | tr -c 'a-zA-Z0-9' '_')"
@@ -251,12 +251,12 @@ fi
 
 if [[ "$INSTALL_CODEX" -eq 1 ]]; then
     echo "=== Transporting Codex auth credentials (copy-in only, host auth.json never written back) ==="
-    if [ -f "/home/bmj/.codex/auth.json" ]; then
-        lxc file push /home/bmj/.codex/auth.json "$CONTAINER/home/$USER/.codex/auth.json" 2>/dev/null
+    if [ -f "$HOME/.codex/auth.json" ]; then
+        lxc file push "$HOME/.codex/auth.json" "$CONTAINER/home/$USER/.codex/auth.json" 2>/dev/null
         lxc exec "$CONTAINER" -- bash -c "chown $USER:$USER /home/$USER/.codex/auth.json && chmod 600 /home/$USER/.codex/auth.json"
         echo "  codex auth.json transported"
     else
-        echo "  no codex credentials found at /home/bmj/.codex/auth.json — manual codex login required"
+        echo "  no codex credentials found at $HOME/.codex/auth.json — manual codex login required"
     fi
 fi
 

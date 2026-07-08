@@ -10,13 +10,13 @@ import (
 func TestMCPServerSpec_Render_DeterministicEnvOrdering(t *testing.T) {
 	spec := MCPServerSpec{
 		ID:                       "wms",
-		Command:                  "/home/bmj/teamster/bin/wms-mcp",
+		Command:                  "/home/testuser/teamster/bin/wms-mcp",
 		DefaultToolsApprovalMode: "approve",
 		Env: map[string]string{
 			"TEAMSTER_STORE_DSN":      "mysql://user:pass@host/db",
 			"TEAMSTER_RUNTIME":        "codex",
 			"TEAMSTER_HOOK_SERVER_URL": "http://hub:9125/event",
-			"TEAMSTER_HOST":           "plex",
+			"TEAMSTER_HOST":           "testhost",
 		},
 	}
 	got1 := spec.render()
@@ -25,9 +25,9 @@ func TestMCPServerSpec_Render_DeterministicEnvOrdering(t *testing.T) {
 		t.Fatalf("render() is not deterministic across calls:\n%q\nvs\n%q", got1, got2)
 	}
 	want := `[mcp_servers.wms]
-command = "/home/bmj/teamster/bin/wms-mcp"
+command = "/home/testuser/teamster/bin/wms-mcp"
 default_tools_approval_mode = "approve"
-env = { TEAMSTER_HOOK_SERVER_URL = "http://hub:9125/event", TEAMSTER_HOST = "plex", TEAMSTER_RUNTIME = "codex", TEAMSTER_STORE_DSN = "mysql://user:pass@host/db" }
+env = { TEAMSTER_HOOK_SERVER_URL = "http://hub:9125/event", TEAMSTER_HOST = "testhost", TEAMSTER_RUNTIME = "codex", TEAMSTER_STORE_DSN = "mysql://user:pass@host/db" }
 `
 	if got1 != want {
 		t.Fatalf("render() =\n%q\nwant\n%q", got1, want)

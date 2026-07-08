@@ -70,11 +70,11 @@ __version__ = _read_version()
 # Pricing table — OpenAI/Codex model families only.
 #
 # SYNC ANCHOR: mirrors the Codex-model entries of internal/pricing/pricing.go
-# (Known map). The pricing-externalization effort
-# (/mnt/ai/projects/teamster-pricing-kit/) has NOT landed store-backed rates
-# as of this port — this is a THIRD hand-maintained copy of the same numbers
-# (Go pricing.go is the first, token-scraper.py's Claude-side _KNOWN is the
-# second). Do not let this drift silently; when the pricing kit ships,
+# (Known map). The pricing-externalization effort (the pricing kit) has NOT
+# landed store-backed rates as of this port — this is a THIRD hand-maintained
+# copy of the same numbers (Go pricing.go is the first, token-scraper.py's
+# Claude-side _KNOWN is the second). Do not let this drift silently; when the
+# pricing kit ships,
 # replace this table with its store-backed lookup and delete the duplicate.
 #
 # ModelPricing: (input, output, cache_read, cache_write) — USD per token.

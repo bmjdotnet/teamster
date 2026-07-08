@@ -31,7 +31,7 @@ func TestJournalObserver_OnStatusChange_CarriesIdentity(t *testing.T) {
 		NewStatus:  StatusActive,
 		SessionID:  "019f3b97-c99f-7ff1-9ec6-4d3f2fc70a61",
 		AgentName:  "codex",
-		Host:       "plex",
+		Host:       "testhost",
 	})
 
 	got := w.last
@@ -41,7 +41,7 @@ func TestJournalObserver_OnStatusChange_CarriesIdentity(t *testing.T) {
 	if got.AgentID != "codex" {
 		t.Errorf("AgentID = %q, want the StatusChange's AgentName", got.AgentID)
 	}
-	if got.Host != "plex" {
+	if got.Host != "testhost" {
 		t.Errorf("Host = %q, want the StatusChange's host", got.Host)
 	}
 	if got.Field != "status" || got.OldValue != StatusPending || got.NewValue != StatusActive {
