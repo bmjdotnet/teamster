@@ -3,6 +3,35 @@
 All notable changes to Teamster are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## v0.2.4 (2026-07-08)
+
+### Added
+- Codex agent support — full WMS, telemetry, and cost attribution for OpenAI Codex sessions alongside Claude Code (identity resolution, MCP server configuration, hooks channel, skill porting, OTEL metrics, model pricing)
+- Codex remote client support — capture parity for remotes running Codex (Python rollout tailer, hookd session endpoint, config patcher, `--codex-mode` on install paths)
+- Codex scraper — systemd-managed JSONL tailer for Codex rollout token/session capture
+- Codex-specific Grafana dashboard (`codex-metrics.json`) with dedicated OTEL receiver
+- `$start` front-door skill for Codex — thin pointer to `teamster-solo`, ambient and visible
+- `wms_getEntityTags` MCP tool — read-only view of direct and inherited entity tags
+- Brief artifact existence check in bootstrap/start/solo skills — flags missing referenced files before acting
+- LXD cleanroom test harness (`cleanroom.sh`) with Codex install matrix support
+- OpenAI/Codex model pricing entries (gpt-5.5, gpt-5.4, gpt-5.3-codex, o3, o4-mini)
+
+### Changed
+- Runtime enum renamed `claude` → `claude_code` (enum: `claude_code`, `codex`, `unknown`)
+- `otelcol-contrib` pinned to 0.156.0 (was 0.95.0) with `deltatocumulative` processor
+- AGENTS.md deferred-tool search guidance reconciled with actual Codex behavior
+
+### Fixed
+- Token-bucket double-count — `cached_input`/`reasoning_output` are subsets, not additive
+- Silent `$0` fallback for unknown pricing models replaced with loud warning
+- `JournalObserver.OnStatusChange` dropping `SessionID`/`AgentName`/`Host` from audit trail
+- Rollup `--reallocate` attribution race — sweep clears by `entity_type=''` instead of `method='unallocated'`
+- Install runner wire guard — systemd hookd-stop gated on `$WIRE` + basedir ownership check, preventing stage-only runs from stopping live services
+- `PostToolUse` object `tool_response` 400 error in hook payloads
+- Non-interactive hook environment resolution
+- Cron `pipefail` on single-line crontab
+- Cleanroom hookd health-check race condition (retry loop replaces fixed sleep)
+
 ## v0.2.3 (2026-07-07)
 
 ### Added
