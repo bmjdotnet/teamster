@@ -193,8 +193,8 @@ func NewServer(cfg config.Config) (*Server, error) {
 }
 
 // RegisterRoutes attaches the server's handlers to mux. In read-only mode
-// the MCP, telemetry, and drain write endpoints return 403; /event and all
-// read/dashboard/SSE routes remain available.
+// the MCP, telemetry, session, and drain write endpoints return 403; /event
+// and all read/dashboard/SSE routes remain available.
 func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	timed := func(h http.HandlerFunc) http.Handler {
 		return http.TimeoutHandler(http.HandlerFunc(h), writeTimeout, "request timeout")
@@ -212,12 +212,14 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 		mux.Handle("/mcp/activity", timed(reject))
 		mux.Handle("/mcp/wms", timed(reject))
 		mux.Handle("/telemetry", timed(reject))
+		mux.Handle("/session", timed(reject))
 		mux.Handle("/focus-timeline", timed(reject))
 		mux.Handle("/wms/api/drain", timed(reject))
 	} else {
 		mux.Handle("/mcp/activity", timed(s.handleMCPActivity))
 		mux.Handle("/mcp/wms", timed(s.handleMCPWMS))
 		mux.Handle("/telemetry", timed(s.handleTelemetry))
+		mux.Handle("/session", timed(s.handleSession))
 		mux.Handle("/focus-timeline", timed(s.handleFocusTimeline))
 		mux.Handle("/wms/api/drain", timed(web.HandleDrainAPI(s.obsStore)))
 	}

@@ -83,6 +83,19 @@ type cursorEntry struct {
 	dirty bool
 }
 
+// sessionRow matches hookd's server.SessionRow wire format for POST /session.
+type sessionRow struct {
+	SessionID  string `json:"session_id"`
+	AgentName  string `json:"agent_name"`
+	Host       string `json:"host"`
+	Username   string `json:"username"`
+	Runtime    string `json:"runtime"`
+	Cwd        string `json:"cwd"`
+	Model      string `json:"model"`
+	Originator string `json:"originator"`
+	CliVersion string `json:"cli_version"`
+}
+
 // telemetryRow matches hookd's server.TelemetryRow wire format.
 type telemetryRow struct {
 	MessageID             string  `json:"message_id"`
@@ -477,6 +490,48 @@ func (s *scraper) upsertCodexSession(ctx context.Context, cursor *cursorEntry) {
 	if err != nil {
 		slog.Error("codex-scraper: session upsert failed", "session_id", cursor.SessionID, "error", err)
 	}
+}
+
+// httpSessionUpserter implements sessionUpserter by POSTing to hookd's
+// POST /session endpoint (docs/specs/CODEX-INSTALL.md, "Migration path for
+// later") instead of writing through a direct store.Open connection. The hub
+// Go scraper uses this same client, not just a future remote tailer — one
+// code path for sessions upserts, continuously exercised by the hub itself
+// (README Open decision 4). upsertCodexSession above is unchanged: it only
+// ever depended on the sessionUpserter interface, never on how a call reaches
+// the sessions table.
+type httpSessionUpserter struct {
+	client     *http.Client
+	sessionURL string
+}
+
+func (u *httpSessionUpserter) UpsertSession(_ context.Context, sess store.Session) error {
+	data, err := json.Marshal(sessionRow{
+		SessionID:  sess.SessionID,
+		AgentName:  sess.AgentName,
+		Host:       sess.Host,
+		Username:   sess.Username,
+		Runtime:    sess.Runtime,
+		Cwd:        sess.Cwd,
+		Model:      sess.Model,
+		Originator: sess.Originator,
+		CliVersion: sess.CliVersion,
+	})
+	if err != nil {
+		return err
+	}
+
+	resp, err := u.client.Post(u.sessionURL, "application/json", bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()        //nolint:errcheck
+	io.Copy(io.Discard, resp.Body) //nolint:errcheck
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("session POST returned %d", resp.StatusCode)
+	}
+	return nil
 }
 
 func (s *scraper) loadCursors() error {

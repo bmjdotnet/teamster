@@ -37,13 +37,13 @@ workflow enforcement, and work management for Claude Code Agent Teams.
 
 | Component | Role |
 |-----------|------|
-| `hookd` | HTTP event server + web dashboard. Receives POST `/event`, serves SSE at `/events/stream`. |
+| `hookd` | HTTP event server + web dashboard. Receives POST `/event`, serves SSE at `/events/stream`. Also serves POST `/telemetry` (token-scraper/codex-scraper ledger rows) and POST `/session` (Codex sessions-row upsert) — both hub-local and remote callable. |
 | `activity-mcp` | MCP server: `reportActivity`, `setOverallIntent`, `completeActivity`, `setMode`. |
 | `wms-mcp` | MCP server: outcome/work-unit CRUD, tags, focus, dependencies. |
 | `feed` | Terminal activity viewer (tails JSONL, colorizes). |
 | `rollup` | Cost-attribution pipeline. Allocates token spend to WMS entities. Runs on a systemd timer. |
 | `classify` | Phase and work-type classifier. Derives tags from activity signals. Runs every 5 minutes. |
-| `codex-scraper` | Codex cost/ledger tailer. Reads Codex CLI rollout JSONL and writes Codex token/session data. Runs on a systemd timer (every 10 min); present only when Codex is installed. |
+| `codex-scraper` | Codex cost/ledger tailer. Reads Codex CLI rollout JSONL and writes Codex token/session data via hookd's `/telemetry` and `/session` endpoints. Runs on a systemd timer (every 10 min) here on the hub; present only when Codex is installed. A pure-Python port of this same tailer runs on remotes/client-mode installs via cron (Linux) or launchd (macOS), on the same 10-minute cadence — see `doc/specs/CODEX-INSTALL.md`'s Remote Codex support section. |
 | `backup` | Backup engine. Snapshots MySQL, OTel config, and teamster state to timestamped directories. Runs on systemd timer. |
 | `teamster` | Hook client + CLI. Forked per hook event; also the CLI entry point for status/tags/wms/sql. |
 

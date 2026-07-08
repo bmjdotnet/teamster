@@ -403,3 +403,53 @@ func TestHandleEvent_UserPromptSubmit_ReturnsAdditionalContext(t *testing.T) {
 		t.Errorf("additionalContext = %q\nwant: %q", ctx, want)
 	}
 }
+
+// TestHandleEvent_PostToolUse_ObjectToolResponse_Codex is the WP-R7-reported
+// regression: Codex sends tool_response as a JSON object for MCP tool calls
+// (the raw tool_result shape), where Claude Code always sends a string. Before
+// the fix, hook.HookEvent.ToolResponse was typed `string`, so the server's
+// json.Unmarshal(body, &event) rejected every Codex PostToolUse event outright
+// (400 "invalid json") — silently dropped, since codex-hook.py is
+// exit-0-always and only logs to a local file the operator has to go looking
+// for. PreToolUse was unaffected (no tool_response field on that event), so
+// this bug was invisible to WMS focus/attribution but ate every
+// PostToolUse-driven signal (feed lines, completeActivity's hook, etc.) for
+// Codex sessions.
+func TestHandleEvent_PostToolUse_ObjectToolResponse_Codex(t *testing.T) {
+	f, err := os.CreateTemp(t.TempDir(), "hookd-*.jsonl")
+	if err != nil {
+		t.Fatalf("create temp log: %v", err)
+	}
+	defer f.Close()
+
+	s := &Server{
+		cfg:     config.Config{Host: "testhost"},
+		logFile: f,
+		metrics: observability.NewMetrics(prometheus.NewRegistry()),
+		sessions: observability.NewSessionTracker(
+			"testhost", 5*time.Minute, 30*time.Second, nil,
+		),
+	}
+	s.bus.subscribers = make(map[uint64]chan []byte)
+
+	// Shape captured live off a Codex mcp__activity__reportActivity call
+	// (see /mnt/ai/projects/teamster-codex-remote-kit/research/wp-r7-verification/).
+	payload, _ := json.Marshal(map[string]interface{}{
+		"hook_event_name": "PostToolUse",
+		"session_id":      "sess-codex-1",
+		"tool_name":       "mcp__activity__reportActivity",
+		"tool_response": map[string]interface{}{
+			"content": []interface{}{
+				map[string]interface{}{"type": "text", "text": "Activity recorded: thought test"},
+			},
+		},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/event", bytes.NewReader(payload))
+	rec := httptest.NewRecorder()
+	s.handleEvent(rec, req)
+
+	if rec.Code != http.StatusOK {
+		body, _ := io.ReadAll(rec.Body)
+		t.Fatalf("status = %d, want 200; body = %s", rec.Code, body)
+	}
+}

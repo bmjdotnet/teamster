@@ -882,10 +882,22 @@ if [[ "$HOOKD_MODE" == "external" ]]; then
         exit 1
     fi
     echo "Prerequisites OK: python3 $(python3 --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+'), claude $(claude --version 2>/dev/null | head -1)"
+
+    # Codex probe — informational only, mirrors hub mode's own probe further
+    # below (never fails the install here; remote-codex-setup.py re-probes and
+    # does the actual gating, including the --codex-mode=install hard-error
+    # case, when Configuring runs).
+    if [[ "$CODEX_MODE" == "none" ]]; then
+        echo "Codex: skipping (--codex-mode=none)"
+    elif command -v codex &>/dev/null; then
+        echo "Codex: found ($(codex --version 2>/dev/null | tail -1)) — will be wired"
+    else
+        echo "Codex: not found — skipping (informational; install https://developers.openai.com/codex/cli if you want it wired)"
+    fi
     echo ""
 
     echo "--- Staging ---"
-    mkdir -p "$BASEDIR/bin" "$BASEDIR/lib" "$BASEDIR/lib/scripts"
+    mkdir -p "$BASEDIR/bin" "$BASEDIR/lib/hook" "$BASEDIR/lib/scripts"
 
     cp "$REPO/skel/lib/hook/teamster.py" "$BASEDIR/bin/teamster"
     chmod +x "$BASEDIR/bin/teamster"
@@ -894,6 +906,21 @@ if [[ "$HOOKD_MODE" == "external" ]]; then
 
     cp -r "$REPO/skel/lib/plugin"         "$BASEDIR/lib/"
     cp -r "$REPO/skel/lib/.claude-plugin"  "$BASEDIR/lib/"
+
+    # Codex remote support (WP-R4c parity with install-remote.sh). Staged
+    # unconditionally — remote-codex-setup.py probes for the codex CLI itself
+    # and no-ops (CODEX_STATUS=skipped) when it's absent or --codex-mode=none.
+    cp "$REPO/skel/lib/scripts/codex-scraper.py" "$BASEDIR/bin/codex-scraper"
+    chmod +x "$BASEDIR/bin/codex-scraper"
+    # codex-hook.py + teamster.py ship together in lib/hook/ (codex-hook.py
+    # imports teamster.py as a same-directory module) — a SECOND copy of
+    # teamster.py from the one already staged (renamed, executable) at
+    # bin/teamster above, since that copy can't double as an importable
+    # `teamster` module.
+    cp "$REPO/skel/lib/hook/codex-hook.py" "$BASEDIR/lib/hook/codex-hook.py"
+    cp "$REPO/skel/lib/hook/teamster.py"   "$BASEDIR/lib/hook/teamster.py"
+    cp "$REPO/skel/lib/scripts/remote-codex-setup.py" "$BASEDIR/lib/scripts/remote-codex-setup.py"
+    cp -r "$REPO/skel/lib/codex-plugin"    "$BASEDIR/lib/"
 
     cp "$REPO/skel/lib/scripts/remote-setup.sh" "$BASEDIR/lib/scripts/remote-setup.sh"
     chmod +x "$BASEDIR/lib/scripts/remote-setup.sh"
@@ -908,7 +935,14 @@ if [[ "$HOOKD_MODE" == "external" ]]; then
 
     echo ""
     echo "--- Configuring ---"
-    bash "$BASEDIR/lib/scripts/remote-setup.sh" --server "$HOOKD_ENDPOINT"
+    # No --otel-codex-port/--otel-environment here: unlike `teamster
+    # install-remote` (SSH'd from a hub that can read its OWN local
+    # teamster.yaml for otelcol.mode/codex_http_port), this client-mode install
+    # runs ON the client itself, pointed at a hub reachable only over HTTP via
+    # $HOOKD_ENDPOINT — there is no local filesystem path to the hub's config
+    # to probe. Auto-detect-only for Codex OTEL wiring in this topology; a
+    # codex-less host or --codex-mode=none installs unaffected either way.
+    bash "$BASEDIR/lib/scripts/remote-setup.sh" --server "$HOOKD_ENDPOINT" --codex-mode "${CODEX_MODE:-auto}"
 
     echo ""
     echo "--- Verifying hook path ---"

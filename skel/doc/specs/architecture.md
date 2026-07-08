@@ -90,6 +90,11 @@ On a remote, `TEAMSTER_HOOK_SERVER_URL` and the MCP endpoints point at the hub.
 `TEAMSTER_HOST` carries the short hostname so the hub can attribute events to
 the right machine.
 
+A remote that also runs the Codex CLI is wired the same way: Codex's
+`config.toml` gets `url =`-form MCP servers pointed at the same hub, and a
+Python `codex-scraper` (cron/launchd) tails Codex's own rollout JSONL. See
+"Codex runtime (second runtime)" below for the full remote-Codex data flow.
+
 **Hub URL uses the hub's hostname, not `localhost`.** The installer writes
 `TEAMSTER_HOOK_SERVER_URL` as `http://<hub-hostname>:9125/event` (from
 `os.Hostname()`, falling back to `localhost` only if the hostname can't be
@@ -412,6 +417,40 @@ processor before Prometheus; the `transform/source_label` processor tags
 `PreToolUse` / `PostToolUse` → `codex-hook.py`) is a **feed-only** signal —
 WMS and cost attribution never depend on it (they run off codex-scraper and the
 wms-mcp `x-codex-turn-metadata` identity).
+
+**Remote Codex.** A remote host running Codex (enrolled via `teamster
+install-remote` or a `--hookd-mode=external` client-mode install) gets the
+identical data flow, ported to pure-stdlib Python since remotes carry no Go
+toolchain:
+
+```
+Remote MCP call (WMS/activity tools):
+  codex config.toml: [mcp_servers.wms] url = "http://<hub>:9125/mcp/wms"
+    (direct HTTP — no proxy, no local MCP process; codex mcp add --url /
+     the bare url= form is wire-verified at both the 0.137.0 pin and 0.142.5)
+  → same hookd mcpwms handler hub-local Claude Code and remote Claude Code
+    already share; x-codex-turn-metadata + clientInfo unchanged by transport
+
+Remote cost/session flow:
+  codex-scraper.py (cron every 10 min / launchd on macOS) tails the remote's
+    own $CODEX_HOME/sessions/**/rollout-*.jsonl (+ archived_sessions/)
+  → POST http://<hub>:9125/telemetry   (ledger rows, runtime='codex')
+  → POST http://<hub>:9125/session     (sessions-row upsert — the hub's own
+                                         Go codex-scraper now uses this same
+                                         endpoint too, not a direct store
+                                         connection)
+  → rollup --sweep (unchanged) attributes those ledger rows by the same
+    temporal join used for hub-local Codex cost
+
+Remote OTEL (only if the hub's own otelcol is running):
+  codex [otel] metrics_exporter = { otlp-http = { endpoint =
+    "http://<hub>:4329/", protocol = "binary" } }
+  → hub's dedicated otlp/codex receiver, same as hub-local Codex metrics
+```
+
+See `docs/specs/REMOTE-INSTALL.md`'s "Codex support on remotes" section and
+`docs/specs/CODEX-INSTALL.md`'s "Remote Codex support" section for the full
+staging layout, flags, and design rationale.
 
 ---
 

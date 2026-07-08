@@ -12,6 +12,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/bmjdotnet/teamster/internal/wms"
@@ -61,14 +62,27 @@ type Session struct {
 
 	// Runtime distinguishes the CLI that produced this session: "claude_code"
 	// (default, zero value normalizes to it) or "codex". Codex sessions are
-	// upserted directly by the codex-scraper tailer (hookd's hook pipeline
-	// never fires for Codex), which is also the only writer of the four
-	// fields below.
+	// upserted via hookd's POST /session endpoint (hookd's hook pipeline never
+	// fires for Codex), which is also the only writer of the four fields below.
 	Runtime    string
 	Cwd        string // Codex session_meta.cwd; empty for Claude sessions
 	Model      string // last-known model for the session; empty for Claude sessions
 	Originator string // Codex session_meta.originator ("codex-tui" / "codex_exec")
 	CliVersion string // Codex session_meta.cli_version
+}
+
+// ValidateSession checks the one requirement every backend enforces before
+// writing a sessions row. Both UpsertSession/CreateSession implementations
+// (mysql, sqlite) call this rather than re-declaring the rule, and hookd's
+// POST /session handler calls it too so an HTTP caller (the codex-scraper
+// tailer, hub-local or eventually remote) gets the identical validation a
+// direct-store caller would — one definition of a valid session row, not a
+// copy per call site.
+func ValidateSession(s Session) error {
+	if s.SessionID == "" {
+		return errors.New("SessionID is required")
+	}
+	return nil
 }
 
 // ActivityEvent is a single activity report (reportActivity / setOverallIntent /

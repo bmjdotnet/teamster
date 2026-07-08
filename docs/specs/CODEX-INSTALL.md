@@ -1,8 +1,10 @@
 # Codex Support — Install & Operate
 
-**Status: complete (v1).** Installer wiring, MCP servers, OTEL, skills,
-hooks, the audit-trail residual-risk note, codex-scraper, and uninstall are
-all covered below. This is the authoritative Codex-support doc — merge new
+**Status: complete (v1 hub-local; remote support shipped).** Installer
+wiring, MCP servers, OTEL, skills, hooks, the audit-trail residual-risk note,
+codex-scraper, and uninstall are all covered below for hub-local Codex; see
+"Remote Codex support" for what's different when Codex runs on a remote host
+instead of the hub. This is the authoritative Codex-support doc — merge new
 content in here rather than starting a second one.
 
 ## Overview
@@ -377,11 +379,18 @@ and exits.
 
 | Env var | Required | Purpose |
 |---|---|---|
-| `TEAMSTER_STORE_DSN` | Yes | Direct store connection for the Codex sessions-row upsert. If unset, the binary still ledgers cost via `/telemetry` but logs a warning and skips the sessions row. |
+| `TEAMSTER_HOOK_SERVER_URL` | No (defaults to `http://localhost:9125/event`) | Base hookd address; `/telemetry` and `/session` are derived sibling endpoints on the same host/port. |
 | `CODEX_HOME` | No (defaults to `~/.codex`) | Root of the Codex CLI's session data. |
-| `TEAMSTER_TELEMETRY_URL` / `TEAMSTER_HOOK_SERVER_URL` | No (derived) | Where ledger rows are POSTed; derived from the hook server URL exactly like `token-scraper`. |
+| `TEAMSTER_TELEMETRY_URL` | No (derived) | Override for the ledger-row POST endpoint; derived from the hook server URL exactly like `token-scraper`. |
+| `TEAMSTER_SESSION_URL` | No (derived) | Override for the sessions-row upsert endpoint (`POST /session`); derived from the hook server URL the same way. |
 | `CODEX_SCRAPER_SESSION_ROOTS` | No | Comma-separated override of the directories walked for `*.jsonl` (testing/isolation only). |
 | `SCRAPER_DRY_RUN` | No | `true`/`1` logs derived rows instead of POSTing/upserting — no writes anywhere. |
+
+`codex-scraper` does **not** read `TEAMSTER_STORE_DSN` — both the ledger POST
+and the sessions-row upsert go through hookd's HTTP surface now (see "Design
+note for reviewers" below for why this changed from v1's original
+direct-store design). This is true for the hub-local Go binary and the
+Python remote port alike; neither opens a store connection.
 
 Graceful on a host with no `codex` CLI installed: the timer still fires, the
 binary finds no rollout files under `$CODEX_HOME`, and exits 0 every run.
@@ -545,30 +554,137 @@ upsert makes the re-insert a no-op (verified by
 handled the same way `token-scraper` handles file rotation: if the file on
 disk is smaller than the persisted cursor offset, the cursor resets to zero.
 
-### Design note for reviewers: why session upsert is direct-store, not HTTP
+### Design note for reviewers: sessions upsert is HTTP, not direct-store
 
-The tailer owns two responsibilities with two different write paths:
-ledger rows go through hookd's `/telemetry` HTTP endpoint (reusing its
-existing batching/fallback-spool/idempotent-upsert machinery, same as
-`token-scraper`), while the Codex sessions row is upserted via a **direct
-`store.Open(TEAMSTER_STORE_DSN)` connection** (same pattern `classify` and
-`rollup` already use for work outside hookd's narrow HTTP surface). This was
-an open design question in the WP3 brief (hookd's `/telemetry` never touches
-`sessions` today); direct-store access for a periodic Go binary is an
-established pattern in this codebase, not a new one, and avoids extending
-hookd's wire contract for a low-frequency, non-batched write.
+v1 originally shipped the Codex sessions-row upsert via a **direct
+`store.Open(TEAMSTER_STORE_DSN)` connection** (the same pattern `classify`
+and `rollup` use for work outside hookd's narrow HTTP surface), reasoning
+that direct-store access for a periodic Go binary was an established pattern
+and avoided extending hookd's wire contract for a low-frequency, non-batched
+write. **That decision has since been superseded.**
 
-**Decided (lead, 2026-07-07): keep direct-store for v1.** The precedent
-(classify/rollup) is exactly right, and v1 is hub-local by scope — no
-rework needed. **Migration path for later:** `codex-scraper` only makes
-sense running on the same host as the `codex` CLI it tails, which for a
-Codex **remote** (by analogy with Claude Code's hub/remote model) would be
-a machine that cannot reach the hub's `TEAMSTER_STORE_DSN` directly. When
-Codex remote support lands ([later], not in this kit's v1 scope), the
-sessions-row upsert must move behind a hookd HTTP endpoint (the
-hookd-endpoint alternative flagged above) so a remote-side scraper can
-reach it the same way remote Claude Code hook clients already reach hookd
-over HTTP — the direct-store path only works hub-local.
+When remote Codex support was designed, the hub-local direct-store path
+turned out to be the wrong long-term shape: a Codex **remote** (by analogy
+with Claude Code's hub/remote model) cannot open `TEAMSTER_STORE_DSN`
+directly — the exact reason `token-scraper.py` POSTs to `/telemetry` instead
+of writing MySQL itself. Rather than maintain two sessions-upsert code paths
+(direct-store for the hub, HTTP for remotes), hookd grew a **`POST
+/session`** endpoint (`src/internal/server/session.go`) that wraps
+`store.UpsertSession` behind `store.ValidateSession` — the same validation
+function both a direct-store caller and an HTTP caller are now held to — and
+**the hub's own Go `codex-scraper` was migrated to use it too**, not left on
+the old direct-store path. One code path, continuously exercised by the hub
+itself, not just by a future remote tailer.
+
+Practical effect: `codex-scraper` (hub-local Go binary or the Python remote
+port) no longer reads `TEAMSTER_STORE_DSN` at all — both the ledger POST and
+the sessions-row POST go through hookd. `POST /session` is synchronous and
+unbatched (one call per scraper run, not one per `token_count` event like
+`/telemetry`), so it doesn't need `/telemetry`'s queue/fallback-spool
+machinery. It's telemetry-quiet by construction (no feed event, no SSE
+publish — matching the pre-existing quiet `s.obsStore.UpsertSession` call in
+the `Stop` handler) and is rejected by a read-only hookd (replica) exactly
+like `/telemetry` and `/mcp/*` — point a Codex install, hub-local or remote,
+at a real hub, never a replica.
+
+## Remote Codex support
+
+Everything above describes hub-local Codex wiring (`teamster-install`'s
+`wireCodex()`, Go binaries). A remote host running Codex — enrolled via
+`teamster install-remote user@host` or a client-mode `--hookd-mode=external`
+install — gets the same capture fidelity, ported to pure-stdlib Python since
+remotes carry no Go toolchain (operator directive: remote components are
+never Go). See `docs/specs/REMOTE-INSTALL.md`'s "Codex support on remotes"
+section for the full staging layout, flags, and directory tree; this section
+covers what's different from the hub-local design above.
+
+**Transport is direct HTTP, no proxy.** The open design question going into
+remote delivery was whether Codex's `config.toml` can express an
+HTTP-transport MCP server the way remote Claude Code does (`claude mcp add
+--transport http`) — Codex had only ever been proven against stdio
+`command`/`args` servers. It can: `codex mcp add --url <URL>` (and the bare
+`url = "..."` config.toml form it writes) is a first-class, wire-verified
+transport at both the Codex 0.137.0 pin and 0.142.5 — a full `initialize` →
+`notifications/initialized` → `tools/list` → `tools/call` round trip
+completes over HTTP, and `x-codex-turn-metadata` + `clientInfo.name ==
+"codex-mcp-client"` land on the wire exactly as they do over stdio. So remote
+Codex is wired straight at the hub's MCPs (`url = "http://<hub>:9125/mcp/wms"`
+plus `default_tools_approval_mode = "approve"` — same approval-mode rationale
+as the hub's stdio form above); no stdio→HTTP proxy is shipped or needed, and
+the hub-side `wms-mcp`/`activity-mcp` identity chain required zero changes to
+support it.
+
+**What's different from hub-local, mechanically:**
+
+- **Config wiring** is `skel/lib/scripts/remote-codex-setup.py`, a Python
+  port of `internal/codexconfig` — same marker-bounded sections, same
+  backup-then-doctor-gate discipline (`.pre-teamster` once + timestamped
+  `.bak` every run, gated on `checks["config.load"].status`, never
+  `overallStatus`), same byte-verified hook trust-hash algorithm
+  (`test_remote_codex_setup.py` checks it against the Go implementation, not
+  just structurally). `mcp_servers` registrations are the `url =` form above
+  instead of the hub's `command`/`args` stdio form; hooks, skills, and the
+  AGENTS.md merge follow the same shape as hub-local.
+- **AGENTS.md merge text is single-sourced.** Both the hub's Go installer
+  (`loadCodexAgentsProtocol`, `src/cmd/teamster-install/main.go`) and the
+  remote's Python installer read the identical
+  `skel/lib/codex-plugin/agents-protocol.md` data file — the text that used
+  to live only in a Go string constant (`codexAgentsProtocol`) now ships as
+  one file both installers read, so the deferred-MCP-tool-search guidance
+  (Known limitation, above) can never drift into two versions.
+- **Cost/ledger tailer** is `skel/lib/scripts/codex-scraper.py`, a Python
+  port of `src/cmd/codex-scraper/{rollout,scraper}.go` — same
+  rollout-parsing semantics (`last_token_usage`-only derivation, subset
+  cached/reasoning tokens, the `codex-auto-review` sentinel, `thread_spawn`
+  subagent parent-resolution — see above), same reliability posture (exit 0
+  always, 2-second HTTP timeouts, errors logged to
+  `~/teamster/var/codex-scraper-errors.log` and swallowed). It POSTs to
+  hookd's `/telemetry` and `/session` — the same HTTP path the hub's own Go
+  `codex-scraper` now uses (design note above), not a remote-only shortcut.
+- **Scheduling** is cron (Linux, every 10 minutes) or a launchd LaunchAgent
+  (macOS, `net.bmj.teamster.codex-scraper`, `StartInterval=600`) instead of a
+  systemd timer — the same cron/launchd split `token-scraper` already uses
+  for Claude Code cost on remotes.
+- **No Go, no local MCP process, no database** — identical to how remote
+  Claude Code already works; Codex just adds a second cron/launchd entry and
+  a second `config.toml` section family.
+
+**OTEL** is in scope for `teamster install-remote`, gated on the **hub's
+own** otelcol actually running (`--otelcol-mode=install`): it reads the
+hub's local `teamster.yaml` for `otelcol.mode`/`otelcol.codex_http_port` and
+only passes `--otel-codex-port`/`--otel-environment` through to
+`remote-codex-setup.py` when both are set.
+
+**`--hookd-mode=external` client-mode installs never wire Codex OTEL — a
+by-design limitation of that topology, not a pending TODO.** Client-mode
+runs directly on the target host, pointed at a hub reachable only over HTTP
+via `--hookd-endpoint`, so there's no local filesystem path to read the
+hub's `teamster.yaml` from (unlike `teamster install-remote`, which is
+SSH'd *from* the hub and reads its own config first). No OTEL flags were
+ever stubbed onto `--hookd-mode=external`; supporting it would mean either
+manual flags the operator fills in by hand or a new hookd HTTP endpoint
+exposing the hub's OTEL config — neither is planned. Codex's MCP servers,
+hooks, and scraper are fully wired on a client-mode install regardless; only
+the OTEL exporter is absent. **Idempotency and uninstall are not
+client-mode-specific either**: re-running a client-mode install goes through
+the identical `remote-setup.sh` → `remote-codex-setup.py` machinery
+documented above (no separate re-run logic), and there is no uninstall
+automation for either install path — apply the "Remote uninstall" recipe
+below directly on the host (drop the `ssh user@host "..."` wrapper; the
+marker names and `~/teamster`/`~/.codex` paths are identical).
+
+**Limitations carried from hub-local v1, unchanged on remotes:** `--ephemeral`
+Codex runs are invisible to the tailer; same-role sibling `thread_spawn`
+subagents collapse onto one identity; a read-only replica hookd rejects
+`/telemetry` and `/session` the same way it rejects `/mcp/*` (point a remote
+Codex install at a real hub, never a replica).
+
+**Testing note.** Any manual test of `remote-setup.sh`'s cron-wiring step
+against a real host writes a **real** crontab entry for the current OS user —
+`crontab` is not scoped by `$HOME`, so redirecting `$HOME` for test isolation
+does not contain it. Container or VM isolation is mandatory for this test,
+not merely convenient (see repo `CLAUDE.md` Pitfalls for the fuller version
+of this warning).
 
 ## Uninstall
 
@@ -610,20 +726,37 @@ rm -f ~/teamster/var/codex-scraper-cursors.json   # tailer's byte-offset cursor
 keyed by a heading marker, not a removable marker pair like config.toml's
 sections above (same posture as `mergeClaudeMD`/CLAUDE.md on the Claude Code
 side — REMOTE-INSTALL.md's Uninstall section is equally hand-wavy about it).
-Two options, in order of safety:
-1. **Restore from backup** (cleanest): every write Teamster makes to
-   `AGENTS.md`/`AGENTS.override.md` is preceded by `installbackup.Backup` —
-   `<file>.pre-teamster` holds the exact pre-Teamster content from the very
-   first install. `cp ~/.codex/AGENTS.md.pre-teamster ~/.codex/AGENTS.md`
-   (or the `.override.md` variant, whichever `mergeCodexAgentsMD` actually
-   targeted — check which file contains the `## Getting Started with
-   Teamster (Codex)` heading). This reverts anything else appended to the
-   file after install too, so only use it if nothing else has touched the
-   file since.
+**Check first whether `~/.codex/AGENTS.md.pre-teamster` (or
+`.override.md.pre-teamster`) exists** — it determines which of the two
+options below applies:
+
+- **It exists** → the target file predates Teamster; go to option 1
+  (restore from backup).
+- **It's absent** → Teamster authored the whole file from scratch on a host
+  with no pre-existing `AGENTS.md`. `installbackup.Backup` only ever writes
+  a `.pre-teamster` copy when the target already existed — "nothing to
+  preserve" means no backup file is written at all, not an empty one
+  (verified live in WP-R7's remote-Codex container: a fresh install left no
+  `.pre-teamster` anywhere). Go straight to `rm ~/.codex/AGENTS.md` (or
+  `.override.md`) instead — there is nothing to restore *to*, since
+  Teamster's content is the entire file.
+
+Two options, in order of safety, once you know which applies:
+1. **Restore from backup** (cleanest, only if `.pre-teamster` exists): every
+   write Teamster makes to `AGENTS.md`/`AGENTS.override.md` is preceded by
+   `installbackup.Backup` — `<file>.pre-teamster` holds the exact
+   pre-Teamster content from the very first install. `cp
+   ~/.codex/AGENTS.md.pre-teamster ~/.codex/AGENTS.md` (or the
+   `.override.md` variant, whichever `mergeCodexAgentsMD` actually targeted
+   — check which file contains the `## Getting Started with Teamster
+   (Codex)` heading). This reverts anything else appended to the file after
+   install too, so only use it if nothing else has touched the file since.
 2. **Manual excision**: the Teamster block runs from the
    `## Getting Started with Teamster (Codex)` heading to end-of-file (it's
    always appended last) — delete from that heading onward if there's
    trailing operator content you need to keep that was added after install.
+   (On a fresh-file host with no `.pre-teamster`, "delete from that heading
+   onward" is everything — equivalent to just removing the file, per above.)
 
 **Backups left behind** (all `installbackup`-managed, safe to leave or clean
 up as the operator prefers): `~/.codex/config.toml.pre-teamster` +
@@ -633,3 +766,45 @@ the same way. The Claude Code side has the equivalent
 `~/.claude/settings.json.pre-teamster`, `~/.claude.json.pre-teamster`,
 `~/.claude/CLAUDE.md.pre-teamster` (retrofitted in WP2 — these did not exist
 before Codex support shipped).
+
+### Remote uninstall
+
+Same marker-bounded content, same backup files, on the remote's own
+`~/.codex/config.toml` and `AGENTS.md` — just no systemd, and cron or
+launchd instead depending on OS. Run this on the remote, or via `ssh
+user@host "..."` from the hub (mirroring `REMOTE-INSTALL.md`'s own Uninstall
+recipe):
+
+```bash
+# Linux remote:
+ssh user@remotehost '
+  CODEX_CONFIG=~/.codex/config.toml   # or $CODEX_HOME/config.toml if CODEX_HOME is set
+  for name in mcp_servers.activity mcp_servers.wms otel hooks hooks-state; do
+    sed -i "/# >>> teamster:${name} >>>/,/# <<< teamster:${name} <<</d" "$CODEX_CONFIG"
+  done
+
+  rm -rf ~/.codex/skills/start ~/.codex/skills/teamster-solo \
+         ~/.codex/skills/teamster-status ~/.codex/skills/teamster-tags \
+         ~/.codex/skills/teamster-review
+
+  crontab -l 2>/dev/null | grep -vF "codex-scraper" | crontab -
+
+  rm -f ~/teamster/var/codex-scraper-cursors.json
+'
+
+# macOS remote — same config.toml/skills cleanup, but unload the LaunchAgent
+# instead of touching crontab:
+ssh user@remotemac '
+  launchctl bootout "gui/$(id -u)/net.bmj.teamster.codex-scraper" 2>/dev/null || true
+  rm -f ~/Library/LaunchAgents/net.bmj.teamster.codex-scraper.plist
+'
+```
+
+`rm -rf ~/teamster` (`REMOTE-INSTALL.md`'s base Uninstall recipe) removes
+`bin/codex-scraper`, `lib/scripts/remote-codex-setup.py`, and
+`lib/hook/codex-hook.py` along with the rest of the remote's Teamster
+install; it does **not** touch `~/.codex/config.toml`, `~/.codex/skills/`,
+`~/.codex/AGENTS.md`, or the crontab/LaunchAgent entry above — those need
+this separate recipe, exactly as they do on the hub. The "Restore from
+backup" vs. "Manual excision" choice for AGENTS.md, and the backup file
+list, above apply identically on a remote.

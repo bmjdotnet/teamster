@@ -31,8 +31,8 @@ import (
 // --- Sessions ---
 
 func (s *Store) UpsertSession(ctx context.Context, sess store.Session) error {
-	if sess.SessionID == "" {
-		return fmt.Errorf("UpsertSession: SessionID is required")
+	if err := store.ValidateSession(sess); err != nil {
+		return fmt.Errorf("UpsertSession: %w", err)
 	}
 	if sess.FirstSeen.IsZero() {
 		sess.FirstSeen = nowUTC()
@@ -78,8 +78,8 @@ func (s *Store) UpsertSession(ctx context.Context, sess store.Session) error {
 }
 
 func (s *Store) CreateSession(ctx context.Context, sess store.Session) error {
-	if sess.SessionID == "" {
-		return fmt.Errorf("CreateSession: SessionID is required")
+	if err := store.ValidateSession(sess); err != nil {
+		return fmt.Errorf("CreateSession: %w", err)
 	}
 	if sess.FirstSeen.IsZero() {
 		sess.FirstSeen = nowUTC()

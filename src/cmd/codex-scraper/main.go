@@ -3,9 +3,9 @@
 // and is the sole writer of Codex cost/ledger data: it POSTs per-token_count
 // telemetry rows to hookd's /telemetry endpoint (same contract token-scraper
 // uses for Claude Code) and, since hookd's hook-event pipeline never fires
-// for Codex, upserts the Codex sessions row itself via a direct store
-// connection (mirroring how classify/rollup already connect directly for
-// work hookd's narrow HTTP surface doesn't cover).
+// for Codex, upserts the Codex sessions row itself via hookd's POST /session
+// endpoint — the same HTTP transport as /telemetry, so this binary needs no
+// store DSN of its own.
 //
 // Oneshot, not a daemon: driven by a systemd timer (mirrors classify), not a
 // poll loop (unlike token-scraper). Idempotent — safe to run concurrently
@@ -35,8 +35,6 @@ import (
 
 	"github.com/bmjdotnet/teamster/internal/config"
 	"github.com/bmjdotnet/teamster/internal/logging"
-	"github.com/bmjdotnet/teamster/internal/store"
-	_ "github.com/bmjdotnet/teamster/internal/store/mysql" // registers mysql, mariadb
 	"github.com/bmjdotnet/teamster/internal/version"
 )
 
@@ -64,19 +62,6 @@ func run() int {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	var upserter sessionUpserter
-	if cfg.StoreDSN.Raw == "" {
-		logger.Warn("TEAMSTER_STORE_DSN not set — Codex sessions row will not be written; ledger/cost is unaffected")
-	} else {
-		st, err := store.Open(ctx, cfg.StoreDSN.Raw)
-		if err != nil {
-			logger.Error("open store failed", "error", err)
-			return 1
-		}
-		defer st.Close() //nolint:errcheck
-		upserter = st
-	}
-
 	codexHome := os.Getenv("CODEX_HOME")
 	if codexHome == "" {
 		codexHome = filepath.Join(os.Getenv("HOME"), ".codex")
@@ -91,23 +76,33 @@ func run() int {
 
 	dryRun := os.Getenv("SCRAPER_DRY_RUN") == "true" || os.Getenv("SCRAPER_DRY_RUN") == "1"
 
+	// hookd base URL: HookServerURL is "http://host:9125/event"; /telemetry
+	// and /session are sibling endpoints on the same hookd instance.
+	hookdBase := strings.TrimSuffix(cfg.HookServerURL, "/event")
+
 	telemetryURL := os.Getenv("TEAMSTER_TELEMETRY_URL")
 	if telemetryURL == "" {
-		base := strings.TrimSuffix(cfg.HookServerURL, "/event")
-		telemetryURL = base + "/telemetry"
+		telemetryURL = hookdBase + "/telemetry"
+	}
+
+	sessionURL := os.Getenv("TEAMSTER_SESSION_URL")
+	if sessionURL == "" {
+		sessionURL = hookdBase + "/session"
 	}
 
 	cursorPath := filepath.Join(cfg.DataDir, "codex-scraper-cursors.json")
 
+	httpClient := &http.Client{Timeout: 5 * time.Second}
+
 	logger.Info("starting",
 		"roots", roots,
 		"telemetry_url", telemetryURL,
+		"session_url", sessionURL,
 		"dry_run", dryRun,
-		"store_configured", upserter != nil,
 	)
 
 	s := &scraper{
-		client:       &http.Client{Timeout: 5 * time.Second},
+		client:       httpClient,
 		telemetryURL: telemetryURL,
 		host:         cfg.Host,
 		username:     cfg.User,
@@ -115,7 +110,7 @@ func run() int {
 		cursorPath:   cursorPath,
 		dryRun:       dryRun,
 		cursors:      make(map[string]*cursorEntry),
-		st:           upserter,
+		st:           &httpSessionUpserter{client: httpClient, sessionURL: sessionURL},
 	}
 
 	if err := s.loadCursors(); err != nil {

@@ -273,6 +273,18 @@ separate top-level sessions, so the remote clients derive each teammate's
 identity (and cost) from its transcript. See
 [docs/specs/REMOTE-INSTALL.md](docs/specs/REMOTE-INSTALL.md) for details.
 
+**Codex on remotes** gets the same treatment as Codex on the hub (see
+[Codex CLI support](#codex-cli-support) above): auto-detected on the remote
+(override with `--codex-mode=install|none`), wired straight at the hub's MCP
+servers over HTTP (Codex speaks the same HTTP MCP transport remote Claude Code
+already uses — no extra process, no proxy), plus its own cron/launchd job
+tailing the remote's Codex session logs. Same delay characteristics as
+hub-local Codex: allow up to ~20 minutes (scraper cadence + rollup cadence)
+for a fresh remote Codex session's cost to reach the dashboards — an empty
+panel right after the session isn't a broken install. See
+[docs/specs/CODEX-INSTALL.md](docs/specs/CODEX-INSTALL.md#remote-codex-support)
+for the full wiring detail.
+
 ## Replication
 
 A hub can push its data to one or more read-only **replica** hosts — a full

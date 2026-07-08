@@ -7,11 +7,36 @@ import (
 	"testing"
 )
 
+// testBasedir builds a temp BASEDIR carrying the real, repo-shipped
+// agents-protocol.md at the path loadCodexAgentsProtocol expects
+// (lib/codex-plugin/agents-protocol.md) — mirrors the skel copy every real
+// install performs (main()'s copyTreeCounting(skelDir, *basedir)), so these
+// tests exercise the actual shared data file content, not a synthetic
+// stand-in, catching any drift between the file and what mergeCodexAgentsMD
+// expects to find. Follows the ../../../skel relative-path convention
+// established by codexconfig/hooks_selftest_test.go.
+func testBasedir(t *testing.T) string {
+	t.Helper()
+	basedir := t.TempDir()
+	destDir := filepath.Join(basedir, "lib", "codex-plugin")
+	if err := os.MkdirAll(destDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile("../../../skel/lib/codex-plugin/agents-protocol.md")
+	if err != nil {
+		t.Fatalf("read real agents-protocol.md: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(destDir, "agents-protocol.md"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return basedir
+}
+
 // TestMergeCodexAgentsMD_CreatesWhenAbsent covers the fresh-install case:
 // neither AGENTS.md nor AGENTS.override.md exists yet.
 func TestMergeCodexAgentsMD_CreatesWhenAbsent(t *testing.T) {
 	codexHome := t.TempDir()
-	if err := mergeCodexAgentsMD(codexHome); err != nil {
+	if err := mergeCodexAgentsMD(testBasedir(t), codexHome); err != nil {
 		t.Fatalf("mergeCodexAgentsMD: %v", err)
 	}
 
@@ -42,7 +67,7 @@ func TestMergeCodexAgentsMD_BacksUpBeforeWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := mergeCodexAgentsMD(codexHome); err != nil {
+	if err := mergeCodexAgentsMD(testBasedir(t), codexHome); err != nil {
 		t.Fatalf("mergeCodexAgentsMD: %v", err)
 	}
 
@@ -72,11 +97,16 @@ func TestMergeCodexAgentsMD_BacksUpBeforeWrite(t *testing.T) {
 func TestMergeCodexAgentsMD_NoOpWhenAlreadyMerged(t *testing.T) {
 	codexHome := t.TempDir()
 	path := filepath.Join(codexHome, "AGENTS.md")
-	if err := os.WriteFile(path, []byte(codexAgentsProtocol), 0o644); err != nil {
+	basedir := testBasedir(t)
+	protocol, err := loadCodexAgentsProtocol(basedir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(protocol), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := mergeCodexAgentsMD(codexHome); err != nil {
+	if err := mergeCodexAgentsMD(basedir, codexHome); err != nil {
 		t.Fatalf("mergeCodexAgentsMD: %v", err)
 	}
 	if _, err := os.Stat(path + ".pre-teamster"); !os.IsNotExist(err) {
@@ -102,7 +132,7 @@ func TestMergeCodexAgentsMD_PrefersOverrideWhenPresent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := mergeCodexAgentsMD(codexHome); err != nil {
+	if err := mergeCodexAgentsMD(testBasedir(t), codexHome); err != nil {
 		t.Fatalf("mergeCodexAgentsMD: %v", err)
 	}
 

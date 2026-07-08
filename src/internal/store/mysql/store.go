@@ -1411,8 +1411,8 @@ func (s *Store) RetireTag(ctx context.Context, tagKey string) error {
 // --- Sessions ---
 
 func (s *Store) UpsertSession(ctx context.Context, sess store.Session) error {
-	if sess.SessionID == "" {
-		return errors.New("UpsertSession: SessionID is required")
+	if err := store.ValidateSession(sess); err != nil {
+		return fmt.Errorf("UpsertSession: %w", err)
 	}
 	if sess.FirstSeen.IsZero() {
 		sess.FirstSeen = nowUTC()
@@ -1458,8 +1458,8 @@ func (s *Store) UpsertSession(ctx context.Context, sess store.Session) error {
 }
 
 func (s *Store) CreateSession(ctx context.Context, sess store.Session) error {
-	if sess.SessionID == "" {
-		return errors.New("CreateSession: SessionID is required")
+	if err := store.ValidateSession(sess); err != nil {
+		return fmt.Errorf("CreateSession: %w", err)
 	}
 	if sess.FirstSeen.IsZero() {
 		sess.FirstSeen = nowUTC()
