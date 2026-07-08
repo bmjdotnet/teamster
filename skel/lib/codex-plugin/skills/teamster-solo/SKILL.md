@@ -29,12 +29,17 @@ strategic Outcome's id and frames the context-tag interview.
 
 There is no team name to generate — solo sessions have no team.
 
-## Step 2 — WMS and activity tools are already available
+## Step 2 — Reach the WMS and activity tools
 
-Teamster's `wms` and `activity` MCP servers are registered at install time —
-call their tools directly (`mcp__wms__wms_createOutcome`,
-`mcp__activity__reportActivity`, etc.). There is no deferred/lazy tool-loading
-step to run first.
+Teamster's `wms` and `activity` MCP servers are registered at install time. On
+some Codex builds their tools are callable directly; on builds that defer-load
+MCP tools you must surface a tool before first use with Codex's own tool
+search. If a tool you expect (`wms_createOutcome`, `reportActivity`, …) isn't
+callable, search for **what you want to DO** in natural-language verbs —
+"create a new outcome," "set focus on an entity" — not a bare `wms_` tool name
+(identifier queries reliably return zero). Search again with different wording
+before concluding a tool is missing. See AGENTS.md → "Finding WMS/activity MCP
+tools" for the full guidance.
 
 ## Step 3 — Create (or resume) the strategic Outcome
 
@@ -163,11 +168,12 @@ wrong in a solo session (it leaves your whole session's cost in the
 | **Activity focus** | A narration string in the live feed | `mcp__activity__reportActivity` / `setOverallIntent` | **Cosmetic only** — the feed display. Drives **no** attribution. |
 | **WMS focus** | The cost-bearing focus interval on a WMS entity | `mcp__wms__wms_setFocus` | **Cost attribution** — every token you spend lands on the entity your WMS focus currently points at. |
 
-Updating your `reportActivity` message does **not** move the WMS focus. As
-your work moves from one entity or step to the next you must call
-`mcp__wms__wms_setFocus` **again** — not just narrate the move with
-`reportActivity`. If you only refresh the activity narration, the WMS focus
-stays frozen on whatever it last pointed at and your spend mis-attributes.
+Updating your `reportActivity` message does **not** move the WMS focus — they
+are separate calls against separate state. As your work moves from one entity
+or step to the next you must call `mcp__wms__wms_setFocus` **again** — not just
+narrate the move with `reportActivity`. If you only refresh the activity
+narration, the WMS focus stays frozen on whatever it last pointed at and your
+spend mis-attributes.
 
 ## Step 6 — Proceed with work (the per-step discipline)
 
@@ -210,7 +216,11 @@ Before you begin a WorkUnit (or spawn a subagent for it):
    and `phase` (`build`). Check the `requiredLifecycle` map in the manifest
    for valid values — no extra lookup needed. Tag the WorkUnit you're on, not
    a stale one. (Context tags from the Outcome are inherited automatically by
-   the engine — you only need to set lifecycle tags per WorkUnit.)
+   the engine — you only need to set lifecycle tags per WorkUnit.) The engine
+   lets you flip a WorkUnit to `active` (step 2) while it is still untagged and
+   only *warns* afterward — so treat steps 2–4 as one atomic startup beat and
+   apply the tags as you activate, never deferring them, or the warning is the
+   first you'll hear of a protocol miss.
 
    **Work-scope slug on the Outcome.** If the strategic Outcome does not yet
    carry a work-scope slug tag and the work type is clear, apply one now with
@@ -237,6 +247,11 @@ have it exit when done, rather than self-certifying your own work. This is
 how solo mode preserves the verification gate without a team: a
 fresh-context reviewer that isn't the author.
 
+A subagent needs no WMS bookkeeping of its own — its token cost rolls up to
+the session and attributes to whatever WMS focus you hold while it runs. Keep
+focus on the WorkUnit the subagent is helping with and its spend lands there
+automatically; you do not set focus for the subagent.
+
 Commit only when the operator asks (the acceptance gate still applies).
 
 If no specific work was named, tell the operator the solo session is ready
@@ -245,19 +260,28 @@ If no specific work was named, tell the operator the solo session is ready
 ## Step 7 — Close-out ritual (end of session)
 
 The session is not done when the code works — it's done when the WMS state
-reflects reality. At the end of the session, run all of:
+reflects reality. There is no `closeoutAudit` tool to run this for you, so
+walk the checklist by hand and confirm each item:
 
-1. **Every WorkUnit is `done`** — walk the WorkUnits under the Outcome
+1. **No open WorkUnits** — walk the WorkUnits under the Outcome
    (`mcp__wms__wms_listWorkUnits`) and `mcp__wms__wms_updateWorkUnitStatus(...
    done)` any still `active`/`pending` whose work is finished. Nothing should
    be parked.
-2. **Mark the Outcome `done`** — `mcp__wms__wms_updateOutcomeStatus(<outcome>,
+2. **Required tags present** — before a WorkUnit goes `done`, confirm it
+   carries its `requiredLifecycle` keys (`work-type`, `phase`) and any
+   `required` context key (e.g. `component`) from the Step 4a manifest. A
+   done-but-untagged WorkUnit is a coverage gap the dashboard can't fill in
+   later.
+3. **Mark the Outcome `done`** — `mcp__wms__wms_updateOutcomeStatus(<outcome>,
    "done")`.
-3. **Apply `resolution:achieved`** —
+4. **Apply `resolution:achieved`** —
    `mcp__wms__wms_tagEntity(entityType="outcome", entityID=<outcome>,
    tagKey="resolution", tagValue="achieved")` (or the resolution that fits,
    e.g. `abandoned`). The Outcome is not closed out without a `resolution`
    tag.
+5. **Focus is not left on a closed entity** — your WMS focus should not still
+   point at a WorkUnit or Outcome you just marked `done`. Any tokens spent
+   after close-out otherwise attribute to a closed entity.
 
 An Outcome left `active` with a `pending` WorkUnit under it and no
 `resolution` tag is the unmistakable signature of a session that forgot to

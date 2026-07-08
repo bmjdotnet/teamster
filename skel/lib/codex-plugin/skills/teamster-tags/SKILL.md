@@ -50,9 +50,12 @@ guided first-time setup, point them at `teamster setup tags`.
 
 ## Step 0 — Set up accounting and read the intent
 
-The `wms` and `activity` MCP tools are already available — call them
-directly (`mcp__wms__wms_listTags`, `mcp__activity__reportActivity`, etc.).
-There is no deferred/lazy tool-loading step to run first.
+The `wms` and `activity` MCP tools are registered at install time. On some
+Codex builds they are callable directly; on builds that defer-load MCP tools,
+surface one before first use with Codex's own tool search — search by **what
+you want to DO** ("list tags," "tag an entity"), not a bare `wms_` name
+(identifier queries reliably return zero). See AGENTS.md → "Finding
+WMS/activity MCP tools."
 
 ### Cost attribution — do this before any other work
 

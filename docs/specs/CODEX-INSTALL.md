@@ -434,6 +434,62 @@ binary finds no rollout files under `$CODEX_HOME`, and exits 0 every run.
   event is ledgered independently of whether its turn came from the
   original launch or a later resume.
 
+### Subagent attribution (Codex `thread_spawn`)
+
+Codex has no persistent Agent-Teams layer — a Codex session is solo — but
+Codex 0.142.x's `thread_spawn` feature lets a session spawn ephemeral
+subagents, and each subagent runs as its own *thread* with its own rollout
+file. The tailer attributes that subagent spend to the parent session rather
+than stranding it as an orphan:
+
+- A subagent file's `session_meta` carries `id` = the subagent's own thread
+  UUID, `session_id` = the **parent** thread's id, and `parent_thread_id` =
+  that same parent id (a top-level file has `id == session_id` and no
+  `parent_thread_id`). Verified live (chunk-test2 evidence). Codex 0.137.0's
+  `session_meta` has no `session_id` field at all, so the tailer **falls back
+  to `id`** — which also makes top-level 0.142.x files (`session_id == id`)
+  behave identically either way.
+- **Ledger rows and the `sessions` upsert use the parent-resolved id**
+  (`session_meta.session_id`), so a subagent's cost books under the **same
+  `session_id` as the parent's own focus intervals**. `rollup`'s existing
+  `temporal_join` / `temporal_join_lead_session_fallback` machinery then
+  attributes it like any other message in that session. This scraper-time
+  resolution is the **single point** of child→parent mapping — no rollup-side
+  mapping is added, because a second resolution layer would double-attribute
+  (subagent message timestamps fall entirely inside the parent's focus
+  windows, so the existing temporal join is sufficient on its own).
+- **`message_id` stays keyed by the file's own thread id**, not the shared
+  `session_id` (`codex:<thread-id>:<seq>`). Keying on `session_id` would let a
+  parent file's `seq 1..N` and a subagent file's `seq 1..M` collide onto the
+  same key, and the `uq_message` upsert would silently swallow one file's rows.
+- **`agent_name` = `@<agent_role>`** (e.g. `@explorer`), read from
+  `session_meta.agent_role` (present only on subagent files; role, not
+  nickname). This matches the identity wms-mcp already opens focus intervals
+  under, and the `sessions` primary key `(session_id, agent_name)` lets a
+  subagent's `(parent, @role)` row coexist with the parent's `(parent, "")`
+  row exactly like a Claude Code teammate. Parent/direct spend carries
+  `agent_name=""`.
+
+**Upgrading a pre-release install scraped by a pre-fix build.** This fix
+changed how `session_id` / `message_id` / `agent_name` are derived. Rows a
+**pre-fix** `codex-scraper` already wrote booked subagent threads as orphan
+sessions, and incremental polling won't re-read those bytes to heal them. To
+repair such an install: reset the scraper cursor for the affected rollout files
+(delete or trim `var/codex-scraper-cursors.json`) so the next run re-scrapes
+them under the parent `session_id`, then run `rollup --sweep --reallocate`
+once. `--reallocate` "clear[s] unallocated attribution rows and re-derive[s]
+them before the pass (recovery after agent-identity backfill)" and leaves the
+parent's already-allocated rows untouched; a plain `--sweep` will **not**
+retro-heal, because allocate skips messages that already carry an attribution
+row. **Ordering matters:** run this `--reallocate` pass *before* the next
+automatic `rollup --sweep` (the `teamster-rollup.timer` runs a plain sweep
+every 10 min) reaches the re-scraped rows — a plain timer sweep that gets there
+first relabels them `method='sweep_skipped'`, which `--reallocate` does **not**
+clear, and recovering from that state then needs a manual `method` reset on
+those rows first. This applies **only to pre-release test installs** — the
+first shipped build derives identity correctly from the start, so fresh
+sessions never need a reallocate (or this ordering care).
+
 ### Schema additions (mysql migration v51 / sqlite v51, additive-only)
 
 - `sessions`: `runtime` (default `'claude_code'`), `cwd`, `model`, `originator`,
@@ -450,8 +506,11 @@ regenerated at `testdata/golden_schema_v51.txt`.
 - **`--ephemeral` Codex runs are invisible.** Codex skips persisting the
   rollout file entirely for `--ephemeral` sessions — there is nothing on
   disk for the tailer to read. Not chased in v1; document as a known gap.
-- **Solo-only.** No Codex Agent Teams in v1 (operator decision); every
-  ledger/session row carries `agent_name=""`.
+- **No persistent Agent Teams.** Codex has no persistent teammate layer, so
+  there is no team-mode wiring in v1 (operator decision). Ephemeral
+  `thread_spawn` subagents ARE attributed to their parent session — see
+  Subagent attribution above; parent/direct spend carries `agent_name=""`,
+  subagent spend carries `@<agent_role>`.
 - **MCP tool-call activity is parsed but not yet shipped as telemetry.**
   `event_msg.mcp_tool_call_end` (server/tool/args/duration/result, branching
   correctly on `result.Ok` vs `result.Err` — a cancelled/denied call is an

@@ -17,9 +17,12 @@ import (
 // the dedup / double-count invariants the operator suspects. It stresses two
 // paths the existing rollup tests do NOT cover:
 //
-//  1. Reallocate idempotency + scope: --reallocate clears ONLY method='unallocated'
-//     rows, never a temporal_join row; running it repeatedly never changes the
-//     conserved total, the row count, or produces a duplicate attribution row.
+//  1. Reallocate idempotency + scope: --reallocate clears only entity-less rows
+//     (entity_type='', the unallocated bucket), never a temporal_join row that
+//     carries a real entity; running it repeatedly never changes the conserved
+//     total, the row count, or produces a duplicate attribution row.
+//     (The sweep_skipped arm of the same clear-set is covered by
+//     TestReallocateClearsSweepSkippedTrap in rollup_reallocate_race_test.go.)
 //  2. 2c recovery without double-count: after a message's agent identity is
 //     rewritten (unknown -> real agent) AND a covering focus interval exists, a
 //     --reallocate pass re-derives ONLY the previously-unallocated row to the

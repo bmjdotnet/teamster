@@ -587,7 +587,15 @@ type AllocationStore interface {
 	// ApplyAttribution upserts one usage_attribution row atomically (was
 	// INSERT ... ON DUPLICATE KEY UPDATE). method is the attribution strategy.
 	ApplyAttribution(ctx context.Context, messageID, method string, entity EntityRef, intervalID *int64) error
-	DeleteAttributionByMethod(ctx context.Context, method string) (int64, error)
+	// ClearUnallocatedAttribution deletes every usage_attribution row not
+	// allocated to an entity (entity_type=''), regardless of method — the
+	// complete not-yet-really-attributed set: the method='unallocated' bucket
+	// plus the 'sweep_skipped' give-up marker a prior sweep may have relabeled
+	// it to (both always carry entity_type=''). Backs Runner.Reallocate. Scoped
+	// by the entity_type='' invariant rather than a method enumeration so a row
+	// carrying a REAL entity is never cleared and no future give-up marker can
+	// re-open the reallocate race. Returns the number of rows deleted.
+	ClearUnallocatedAttribution(ctx context.Context) (int64, error)
 
 	// Set-based aggregations — per-backend implementations (SQL stays SQL).
 	// BuildCostRollup atomically replaces cost_rollup (see AtomicReplace —
@@ -625,8 +633,8 @@ type RecoveryStore interface {
 	ApplyRecovery(ctx context.Context, batch RecoveryBatch) error
 	UncoverRecovery(ctx context.Context, strategy string) (int64, error)
 	// ReleaseSessionAttribution deletes a session's attribution rows matching
-	// any of methods — the session-scoped generalization of
-	// DeleteAttributionByMethod that internal/rollup's focus-interval repair
+	// any of methods — the session-scoped, method-explicit counterpart of
+	// ClearUnallocatedAttribution that internal/rollup's focus-interval repair
 	// needs (release the cost a now-fixed interval covers so a reallocate
 	// re-derives it), added here rather than left as raw SQL against a
 	// leftover *sql.DB handle so Runner can drop that handle entirely.

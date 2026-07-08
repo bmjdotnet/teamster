@@ -43,6 +43,7 @@ workflow enforcement, and work management for Claude Code Agent Teams.
 | `feed` | Terminal activity viewer (tails JSONL, colorizes). |
 | `rollup` | Cost-attribution pipeline. Allocates token spend to WMS entities. Runs on a systemd timer. |
 | `classify` | Phase and work-type classifier. Derives tags from activity signals. Runs every 5 minutes. |
+| `codex-scraper` | Codex cost/ledger tailer. Reads Codex CLI rollout JSONL and writes Codex token/session data. Runs on a systemd timer (every 10 min); present only when Codex is installed. |
 | `backup` | Backup engine. Snapshots MySQL, OTel config, and teamster state to timestamped directories. Runs on systemd timer. |
 | `teamster` | Hook client + CLI. Forked per hook event; also the CLI entry point for status/tags/wms/sql. |
 
@@ -79,7 +80,7 @@ to close stale intervals.
 
 ## Further reading
 
-- `doc/specs/architecture.md` — full system architecture, data flows, env vars
+- `doc/specs/architecture.md` — full system architecture, data flows (incl. Codex runtime), env vars
 - `doc/specs/semantic-conventions.md` — JSONL fields, tag taxonomy, WMS entities
 - `doc/specs/wms-dashboard-spec.md` — dashboard design and implemented pages
 - `lib/plugin/skills/` — available `/teamster:*` slash commands

@@ -78,7 +78,8 @@ src/                          Go source (go.mod: github.com/bmjdotnet/teamster)
     wms-mcp/                  MCP stdio: outcome/workunit CRUD, tags, focus, dependencies, search
     rollup/                   Cost-attribution pipeline (allocate, recover, sweep)
     classify/                 Interval phase + work-type classifier (systemd timer)
-    token-scraper/            Session transcript token-usage scraper
+    token-scraper/            Session transcript token-usage scraper (Claude Code)
+    codex-scraper/            Codex rollout-JSONL cost/ledger tailer (systemd timer, oneshot)
     teamster-install/         Installer binary (called by lib/installrunner.sh)
     demogen/                  Synthetic data generator for dashboards
     backup/                   Standalone backup binary (systemd timer)
@@ -86,6 +87,9 @@ src/                          Go source (go.mod: github.com/bmjdotnet/teamster)
     activity/                 Shared activity-tool handler logic
     classify/                 Rule-based classifier engine (work-type, phase)
     config/                   Env-var config (TEAMSTER_* namespace)
+    codexconfig/              Codex CLI config wiring: ~/.codex/config.toml MCP
+                              servers, OTEL, hooks + trust state, skills file-copy,
+                              AGENTS.md merge — all backup-then-doctor-gated
     display/                  Entity colors, tag colors, ANSI rendering
     hook/                     Tool extraction, tag taxonomy, enrichment
     llm/                      Anthropic API client (used by sweep-llm)
@@ -133,6 +137,8 @@ skel/                         Assets copied to BASEDIR at install time
     teamster-sweep.timer.tmpl        Sweep timer (every hour)
     teamster-backup.service.tmpl     Backup one-shot service
     teamster-backup.timer.tmpl       Backup timer (configurable, default 1h)
+    teamster-codex-scraper.service.tmpl  Codex rollout-tailer one-shot service
+    teamster-codex-scraper.timer.tmpl    Codex-scraper timer (every 10 min)
     teamster-relay.service.tmpl      Event relay (hub→replica), --relay-mode=install
     teamster-repl-push.service.tmpl  Repl-push MySQL sync server (hub side)
     teamster-prometheus-replica.yml.tmpl  Replica Prometheus scrape config
@@ -145,6 +151,11 @@ skel/                         Assets copied to BASEDIR at install time
       skills/bootstrap/references/{eight-rules.md, execution-loop.md, field-guide.md, rubrics.md}
       skills/tags/references/
     hook/teamster.py          Python hook client used on remote installs
+    hook/codex-hook.py        Python hook client for Codex (imports teamster.py's
+                              redaction/error helpers; the two ship together)
+    codex-plugin/             Codex plugin-shaped skills — shipped as a documented
+                              fallback; v1 installs skills by file-copy, not this
+    .agents/                  Codex agents/ assets (openai.yaml) for that fallback
     scripts/                  selftest, remote-setup, session-explorer, wms-smoketest,
                               install-remote.sh, token-scraper.py, ccusage-scraper.py
 
@@ -279,7 +290,8 @@ Agent-Teams teammates run as separate top-level sessions (see Pitfalls).
 | `wms-mcp` | MCP stdio (WMS) | Outcome/WorkUnit CRUD, tags, focus, dependencies over MySQL/MariaDB via `TEAMSTER_STORE_DSN`. Includes `wms_search`, exposing the `wms.Search` primitive as granular `[]Hit` (the same engine `teamster search sessions` groups into session rollups). State changes posted to hookd via `HookObserver` when `TEAMSTER_HOOK_SERVER_URL` is set. |
 | `rollup` | Cost-attribution pipeline | Allocates token spend to WMS entities via focus intervals. Flags: `--reallocate`, `--recover-focus`, `--recover-warmup`, `--recover-gaps`, `--recover-directives` (focus-less remote teammates → entity named in their dispatch brief), `--repair-focus-intervals` (one-time fix of negative-width focus intervals from the dual-writer/async race), `--synthesize-remote-orphans` (remote sessions with no focus/directive/transcript → temporal correlation with concurrent focused sessions on the same host), `--synthesize-focus <file>`, `--sweep` (chains all deterministic passes), `--sweep-llm` (adds LLM-assisted synthesis), `--count-orphans` (print processable orphan count; checks local transcript existence). Reversible: `--unrecover`, `--unrecover-warmup`, `--unrecover-gaps`, `--unrecover-directives`, `--unrepair-focus-intervals`, `--unsynthesize-remote-floor`, `--unsynthesize`. |
 | `classify` | Interval phase + work-type classifier | Derives `phase` and `work-type` tags on intervals/workunits from rule-based signals. Recovers missing required lifecycle tags on work units (safety net for dispatch gaps). Run by systemd timer every 5 min. `--reclassify` re-derives from scratch. `--dry-run` logs lifecycle recovery intent without writing. |
-| `token-scraper` | Session transcript scraper | Reads Claude Code session JSONL transcripts and POSTs per-message token usage to hookd's `/telemetry` endpoint. |
+| `token-scraper` | Session transcript scraper | Reads **Claude Code** session JSONL transcripts and POSTs per-message token usage to hookd's `/telemetry` endpoint. Codex has its own tailer (`codex-scraper`) — this one never reads Codex data. |
+| `codex-scraper` | Codex rollout-JSONL cost/ledger tailer | Oneshot (systemd timer, every 10 min), **not** a daemon. Tails `~/.codex/sessions/**/rollout-*.jsonl` (+ `archived_sessions/`) and is the **sole writer** of Codex cost data: POSTs per-`token_count` ledger rows to hookd's `/telemetry` (cost derived from `last_token_usage`) and upserts the Codex `sessions` row itself via a direct store connection (hookd's hook pipeline never fires for Codex). Every row carries `runtime='codex'`. Codex 0.142.x `thread_spawn` subagents write their own rollout file whose `session_meta.session_id` is the **parent** thread's id, so subagent spend books under the parent `session_id` (falls back to the file's own `id` on 0.137.0, which lacks `session_id`); `message_id` is keyed by the file's own thread id to avoid sibling collisions, and `agent_name` is `@<agent_role>`. See `docs/specs/CODEX-INSTALL.md`. |
 | `teamster-install` | Installer | Called by `lib/installrunner.sh`. Explicit `--basedir/--repo/--builddir` flags — no path inference. |
 | `demogen` | Synthetic data generator | Creates correlated demo data across token_ledger/wms_intervals/usage_attribution/entity_tags/cost_rollup. `--clean` for teardown. |
 | `backup` | Backup engine | Standalone binary for systemd timer. Takes timestamped snapshots of MySQL, OTel, and teamster config/state. No sudo. CLI also accessible via `teamster backup` and `teamster restore`. |
@@ -296,6 +308,7 @@ Agent-Teams teammates run as separate top-level sessions (see Pitfalls).
 | `teamster-classify.timer` | Every 5 minutes | Runs `classify` to derive phase/work-type |
 | `teamster-sweep.timer` | Every hour | Runs `claude --print /teamster:sweep` for LLM-assisted synthesis, gated on `--count-orphans` (skips when nothing to process) |
 | `teamster-backup.timer` | Configurable (default 1h) | Runs backup to snapshot all stores |
+| `teamster-codex-scraper.timer` | Every 10 minutes | Runs `codex-scraper` (oneshot) to tail Codex rollout JSONL and ledger Codex cost. Installed only when Codex is wired; a no-op on a host with no `codex` CLI (finds no rollout files, exits 0). |
 
 ## Key conventions
 
@@ -411,12 +424,12 @@ Agent-Teams teammates run as separate top-level sessions (see Pitfalls).
 | `README.md` | **Current** — user-facing quick start | What Teamster is, install, first team, dashboard, subagent-mode opt-in |
 | `docs/specs/REMOTE-INSTALL.md` | **Current** | Hub/remote install model |
 | `docs/specs/replication.md` | **Current** | Hub→replica replication topology (relay + repl-push) |
-| `docs/specs/CODEX-INSTALL.md` | **Current** | Codex CLI support: `--codex-mode` flag, MCP server wiring + default-approve audit-trail risk, OTEL, skills delivery, hooks channel + trust provisioning, codex-scraper (cost/ledger tailer), `runtime` enum, uninstall |
+| `docs/specs/CODEX-INSTALL.md` | **Current** | Codex CLI support: `--codex-mode` flag, MCP server wiring + default-approve audit-trail risk, OTEL, skills delivery, hooks channel + trust provisioning, codex-scraper (cost/ledger tailer + subagent→parent attribution), `runtime` enum, deferred-MCP-tool-loading known limitation (newer Codex builds), uninstall |
 | `docs/wizard.md` | **Current** | Guided interactive installer (`install.sh`) + tag setup TUI + per-project subagent-mode opt-in |
 | `docs/session-explorer-guide.md` | **Current** | 9-point primer for driving programs via tmux |
-| `skel/doc/specs/architecture.md` | **Current** — full system | Hub/remote topology, all components, data flows, env vars, operating modes, cost attribution, focus nudge |
+| `skel/doc/specs/architecture.md` | **Current** — full system | Hub/remote topology, all components, data flows (incl. Codex runtime), env vars, operating modes, cost attribution, focus nudge |
 | `skel/doc/specs/wms-dashboard-spec.md` | Forward-looking + implemented | What `/wms` should become (phases 2/3 not built) + implemented pages (cost-flow, tags, Grafana dashboards) |
-| `skel/doc/specs/semantic-conventions.md` | **Current** | JSONL field conventions, tag taxonomy, WMS entity types, state machine, session mode / `setMode` signal, cost attribution methods, close-out warnings, two-focus distinction |
+| `skel/doc/specs/semantic-conventions.md` | **Current** | JSONL field conventions, tag taxonomy, WMS entity types, state machine, session mode / `setMode` signal, cost attribution methods, close-out warnings, two-focus distinction, Codex runtime conventions (`runtime` enum, session identity, subagent thread model) |
 | `skel/lib/plugin/skills/bootstrap/references/eight-rules.md` | **Canonical protocol** | The Eight Rules |
 | `skel/lib/plugin/skills/bootstrap/references/field-guide.md` | **Canonical lessons** | Practical operating and development lessons |
 | `skel/lib/plugin/skills/seasoning/SKILL.md` | **Current** | Iterative spec refinement skill |
