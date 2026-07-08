@@ -8,6 +8,7 @@ src/*.out
 # here as they are added so a stray build artifact never shows as untracked.
 src/activity-mcp
 src/classify
+src/codex-scraper
 src/demogen
 src/feed
 src/hookd

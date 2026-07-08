@@ -35,7 +35,7 @@ func main() {
 
 func run() int {
 	reallocate := flag.Bool("reallocate", false,
-		"clear unallocated attribution rows and re-derive them before the pass (recovery after agent-identity backfill)")
+		"clear every attribution row not allocated to an entity (entity_type='' — the unallocated bucket plus 'sweep_skipped' give-up markers) and re-derive them before the pass (recovery after agent-identity backfill)")
 	reassembleIntervals := flag.Bool("reassemble-intervals", false,
 		"opt-in one-time backfill: re-resolve interval_id for historical attribution rows so cost-by-phase covers existing work, then reassemble interval cost (the normal pass is forward-only)")
 	recoverFocus := flag.Bool("recover-focus", false,

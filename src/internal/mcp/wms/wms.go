@@ -22,7 +22,44 @@ type Meta struct {
 	Host      string `json:"host"`
 	SessionID string `json:"session_id"`
 	AgentType string `json:"agent_type"`
+	// CodexTurn carries Codex's native per-call session identity, sent
+	// automatically (no prompting, independent of hooks) under the key
+	// "x-codex-turn-metadata" on every tools/call. Claude Code never sends
+	// this key. See resolveSessionID for how it's used.
+	CodexTurn *CodexTurnMeta `json:"x-codex-turn-metadata"`
 }
+
+// CodexTurnMeta is the subset of Codex's per-turn MCP metadata wms-mcp uses.
+// Codex sends additional fields (sandbox, turn_started_at_unix_ms, and a
+// conditional user_input_requested_during_turn present only on turns that hit
+// an interactive approval prompt) — this struct parses only what it needs;
+// json.Unmarshal ignores unrecognized fields and zero-values missing ones, so
+// it tolerates the field set drifting on Codex's side (x-codex-turn-metadata
+// is undocumented internal surface, not a stable contract).
+type CodexTurnMeta struct {
+	SessionID string `json:"session_id"`
+	ThreadID  string `json:"thread_id"`
+	Model     string `json:"model"`
+}
+
+// ConnectionClientName is the MCP clientInfo.name reported at initialize.
+// Wired in by cmd/wms-mcp/main.go for the stdio transport, where one process
+// serves exactly one connection, so process-level state is connection-level
+// state. Confirmed empirically (2026-07-07, isolated echo-probe capture):
+// Claude Code's own MCP client sends clientInfo.name == "claude-code"; Codex
+// sends "codex-mcp-client" (kit evidence). Left at its zero value "" by
+// hookd's HTTP /mcp/wms transport (server.go), which never sets it — that
+// transport's identity comes from a different, pre-existing mechanism
+// (injectMCPIdentity's hook-payload stash) and is unaffected by this var;
+// Codex-over-HTTP is out of v1 scope (hub-local stdio only). An empty value
+// here is treated as "no clientInfo received", which fallbackEligible also
+// covers, so hookd's path replicates its pre-existing behavior unchanged.
+var ConnectionClientName string
+
+const (
+	claudeCodeClientName = "claude-code"
+	codexClientName      = "codex-mcp-client"
+)
 
 // callParams holds the parsed tools/call params.
 type callParams struct {
@@ -71,8 +108,11 @@ var ActiveClassifier wms.Classifier
 var CreatorUser string
 
 // readCurrentSessionID reads ~/.claude/current-session-id written by the hook
-// client on every event. Used as a fallback when _meta.session_id is absent
-// (Claude Code MCP clients don't send _meta).
+// client on every event. Used as a fallback when no other session identity is
+// available (Claude Code's own MCP client sends neither _meta.session_id nor
+// x-codex-turn-metadata). Only ever consulted when fallbackEligible says the
+// calling connection is Claude Code or unidentified-but-legacy — see
+// resolveSessionID.
 func readCurrentSessionID() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -85,6 +125,81 @@ func readCurrentSessionID() string {
 	return strings.TrimSpace(string(data))
 }
 
+// fallbackEligible reports whether this connection may fall back to the
+// shared ~/.claude/current-session-id file when no explicit session id is
+// present. Eligible: no clientInfo was ever sent at initialize (older/minimal
+// clients — back-compat so existing Claude Code installs are unchanged), or
+// clientInfo.name is Claude Code's own. Never eligible when TEAMSTER_RUNTIME=
+// codex (installer-set env, belt-and-suspenders — wins even if clientInfo
+// itself drifts or vanishes in a future Codex release, satisfying the
+// fail-safe requirement that a Codex connection never falls through to a live
+// Claude Code session id).
+func fallbackEligible() bool {
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("TEAMSTER_RUNTIME")), "codex") {
+		return false
+	}
+	return ConnectionClientName == "" || ConnectionClientName == claudeCodeClientName
+}
+
+// runtimeTag classifies the calling connection into one of three buckets for
+// tagging freshly created entities: "codex", "claude_code", or "unknown" (a
+// third MCP client we can't positively identify as either — inspector tools,
+// another agent CLI, etc.). Independent of whether Codex's turn metadata was
+// present on this particular call; a Codex connection that dropped turn
+// metadata for one call is still "codex" here even though resolveSessionID
+// buckets its session id as unknown-codex rather than trusting a stolen file.
+func runtimeTag() string {
+	switch {
+	case strings.EqualFold(strings.TrimSpace(os.Getenv("TEAMSTER_RUNTIME")), "codex"):
+		return "codex"
+	case ConnectionClientName == codexClientName:
+		return "codex"
+	case ConnectionClientName == claudeCodeClientName, ConnectionClientName == "":
+		return "claude_code"
+	default:
+		return "unknown"
+	}
+}
+
+// resolveSessionID fills in m.SessionID, in priority order:
+//  1. Codex's native x-codex-turn-metadata.session_id (PRIMARY — sent on
+//     every tools/call, independent of hooks, most specific signal available).
+//  2. An explicit generic _meta.session_id, if some future client populates
+//     it directly — trusted as-is, unaffected by this change (no client does
+//     this today; Claude Code and Codex both leave it empty).
+//  3. The ~/.claude/current-session-id file, but ONLY when fallbackEligible
+//     (Claude Code, or a connection indistinguishable from it).
+//  4. Otherwise, an explicit "unknown-<runtime>" bucket — never the fallback
+//     file. This is the generalized refusal: any connection that isn't
+//     positively Claude Code lands here rather than silently stealing
+//     whatever Claude Code session happens to be active on the host.
+func resolveSessionID(m *Meta) {
+	if m.CodexTurn != nil && m.CodexTurn.SessionID != "" {
+		m.SessionID = m.CodexTurn.SessionID
+		return
+	}
+	if m.SessionID != "" {
+		return
+	}
+	if fallbackEligible() {
+		m.SessionID = readCurrentSessionID()
+		return
+	}
+	m.SessionID = "unknown-" + runtimeTag()
+}
+
+// applyRuntimeTag auto-applies runtime:<codex|claude_code|unknown> to a
+// freshly created entity, mirroring applyCreatorUserTag's pattern:
+// best-effort, never blocks the create. "unknown" means the call arrived
+// over a connection that could not be positively identified as Claude Code
+// or Codex.
+func applyRuntimeTag(ctx context.Context, store wms.Store, entityType, entityID, runtime string) {
+	if err := store.TagEntity(ctx, entityType, entityID, "runtime", runtime, "classifier", ""); err != nil {
+		slog.Warn("wms-mcp: auto runtime-tag failed",
+			"entity_type", entityType, "entity_id", entityID, "runtime", runtime, "err", err)
+	}
+}
+
 // HandleToolCall dispatches a tools/call request to the appropriate store method.
 // meta is captured from params._meta and stored on mutations.
 func HandleToolCall(store wms.Store, eng wms.Engine, rawParams json.RawMessage) (Result, *CallError) {
@@ -93,9 +208,8 @@ func HandleToolCall(store wms.Store, eng wms.Engine, rawParams json.RawMessage) 
 		return Result{}, &CallError{Code: -32602, Message: "invalid params"}
 	}
 
-	if p.Meta.SessionID == "" {
-		p.Meta.SessionID = readCurrentSessionID()
-	}
+	resolveSessionID(&p.Meta)
+	runtime := runtimeTag()
 
 	strArg := func(key string) string {
 		v, _ := p.Arguments[key].(string)
@@ -405,6 +519,21 @@ func HandleToolCall(store wms.Store, eng wms.Engine, rawParams json.RawMessage) 
 		}
 		return JSONResult(map[string]interface{}{"removed": removed, "snapshot": path}), nil
 
+	case ToolGetEntityTags:
+		entityType := strArg("entityType")
+		entityID := strArg("entityID")
+		if entityType != wms.EntityOutcome && entityType != wms.EntityWorkUnit {
+			return Result{}, &CallError{Code: -32602, Message: "getEntityTags supports entityType=outcome|workunit only"}
+		}
+		if entityID == "" {
+			return Result{}, &CallError{Code: -32602, Message: "entityID is required"}
+		}
+		tags, err := resolveEntityTags(ctx, store, entityType, entityID)
+		if err != nil {
+			return Result{}, &CallError{Code: -32000, Message: err.Error()}
+		}
+		return JSONResult(tags), nil
+
 	case ToolGetHistory:
 		limit := 50
 		if v, ok := p.Arguments["limit"].(float64); ok && v > 0 {
@@ -453,6 +582,7 @@ func HandleToolCall(store wms.Store, eng wms.Engine, rawParams json.RawMessage) 
 		}
 		store.OpenEventRecord(ctx, wms.EntityOutcome, o.ID, o.Status, p.Meta.SessionID, p.Meta.AgentType, p.Meta.Host) //nolint:errcheck
 		applyCreatorUserTag(ctx, store, wms.EntityOutcome, o.ID)
+		applyRuntimeTag(ctx, store, wms.EntityOutcome, o.ID, runtime)
 		return TextResult("Created outcome: " + o.Title), nil
 
 	case ToolGetOutcome:
@@ -542,6 +672,7 @@ func HandleToolCall(store wms.Store, eng wms.Engine, rawParams json.RawMessage) 
 		}
 		store.OpenEventRecord(ctx, wms.EntityWorkUnit, wu.ID, wu.Status, p.Meta.SessionID, p.Meta.AgentType, p.Meta.Host) //nolint:errcheck
 		applyCreatorUserTag(ctx, store, wms.EntityWorkUnit, wu.ID)
+		applyRuntimeTag(ctx, store, wms.EntityWorkUnit, wu.ID, runtime)
 		// Dispatch-time reminder (W3): a freshly created work unit carries no
 		// tags, so any required keys are by definition missing. Surface them as
 		// an advisory hint appended to the success response — never a block. If
@@ -906,6 +1037,66 @@ func snapshotEntityTags(ctx context.Context, store wms.Store, entityType string,
 		return path, nil //nolint:nilerr // path is usable even if Abs fails
 	}
 	return abs, nil
+}
+
+// EntityTagView is one tag binding as surfaced by wms_getEntityTags: the
+// underlying wms.EntityTag fields (tag_key, tag_value, category, source,
+// description, applied_at), embedded and promoted flat into the JSON, plus
+// Inherited and Origin. Direct bindings have Inherited=false and Origin equal
+// to the queried entity's own ID; inherited bindings have Inherited=true and
+// Origin set to the parent outcome ID the binding actually lives on.
+type EntityTagView struct {
+	wms.EntityTag
+	Inherited bool   `json:"inherited"`
+	Origin    string `json:"origin"`
+}
+
+// resolveEntityTags returns entityType/entityID's direct tag bindings plus,
+// for a workunit, tags inherited from its parent outcome — mirroring the
+// mysql entity_tags_resolved view's per-key-override union (a workunit's own
+// binding for a key always shadows the outcome's inherited row for that same
+// key) without requiring that view to exist on every backend. entityType must
+// already be validated by the caller; existence of entityID is checked here
+// via GetOutcome/GetWorkUnit, so an unknown entity surfaces the store's
+// not-found error rather than silently returning an empty list.
+func resolveEntityTags(ctx context.Context, store wms.Store, entityType, entityID string) ([]EntityTagView, error) {
+	var outcomeID string
+	if entityType == wms.EntityWorkUnit {
+		wu, err := store.GetWorkUnit(ctx, entityID)
+		if err != nil {
+			return nil, err
+		}
+		outcomeID = wu.OutcomeID
+	} else {
+		if _, err := store.GetOutcome(ctx, entityID); err != nil {
+			return nil, err
+		}
+	}
+
+	direct, err := store.GetEntityTags(ctx, entityType, entityID)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool, len(direct))
+	out := make([]EntityTagView, 0, len(direct))
+	for _, et := range direct {
+		seen[et.TagKey] = true
+		out = append(out, EntityTagView{EntityTag: et, Inherited: false, Origin: entityID})
+	}
+	if outcomeID == "" {
+		return out, nil
+	}
+	parentTags, err := store.GetEntityTags(ctx, wms.EntityOutcome, outcomeID)
+	if err != nil {
+		return nil, err
+	}
+	for _, et := range parentTags {
+		if seen[et.TagKey] {
+			continue // per-key override: the workunit's own binding wins
+		}
+		out = append(out, EntityTagView{EntityTag: et, Inherited: true, Origin: outcomeID})
+	}
+	return out, nil
 }
 
 // untagEntity surgically removes one entity's tag binding(s) for tagKey: a
@@ -1381,6 +1572,18 @@ var ToolDefs = []map[string]interface{}{
 				"tagValue":   map[string]interface{}{"type": "string", "description": "Optional. The specific value to remove; omit to remove ALL of the key's bindings on this entity."},
 			},
 			"required": []string{"entityType", "entityID", "tagKey"},
+		},
+	},
+	{
+		"name":        ToolGetEntityTags,
+		"description": "Read the tags bound to one entity (outcome or workunit): direct bindings PLUS, for a workunit, tags inherited from its parent outcome (outcomes do not inherit further). Each row is tag_key/tag_value/category/source/description/applied_at plus inherited (bool) and origin (the entity_id the binding actually lives on — the queried entity itself when direct, the parent outcome's ID when inherited). A workunit's own binding for a key always shadows the outcome's inherited row for that key. Read-only — does not modify wms_getOutcome or wms_getWorkUnit's response shape. Returns an empty array (not an error) when the entity has no tags; errors if the entity does not exist.",
+		"inputSchema": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"entityType": map[string]interface{}{"type": "string", "description": "outcome or workunit"},
+				"entityID":   map[string]interface{}{"type": "string"},
+			},
+			"required": []string{"entityType", "entityID"},
 		},
 	},
 	{

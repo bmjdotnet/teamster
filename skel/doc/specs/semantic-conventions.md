@@ -377,7 +377,7 @@ value in `usage_attribution.method` for every attributed message:
 | `gap_recovery` | Lead/teammate thread gap attributed to the session's strategic Outcome by inference from other attributed messages in the same session. Provenance in `gap_evidence`. Reversible via `--unrecover-gaps` |
 | `brief_directive_recovery` | Focus-less **remote teammate** cost attributed to the exact entity its dispatch brief named — the mandated `wms_setFocus(entityType, entityID)` directive the teammate was told to call first but never did. The remote scraper parses the directive from the teammate's own transcript head and ships it to `/focus-timeline` as a `brief_directive` focus interval; `--recover-directives` resolves it and re-attributes the session's `unallocated`/`sweep_skipped` cost. Deterministic (no LLM, protocol-grounded link), so higher fidelity than `synthesized_outcome`. Provenance in `directive_evidence`. Reversible via `--unrecover-directives` |
 | `synthesized_remote_floor` | Remote-orphan session cost attributed by **temporal correlation** — the session had no focus interval, no brief directive, and no accessible transcript, so the hub attributed it to whatever WMS entity concurrent sessions on the same host were focused on. Lowest-fidelity deterministic method (Step 8, after `brief_directive_recovery`). Provenance in `synthesis_evidence` with `mapping_source='temporal_correlation'`. Reversible via `--unsynthesize-remote-floor` |
-| `sweep_skipped` | LLM sweep examined the session and determined it cannot be attributed (e.g. no user objective, trivial session). Reason recorded in `synthesis_evidence.evidence_excerpt`. Excluded from future `--count-orphans`. Reclaimable by `brief_directive_recovery` or `synthesized_remote_floor` when a directive or concurrent focus is later found; otherwise not reversible — re-examine manually if needed |
+| `sweep_skipped` | The sweep gave up on attributing the session — either the LLM sweep examined it and found no objective (reason in `synthesis_evidence.evidence_excerpt`) or `--count-orphans` found no local transcript to synthesize from. A "tried, still unallocatable" marker: it always carries `entity_type=''` (it is written off an `unallocated` row without setting an entity). Excluded from future `--count-orphans`. Reclaimable by `brief_directive_recovery` or `synthesized_remote_floor` when a directive or concurrent focus is later found, and re-derived by `--reallocate` — whose clear-set is every entity-less row (`entity_type=''`), so a `sweep_skipped` message whose covering focus was materialized by a later identity backfill is recovered on the next allocate; otherwise re-examine manually if needed |
 | `unallocated` | No covering interval found anywhere |
 
 `temporal_join_lead_fallback` fires only when `agentName != ""` (so the lead's
@@ -619,3 +619,88 @@ via `teamster setup tags` (TUI wizard with checkboxes per integration).
 
 - **single**: at most one value per entity per key. Setting a new value replaces the old one.
 - **multi**: multiple values per entity per key (e.g. `component` can have several values).
+
+---
+
+## 10. Codex Runtime Conventions
+
+Teamster records Codex CLI activity as a **second runtime** alongside Claude
+Code — an identically-shaped, parallel stream that is never merged with Claude
+Code data. This section is the normative field/identity reference for that
+stream; the operational doc is `docs/specs/CODEX-INSTALL.md`.
+
+### 10.1 The `runtime` enum
+
+Every `sessions` and `token_ledger` row carries a `runtime` column (mysql/
+sqlite migration v51, additive-only, default `'claude_code'` so existing rows
+are unaffected):
+
+| Value | Meaning |
+|-------|---------|
+| `claude_code` | Claude Code session (the default; all pre-v51 rows). |
+| `codex` | Codex CLI session, written by `codex-scraper`. |
+| `unknown` | An MCP connection that could not be positively identified as either (an inspector tool, another agent CLI, etc.). |
+
+The same three values are auto-applied to freshly created WMS entities as a
+`runtime` **tag** (`runtimeTag`, `src/internal/mcp/wms/wms.go`) and are
+identity-mapped to the OTEL `source` resource attribute (`claude_code`/`codex`)
+by the collector's `transform/source_label` processor. Codex `token_ledger`
+rows additionally populate `reasoning_output_tokens` — a subset already counted
+inside `output_tokens`, kept for raw-count fidelity (it prices at the output
+rate, not as extra tokens).
+
+### 10.2 Codex session identity
+
+Codex sessions are **not** discovered through the hook pipeline (Codex hook
+events are an optional channel WMS/cost must not depend on). Two independent
+mechanisms carry Codex identity:
+
+- **wms-mcp calls.** Codex sends its native per-call metadata under the
+  `x-codex-turn-metadata` key on every `tools/call` `_meta` (a `session_id`,
+  `thread_id`, and `model`; sent automatically, independent of hooks). Claude
+  Code never sends this key. `resolveSessionID` (`internal/mcp/wms/wms.go`)
+  prefers `x-codex-turn-metadata.session_id` above all other sources.
+- **MCP `clientInfo.name` at initialize** distinguishes the runtimes: Claude
+  Code's own client reports `claude-code`; Codex reports `codex-mcp-client`
+  (empirically confirmed). A Codex connection is never eligible to fall back to
+  the shared `~/.claude/current-session-id` file, so it can never adopt a live
+  Claude Code session id; the installer-set `TEAMSTER_RUNTIME=codex` env var
+  enforces this even if `clientInfo` drifts in a future Codex release. A
+  positively-unidentifiable client buckets to `unknown-<runtime>`.
+
+Cost/ledger rows take their identity instead from `codex-scraper` reading each
+rollout file's `session_meta` (not from MCP) — see §10.3.
+
+### 10.3 Codex subagent thread model
+
+Codex 0.142.x's `thread_spawn` subagents each run as their own *thread* with
+their own rollout JSONL file. `codex-scraper` books their spend under the
+parent session so it attributes exactly like a Claude Code teammate:
+
+| `session_meta` field | Top-level file | Subagent file |
+|----------------------|----------------|---------------|
+| `id` | the session's own thread UUID | the **subagent's** own thread UUID |
+| `session_id` | equal to `id` | the **parent** thread's id |
+| `parent_thread_id` | absent | the parent thread's id |
+| `agent_role` | absent | the subagent's role (e.g. `explorer`) |
+
+- **`session_id` (parent-resolved)** is what ledger rows and the `sessions`
+  upsert use, so subagent cost books under the **same session** as the parent's
+  focus intervals. On Codex 0.137.0 `session_meta` has no `session_id` field,
+  so the scraper falls back to `id` (harmless — top-level 0.142.x files already
+  have `session_id == id`).
+- **`agent_name`** is `@<agent_role>` for a subagent (e.g. `@explorer`) and
+  `""` for parent/direct spend — the same `@`-prefixed identity wms-mcp opens
+  focus intervals under. The `sessions` primary key is `(session_id,
+  agent_name)`, so a subagent's `(parent, @role)` row coexists with the
+  parent's `(parent, "")` row, exactly like a hub Claude Code teammate.
+- **`message_id`** for a Codex ledger row is `codex:<thread-id>:<seq>`, keyed
+  by the file's **own** thread id (never the shared `session_id`) so sibling
+  subagent files' sequence counters cannot collide onto one key. `<seq>` is
+  scan-order, which is why a full re-scan reproduces identical keys (the
+  `uq_message` upsert makes the re-insert a no-op).
+
+Cost then flows through the standard attribution methods in §7.2 — there is no
+Codex-specific `usage_attribution.method` value; a subagent message resolves as
+a `temporal_join` (or `temporal_join_lead_session_fallback`) hit in the parent
+session like any other message.

@@ -22,9 +22,11 @@ not run this installer on the Mac. To enroll a Mac, run
 
 - Run `./install.sh` with no flags for a guided first install or when you
   want guidance on service mode decisions.
-- Pass flags directly (e.g. `./install.sh --basedir=PATH --wire`) when you
-  know exactly what you want, are re-running an existing install, or are
-  scripting from CI.
+- Invoke the build/install backend directly (e.g.
+  `lib/installrunner.sh --basedir=PATH --wire`) when you know exactly what you
+  want, are re-running an existing install, or are scripting from CI.
+  `install.sh` itself accepts only `--debug-log`/`--help`; every install
+  choice is a flag on `lib/installrunner.sh`.
 
 ## Pre-install probes
 
@@ -123,6 +125,29 @@ answers:
 | Repl-push destination | `--repl-push-remote=user@host` |
 | Replica mode (read-only hookd) | `--hookd-read-only` |
 | Wire (always for real installs) | `--wire` |
+
+## Codex CLI wiring (automatic, not part of the interview)
+
+If the `codex` CLI is on `PATH`, `lib/installrunner.sh` also wires OpenAI Codex
+into Teamster — writing the `activity` and `wms` MCP servers, the Teamster
+skills, hook registrations, and (when installing the OTEL collector) an OTEL
+exporter into Codex's own `~/.codex/config.toml` and `AGENTS.md`. This is
+**auto-detected**: a host with no `codex` binary installs exactly as before, and
+the wiring is skipped informationally, not as an error.
+
+The guided `install.sh` interview does **not** ask about Codex, and `install.sh`
+accepts no Codex flag (only `--debug-log`/`--help`). The override is a
+`lib/installrunner.sh` flag, for direct/scripted backend installs:
+
+| Flag | Behavior |
+|------|----------|
+| (unset, default) | Auto-detect: wire Codex if `codex` is on `PATH`, else skip silently |
+| `--codex-mode=install` | Force-wire; the install aborts if `codex` is not on `PATH` |
+| `--codex-mode=none` | Skip Codex wiring even if `codex` is present |
+
+See [specs/CODEX-INSTALL.md](specs/CODEX-INSTALL.md) for exactly what gets
+written (MCP servers, skills, hooks, OTEL, the `AGENTS.md` merge) and the manual
+uninstall recipe.
 
 ## Key invariant
 

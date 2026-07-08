@@ -62,6 +62,15 @@ open outcomes that match the session's focus. Note any matches — they'll be
 presented in Step 3 if found. If more than 3 outcomes match, keep only the 3
 most recently updated.
 
+**Verify referenced artifacts.** If the focus slug or the operator's message
+names specific local files, paths, or kits, verify each one exists (`ls` or
+`Read`) before treating it as real — flag anything missing to the operator
+and confirm intent (wrong path? not built yet? proceed without it?) rather
+than assuming or improvising. Do this now, since this is the interview that
+actually runs for most sessions — the dispatched skill's own copy of this
+check (below) only fires when the operator invokes it directly, bypassing
+`start`.
+
 Keep this context — you pass it to the dispatched skill in Step 4 so it skips
 its own redundant gather. One interview, not two.
 

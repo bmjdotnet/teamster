@@ -8,12 +8,22 @@
 # Override the defaults for your environment:
 #   SELFTEST_CONTAINER  LXD container name        (default: teamster-test)
 #   SELFTEST_USER       user inside the container  (default: teamster)
-#   SELFTEST_JSONL      event log path             (default: ~USER/.local/share/teamster/events.jsonl)
+#   SELFTEST_BASEDIR    Teamster BASEDIR in-container (default: ~USER/teamster)
+#   SELFTEST_JSONL      event log path             (default: $SELFTEST_BASEDIR/var/events.jsonl)
 set -euo pipefail
 
 CONTAINER="${SELFTEST_CONTAINER:-teamster-test}"
 USER="${SELFTEST_USER:-teamster}"
-JSONL="${SELFTEST_JSONL:-/home/$USER/.local/share/teamster/events.jsonl}"
+BASEDIR="${SELFTEST_BASEDIR:-/home/$USER/teamster}"
+# JSONL lives at $BASEDIR/var/events.jsonl (skel/CLAUDE.md's documented
+# layout) — a prior default here pointed at ~/.local/share/teamster/, a path
+# nothing in the current architecture ever writes to. That stale default made
+# every check_tag/check_focus call fail regardless of whether hooks actually
+# fired (found running this script for real against a fresh cleanroom
+# container: events.jsonl had the exact expected tags, but every check still
+# reported FAIL until this was fixed) — not a Codex-support regression, a
+# pre-existing latent bug this was the first real end-to-end run to surface.
+JSONL="${SELFTEST_JSONL:-$BASEDIR/var/events.jsonl}"
 FAILURES=0
 TOTAL=0
 
@@ -81,6 +91,30 @@ dump_tags() {
     echo "  (tags seen: $(lxc exec "$CONTAINER" -- grep -o '"tag":"[^"]*"' "$JSONL" 2>/dev/null | sort -u | tr '\n' ' ' || echo 'none'))"
 }
 
+# run_codex sends a prompt to `codex exec` inside the container, same shape
+# as run_prompt but for the second runtime.
+run_codex() {
+    local prompt="$1"
+    lxc exec "$CONTAINER" -- su - "$USER" -c \
+        "export PATH=\"\$HOME/.local/bin:\$HOME/bin:\$PATH\" && \
+         timeout 60 codex exec --skip-git-repo-check $(printf '%q' "$prompt") 2>/dev/null" \
+        || true
+}
+
+# check_file verifies a file exists inside the container (backups, systemd
+# units, etc.) — a lighter check than check_tag since it doesn't depend on
+# JSONL content, just that an install-time write actually happened.
+check_file() {
+    local path="$1" label="$2"
+    TOTAL=$((TOTAL + 1))
+    if lxc exec "$CONTAINER" -- su - "$USER" -c "test -e $(printf '%q' "$path")" 2>/dev/null; then
+        echo "  PASS: [$label] ($path)"
+    else
+        echo "  FAIL: [$label] not found: $path"
+        FAILURES=$((FAILURES + 1))
+    fi
+}
+
 # --- test cases ---
 
 echo "--- Test A: MCP activity tools ---"
@@ -110,6 +144,73 @@ sleep 2
 check_tag "EDIT"
 check_tag "READ"
 dump_tags
+
+# --- Codex tests (graceful skip: a container without Codex installed is not
+# a failure, same opposite-polarity posture as the installer's own probe) ---
+
+if lxc exec "$CONTAINER" -- su - "$USER" -c 'command -v codex' >/dev/null 2>&1; then
+    echo ""
+    echo "--- Test D: Codex config.toml doctor gate ---"
+    TOTAL=$((TOTAL + 1))
+    DOCTOR_JSON=$(lxc exec "$CONTAINER" -- su - "$USER" -c \
+        'export PATH="$HOME/.local/bin:$HOME/bin:$PATH" && codex --strict-config doctor --json' 2>/dev/null || echo '{}')
+    DOCTOR_STATUS=$(echo "$DOCTOR_JSON" | python3 -c 'import json,sys
+try:
+    print(json.load(sys.stdin)["checks"]["config.load"]["status"])
+except Exception:
+    print("parse-error")' 2>/dev/null)
+    if [[ "$DOCTOR_STATUS" == "ok" ]]; then
+        echo "  PASS: [DOCTOR] config.load status=ok"
+    else
+        echo "  FAIL: [DOCTOR] config.load status=$DOCTOR_STATUS (expected ok)"
+        FAILURES=$((FAILURES + 1))
+    fi
+
+    echo ""
+    echo "--- Test E: Codex client-config backups exist (both runtimes) ---"
+    # A .pre-teamster backup is only created for a file that EXISTED before
+    # Teamster's first write to it (installbackup.Backup's documented no-op
+    # semantics — nothing to preserve on a target that didn't exist yet). On
+    # a from-scratch container, settings.json/CLAUDE.md are typically
+    # created BY this install run (no prior file), so those two legitimately
+    # have no backup on a first run — expect them to start passing from a
+    # second (reinstall) run onward. config.toml and .claude.json usually
+    # DO pre-exist by first-install time (Codex/Claude Code's own install
+    # step creates a stub), so those two are meaningful checks even on a
+    # fresh single-install run.
+    check_file "/home/$USER/.codex/config.toml.pre-teamster" "codex config.toml backup"
+    check_file "/home/$USER/.claude/settings.json.pre-teamster" "claude settings.json backup"
+    check_file "/home/$USER/.claude.json.pre-teamster" "claude .claude.json backup"
+    check_file "/home/$USER/.claude/CLAUDE.md.pre-teamster" "claude CLAUDE.md backup"
+
+    echo ""
+    echo "--- Test F: codex-scraper systemd unit staged ---"
+    # This harness invokes teamster-install directly (never
+    # lib/installrunner.sh's systemd orchestration — true of the pre-existing
+    # Claude-only cleanroom too, which never enables teamster-hookd.service
+    # either), so `systemctl is-enabled` would fail regardless of whether
+    # staging worked correctly. Check that the unit file itself was staged
+    # under BASEDIR/etc — the thing this harness can actually speak to.
+    check_file "$BASEDIR/etc/teamster-codex-scraper.service" "codex-scraper unit staged"
+    check_file "$BASEDIR/etc/teamster-codex-scraper.timer" "codex-scraper timer staged"
+
+    echo ""
+    echo "--- Test G: Codex hook fires with zero interactive trust ---"
+    clear_jsonl
+    run_codex "Run the shell command: echo teamster-selftest-codex"
+    sleep 2
+    TOTAL=$((TOTAL + 1))
+    if lxc exec "$CONTAINER" -- test -s "$JSONL" 2>/dev/null; then
+        echo "  PASS: [CODEX-HOOK] events.jsonl received at least one event post-install, no trust prompt needed"
+    else
+        echo "  FAIL: [CODEX-HOOK] no events reached events.jsonl from codex exec"
+        FAILURES=$((FAILURES + 1))
+    fi
+    dump_tags
+else
+    echo ""
+    echo "--- Codex tests skipped: codex CLI not found in $CONTAINER (informational, not a failure) ---"
+fi
 
 # --- summary ---
 

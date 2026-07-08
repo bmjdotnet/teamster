@@ -1,0 +1,22 @@
+{
+  "name": "teamster",
+  "version": "0.2.3",
+  "description": "Teamster workflow orchestration — WMS and observability for solo Codex sessions",
+  "author": {
+    "name": "bmjdotnet"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Teamster",
+    "shortDescription": "WMS tracking and observability for solo sessions",
+    "longDescription": "Teamster tracks Outcomes and WorkUnits in WMS, attributes token cost to the entity you're working on, and keeps a tag vocabulary and live activity feed current across your solo Codex sessions.",
+    "developerName": "bmjdotnet",
+    "category": "Developer Tools",
+    "capabilities": ["Interactive", "Write"],
+    "defaultPrompt": [
+      "Use $teamster-solo to start a WMS-tracked session.",
+      "Use $teamster-status to check outcome and work-unit progress.",
+      "Use $teamster-tags to refine the tag vocabulary."
+    ]
+  }
+}

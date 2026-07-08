@@ -143,6 +143,161 @@ docs: Eight Rules, Field Guide). Identical to what the hub ships.
 Registered on the remote via `claude plugin marketplace add` +
 `claude plugin install`.
 
+## Codex support on remotes
+
+A remote that also runs the Codex CLI gets the same capture fidelity Codex
+gets hub-local (see `docs/specs/CODEX-INSTALL.md`): sessions, cent-accurate
+cost, and WMS/activity tool calls, all attributed to the remote's own host.
+Wiring is auto-detected exactly like the hub — `teamster install-remote
+user@host --codex-mode {install|none}` (unset = auto-detect, mirroring the
+hub installer's flag) probes the remote for `codex` on `PATH` and no-ops
+silently if it's absent and `--codex-mode` wasn't forced. A codex-less
+remote's Claude Code install is **behaviorally** unaffected — no
+`~/.codex/config.toml`/`AGENTS.md`/skills are ever touched, and no
+cron/launchd entry is scheduled. The `~/teamster/` tree itself is not
+byte-identical to a pre-Codex-support install, though: the Codex components
+(`bin/codex-scraper`, `lib/hook/codex-hook.py`, `lib/scripts/
+remote-codex-setup.py`, `lib/codex-plugin/`) are staged unconditionally by
+`install-remote.sh`'s Step 2 — `remote-codex-setup.py` is the thing that
+probes for `codex` and no-ops (`CODEX_STATUS=skipped`); the files it would
+have wired ship either way, inert on a codex-less host.
+
+### Transport: direct HTTP, no proxy
+
+The one open question going into remote delivery was whether Codex's
+`config.toml` can express an HTTP-transport MCP server the way remote Claude
+Code does (`claude mcp add --transport http`) — Codex had only ever been
+proven against stdio `command`/`args` servers. It can: `codex mcp add --url
+<URL>` (and the bare `url = "..."` config.toml form it writes) is a
+first-class, wire-verified transport at both the Codex 0.137.0 pin and
+0.142.5 — a full `initialize` → `notifications/initialized` → `tools/list` →
+`tools/call` round trip completes over HTTP, and `x-codex-turn-metadata` +
+`clientInfo.name == "codex-mcp-client"` land on the wire exactly as they do
+over stdio. So remote Codex is wired straight at the hub's MCPs, with no
+local MCP process and no proxy:
+
+```toml
+[mcp_servers.wms]
+url = "http://<hub>:9125/mcp/wms"
+default_tools_approval_mode = "approve"
+```
+
+The hub-side `wms-mcp`/`activity-mcp` identity chain needed zero changes to
+support this — identity comes from `x-codex-turn-metadata` + `clientInfo`,
+which is transport-independent.
+
+### What lands on the remote
+
+Staged unconditionally by `teamster install-remote` (a codex-less remote
+just never gets `config.toml`/`AGENTS.md`/skills touched, since
+`remote-codex-setup.py` probes for `codex` itself and no-ops):
+
+```
+~/teamster/
+├── bin/
+│   └── codex-scraper                  # Python rollout-JSONL tailer (cron/launchd, every 10 min)
+└── lib/
+    ├── hook/
+    │   ├── codex-hook.py               # feed-only hook client
+    │   └── teamster.py                 # (second copy; codex-hook.py imports it as a module)
+    ├── scripts/
+    │   └── remote-codex-setup.py       # Python port of internal/codexconfig
+    └── codex-plugin/
+        ├── skills/{start,teamster-solo,teamster-status,teamster-tags,teamster-review}/
+        └── agents-protocol.md          # AGENTS.md merge text — same file the hub's Go installer reads
+```
+
+`remote-setup.sh`'s Step 7 then runs `remote-codex-setup.py` on the remote,
+which reproduces `internal/codexconfig`'s hub-local behavior in pure-stdlib
+Python: marker-bounded `config.toml` sections (`[mcp_servers.*]`, `[otel]` if
+scoped in, `[[hooks.*]]` + trust state), each backed up
+(`.pre-teamster` once, timestamped `.bak` every run) and gated on `codex
+--strict-config doctor --json`'s `checks["config.load"].status` (never
+`overallStatus`) exactly like the hub; skills file-copy to `~/.codex/skills/`;
+and the AGENTS.md/`AGENTS.override.md` merge. The hook trust-hash algorithm is
+byte-verified against the Go implementation (`test_remote_codex_setup.py`),
+not just structurally similar — a mismatch there means every hook silently
+stops firing with no error, on the remote exactly as on the hub. Step 8 then
+schedules `codex-scraper` — cron every 10 minutes on Linux, a launchd
+LaunchAgent (`net.bmj.teamster.codex-scraper`, `StartInterval=600`) on macOS
+— but only if Step 7 actually wired Codex on this remote.
+
+**`--hookd-mode=external` client-mode installs** (run on the client itself,
+pointed at a hub over HTTP via `--hookd-endpoint`, rather than SSH'd from the
+hub) stage the same Codex components and call `remote-codex-setup.py` the
+same way — no client-mode-specific staging or re-run logic exists; it goes
+through the exact same `remote-setup.sh` → `remote-codex-setup.py` machinery
+`teamster install-remote` uses, inheriting that path's idempotency story
+as-is (`SkipIfPresent` on `mcp_servers`, `AlwaysUpsert` self-healing on
+`hooks`/`otel`, full remove-then-copy on skills). Codex OTEL wiring is the
+one thing client-mode cannot do (see OTEL below); everything else — MCP,
+hooks, scraper — is wired identically to `teamster install-remote`.
+
+### Cost and session flow
+
+`codex-scraper` on the remote is the Python port of the hub's Go tailer
+(`src/cmd/codex-scraper/`): it tails `$CODEX_HOME/sessions/**/rollout-*.jsonl`
++ `archived_sessions/` and POSTs per-`token_count` ledger rows to hookd's
+`/telemetry` (same wire contract `token-scraper.py` already uses for Claude
+Code cost) and the Codex `sessions`-row upsert to hookd's `POST /session` —
+the remote-reachable equivalent of the hub-local Go scraper's direct
+`store.UpsertSession` call, which a Go-less remote has no way to make. The
+hub's own Go `codex-scraper` now posts through this same `/session` endpoint
+too (see `docs/specs/CODEX-INSTALL.md`'s design note) — one code path for
+sessions upserts, not a hub-only shortcut plus a remote-only HTTP path.
+`thread_spawn` subagent attribution (parent-resolved `session_id`,
+thread-keyed `message_id`, `agent_name=@<role>`) is identical to the hub —
+nothing about remote delivery changes that logic.
+
+### OTEL
+
+In scope for `teamster install-remote`, gated on the **hub's own** otelcol
+actually running (`--otelcol-mode=install`): it reads the hub's local
+`teamster.yaml` for `otelcol.mode`/`otelcol.codex_http_port` and only passes
+`--otel-codex-port`/`--otel-environment` through to `remote-codex-setup.py`
+when both are set — a hub with no collector wires nothing to point a remote
+exporter at.
+
+**`--hookd-mode=external` client-mode installs never wire Codex OTEL — by
+design, not as a pending TODO.** Client-mode runs directly on the target
+host, pointed at a hub reachable only over HTTP via `--hookd-endpoint`; there
+is no local filesystem path to the hub's `teamster.yaml` to read
+`otelcol.mode`/`codex_http_port` from, unlike `teamster install-remote`
+(which is SSH'd *from* the hub and reads its own local config before ever
+touching the remote). No `--otel-codex-port`/`--otel-environment` flags exist
+on `--hookd-mode=external` — they were never stubbed in. Extending this would
+require new work not currently planned: either manual flags on
+`--hookd-mode=external` (the operator pastes the hub's OTEL port themselves)
+or a new hookd HTTP endpoint exposing that config. Codex's MCP servers,
+hooks, and scraper are all still fully wired on a client-mode install —
+only the OTEL exporter is absent.
+
+### Uninstall
+
+No uninstall automation exists for Codex on either install path — same
+manual-recipe-only posture as hub-local Codex (`docs/specs/CODEX-INSTALL.md`
+has never had one either). The marker-bounded `config.toml` removal, skills
+directory removal, and cron/launchd teardown are identical for
+`teamster install-remote` and client-mode installs alike — see
+`docs/specs/CODEX-INSTALL.md`'s Uninstall section, "Remote uninstall"
+subsection, for the exact commands. `rm -rf ~/teamster` (this document's own
+Uninstall section, below) removes `codex-scraper`/`remote-codex-setup.py`
+themselves; it does **not** touch `~/.codex/config.toml`, `~/.codex/skills/`,
+`~/.codex/AGENTS.md`, or the remote's crontab/LaunchAgent entry — those need
+the separate recipe. For a client-mode install, run that same recipe
+directly on the host instead of via `ssh user@host "..."` — same marker
+names, same `~/teamster`/`~/.codex` paths, just no SSH wrapper.
+
+### Limitations (carried from hub-local v1)
+
+- `--ephemeral` Codex runs are invisible to the tailer — Codex never
+  persists a rollout file for them.
+- Same-role sibling `thread_spawn` subagents collapse onto one identity
+  (`agent_name` is the role, not a unique nickname).
+- A read-only replica hookd rejects `/telemetry` and `/session` the same way
+  it rejects `/mcp/*` — point a remote Codex install at a real hub, never a
+  replica.
+
 ## Config merges on the remote (non-destructive)
 
 ### `~/.claude/settings.json`
@@ -263,6 +418,8 @@ refactoring.
 | `/events/stream` | GET | — | Existing SSE (HTML, dashboard) |
 | `/mcp/activity` | POST | JSON-RPC 2.0 | New: activity MCP |
 | `/mcp/wms` | POST | JSON-RPC 2.0 | New: WMS MCP |
+| `/telemetry` | POST | JSON | Per-message/token-count cost ledger ingest (Claude Code `token-scraper` and Codex `codex-scraper`, hub or remote) |
+| `/session` | POST | JSON | Codex sessions-row upsert (`codex-scraper`, hub or remote); rejected in read-only mode like `/mcp/*` |
 | `/health` | GET | — | Existing |
 | `/` | GET | — | Existing dashboard |
 | `/wms` | GET | — | Existing WMS dashboard |
@@ -323,6 +480,10 @@ Required:
 - SSH access (password or key)
 - `python3` (3.6+, virtually universal)
 - `claude` CLI installed and authenticated
+
+Optional:
+- `codex` CLI — auto-detected and wired if present (see Codex support on
+  remotes above); a remote with no `codex` on `PATH` is unaffected.
 
 NOT required:
 - Go toolchain
@@ -463,6 +624,11 @@ Running `teamster install-remote user@host` repeatedly is safe:
   the script checks `claude mcp list` before adding
 - `CLAUDE.md` append checks for existing marker text
 - `.bashrc` PATH addition checks for existing entry
+- Codex `config.toml` sections are marker-bounded (`mcp_servers` is
+  skip-if-present; `otel`/`hooks`/`hooks-state` always re-derived and
+  rewritten so a config change self-heals); the AGENTS.md merge and
+  codex-scraper cron/launchd registration are also idempotent (marker
+  check, cron-line replace-not-append)
 
 On macOS, the launchd agent reinstall uses bootout-then-bootstrap: the
 installer unloads any existing agent before loading the new plist, making
