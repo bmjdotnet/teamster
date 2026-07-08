@@ -261,6 +261,36 @@ else
     fail "getFocus round-trip" "$r"
 fi
 
+# ── Scenario 6: Codex identity resolution + journal audit trail ─────────────
+# A mutating call carrying Codex's native _meta["x-codex-turn-metadata"]
+# (WP1's identity fix) must land the Codex session UUID — never a Claude
+# fallback — in the wms_journal entry the status transition produces
+# (wms-mcp's JournalObserver fix, commit 80e47ac). One scenario proves both:
+# the primary identity-resolution path and the journal attribution it feeds.
+
+CODEX_SESSION_ID="codex-smoketest-session-$$"
+
+responses=$(rpc_batch \
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"wms_createWorkUnit","arguments":{"id":"w-codex","title":"Codex Smoketest Unit","outcomeID":"o1"}}}' \
+    "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"wms_updateStatus\",\"arguments\":{\"entityType\":\"workunit\",\"entityID\":\"w-codex\",\"status\":\"active\"},\"_meta\":{\"x-codex-turn-metadata\":{\"session_id\":\"$CODEX_SESSION_ID\",\"thread_id\":\"smoketest-thread\",\"model\":\"gpt-5.5\"}}}}" \
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"wms_getHistory","arguments":{"entityType":"workunit","entityID":"w-codex"}}}' \
+)
+
+r=$(resp_for "$responses" 3)
+if echo "$r" | grep -q 'Updated workunit'; then
+    pass "codex-originated status transition accepted"
+else
+    fail "codex-originated status transition accepted" "$r"
+fi
+
+r=$(resp_for "$responses" 4)
+if echo "$r" | grep -q "$CODEX_SESSION_ID"; then
+    pass "journal entry carries the Codex session id (not a Claude fallback)"
+else
+    fail "journal entry carries the Codex session id" "$r"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""

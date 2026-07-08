@@ -15,20 +15,22 @@ import (
 
 // otelcolTmplData is the template data struct for otelcol.yaml.tmpl rendering.
 type otelcolTmplData struct {
-	OtelGRPCPort    int
-	OtelHTTPPort    int
-	PrometheusPort  int
-	Env             string
-	ForwardEndpoint string // optional; empty = no forwarding pipeline
+	OtelGRPCPort      int
+	OtelHTTPPort      int
+	OtelCodexHTTPPort int
+	PrometheusPort    int
+	Env               string
+	ForwardEndpoint   string // optional; empty = no forwarding pipeline
 }
 
 func otelcolDataFrom(cfg config.Config) otelcolTmplData {
 	d := otelcolTmplData{
-		OtelGRPCPort:    cfg.OtelGRPCPort,
-		OtelHTTPPort:    cfg.OtelHTTPPort,
-		PrometheusPort:  cfg.PrometheusPort,
-		Env:             cfg.Env,
-		ForwardEndpoint: os.Getenv("TEAMSTER_OTEL_FORWARD_ENDPOINT"),
+		OtelGRPCPort:      cfg.OtelGRPCPort,
+		OtelHTTPPort:      cfg.OtelHTTPPort,
+		OtelCodexHTTPPort: cfg.OtelCodexHTTPPort,
+		PrometheusPort:    cfg.PrometheusPort,
+		Env:               cfg.Env,
+		ForwardEndpoint:   os.Getenv("TEAMSTER_OTEL_FORWARD_ENDPOINT"),
 	}
 	return d
 }

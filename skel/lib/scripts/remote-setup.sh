@@ -7,11 +7,17 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 
 SERVER=""
 PYTHON3_ARG=""
+CODEX_MODE="auto"
+OTEL_CODEX_PORT=""
+OTEL_ENVIRONMENT=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --server)  SERVER="$2";      shift 2 ;;
-        --python3) PYTHON3_ARG="$2"; shift 2 ;;
+        --server)           SERVER="$2";          shift 2 ;;
+        --python3)          PYTHON3_ARG="$2";     shift 2 ;;
+        --codex-mode)       CODEX_MODE="$2";      shift 2 ;;
+        --otel-codex-port)  OTEL_CODEX_PORT="$2"; shift 2 ;;
+        --otel-environment) OTEL_ENVIRONMENT="$2"; shift 2 ;;
         *)         die "unknown option: $1" ;;
     esac
 done
@@ -352,8 +358,12 @@ PLIST_EOF
     else
         CRON_LINE="* * * * * TEAMSTER_HOOK_SERVER_URL=http://$SERVER/event TEAMSTER_HOST=$SHORT_HOST $SCRAPER"
         if crontab -l 2>/dev/null | grep -qF 'token-scraper'; then
-            # Update existing entry (server may have changed)
-            crontab -l 2>/dev/null | grep -vF 'token-scraper' | { cat; printf '%s\n' "$CRON_LINE"; } | crontab - \
+            # Update existing entry (server may have changed).
+            # grep -v exits 1 (no error) when the marker matched every line,
+            # leaving nothing to keep — under pipefail that would otherwise
+            # abort the pipeline on a legitimate "crontab now empty" result.
+            # Guard it so only a real grep error (exit >1) still fails.
+            crontab -l 2>/dev/null | { grep -vF 'token-scraper' || [ $? -eq 1 ]; } | { cat; printf '%s\n' "$CRON_LINE"; } | crontab - \
                 || die "step 6 failed: could not update token-scraper cron entry"
             echo "  updated token-scraper cron entry"
         else
@@ -366,9 +376,111 @@ else
     echo "  WARN: $SCRAPER not found — skipping scheduler setup (cost data will not be scraped)"
 fi
 
+# 7. Wire Codex CLI support (WP-R4's Python codexconfig equivalent). Runs
+# under the resolved PYTHON3 (same launchd-safe absolute-interpreter
+# reasoning as every other step here). remote-codex-setup.py itself probes
+# for codex on PATH and no-ops (prints CODEX_STATUS=skipped, exits 0) when
+# it's absent and --codex-mode is unset/auto — a codex-less remote installs
+# unaffected, same as before this WP existed (Claude-remote regression
+# acceptance criterion). --codex-mode=install instead hard-fails if codex is
+# missing; --codex-mode=none always skips.
+echo "--> Step 7: Wiring Codex CLI support..."
+CODEX_SETUP_SCRIPT="$TEAMSTER_DIR/lib/scripts/remote-codex-setup.py"
+CODEX_WIRED=0
+if [[ -f "$CODEX_SETUP_SCRIPT" ]]; then
+    # --host pins the same $SHORT_HOST value Step 1 already wrote into
+    # settings.json's env block, so Claude Code and Codex sessions on this
+    # remote report under one consistent label (WP-R8: baked into the hook
+    # command explicitly rather than left for codex-hook.py to resolve
+    # ambiently — see teamster_hook_specs's doc comment for why).
+    CODEX_SETUP_ARGS=(--server "$SERVER" --teamster-dir "$TEAMSTER_DIR" --codex-mode "$CODEX_MODE" --host "$SHORT_HOST")
+    [[ -n "$OTEL_CODEX_PORT" ]] && CODEX_SETUP_ARGS+=(--otel-codex-port "$OTEL_CODEX_PORT")
+    [[ -n "$OTEL_ENVIRONMENT" ]] && CODEX_SETUP_ARGS+=(--otel-environment "$OTEL_ENVIRONMENT")
+
+    CODEX_SETUP_OUT=$("$PYTHON3" "$CODEX_SETUP_SCRIPT" "${CODEX_SETUP_ARGS[@]}" 2>&1) \
+        || die "step 7 failed: remote-codex-setup.py returned nonzero
+$CODEX_SETUP_OUT"
+    echo "$CODEX_SETUP_OUT" | sed 's/^/  /'
+    echo "$CODEX_SETUP_OUT" | grep -q '^CODEX_STATUS=wired$' && CODEX_WIRED=1
+else
+    echo "  WARN: $CODEX_SETUP_SCRIPT not found — skipping Codex wiring (stale/partial staging?)"
+fi
+
+# 8. Schedule codex-scraper (cost attribution from remote Codex sessions),
+# only if Step 7 actually wired Codex on this remote. Same cron/launchd split
+# as Step 6's token-scraper, but a 10-minute interval — codex-scraper is a
+# oneshot batch tailer, not a 60s poll (matches the hub's systemd-timer
+# cadence; CODEX-INSTALL.md's codex-scraper section).
+echo "--> Step 8: Scheduling codex-scraper..."
+CODEX_SCRAPER="$TEAMSTER_DIR/bin/codex-scraper"
+if [[ "$CODEX_WIRED" -eq 1 && -x "$CODEX_SCRAPER" ]]; then
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+        CODEX_PLIST="$HOME/Library/LaunchAgents/net.bmj.teamster.codex-scraper.plist"
+        mkdir -p "$HOME/Library/LaunchAgents"
+        cat > "$CODEX_PLIST" <<PLIST_EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>net.bmj.teamster.codex-scraper</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$PYTHON3</string>
+        <string>$CODEX_SCRAPER</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>TEAMSTER_HOOK_SERVER_URL</key>
+        <string>http://$SERVER/event</string>
+        <key>TEAMSTER_HOST</key>
+        <string>$SHORT_HOST</string>
+    </dict>
+    <key>StartInterval</key>
+    <integer>600</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>$HOME/teamster/var/codex-scraper.log</string>
+    <key>StandardErrorPath</key>
+    <string>$HOME/teamster/var/codex-scraper.log</string>
+</dict>
+</plist>
+PLIST_EOF
+        mkdir -p "$HOME/teamster/var"
+        # Idempotent load: boot out existing agent (ignore failure), then bootstrap.
+        launchctl bootout "gui/$(id -u)/net.bmj.teamster.codex-scraper" 2>/dev/null || true
+        launchctl bootstrap "gui/$(id -u)" "$CODEX_PLIST" \
+            || die "step 8 failed: launchctl bootstrap of codex-scraper LaunchAgent failed"
+        echo "  installed codex-scraper LaunchAgent (every 10min): $CODEX_PLIST"
+    else
+        CODEX_CRON_LINE="*/10 * * * * TEAMSTER_HOOK_SERVER_URL=http://$SERVER/event TEAMSTER_HOST=$SHORT_HOST $CODEX_SCRAPER"
+        if crontab -l 2>/dev/null | grep -qF 'codex-scraper'; then
+            # See Step 6: guard grep -v's legitimate exit-1 ("nothing left to
+            # keep") so pipefail doesn't treat it as a pipeline failure.
+            crontab -l 2>/dev/null | { grep -vF 'codex-scraper' || [ $? -eq 1 ]; } | { cat; printf '%s\n' "$CODEX_CRON_LINE"; } | crontab - \
+                || die "step 8 failed: could not update codex-scraper cron entry"
+            echo "  updated codex-scraper cron entry"
+        else
+            ( crontab -l 2>/dev/null; printf '%s\n' "$CODEX_CRON_LINE" ) | crontab - \
+                || die "step 8 failed: could not install codex-scraper cron entry"
+            echo "  installed codex-scraper cron entry (every 10min)"
+        fi
+    fi
+elif [[ "$CODEX_WIRED" -eq 1 ]]; then
+    echo "  WARN: $CODEX_SCRAPER not found — skipping scheduler setup (Codex cost data will not be scraped)"
+else
+    echo "  skipped (Codex not wired on this remote)"
+fi
+
 echo ""
 echo "==> remote-setup.sh complete."
 echo "    Hub:     http://$SERVER"
 echo "    Hook:    $TEAMSTER_DIR/bin/teamster"
 echo "    Scraper: $SCRAPER (every 60s)"
+if [[ "$CODEX_WIRED" -eq 1 ]]; then
+    echo "    Codex:   wired (codex-scraper every 10min)"
+else
+    echo "    Codex:   not wired on this remote"
+fi
 echo "    Test: echo '{\"hook_event_name\":\"test\"}' | TEAMSTER_HOOK_SERVER_URL=http://$SERVER/event ~/teamster/bin/teamster"

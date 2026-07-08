@@ -38,9 +38,10 @@ type FileConfig struct {
 	Prometheus ServiceConfig `yaml:"prometheus"`
 	Grafana    ServiceConfig `yaml:"grafana"`
 	Otelcol    struct {
-		Mode     string `yaml:"mode"`
-		GRPCPort int    `yaml:"grpc_port"`
-		HTTPPort int    `yaml:"http_port"`
+		Mode          string `yaml:"mode"`
+		GRPCPort      int    `yaml:"grpc_port"`
+		HTTPPort      int    `yaml:"http_port"`
+		CodexHTTPPort int    `yaml:"codex_http_port"`
 	} `yaml:"otelcol"`
 	TokenScraper struct {
 		Mode string `yaml:"mode"`

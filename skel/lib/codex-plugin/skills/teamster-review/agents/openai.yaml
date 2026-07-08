@@ -1,0 +1,13 @@
+interface:
+  display_name: "Teamster Readiness Review"
+  short_description: "Check git, WMS, build/test before presenting work"
+  default_prompt: "Use $teamster-review to check whether this work is ready to present."
+
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "wms"
+      description: "Outcome/WorkUnit inventory"
+
+policy:
+  allow_implicit_invocation: false

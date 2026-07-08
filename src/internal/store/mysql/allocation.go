@@ -180,11 +180,14 @@ func (s *Store) ApplyAttribution(ctx context.Context, messageID, method string, 
 	return err
 }
 
-// DeleteAttributionByMethod implements store.AllocationStore: deletes every
-// usage_attribution row with the given method, generalizing Reallocate
-// (method='unallocated') and every Uncover* pass (method=<strategy method>).
-func (s *Store) DeleteAttributionByMethod(ctx context.Context, method string) (int64, error) {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM usage_attribution WHERE method = ?`, method)
+// ClearUnallocatedAttribution implements store.AllocationStore: deletes every
+// usage_attribution row not allocated to an entity (entity_type=''), the
+// complete not-yet-really-attributed set (method='unallocated' plus the
+// 'sweep_skipped' give-up marker, both entity_type=''). Predicated on
+// entity_type rather than method so a row carrying a REAL entity is never
+// deleted; index idx_ua_entity(entity_type, entity_id) covers the scan.
+func (s *Store) ClearUnallocatedAttribution(ctx context.Context) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM usage_attribution WHERE entity_type = ''`)
 	if err != nil {
 		return 0, err
 	}

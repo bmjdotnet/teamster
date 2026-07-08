@@ -43,6 +43,18 @@ that the name is meaningful and reasonably unique.
 Keep the slug — you'll use it to seed the strategic Outcome (Step 5) and
 the context-tag interview (Step 6).
 
+### Verify referenced artifacts before proceeding
+
+If the focus slug or the operator's brief names specific local files, paths,
+or kits (e.g. "apply the fix from the pricing kit," "pick up the devkit at
+`/path/to/thing`"), verify each one exists — `ls` the path or `Read` the
+file — before treating it as real. If something named is missing, say so
+and confirm intent with the operator (wrong path? not built yet? proceed
+without it?) rather than silently assuming it exists or improvising its
+contents. A session — or a teammate you're about to dispatch — that burns
+its first several turns acting on a kit that was never actually delivered
+is a worse outcome than a 10-second existence check up front.
+
 **Set the session mode (first action).** Team mode is the default, but set the
 marker explicitly so a session that previously chose solo is returned to
 enforcement. Load and call the mode signal:

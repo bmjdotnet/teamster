@@ -72,7 +72,14 @@ type HookEvent struct {
 	AgentType            string      `json:"agent_type"`
 	CWD                  string      `json:"cwd"`
 	TranscriptPath       string      `json:"transcript_path"`
-	ToolResponse         string      `json:"tool_response"`
+	// ToolResponse is untyped like ToolInput: Claude Code sends a string, but
+	// Codex sends a JSON object for MCP tool calls (the raw tool_result
+	// shape) — a string field here made json.Unmarshal reject every
+	// Codex-originated PostToolUse event outright (400 "invalid json" at
+	// hookd's POST /event, silently swallowed by codex-hook.py's
+	// exit-0-always contract). Callers that expect a string (see
+	// ProcessEvent's TaskCreate branch below) must type-assert.
+	ToolResponse         interface{} `json:"tool_response"`
 	StopResponse         string      `json:"stop_response"`
 	LastAssistantMessage string      `json:"last_assistant_message"`
 }
@@ -436,7 +443,11 @@ func ProcessEvent(event HookEvent, rawData map[string]interface{}, serverURL, de
 				if hookEvent == "PostToolUse" {
 					ti, _ := toolInput.(map[string]interface{})
 					subject := strField(ti, "subject", 256) // sanity bound, not tight — display layer clips to terminal width
-					resp := event.ToolResponse
+					// TaskCreate always comes from Claude Code (Codex has no
+					// Agent Teams / task dispatch in v1), so this is a string
+					// in practice; the assertion is defensive, matching
+					// enrich.go's identical data["tool_response"].(string).
+					resp, _ := event.ToolResponse.(string)
 					taskNum := ""
 					if m := regexp.MustCompile(`#(\d+)`).FindStringSubmatch(resp); m != nil {
 						taskNum = "#" + m[1] + " "

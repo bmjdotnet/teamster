@@ -16,7 +16,9 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/bmjdotnet/teamster/internal/codexconfig"
 	"github.com/bmjdotnet/teamster/internal/config"
+	"github.com/bmjdotnet/teamster/internal/installbackup"
 	"github.com/bmjdotnet/teamster/internal/redact"
 	"gopkg.in/yaml.v3"
 )
@@ -327,6 +329,7 @@ func run() error {
 	env := flag.String("env", "", "TEAMSTER_ENV value (e.g. production)")
 	backupDir := flag.String("backup-dir", "", "backup.backup_dir value (absolute path for backup snapshots)")
 	backupSchedule := flag.String("backup-schedule", "", "backup.schedule value (e.g. 1h, 30m)")
+	codexMode := flag.String("codex-mode", "", "codex wiring mode: install (force, error if codex absent) | none (skip, even if present) | unset (auto-detect, default)")
 	debugLogPath := flag.String("debug-log", "", "append structured trace events to this file (Round 0 instrumentation)")
 	flag.Parse()
 	// otelcol-build-from-src/prometheus-build-from-src/grafana-build-from-src are informational
@@ -375,6 +378,7 @@ func run() error {
 		"prometheus_retention_size", *prometheusRetentionSize,
 		"env", *env,
 		"debug_log", *debugLogPath,
+		"codex_mode", *codexMode,
 	)
 
 	if *repoDir == "" {
@@ -412,7 +416,7 @@ func run() error {
 	}
 
 	// 2. Copy runtime binaries (not teamster-install itself).
-	for _, b := range []string{"teamster", "hookd", "feed", "activity-mcp", "wms-mcp", "token-scraper", "rollup", "classify", "demogen", "relay", "backup"} {
+	for _, b := range []string{"teamster", "hookd", "feed", "activity-mcp", "wms-mcp", "token-scraper", "codex-scraper", "rollup", "classify", "demogen", "relay", "backup"} {
 		src := filepath.Join(*buildDir, b)
 		dst := filepath.Join(*basedir, "bin", b)
 		if err := copyFile(src, dst, 0o755); err != nil {
@@ -556,12 +560,26 @@ func run() error {
 			otelHTTPPort = findFreePort(4328)
 		}
 	}
+	// otelCodexHTTPPort is the dedicated otlp/http receiver Codex's [otel]
+	// export points at — never otelHTTPPort, the receiver Claude Code shares
+	// (see internal/codexconfig/otel.go's OtelSpec.MetricsEndpoint doc
+	// comment). Gated on the same otelcolMode as otelHTTPPort: there's no
+	// collector to point Codex at unless one is actually running.
+	otelCodexHTTPPort := 0
+	if *otelcolMode == "install" {
+		if prior.Otelcol.CodexHTTPPort != 0 {
+			otelCodexHTTPPort = prior.Otelcol.CodexHTTPPort
+		} else {
+			otelCodexHTTPPort = findFreePort(4329)
+		}
+	}
 	dlog("INFO", "teamster-install.ports", "found free ports",
 		"hookd", fmt.Sprintf("%d", port),
 		"prometheus", fmt.Sprintf("%d", ports.prometheus),
 		"grafana", fmt.Sprintf("%d", ports.grafana),
 		"otel_grpc", fmt.Sprintf("%d", ports.otelGRPC),
 		"otel_http", fmt.Sprintf("%d", otelHTTPPort),
+		"otel_codex_http", fmt.Sprintf("%d", otelCodexHTTPPort),
 	)
 
 	// 4b. Write the 0600 secrets EnvironmentFile (the store DSN) BEFORE any unit
@@ -688,6 +706,35 @@ func run() error {
 		}
 	}
 
+	// 5c2. Materialize the codex-scraper service + timer (Codex rollout-JSONL
+	// tailer — the sole writer of Codex cost/ledger data and the Codex
+	// sessions row; hookd's hook-event pipeline never fires for Codex, so
+	// WMS/cost cannot depend on hooks). Needs the store DSN like
+	// classify/rollup (it upserts the sessions row via a direct store
+	// connection, alongside POSTing ledger rows to hookd's /telemetry).
+	// Graceful no-op on a host with no `codex` installed: the timer still
+	// fires, the binary finds no rollout files under $CODEX_HOME and exits 0.
+	codexScraperSvcTmpl := filepath.Join(*basedir, "etc", "teamster-codex-scraper.service.tmpl")
+	codexScraperSvcOut := filepath.Join(*basedir, "etc", "teamster-codex-scraper.service")
+	if data, err := os.ReadFile(codexScraperSvcTmpl); err == nil {
+		user := currentUsername()
+		m := strings.ReplaceAll(string(data), "__BASEDIR__", *basedir)
+		m = strings.ReplaceAll(m, "__USER__", user)
+		if effectiveDSN != "" {
+			m = strings.TrimRight(m, "\n") + "\n" + dsnEnvLine(secretsPath)
+		}
+		if werr := os.WriteFile(codexScraperSvcOut, []byte(m), 0o644); werr != nil {
+			fmt.Fprintf(os.Stderr, "warning: writing codex-scraper service unit: %v\n", werr)
+		}
+	}
+	codexScraperTimerTmpl := filepath.Join(*basedir, "etc", "teamster-codex-scraper.timer.tmpl")
+	codexScraperTimerOut := filepath.Join(*basedir, "etc", "teamster-codex-scraper.timer")
+	if data, err := os.ReadFile(codexScraperTimerTmpl); err == nil {
+		if werr := os.WriteFile(codexScraperTimerOut, data, 0o644); werr != nil {
+			fmt.Fprintf(os.Stderr, "warning: writing codex-scraper timer unit: %v\n", werr)
+		}
+	}
+
 	// 5d. Materialize the sweep service + timer (deep-clean attribution
 	// pipeline). Like rollup it needs the store DSN.
 	// Both are written inside basedir/etc/; install.sh syncs them into
@@ -779,6 +826,7 @@ func run() error {
 		env:                *env,
 		ports:              ports,
 		otelHTTP:           otelHTTPPort,
+		otelCodexHTTP:      otelCodexHTTPPort,
 	})
 
 	// Merge backup: section into teamster.yaml. Runs AFTER writeYAMLConfig so the
@@ -883,7 +931,32 @@ func run() error {
 		fmt.Fprintf(os.Stderr, "warning: updating .bashrc: %v\n", err)
 	}
 
-	// 11. Print summary.
+	// 11. Wire Codex CLI, if present and not explicitly disabled. Graceful,
+	// opposite polarity from Claude Code's hard requirement above (probe.sh)
+	// — a host without Codex installs unchanged, informational only.
+	codexStatus := "not detected — skipped"
+	switch *codexMode {
+	case "none":
+		codexStatus = "skipped (--codex-mode=none)"
+		dlog("INFO", "teamster-install.codex", "codex-mode=none — skipping by explicit operator request")
+	default:
+		codexVersion, probeErr := probeCodex()
+		switch {
+		case probeErr != nil && *codexMode == "install":
+			dlog("ERROR", "teamster-install.codex", "--codex-mode=install but codex not found in PATH", "err", probeErr.Error())
+			return fmt.Errorf("--codex-mode=install requires the codex CLI in PATH: %w", probeErr)
+		case probeErr != nil:
+			dlog("INFO", "teamster-install.codex", "codex not found in PATH — skipping (informational)")
+		default:
+			dlog("INFO", "teamster-install.codex", "codex detected", "version", codexVersion)
+			if err := wireCodex(*basedir, home, effectiveDSN, ports.hookServerURL, hubHost(), *env, otelCodexHTTPPort); err != nil {
+				return fmt.Errorf("wiring codex: %w", err)
+			}
+			codexStatus = fmt.Sprintf("wired (codex %s)", codexVersion)
+		}
+	}
+
+	// 12. Print summary.
 	fmt.Printf(`
 Teamster installed to: %s
 
@@ -896,6 +969,7 @@ Teamster installed to: %s
   settings:      %s (merged)
   CLAUDE.md:     %s (updated)
   plugin:        %s
+  codex:         %s
 
 Start hookd:     %s
 Watch activity:  %s
@@ -903,10 +977,80 @@ Watch activity:  %s
 		*basedir,
 		binPath, dataDir,
 		port, hookBin, activityBin, wmsBin,
-		settingsPath, claudeMDPath, pluginStatus,
+		settingsPath, claudeMDPath, pluginStatus, codexStatus,
 		filepath.Join(*basedir, "bin", "hookd"),
 		filepath.Join(*basedir, "bin", "feed"),
 	)
+
+	return nil
+}
+
+// probeCodex detects the codex CLI in PATH and returns its reported version.
+// Graceful, opposite polarity from the hard `claude` requirement enforced
+// upstream in install.sh/lib/installrunner.sh: a host without Codex is a
+// normal, expected case, not an error — the caller decides what "not found"
+// means (an informational skip by default, or a hard error when
+// --codex-mode=install explicitly demanded it).
+func probeCodex() (string, error) {
+	codexPath, err := exec.LookPath("codex")
+	if err != nil {
+		return "", err
+	}
+	out, err := exec.Command(codexPath, "--version").Output()
+	if err != nil {
+		return "", fmt.Errorf("codex --version: %w", err)
+	}
+	// Live output is "codex-cli 0.137.0\n" — take the trailing field so a
+	// banner wording change upstream doesn't break parsing.
+	fields := strings.Fields(string(out))
+	if len(fields) == 0 {
+		return strings.TrimSpace(string(out)), nil
+	}
+	return fields[len(fields)-1], nil
+}
+
+// wireCodex writes everything Teamster owns in Codex's config.toml (MCP
+// servers, OTEL export, hooks + trust state) plus AGENTS.md and skills,
+// using internal/codexconfig's shared backup+doctor-gate machinery — every
+// config.toml write it makes is already individually gated and rolled back
+// on failure, so this function's only job is sequencing, not safety.
+//
+// Called only after probeCodex confirms codex is on PATH. otelCodexHTTPPort
+// of 0 means otelcol isn't running (--otelcol-mode != install) — there's no
+// collector to point Codex's [otel] export at, so that step is skipped
+// rather than writing a config Codex would export into a black hole.
+func wireCodex(basedir, home, storeDSN, hookServerURL, host, env string, otelCodexHTTPPort int) error {
+	configPath := codexconfig.DefaultConfigPath(home)
+	codexHome := filepath.Dir(configPath)
+
+	specs := codexconfig.TeamsterMCPServerSpecs(basedir, storeDSN, hookServerURL, host)
+	if _, err := codexconfig.WriteMCPServers(configPath, specs); err != nil {
+		return fmt.Errorf("mcp servers: %w", err)
+	}
+
+	if otelCodexHTTPPort != 0 {
+		envLabel := env
+		if envLabel == "" {
+			envLabel = "production"
+		}
+		otelEndpoint := fmt.Sprintf("http://localhost:%d", otelCodexHTTPPort)
+		if _, err := codexconfig.WriteOtelConfig(configPath, codexconfig.TeamsterOtelSpec(otelEndpoint, envLabel)); err != nil {
+			return fmt.Errorf("otel config: %w", err)
+		}
+	}
+
+	skillsSrc := filepath.Join(basedir, "lib", "codex-plugin", "skills")
+	if _, err := codexconfig.InstallSkills(skillsSrc, codexHome); err != nil {
+		return fmt.Errorf("skills: %w", err)
+	}
+	if err := mergeCodexAgentsMD(basedir, codexHome); err != nil {
+		return fmt.Errorf("AGENTS.md: %w", err)
+	}
+
+	hookSpecs := codexconfig.TeamsterHookSpecs(basedir, codexconfig.DefaultHookTimeoutSec)
+	if _, err := codexconfig.WriteHooks(configPath, hookSpecs); err != nil {
+		return fmt.Errorf("hooks: %w", err)
+	}
 
 	return nil
 }
@@ -976,6 +1120,15 @@ func registerMCPServer(name, desiredBin string) {
 		return
 	}
 
+	// Back up ~/.claude.json before invoking the claude CLI, which writes it
+	// directly — this installer doesn't control that write itself, so the
+	// backup has to happen just before the external command, not around an
+	// os.WriteFile call it doesn't own.
+	userScopePath := filepath.Join(home, ".claude.json")
+	if _, err := installbackup.Backup(userScopePath); err != nil {
+		fmt.Printf("Warning: could not back up %s before claude mcp add-json: %v\n", userScopePath, err)
+	}
+
 	var errBuf strings.Builder
 	addCmd := exec.Command(claudePath, "mcp", "add-json", "--scope", "user", name, addJSON)
 	addCmd.Stdout = os.Stdout
@@ -1023,6 +1176,9 @@ func removeMCPFromFile(path, name string) error {
 	out, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
 		return err
+	}
+	if _, err := installbackup.Backup(path); err != nil {
+		fmt.Printf("Warning: could not back up %s before write: %v\n", path, err)
 	}
 	return os.WriteFile(path, append(out, '\n'), 0o644)
 }
@@ -1403,6 +1559,9 @@ func mergeSettings(path, hookBin, hookServerURL, dataDir string, port int, extra
 		)
 		return os.Chmod(path, 0o600)
 	}
+	if _, err := installbackup.Backup(path); err != nil {
+		dlog("WARN", "teamster-install.merge", "backup settings.json failed", "err", err.Error())
+	}
 	if err := os.WriteFile(path, final, 0o600); err != nil {
 		dlog("ERROR", "teamster-install.merge", "write settings.json failed", "err", err.Error())
 		return err
@@ -1760,7 +1919,112 @@ func mergeClaudeMD(path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
+	if _, err := installbackup.Backup(path); err != nil {
+		fmt.Printf("Warning: could not back up %s before write: %v\n", path, err)
+	}
 	return os.WriteFile(path, []byte(content), 0o644)
+}
+
+// codexAgentsMarker is the substring mergeCodexAgentsMD checks for to decide
+// whether the protocol block is already present — distinctive enough that an
+// operator's own AGENTS.md/AGENTS.override.md content is vanishingly
+// unlikely to contain it by coincidence.
+const codexAgentsMarker = "## Getting Started with Teamster (Codex)"
+
+// codexAgentsProtocolRelPath is where the shared AGENTS.md merge text ships
+// relative to BASEDIR: skel/lib/codex-plugin/agents-protocol.md, mirrored to
+// BASEDIR/lib/codex-plugin/agents-protocol.md by the blanket skel copy every
+// install run already performs (main()'s copyTreeCounting(skelDir,
+// *basedir) call). Single-sourced (LESSONS §1) so this installer and the
+// Python remote-codex-setup.py port never carry two copies of the text —
+// previously a Go string constant (codexAgentsProtocol), extracted verbatim
+// (byte-identical) into this data file so both the Go and Python installers
+// read the same bytes rather than maintaining independent copies.
+const codexAgentsProtocolRelPath = "lib/codex-plugin/agents-protocol.md"
+
+// loadCodexAgentsProtocol reads the shared AGENTS.md merge text — the Codex
+// counterpart to activityProtocol, merged into AGENTS.md (or
+// AGENTS.override.md — see mergeCodexAgentsMD) instead of CLAUDE.md. Codex
+// has no Agent Teams layer: every Codex session is inherently solo, so
+// unlike activityProtocol this carries none of the Eight Rules /
+// team-dispatch content — only activity reporting and WMS focus discipline,
+// which apply identically to a solo Codex session. The skill it points at
+// (teamster-solo) is this WP's ported entry point, analogous to
+// activityProtocol's `/teamster:start` pointer.
+//
+// The "Available skills" and "Finding WMS/activity MCP tools" sections were
+// added after a live operator VM triage (research/evidence-round3/
+// wp7-vm-triage/ in the teamster-codex-kit): on Codex builds where
+// tool_search_always_defer_mcp_tools is baked in (confirmed at 0.142.5, no
+// override — three independent override attempts all silently ignored), MCP
+// tools are defer-loaded behind an internal search the model must run itself,
+// and a vague first query reliably lands on the same narrow ~5-tool cluster
+// the operator saw. This is burned into every session's context rather than
+// left to a skill body, since the gap bites before any skill is even
+// invoked. Separately, teamster-status was the only one of the four ported
+// skills without an agents/openai.yaml, so skill listings showed it by raw
+// id while the other three showed their display_name — the explicit
+// name-pairing below closes that inconsistency without relying on the
+// listing UI.
+func loadCodexAgentsProtocol(basedir string) (string, error) {
+	data, err := os.ReadFile(filepath.Join(basedir, codexAgentsProtocolRelPath))
+	if err != nil {
+		return "", fmt.Errorf("read shared AGENTS.md protocol text: %w", err)
+	}
+	return string(data), nil
+}
+
+// mergeCodexAgentsMD appends the Codex solo-mode Teamster protocol to
+// whichever file actually governs Codex's global instructions on this host:
+// codexHome/AGENTS.override.md if the operator has one, else
+// codexHome/AGENTS.md. AGENTS.override.md fully wins over AGENTS.md on
+// Codex 0.137.0 (confirmed live, verification-round2.md P7) -- merging only
+// into AGENTS.md when an override file is present would leave Teamster's
+// protocol text silently dead, so this targets whichever file Codex will
+// actually read and logs a note explaining the substitution. Idempotent: a
+// no-op if the target already contains codexAgentsMarker. Backs up the
+// target before any write (installbackup, same semantics as mergeClaudeMD).
+func mergeCodexAgentsMD(basedir, codexHome string) error {
+	target := filepath.Join(codexHome, "AGENTS.md")
+	overridePath := filepath.Join(codexHome, "AGENTS.override.md")
+	usingOverride := false
+	if _, err := os.Stat(overridePath); err == nil {
+		target = overridePath
+		usingOverride = true
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+
+	existing, err := os.ReadFile(target)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if strings.Contains(string(existing), codexAgentsMarker) {
+		return nil
+	}
+
+	protocol, err := loadCodexAgentsProtocol(basedir)
+	if err != nil {
+		return err
+	}
+
+	if usingOverride {
+		fmt.Printf("Note: %s exists and fully overrides AGENTS.md on this Codex install -- merging Teamster's protocol there instead so it actually takes effect.\n", overridePath)
+	}
+
+	content := string(existing)
+	if len(content) > 0 {
+		content = strings.TrimRight(content, "\n") + "\n"
+	}
+	content += protocol
+
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return err
+	}
+	if _, err := installbackup.Backup(target); err != nil {
+		fmt.Printf("Warning: could not back up %s before write: %v\n", target, err)
+	}
+	return os.WriteFile(target, []byte(content), 0o644)
 }
 
 // mergeBackupSection adds a default backup: section to teamster.yaml when the

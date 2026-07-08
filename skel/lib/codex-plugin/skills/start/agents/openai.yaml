@@ -1,0 +1,13 @@
+interface:
+  display_name: "Teamster Start"
+  short_description: "Front door for a WMS-tracked Teamster session"
+  default_prompt: "Use $start to begin a WMS-tracked Teamster session."
+
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "wms"
+      description: "Outcome/WorkUnit CRUD, tags, focus, dependencies"
+    - type: "mcp"
+      value: "activity"
+      description: "Activity feed narration (reportActivity/setOverallIntent/completeActivity)"

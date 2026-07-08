@@ -29,6 +29,9 @@ func (j *JournalObserver) OnStatusChange(change StatusChange) {
 		Field:      "status",
 		OldValue:   change.OldStatus,
 		NewValue:   change.NewStatus,
+		SessionID:  change.SessionID,
+		AgentID:    change.AgentName,
+		Host:       change.Host,
 	}
 	if err := j.store.WriteJournalEntry(context.Background(), entry); err != nil {
 		slog.Warn("journal: write status change", "entity_type", change.EntityType, "entity_id", change.EntityID, "err", err)

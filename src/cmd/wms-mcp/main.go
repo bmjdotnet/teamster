@@ -120,6 +120,22 @@ func main() {
 
 		switch req.Method {
 		case "initialize":
+			// Capture the connection's clientInfo.name (e.g. "claude-code",
+			// "codex-mcp-client") as process-level state: wms-mcp is a
+			// per-connection stdio process, so one process = one connection.
+			// Used by mcpwms.HandleToolCall to decide whether the
+			// ~/.claude/current-session-id fallback is safe for this
+			// connection (see mcpwms.ConnectionClientName). Absent or
+			// unparseable params leave it at its zero value "", which is
+			// itself a valid (fallback-eligible, legacy) state.
+			var initParams struct {
+				ClientInfo struct {
+					Name string `json:"name"`
+				} `json:"clientInfo"`
+			}
+			if err := json.Unmarshal(req.Params, &initParams); err == nil {
+				mcpwms.ConnectionClientName = initParams.ClientInfo.Name
+			}
 			respond(req.ID, map[string]interface{}{
 				"protocolVersion": "2024-11-05",
 				"serverInfo":      map[string]interface{}{"name": "wms-mcp", "version": version.Version},
