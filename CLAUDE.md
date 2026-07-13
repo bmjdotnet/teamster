@@ -74,10 +74,19 @@ src/                          Go source (go.mod: github.com/bmjdotnet/teamster)
                               supervisor subcommands (start/stop/status/wms-reset/tags/setup)
     hookd/                    HTTP event server + dashboard
     feed/                     Terminal activity viewer (replaces gatail)
+    ctop/                     Muster: terminal fleet dashboard (Bubbletea). Single view
+                              (fleet_view.go): multi-team tree, hierarchy, activity log.
     activity-mcp/             MCP stdio: reportActivity/setOverallIntent/completeActivity/setMode
     wms-mcp/                  MCP stdio: outcome/workunit CRUD, tags, focus, dependencies, search
     rollup/                   Cost-attribution pipeline (allocate, recover, sweep)
     classify/                 Interval phase + work-type classifier (systemd timer)
+    health-collector/         Muster: per-agent health gauge collector (polls token_ledger,
+                              writes agent_health_gauge). Hub daemon, 15s poll interval.
+                              teammate_context.go: transcript-derived context occupancy for
+                              Agent-Teams teammates (statusLine never fires for them — reads
+                              each teammate's own transcript JSONL + .meta.json sidecar under
+                              subagents/agent-<id>.*); cost_test.go covers per-agent cost
+                              (costForRows, component token columns) and session_total_cost_usd.
     token-scraper/            Session transcript token-usage scraper (Claude Code)
     codex-scraper/            Codex rollout-JSONL cost/ledger tailer (systemd timer, oneshot)
     teamster-install/         Installer binary (called by lib/installrunner.sh)
@@ -96,21 +105,37 @@ src/                          Go source (go.mod: github.com/bmjdotnet/teamster)
     logging/                  Structured slog setup (TEAMSTER_LOG_LEVEL)
     mcp/                      Shared MCP JSON-RPC plumbing
       activity/               Activity MCP tool handlers
+      health/                 Muster: health MCP tool handlers (health_listAgents,
+                              health_getAgentSnapshot, health_getTeamSummary,
+                              health_getPressureAlerts)
+      roster/                 Muster: roster MCP tool handlers (roster_listAgents,
+                              roster_getAgent, roster_resolveId, registerPeer,
+                              verifyToken, roster_bindSession, getRosterEntry) +
+                              liveness derivation (computed from last_seen, never stored)
       wms/                    WMS MCP tool handlers
     observability/            Prometheus collectors (attribution, cost, entities, sessions, sweep)
     pricing/                  Per-model token pricing tables
     redact/                   Credential redaction for activity feed
     render/                   Display-string rendering helpers
     rollup/                   Cost allocation + recovery passes (gap, synthesize, sweep-llm)
-    server/                   HTTP receiver + JSONL writer + focus nudge
+    roster/                   Muster: shared roster utilities — GenerateRosterID (UUID v4),
+                              MintToken, VerifyToken, RegisterPeer (token lifecycle)
+    agenthealth/              Muster: agent-health concern subtree (R2 private storage)
+      gauge/                  GaugeStore interface (overwrite semantics, not append-only)
+        mysql/                MySQL GaugeStore implementation (agent_health_gauge table)
+    server/                   HTTP receiver + JSONL writer + focus nudge + roster
+                              auto-registration + turn-state tracker + /mcp/roster +
+                              /mcp/health endpoints
     store/                    Backend-neutral Store interface (store.go: role-based
                               sub-interfaces — SessionStore, IntervalStore,
-                              MaintenanceStore, AllocationStore, RecoveryStore, etc.),
+                              MaintenanceStore, AllocationStore, RecoveryStore,
+                              RosterStore, etc.),
                               typed errors (errors.go: ErrNotFound/ErrConflict/
                               ErrPrecondition), backend registry + store.Open
                               (factory.go), portable migration framework (migrate.go),
-                              conformance suite (conformance_dim1-4_test.go, dim6_test.go)
-      mysql/                  MySQL/MariaDB backend + migrations (v1–v50); search.go:
+                              conformance suite (conformance_dim1-4_test.go, dim6_test.go,
+                              conformance_dim7_test.go — roster/token ops)
+      mysql/                  MySQL/MariaDB backend + migrations (v1–v61); search.go:
                               SQL behind wms.Search/SearchSessions
       sqlite/                 SQLite backend (modernc.org/sqlite) — conformance
                               validation only, not an install-time option
@@ -148,7 +173,7 @@ skel/                         Assets copied to BASEDIR at install time
     .claude-plugin/marketplace.json  Plugin marketplace root (NOTE: above plugin/)
     plugin/                   Claude Code plugin (skills/ only; marketplace.json is in .claude-plugin/ above)
       skills/{bootstrap,start,solo,plan,review,status,tags,sweep,seasoning}/SKILL.md
-      skills/bootstrap/references/{eight-rules.md, execution-loop.md, field-guide.md, rubrics.md}
+      skills/bootstrap/references/{eight-rules.md, execution-loop.md, field-guide.md, muster-guide.md, rubrics.md}
       skills/tags/references/
     hook/teamster.py          Python hook client used on remote installs
     hook/codex-hook.py        Python hook client for Codex (imports teamster.py's
@@ -228,7 +253,10 @@ During development, the script can also be run directly from
 **Post-install:** run `teamster setup tags` to configure the tag keyspace
 via the TUI wizard (8-screen guided flow on first run, 3-column editor
 on subsequent runs). Or use `teamster tags add-key`/`add-value` for
-non-interactive setup.
+non-interactive setup. `lib/installrunner.sh` only auto-launches this wizard
+on a **fresh** install (captured as `IS_UPGRADE` before the binary swap) —
+an upgrade already has a configured keyspace, so re-running mid-upgrade would
+be disruptive; run `teamster setup tags` manually any time to adjust it.
 
 ## Test
 
@@ -295,7 +323,9 @@ Agent-Teams teammates run as separate top-level sessions (see Pitfalls).
 |--------|---------|-------|
 | `teamster` (Go) | Hook client + CLI on the hub | Forked per hook event. Reads JSON from stdin, enriches, POSTs to hookd. Must exit 0 always. Also serves as the CLI: `start`/`stop`/`status`/`wms-reset`/`tags`/`setup tags`/`wms drain`/`wms list`/`wms close`/`install-remote`/`backup`/`restore`. |
 | `teamster.py` (Python) | Hook client on remotes | Pure stdlib, no third-party deps. Same wire contract as Go version. On macOS, derives teammate identity from the transcript's `agentName` (sets `agent_type` when the payload lacks one) and echoes hookd's `additionalContext` on PreToolUse **and** UserPromptSubmit. `TEAMSTER_DEBUG_RAW=1` dumps raw hook stdin to `var/raw-hook-debug.jsonl`. |
-| `hookd` | HTTP event server | POST `/event` → JSONL append. Serves dashboard at `/`, WMS at `/wms`, SSE at `/events/stream`. POST `/telemetry` (Claude Code + Codex ledger rows) and POST `/session` (Codex sessions-row upsert, `internal/server/session.go`, wraps `store.UpsertSession` via `store.ValidateSession`) are both hub-local- and remote-callable, and both rejected in read-only mode like `/mcp/*`. Focus-absent nudge on PreToolUse (max 1 per session+agent per turn). Returns activity + team-dispatch `additionalContext` on UserPromptSubmit so remote Python clients get the nudge (the hub Go client ignores it — no double-inject; hookd can't see a remote's solo/team marker, so it always sends team context). |
+| `hookd` | HTTP event server | POST `/event` → JSONL append. Serves dashboard at `/`, WMS at `/wms`, SSE at `/events/stream`. POST `/telemetry` (Claude Code + Codex ledger rows) and POST `/session` (Codex sessions-row upsert, `internal/server/session.go`, wraps `store.UpsertSession` via `store.ValidateSession`) are both hub-local- and remote-callable, and both rejected in read-only mode like `/mcp/*`. Muster surfaces: POST `/mcp/roster` (agent roster MCP — 7 tools), POST `/mcp/health` (agent health MCP — 4 tools), both rejected in read-only mode. Auto-registers agents on first hook event (`dispatchObservability` early-upsert creates `sessions` + `agent_roster` rows with `status: active`). Tracks per-agent turn state (processing/idle + in-flight activity) in memory. Focus-absent nudge on PreToolUse (max 1 per session+agent per turn). Returns activity + team-dispatch `additionalContext` on UserPromptSubmit so remote Python clients get the nudge (the hub Go client ignores it — no double-inject; hookd can't see a remote's solo/team marker, so it always sends team context). |
+| `health-collector` | Muster: health gauge collector | Hub daemon, 15s poll interval. Polls `token_ledger` for per-agent token usage (recorded exception E2 — direct SQL read of another concern's table), computes context window usage, writes `agent_health_gauge` rows via GaugeStore. Resolves `roster_id` per agent via `ResolveRosterID`. Model sourced from `token_ledger.model` only (never hookd events — see `~/gh/teamster-context-bug.md`). Static context-window table: 200k default, 1M when model contains `[1m]`. Agent-Teams teammates get context occupancy from their own transcript + `.meta.json` sidecar (`teammate_context.go`), since the statusLine channel only ever fires for Agent-tool subagents (`gauge.ContextSourceTranscript`/`Fallback`/`Unavailable`). Per-agent cost sums each new `token_ledger` row's own component token columns (input/output/cache-read/cache-write, split by 5m/1h TTL tier) via `costForRows`; `session_total_cost_usd` (lead's row only) is a stored-value `SUM(cost_usd)` over the whole session, immune to a stale pricing table. |
+| `ctop` | Muster: terminal fleet dashboard | Bubbletea TUI, `cmd/ctop/`. Single view (fleet_view.go): a multi-team tree with hierarchy indentation, per-agent health/cost, and an activity log. Activity text/tag for a row is resolved by `resolvedActivity`: the health API poll is authoritative, the SSE tracker only overlays when its own timestamp is strictly newer — one rendering path regardless of source. |
 | `feed` | Terminal activity viewer | Tails JSONL, ANSI colorizes. Built from `cmd/feed/`. |
 | `activity-mcp` | MCP stdio (activity) | **No-op.** Tools just return confirmation strings. Real data extraction happens in the hook from PreToolUse payloads — that's how we get `agent_type` for teammate attribution. Includes `setMode` for session mode switching. |
 | `wms-mcp` | MCP stdio (WMS) | Outcome/WorkUnit CRUD, tags, focus, dependencies over MySQL/MariaDB via `TEAMSTER_STORE_DSN`. Includes `wms_search`, exposing the `wms.Search` primitive as granular `[]Hit` (the same engine `teamster search sessions` groups into session rollups). State changes posted to hookd via `HookObserver` when `TEAMSTER_HOOK_SERVER_URL` is set. |
@@ -328,7 +358,7 @@ Agent-Teams teammates run as separate top-level sessions (see Pitfalls).
   verb prefixes at display time. (`__file__`, `__pattern__`, `__id__`.)
 - **Entity naming**: `@agent`, `#team`, `<model>` — colorized in the stream.
 - **Tag taxonomy** (see `skel/doc/specs/semantic-conventions.md` §3 for the
-  full table): GOAL/THNK/DONE come from MCP activity tools; READ/EDIT/GREP/ACT/
+  full table): GOAL/THNK/DONE/RCAP come from MCP activity tools and Stop events; READ/EDIT/GREP/ACT/
   EXEC/TEAM/COMM/TASK/WEB/ASK/PLAN come from tool names; TOOL is the fallback.
 - **MCP no-op + hook extraction**: MCP tools are callable surface area for
   the model only. The hook client pulls the actual args out of PreToolUse.
@@ -342,6 +372,13 @@ Agent-Teams teammates run as separate top-level sessions (see Pitfalls).
 - **Tag keyspace** uses `product` and 8 work-scope slug keys (`feature`, `bug`, `refactor`, `infra`, `docs`, `research`, `test`, `admin`) as core context keys. Slug keys are facets of `work-type` and share the `work-scope` exclusion group.
   Integration key namespaces (`github.*`, `jira.*`, etc.) are seeded at setup time via
   `teamster setup tags`. Phase/resolution/lifecycle keys have single cardinality.
+- **Activity tag persists through the full read path**: `last_activity_tag`
+  (the READ/EDIT/GOAL/... tag coloring an agent's activity text) flows
+  `agent_health_gauge.last_activity_tool` (column name predates its current
+  meaning) → health API's `last_activity_tag` JSON field → ctop's
+  `resolvedActivity`. Any consumer that renders activity text must carry the
+  tag alongside it — text without its tag renders dim/uncolored instead of in
+  its canonical tag color.
 - **Focus nudge**: hookd checks for any focus interval (open or closed) on
   PreToolUse and injects `additionalContext` if missing. Max 1 nudge per
   (session, agent) per turn. Cache-backed (`src/internal/server/nudge.go`).
@@ -372,10 +409,22 @@ Agent-Teams teammates run as separate top-level sessions (see Pitfalls).
 
 - MCP config lives in `~/.claude.json` (`claude mcp add-json --scope user`),
   **not** `~/.claude/mcp.json` — that path is not read by Claude Code.
-- `SubagentStart` / `SubagentStop` hooks do **not** fire for Agent Teams.
-  On the **hub/Linux**, teammate events appear as regular tool calls within the
-  lead's session_id, and identity comes from the `agent_type` field on hook
-  payloads.
+- On the **hub/Linux**, Agent-Teams teammate events mostly appear as regular
+  tool calls within the lead's session_id, and identity comes from the
+  `agent_type` field on hook payloads. But `SubagentStart` **does** fire for
+  a teammate — on every turn-resume (mailbox wakeup), not just true Agent-tool
+  spawns — carrying the SAME `agent_type` as the teammate's very first event.
+  `agent_type` alone can't tell "new entity" from "known entity resuming," so
+  hookd's `SubagentStart` handler checks the **persistent roster store**
+  first (`ResolveRosterID`) before registering — the in-memory session
+  tracker isn't a safe-enough guard either, since its own eviction sweep can
+  make a long-idle teammate's resume falsely look brand new
+  (`internal/server/server.go`'s `dispatchObservability`,
+  `subagent_start_dedup_test.go`). Two more hook events exist purely for
+  Agent-Teams awareness and carry `teammate_name` instead of `agent_type`:
+  `TeammateIdle` (only push signal for a teammate's idle transition — without
+  it turn state only flips on `Stop`) and `TaskCompleted` (per finished
+  in-progress task at turn end, log-only).
 - **macOS teammates differ — separate top-level sessions, no `agent_type`.** On
   macOS, each Agent-Teams teammate runs as its own top-level Claude Code session
   (distinct `session_id`, its own `~/.claude/projects/<proj>/<session>.jsonl`
@@ -451,6 +500,7 @@ Agent-Teams teammates run as separate top-level sessions (see Pitfalls).
 | `skel/doc/specs/semantic-conventions.md` | **Current** | JSONL field conventions, tag taxonomy, WMS entity types, state machine, session mode / `setMode` signal, cost attribution methods, close-out warnings, two-focus distinction, Codex runtime conventions (`runtime` enum, session identity, subagent thread model) |
 | `skel/lib/plugin/skills/bootstrap/references/eight-rules.md` | **Canonical protocol** | The Eight Rules |
 | `skel/lib/plugin/skills/bootstrap/references/field-guide.md` | **Canonical lessons** | Practical operating and development lessons |
+| `skel/lib/plugin/skills/bootstrap/references/muster-guide.md` | **Current** | Muster roster + health awareness for team leads |
 | `skel/lib/plugin/skills/seasoning/SKILL.md` | **Current** | Iterative spec refinement skill |
 | `skel/lib/plugin/skills/solo/SKILL.md` | **Current** | Single-agent (subagent) mode — interview-driven selection; authoritative for the shipped solo mode |
 | `skel/lib/plugin/skills/sweep/SKILL.md` | **Current** | Attribution sweep for `claude --print` |

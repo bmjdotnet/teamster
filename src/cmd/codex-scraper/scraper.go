@@ -399,7 +399,8 @@ func (s *scraper) emitLedgerRow(timestamp string, u tokenUsage, cursor *cursorEn
 			"session_id", cursor.SessionID, "input", u.InputTokens, "cached_input", u.CachedInputTokens)
 		uncachedInput = 0
 	}
-	costUSD := pricing.ComputeCost(cursor.Model, uncachedInput, u.OutputTokens, u.CachedInputTokens, 0)
+	// OpenAI/Codex has no cache-write concept — both TTL buckets are 0.
+	costUSD := pricing.ComputeCost(cursor.Model, uncachedInput, u.OutputTokens, u.CachedInputTokens, 0, 0)
 
 	ts, err := time.Parse(time.RFC3339Nano, timestamp)
 	if err != nil {

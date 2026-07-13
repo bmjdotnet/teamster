@@ -1,0 +1,679 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Muster — Agent Health</title>
+<script src="https://unpkg.com/htmx.org@2.0.4"></script>
+<script src="https://unpkg.com/htmx-ext-sse@2.3.0/sse.js"></script>
+<style>
+* { box-sizing: border-box; }
+body { background:#1a1a2e; color:#e0e0e0; font-family:'JetBrains Mono','Fira Code',monospace; font-size:13px; margin:0; padding:16px; }
+h1 { color:#ffc83c; font-size:18px; margin:0 0 4px 0; }
+nav { margin-bottom:12px; }
+nav a { color:#5099ff; text-decoration:none; margin-right:12px; }
+
+.status-line { color:#888; font-size:12px; margin-bottom:12px; display:flex; align-items:center; gap:16px; flex-wrap:wrap; }
+.dot-ok { color:#3fb950; }
+.dot-bad { color:#f85149; }
+.scope-toggle { margin-left:auto; display:flex; gap:4px; }
+.scope-toggle button { background:#22223a; color:#5099ff; border:1px solid #333; border-radius:3px; padding:3px 10px; font-family:inherit; font-size:12px; cursor:pointer; }
+.scope-toggle button.active { background:#5099ff; color:#0d1117; }
+
+#alerts-banner { display:none; background:#3a2a1a; border:1px solid #d29922; color:#e3b341; padding:8px 12px; border-radius:4px; margin-bottom:12px; font-weight:bold; cursor:pointer; }
+#alerts-banner.has-critical { background:#3a1a1a; border-color:#f85149; color:#ff8a8a; }
+
+.table-wrap { overflow-x:auto; margin-bottom:16px; border:1px solid #333; border-radius:4px; }
+table { border-collapse:collapse; width:100%; min-width:900px; }
+th, td { padding:6px 10px; text-align:left; white-space:nowrap; }
+th { background:#22223a; color:#999; font-size:11px; text-transform:uppercase; border-bottom:1px solid #333; }
+th.sortable { cursor:pointer; user-select:none; }
+th.sortable:hover { color:#ccc; }
+th.sorted { color:#5099ff; }
+tbody tr { border-bottom:1px solid #26263e; cursor:pointer; }
+tbody tr:hover { background:#22223a; }
+tbody tr.selected { background:#2a2a4a; }
+tbody tr.dim { opacity:0.5; }
+td.focus-cell { max-width:280px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+.live-live { color:#3fb950; }
+.live-idle { color:#e0e0e0; }
+.live-stale { color:#d29922; }
+.live-closed { color:#666; }
+.live-unbound { color:#666; }
+.live-none { color:#666; }
+
+.bar { display:inline-block; width:80px; height:8px; background:#26263e; border-radius:4px; overflow:hidden; vertical-align:middle; margin-right:6px; }
+.bar .fill { height:100%; }
+.fill.pressure-ok { background:#5099ff; }
+.fill.pressure-warning { background:#d29922; }
+.fill.pressure-critical { background:#f85149; }
+.ctx-pct { display:inline-block; width:34px; text-align:right; }
+
+.press-ok { color:#888; }
+.press-warning { color:#d29922; font-weight:bold; }
+.press-critical { color:#f85149; font-weight:bold; }
+
+.lower-row { display:grid; grid-template-columns:minmax(320px,2fr) 3fr; gap:12px; }
+@media (max-width:800px) {
+  .lower-row { grid-template-columns:1fr; }
+  .panel { max-height:40vh; }
+}
+
+.panel { border:1px solid #333; border-radius:4px; background:#16162a; display:flex; flex-direction:column; min-height:200px; max-height:60vh; }
+.panel h2 { font-size:13px; color:#999; margin:0; padding:8px 12px; border-bottom:1px solid #333; display:flex; justify-content:space-between; align-items:center; font-weight:normal; text-transform:uppercase; }
+.panel .body { padding:10px 12px; overflow-y:auto; flex:1; }
+
+#detail-close { background:none; border:none; color:#888; cursor:pointer; font-size:14px; line-height:1; }
+#detail-close:hover { color:#e0e0e0; }
+
+.alert-row { padding:4px 0; border-bottom:1px solid #26263e; font-size:12px; }
+.alert-row:last-child { border-bottom:none; }
+.no-alerts { color:#666; text-align:center; padding:20px 0; }
+
+.detail-line { margin-bottom:8px; }
+.detail-label { color:#888; }
+details.diagnostics { margin-top:8px; color:#888; font-size:12px; }
+details.diagnostics summary { cursor:pointer; color:#5099ff; }
+
+/* Composition stacked bar — same color mapping as ctop's SegmentedBar
+   (cmd/ctop/format.go): text = default text color, tool_use = blue
+   (reading_pct folded in — both are "tool activity"), thinking = yellow.
+   Unlike the context-fill bar above, this bar always sums to 100% — there
+   is no "free" segment here, composition describes what's already spent. */
+.comp-bar { display:flex; width:200px; height:8px; border-radius:4px; overflow:hidden; background:#26263e; margin:4px 0; }
+.comp-seg-text { background:#e0e0e0; }
+.comp-seg-tool { background:#5099ff; }
+.comp-seg-think { background:#d29922; }
+.comp-legend { display:flex; gap:14px; font-size:11px; color:#999; }
+.comp-legend .swatch { display:inline-block; width:8px; height:8px; border-radius:2px; margin-right:4px; vertical-align:middle; }
+
+#activity-filter { width:100%; background:#0d1117; color:#c9d1d9; border:1px solid #333; border-radius:3px; padding:4px 8px; font-family:inherit; font-size:12px; margin-bottom:8px; }
+#activity { font-size:12px; }
+#activity .event { padding:2px 0; white-space:pre-wrap; word-break:break-word; }
+#activity .event.filtered-out, #activity .focus-line.filtered-out { display:none; }
+.tag { font-weight:bold; }
+.tag-GOAL { color:#ffc83c; font-weight:bold; }
+.tag-THNK { color:#8caa82; }
+.tag-DONE { color:#006600; font-weight:bold; }
+.tag-READ { color:#0000ff; }
+.tag-EDIT { color:#808000; }
+.tag-GREP { color:#788cc8; }
+.tag-ACT  { color:#e69632; }
+.tag-EXEC { color:#b4a03c; }
+.tag-TEAM { color:#b478dc; }
+.tag-COMM { color:#968cd2; }
+.tag-TASK { color:#3cbeb4; }
+.tag-WEB  { color:#d282b4; }
+.tag-ASK  { color:#ff6464; }
+.tag-PLAN { color:#a0a0dc; }
+.tag-TOOL { color:#a0a0a0; }
+.tag-WARN { color:#ffa028; }
+.ts { color:#666666; }
+.agent { font-weight:bold; }
+.param { color:#33ccff; }
+.focus-line { color:#ffc83c; font-weight:bold; border-bottom:1px solid #333; margin:4px 0; padding:2px 0; }
+</style>
+</head>
+<body>
+<h1>Muster — Agent Health</h1>
+<nav>
+  <a href="/">Activity Stream</a>
+  <a href="/wms">WMS State</a>
+  <a href="/health/dashboard">Health</a>
+</nav>
+
+<div class="status-line">
+  <span><span id="sse-dot">●</span> <span id="sse-label">sse connecting…</span></span>
+  <span id="poll-status">loading…</span>
+  <span id="agent-count"></span>
+  <div class="scope-toggle">
+    <button id="scope-live" class="active">live</button>
+    <button id="scope-recent">recent</button>
+  </div>
+</div>
+
+<div id="alerts-banner"></div>
+
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th class="sortable" data-key="name">Agent</th>
+        <th>Team</th>
+        <th>Host</th>
+        <th>RT</th>
+        <th>Model</th>
+        <th>Live</th>
+        <th class="sortable" data-key="fill">Ctx</th>
+        <th class="sortable sorted" data-key="pressure">Press</th>
+        <th>Tokens</th>
+        <th>Cost</th>
+        <th title="tool_calls_total">T</th>
+        <th class="sortable" data-key="last">Last</th>
+        <th>Focus</th>
+      </tr>
+    </thead>
+    <tbody id="agents-body">
+      <tr><td colspan="13" style="text-align:center;color:#666;padding:20px">Loading…</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="lower-row">
+  <div class="panel" id="detail-panel">
+    <h2><span id="detail-title">Alerts</span><button id="detail-close" style="display:none">×</button></h2>
+    <div class="body" id="detail-body">Loading…</div>
+  </div>
+  <div class="panel">
+    <h2>Activity</h2>
+    <div class="body" id="activity-scroll">
+      <input id="activity-filter" type="text" placeholder="filter by substring…">
+      <div id="activity"
+           hx-ext="sse"
+           sse-connect="/health/stream?history=50"
+           sse-swap="message"
+           hx-swap="beforeend"
+           hx-target="#activity">
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  const state = {
+    agents: [],
+    alerts: [],
+    scope: 'live',
+    sortKey: 'pressure',
+    selectedRosterId: null, // rosterKey() of the selected row, not necessarily a real roster_id
+  };
+
+  const pressureRank = { critical: 0, warning: 1, ok: 2, '': 3 };
+
+  function el(tag, opts) {
+    const e = document.createElement(tag);
+    if (opts) {
+      if (opts.cls) e.className = opts.cls;
+      if (opts.text !== undefined) e.textContent = opts.text;
+    }
+    return e;
+  }
+
+  function fmtPct(v) {
+    // context_fill_pct is a 0..1 fraction; clamp the *displayed* percentage to
+    // [0,100] too, not just the bar width — a stale/overflowed gauge row can
+    // carry a fraction > 1.
+    return Math.max(0, Math.min(100, Math.round((v || 0) * 100)));
+  }
+
+  function fmtTokens(n) {
+    n = n || 0;
+    if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+    if (n >= 1e3) return Math.round(n / 1e3) + 'k';
+    return String(n);
+  }
+
+  function fmtCost(usd) {
+    return '$' + (usd || 0).toFixed(2);
+  }
+
+  function fmtRelative(iso) {
+    if (!iso) return '—';
+    const t = new Date(iso).getTime();
+    if (isNaN(t)) return '—';
+    const deltaS = Math.max(0, Math.round((Date.now() - t) / 1000));
+    if (deltaS < 60) return deltaS + 's';
+    const m = Math.round(deltaS / 60);
+    if (m < 60) return m + 'm';
+    const h = Math.round(m / 60);
+    if (h < 24) return h + 'h';
+    return Math.round(h / 24) + 'd';
+  }
+
+  function livenessBadge(liveness) {
+    const table = {
+      live:    ['● live', 'live-live'],
+      idle:    ['◌ idle', 'live-idle'],
+      stale:   ['○ stale', 'live-stale'],
+      closed:  ['✕ closed', 'live-closed'],
+      unbound: ['? unbnd', 'live-unbound'],
+    };
+    const hit = table[liveness];
+    return hit ? { text: hit[0], cls: hit[1] } : { text: '—', cls: 'live-none' };
+  }
+
+  function pressureBadge(level) {
+    if (level === 'critical') return { text: 'CRIT', cls: 'press-critical' };
+    if (level === 'warning') return { text: 'WARN', cls: 'press-warning' };
+    return { text: 'ok', cls: 'press-ok' };
+  }
+
+  function atName(name) {
+    name = name || '';
+    return name.startsWith('@') ? name : '@' + name;
+  }
+
+  function rosterKey(a) {
+    return a.roster_id || ((a.session_id || '') + '|' + (a.agent_name || ''));
+  }
+
+  function sortAgents(rows) {
+    const arr = rows.slice();
+    arr.sort((a, b) => {
+      switch (state.sortKey) {
+        case 'fill':
+          return (b.context_fill_pct || 0) - (a.context_fill_pct || 0);
+        case 'name':
+          return (a.agent_name || '').localeCompare(b.agent_name || '');
+        case 'last': {
+          const ta = a.last_activity_ts ? new Date(a.last_activity_ts).getTime() : 0;
+          const tb = b.last_activity_ts ? new Date(b.last_activity_ts).getTime() : 0;
+          return tb - ta;
+        }
+        case 'pressure':
+        default: {
+          const pa = pressureRank[a.pressure_level] ?? 3;
+          const pb = pressureRank[b.pressure_level] ?? 3;
+          if (pa !== pb) return pa - pb;
+          if ((b.context_fill_pct || 0) !== (a.context_fill_pct || 0)) return (b.context_fill_pct || 0) - (a.context_fill_pct || 0);
+          return (a.agent_name || '').localeCompare(b.agent_name || '');
+        }
+      }
+    });
+    return arr;
+  }
+
+  function renderAgents() {
+    const tbody = document.getElementById('agents-body');
+    tbody.innerHTML = '';
+    const rows = sortAgents(state.agents);
+    if (rows.length === 0) {
+      const tr = el('tr');
+      const td = el('td', { text: 'No agents.' });
+      td.colSpan = 13;
+      td.style.textAlign = 'center'; td.style.color = '#666'; td.style.padding = '20px';
+      tr.appendChild(td);
+      tbody.appendChild(tr);
+      document.getElementById('agent-count').textContent = '';
+      return;
+    }
+    let liveCount = 0, idleCount = 0;
+    rows.forEach(a => {
+      if (a.liveness === 'live') liveCount++;
+      if (a.liveness === 'idle') idleCount++;
+      const key = rosterKey(a);
+      const tr = el('tr');
+      if (a.liveness === 'stale' || a.liveness === 'closed') tr.classList.add('dim');
+      if (state.selectedRosterId === key) tr.classList.add('selected');
+
+      tr.appendChild(el('td', { text: atName(a.agent_name) }));
+      tr.appendChild(el('td', { text: a.team_name || '—' }));
+      tr.appendChild(el('td', { text: a.host || '' }));
+      tr.appendChild(el('td', { text: a.runtime === 'codex' ? 'cdx' : (a.runtime === 'claude_code' ? 'cc' : (a.runtime || '')) }));
+      tr.appendChild(el('td', { text: (a.model || '').replace(/^claude-/, '') }));
+
+      const lv = livenessBadge(a.liveness);
+      const liveTd = el('td');
+      liveTd.appendChild(el('span', { cls: lv.cls, text: lv.text }));
+      tr.appendChild(liveTd);
+
+      const ctxTd = el('td');
+      const pct = fmtPct(a.context_fill_pct);
+      const bar = el('div', { cls: 'bar' });
+      const fill = el('div', { cls: 'fill pressure-' + (a.pressure_level || 'ok') });
+      fill.style.width = pct + '%';
+      bar.appendChild(fill);
+      ctxTd.appendChild(bar);
+      ctxTd.appendChild(el('span', { cls: 'ctx-pct', text: pct + '%' }));
+      tr.appendChild(ctxTd);
+
+      const pb = pressureBadge(a.pressure_level);
+      const pressTd = el('td');
+      pressTd.appendChild(el('span', { cls: pb.cls, text: pb.text }));
+      tr.appendChild(pressTd);
+
+      tr.appendChild(el('td', { text: fmtTokens(a.tokens_in_total) + '/' + fmtTokens(a.tokens_out_total) }));
+      tr.appendChild(el('td', { text: fmtCost(a.session_cost_usd) }));
+      tr.appendChild(el('td', { text: fmtTokens(a.tool_calls_total) }));
+      tr.appendChild(el('td', { text: fmtRelative(a.last_activity_ts) }));
+      tr.appendChild(el('td', { cls: 'focus-cell', text: a.current_focus || '—' }));
+
+      tr.addEventListener('click', () => selectAgent(key, a.roster_id || ''));
+      tbody.appendChild(tr);
+    });
+    document.getElementById('agent-count').textContent = rows.length + ' agents (' + liveCount + ' live · ' + idleCount + ' idle)';
+  }
+
+  function renderAlertsBanner() {
+    const banner = document.getElementById('alerts-banner');
+    const crit = state.alerts.filter(a => a.pressure_level === 'critical').length;
+    const warn = state.alerts.filter(a => a.pressure_level === 'warning').length;
+    if (crit + warn === 0) {
+      banner.style.display = 'none';
+      return;
+    }
+    banner.style.display = 'block';
+    banner.classList.toggle('has-critical', crit > 0);
+    banner.textContent = '⚠ ' + warn + ' warning · ' + crit + ' critical';
+  }
+
+  function renderAlertsCard() {
+    document.getElementById('detail-title').textContent = 'Alerts (' + state.alerts.length + ')';
+    document.getElementById('detail-close').style.display = 'none';
+    const body = document.getElementById('detail-body');
+    body.innerHTML = '';
+    if (state.alerts.length === 0) {
+      body.appendChild(el('div', { cls: 'no-alerts', text: 'all agents ok' }));
+      return;
+    }
+    const sorted = state.alerts.slice().sort((a, b) => (pressureRank[a.pressure_level] ?? 3) - (pressureRank[b.pressure_level] ?? 3));
+    sorted.forEach(a => {
+      const row = el('div', { cls: 'alert-row' });
+      const pb = pressureBadge(a.pressure_level);
+      row.appendChild(el('span', { cls: pb.cls, text: pb.text + ' ' }));
+      row.appendChild(el('span', { text: atName(a.agent_name) + '  ' }));
+      row.appendChild(el('span', { text: (a.team_name || '—') + '/' + (a.host || '') + '  ' }));
+      row.appendChild(el('span', { text: fmtPct(a.context_fill_pct) + '%  ' }));
+      row.appendChild(el('span', { text: a.current_focus || '' }));
+      body.appendChild(row);
+    });
+  }
+
+  // renderCompositionBar builds the composition stacked-bar block: text /
+  // tool_use (reading_pct folded in, same as ctop's SegmentedBar) / thinking,
+  // each a CSS-width segment of a 100%-wide bar, plus a labeled legend line.
+  // Percentages already sum to ~1.0 (health-collector's percentages());
+  // clamp defensively rather than trust the wire value blindly.
+  function renderCompositionBar(comp) {
+    const pct = (v) => Math.max(0, Math.min(100, Math.round((v || 0) * 100)));
+    const textPct = pct(comp.text_pct);
+    const toolPct = pct((comp.tool_use_pct || 0) + (comp.reading_pct || 0));
+    const thinkPct = pct(comp.thinking_pct);
+
+    const block = el('div', { cls: 'detail-line' });
+    block.appendChild(el('div', { cls: 'detail-label', text: 'composition' }));
+
+    const bar = el('div', { cls: 'comp-bar' });
+    const segText = el('div', { cls: 'comp-seg-text' });
+    segText.style.width = textPct + '%';
+    const segTool = el('div', { cls: 'comp-seg-tool' });
+    segTool.style.width = toolPct + '%';
+    const segThink = el('div', { cls: 'comp-seg-think' });
+    segThink.style.width = thinkPct + '%';
+    bar.appendChild(segText);
+    bar.appendChild(segTool);
+    bar.appendChild(segThink);
+    block.appendChild(bar);
+
+    const legend = el('div', { cls: 'comp-legend' });
+    const item = (cls, label, v) => {
+      const span = el('span');
+      span.appendChild(el('span', { cls: 'swatch ' + cls }));
+      span.appendChild(document.createTextNode(label + ' ' + Math.round(v * 100) + '%'));
+      return span;
+    };
+    legend.appendChild(item('comp-seg-text', 'text', comp.text_pct || 0));
+    legend.appendChild(item('comp-seg-tool', 'tool_use', (comp.tool_use_pct || 0) + (comp.reading_pct || 0)));
+    legend.appendChild(item('comp-seg-think', 'thinking', comp.thinking_pct || 0));
+    block.appendChild(legend);
+
+    return block;
+  }
+
+  function renderSnapshot(snap) {
+    document.getElementById('detail-title').textContent = atName(snap.agent_name);
+    document.getElementById('detail-close').style.display = 'inline';
+    const body = document.getElementById('detail-body');
+    body.innerHTML = '';
+
+    const lv = livenessBadge(snap.liveness);
+    const line1 = el('div', { cls: 'detail-line' });
+    line1.appendChild(el('span', { cls: 'detail-label', text: 'roster ' }));
+    line1.appendChild(el('span', { text: (snap.roster_id || '—') + '   ' }));
+    line1.appendChild(el('span', { cls: 'detail-label', text: 'liveness ' }));
+    line1.appendChild(el('span', { cls: lv.cls, text: lv.text }));
+    body.appendChild(line1);
+
+    const pct = fmtPct(snap.context_fill_pct);
+    const line2 = el('div', { cls: 'detail-line' });
+    const bar = el('div', { cls: 'bar' });
+    bar.style.width = '120px';
+    const fill = el('div', { cls: 'fill pressure-' + (snap.pressure_level || 'ok') });
+    fill.style.width = Math.max(0, Math.min(100, pct)) + '%';
+    bar.appendChild(fill);
+    line2.appendChild(bar);
+    line2.appendChild(el('span', {
+      text: ' ' + pct + '% (' + (snap.context_tokens_used || 0).toLocaleString() + ' / ' +
+        (snap.context_window_tokens || 0).toLocaleString() + ' · ' +
+        (snap.context_tokens_free || 0).toLocaleString() + ' free)'
+    }));
+    body.appendChild(line2);
+
+    const line3 = el('div', { cls: 'detail-line' });
+    line3.appendChild(el('span', { cls: 'detail-label', text: 'long-context ' }));
+    line3.appendChild(el('span', { text: (snap.long_context_active ? 'yes' : 'no') + '   ' }));
+    line3.appendChild(el('span', { cls: 'detail-label', text: 'reset-suspected ' }));
+    line3.appendChild(el('span', { text: snap.context_reset_suspected ? 'yes' : 'no' }));
+    body.appendChild(line3);
+
+    const pb = pressureBadge(snap.pressure_level);
+    const line4 = el('div', { cls: 'detail-line' });
+    line4.appendChild(el('span', { cls: pb.cls, text: pb.text }));
+    body.appendChild(line4);
+
+    const line5 = el('div', { cls: 'detail-line' });
+    line5.appendChild(el('span', { cls: 'detail-label', text: 'tokens ' }));
+    line5.appendChild(el('span', { text: 'in ' + fmtTokens(snap.tokens_in_total) + ' · out ' + fmtTokens(snap.tokens_out_total) + '   ' }));
+    line5.appendChild(el('span', { cls: 'detail-label', text: 'cost ' }));
+    line5.appendChild(el('span', { text: fmtCost(snap.session_cost_usd) + '   ' }));
+    line5.appendChild(el('span', { cls: 'detail-label', text: 'model ' }));
+    line5.appendChild(el('span', { text: snap.model || '' }));
+    body.appendChild(line5);
+
+    const line6 = el('div', { cls: 'detail-line' });
+    line6.appendChild(el('span', { cls: 'detail-label', text: 'runtime ' }));
+    line6.appendChild(el('span', { text: (snap.runtime || '') + '   ' }));
+    line6.appendChild(el('span', { cls: 'detail-label', text: 'host ' }));
+    line6.appendChild(el('span', { text: snap.host || '' }));
+    body.appendChild(line6);
+
+    if (snap.current_focus) {
+      const line7 = el('div', { cls: 'detail-line' });
+      line7.appendChild(el('span', { cls: 'detail-label', text: 'focus ' }));
+      line7.appendChild(el('span', { text: snap.current_focus }));
+      body.appendChild(line7);
+    }
+
+    // Diagnostics: collector_status appears ONLY here (never in the grid), plus
+    // fidelity_notes when present — collapsed by default, the web equivalent of
+    // the TUI's dim detail-only line.
+    const details = el('details', { cls: 'diagnostics' });
+    details.appendChild(el('summary', { text: 'diagnostics' }));
+    details.appendChild(el('div', { text: 'collector: ' + (snap.collector_status || '—') }));
+    if (snap.fidelity_notes) {
+      details.appendChild(el('div', { text: '~ ' + snap.fidelity_notes }));
+    }
+    body.appendChild(details);
+
+    // composition_json / tool_call_counts_json: nullable, rendered only when present.
+    if (snap.composition_json) {
+      try {
+        const comp = JSON.parse(snap.composition_json);
+        body.appendChild(renderCompositionBar(comp));
+      } catch (e) { /* malformed JSON — skip silently */ }
+    }
+    if (snap.tool_call_counts_json) {
+      try {
+        const counts = JSON.parse(snap.tool_call_counts_json);
+        const entries = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 5);
+        const block = el('div', { cls: 'detail-line' });
+        block.appendChild(el('div', { cls: 'detail-label', text: 'tool calls' }));
+        entries.forEach(([name, count]) => {
+          block.appendChild(el('div', { text: name + ' × ' + count }));
+        });
+        body.appendChild(block);
+      } catch (e) { /* malformed JSON — skip silently */ }
+    }
+    // statusline_json: whatever statusLine fields don't warrant their own
+    // column (cache tokens, subagent task status) — same generic
+    // top-N-by-value rendering as tool_call_counts_json.
+    if (snap.statusline_json) {
+      try {
+        const extra = JSON.parse(snap.statusline_json);
+        const entries = Object.entries(extra).sort((a, b) => (b[1] > a[1] ? 1 : -1)).slice(0, 5);
+        const block = el('div', { cls: 'detail-line' });
+        block.appendChild(el('div', { cls: 'detail-label', text: 'statusline' }));
+        entries.forEach(([name, value]) => {
+          block.appendChild(el('div', { text: name + ' ' + value }));
+        });
+        body.appendChild(block);
+      } catch (e) { /* malformed JSON — skip silently */ }
+    }
+  }
+
+  function scopeQuery() {
+    if (state.scope === 'recent') {
+      return '?liveness=live&liveness=idle&liveness=stale&liveness=closed';
+    }
+    return '';
+  }
+
+  async function fetchSnapshot(rosterId) {
+    if (!rosterId) {
+      document.getElementById('detail-title').textContent = 'Detail';
+      document.getElementById('detail-close').style.display = 'inline';
+      document.getElementById('detail-body').textContent = 'no snapshot: agent has no roster binding';
+      return;
+    }
+    try {
+      const r = await fetch('/health/api/agents/' + encodeURIComponent(rosterId));
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const snap = await r.json();
+      renderSnapshot(snap || {});
+    } catch (e) {
+      document.getElementById('detail-body').textContent = 'snapshot unavailable: ' + e.message;
+    }
+  }
+
+  function selectAgent(key, rosterId) {
+    if (state.selectedRosterId === key) {
+      state.selectedRosterId = null;
+      renderAgents();
+      renderAlertsCard();
+      return;
+    }
+    state.selectedRosterId = key;
+    renderAgents();
+    fetchSnapshot(rosterId);
+  }
+
+  function deselect() {
+    state.selectedRosterId = null;
+    renderAgents();
+    renderAlertsCard();
+  }
+
+  document.getElementById('detail-close').addEventListener('click', deselect);
+  document.getElementById('alerts-banner').addEventListener('click', () => {
+    deselect();
+    document.getElementById('detail-panel').scrollIntoView({ behavior: 'smooth', block: 'center' });
+  });
+
+  function setPollStatus(ok) {
+    const elm = document.getElementById('poll-status');
+    if (ok) {
+      elm.textContent = 'poll ok';
+      elm.style.color = '#3fb950';
+    } else {
+      elm.textContent = 'poll ✗ stale';
+      elm.style.color = '#f85149';
+    }
+  }
+
+  async function refresh() {
+    try {
+      const [agentsResp, alertsResp] = await Promise.all([
+        fetch('/health/api/agents' + scopeQuery()).then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }),
+        fetch('/health/api/alerts').then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }),
+      ]);
+      state.agents = agentsResp || []; // null-tolerant: DashboardJSON passes through a nil-slice `null`
+      state.alerts = alertsResp || [];
+      renderAgents();
+      renderAlertsBanner();
+      if (state.selectedRosterId) {
+        const cur = state.agents.find(a => rosterKey(a) === state.selectedRosterId);
+        if (cur) fetchSnapshot(cur.roster_id || '');
+      } else {
+        renderAlertsCard();
+      }
+      setPollStatus(true);
+    } catch (e) {
+      setPollStatus(false); // keep last-good render, don't blank the page
+    }
+  }
+
+  document.querySelectorAll('th.sortable').forEach(th => {
+    th.addEventListener('click', () => {
+      state.sortKey = th.dataset.key;
+      document.querySelectorAll('th.sortable').forEach(x => x.classList.remove('sorted'));
+      th.classList.add('sorted');
+      renderAgents();
+    });
+  });
+
+  document.getElementById('scope-live').addEventListener('click', () => {
+    state.scope = 'live';
+    document.getElementById('scope-live').classList.add('active');
+    document.getElementById('scope-recent').classList.remove('active');
+    refresh();
+  });
+  document.getElementById('scope-recent').addEventListener('click', () => {
+    state.scope = 'recent';
+    document.getElementById('scope-recent').classList.add('active');
+    document.getElementById('scope-live').classList.remove('active');
+    refresh();
+  });
+
+  const activityFilter = document.getElementById('activity-filter');
+  function applyActivityFilter() {
+    const q = activityFilter.value.trim().toLowerCase();
+    document.querySelectorAll('#activity .event, #activity .focus-line').forEach(evt => {
+      if (!q) { evt.classList.remove('filtered-out'); return; }
+      evt.classList.toggle('filtered-out', !evt.textContent.toLowerCase().includes(q));
+    });
+  }
+  activityFilter.addEventListener('input', applyActivityFilter);
+
+  // Auto-scroll adapted from dashboard.html's window-scoped version, but scoped
+  // to this panel's own scroll container since activity here is one region, not
+  // the whole page.
+  const activityScroll = document.getElementById('activity-scroll');
+  let autoScroll = true;
+  activityScroll.addEventListener('scroll', () => {
+    autoScroll = (activityScroll.scrollTop + activityScroll.clientHeight) >= (activityScroll.scrollHeight - 50);
+  });
+  const observer = new MutationObserver(() => {
+    applyActivityFilter();
+    if (autoScroll) activityScroll.scrollTop = activityScroll.scrollHeight;
+  });
+  observer.observe(document.getElementById('activity'), { childList: true });
+
+  document.body.addEventListener('htmx:sseOpen', () => {
+    document.getElementById('sse-dot').className = 'dot-ok';
+    document.getElementById('sse-label').textContent = 'sse ●';
+  });
+  document.body.addEventListener('htmx:sseError', () => {
+    document.getElementById('sse-dot').className = 'dot-bad';
+    document.getElementById('sse-label').textContent = 'sse ○ reconnecting';
+  });
+
+  setInterval(() => { if (!document.hidden) refresh(); }, 5000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
+
+  refresh();
+})();
+</script>
+</body>
+</html>

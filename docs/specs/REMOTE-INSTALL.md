@@ -311,7 +311,11 @@ Merged keys (existing keys preserved, never overwritten):
     "PreToolUse":       [{"matcher":"","hooks":[{"type":"command","command":"~/teamster/bin/teamster","timeout":10}]}],
     "PostToolUse":      [{"matcher":"","hooks":[{"type":"command","command":"~/teamster/bin/teamster","timeout":10}]}],
     "PostToolUseFailure":[{"matcher":"","hooks":[{"type":"command","command":"~/teamster/bin/teamster","timeout":10}]}],
-    "Stop":             [{"matcher":"","hooks":[{"type":"command","command":"~/teamster/bin/teamster","timeout":10}]}]
+    "Stop":             [{"matcher":"","hooks":[{"type":"command","command":"~/teamster/bin/teamster","timeout":10}]}],
+    "SubagentStart":    [{"matcher":"","hooks":[{"type":"command","command":"~/teamster/bin/teamster","timeout":10}]}],
+    "SubagentStop":     [{"matcher":"","hooks":[{"type":"command","command":"~/teamster/bin/teamster","timeout":10}]}],
+    "TeammateIdle":     [{"matcher":"","hooks":[{"type":"command","command":"~/teamster/bin/teamster","timeout":10}]}],
+    "TaskCompleted":    [{"matcher":"","hooks":[{"type":"command","command":"~/teamster/bin/teamster","timeout":10}]}]
   },
   "env": {
     "TEAMSTER_HOOK_SERVER_URL": "http://<hub>:9125/event",
@@ -349,6 +353,19 @@ claude mcp add --transport http --scope user wms      http://<hub>:9125/mcp/wms
 This is what makes the architecture work: the remote's Claude Code, when it
 needs to call `reportActivity` or `wms_createOutcome`, opens an HTTP connection
 to the hub's hookd, which serves the MCP. No MCP process on the remote.
+
+**Roster and health MCP endpoints (known gap).** hookd also serves
+`/mcp/roster` (agent roster, 7 tools) and `/mcp/health` (agent health, 4
+tools) over HTTP-MCP, but these are not yet registered on remotes by the
+installer. Adding them follows the same pattern:
+
+```bash
+claude mcp add --transport http --scope user roster http://<hub>:9125/mcp/roster
+claude mcp add --transport http --scope user health http://<hub>:9125/mcp/health
+```
+
+This is a v0.2.5 gap — the endpoints exist and work, but agents cannot call
+them until the installer registers them. Planned for the next release.
 
 ### UserPromptSubmit context (the nudge, for remotes)
 

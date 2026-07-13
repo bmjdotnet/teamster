@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"time"
 
+	"github.com/bmjdotnet/teamster/internal/roster"
 	"github.com/bmjdotnet/teamster/internal/store"
 )
 
@@ -15,15 +17,17 @@ import (
 // pointer fields (team/project/goal/task/workitem/focus), since those are
 // owned by the hook/MCP-driven path this endpoint does not touch.
 type SessionRow struct {
-	SessionID  string `json:"session_id"`
-	AgentName  string `json:"agent_name"`
-	Host       string `json:"host"`
-	Username   string `json:"username"`
-	Runtime    string `json:"runtime"`
-	Cwd        string `json:"cwd"`
-	Model      string `json:"model"`
-	Originator string `json:"originator"`
-	CliVersion string `json:"cli_version"`
+	SessionID    string `json:"session_id"`
+	AgentName    string `json:"agent_name"`
+	Host         string `json:"host"`
+	Username     string `json:"username"`
+	Runtime      string `json:"runtime"`
+	Cwd          string `json:"cwd"`
+	Model        string `json:"model"`
+	Originator   string `json:"originator"`
+	CliVersion   string `json:"cli_version"`
+	Relationship string `json:"relationship,omitempty"`
+	BusTeam      string `json:"bus_team,omitempty"`
 }
 
 // handleSession accepts POST /session with a SessionRow JSON body and upserts
@@ -83,10 +87,34 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.obsStore.UpsertSession(context.Background(), sess); err != nil {
+	ctx := context.Background()
+	if err := s.obsStore.UpsertSession(ctx, sess); err != nil {
 		http.Error(w, "session upsert failed", http.StatusInternalServerError)
 		return
 	}
+
+	// Paired roster upsert: Codex sessions get a roster entry too.
+	// Relationship defaults to "lead" for a bare Codex session; the caller
+	// can override via the new Relationship field.
+	rel := row.Relationship
+	if rel == "" {
+		rel = "lead"
+	}
+	now := time.Now().UTC()
+	boundAt := now
+	rosterEntry := store.RosterEntry{
+		RosterID:     roster.GenerateRosterID(),
+		SessionID:    &row.SessionID,
+		AgentName:    row.AgentName,
+		Host:         row.Host,
+		Runtime:      row.Runtime,
+		Model:        row.Model,
+		Relationship: rel,
+		BusTeam:      row.BusTeam,
+		CreatedAt:    now,
+		BoundAt:      &boundAt,
+	}
+	_ = s.obsStore.UpsertRosterEntry(ctx, rosterEntry)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)

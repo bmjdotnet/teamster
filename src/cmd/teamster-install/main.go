@@ -416,7 +416,7 @@ func run() error {
 	}
 
 	// 2. Copy runtime binaries (not teamster-install itself).
-	for _, b := range []string{"teamster", "hookd", "feed", "activity-mcp", "wms-mcp", "token-scraper", "codex-scraper", "rollup", "classify", "demogen", "relay", "backup"} {
+	for _, b := range []string{"teamster", "hookd", "feed", "ctop", "activity-mcp", "wms-mcp", "roster-mcp", "health-mcp", "token-scraper", "codex-scraper", "rollup", "classify", "demogen", "relay", "backup", "health-collector"} {
 		src := filepath.Join(*buildDir, b)
 		dst := filepath.Join(*basedir, "bin", b)
 		if err := copyFile(src, dst, 0o755); err != nil {
@@ -807,6 +807,43 @@ func run() error {
 		}
 	}
 
+	// 5g. Materialize the health-collector service (Muster: per-agent token
+	// usage gauge collector, 15s poll interval). Needs the store DSN like
+	// rollup/classify — it reads token_ledger and writes agent_health_gauge
+	// directly via store.Store, no hookd dependency. Type=simple daemon (no
+	// timer), unlike rollup/classify's oneshot+timer pair.
+	healthCollectorSvcTmpl := filepath.Join(*basedir, "etc", "teamster-health-collector.service.tmpl")
+	healthCollectorSvcOut := filepath.Join(*basedir, "etc", "teamster-health-collector.service")
+	if data, err := os.ReadFile(healthCollectorSvcTmpl); err == nil {
+		user := currentUsername()
+		m := strings.ReplaceAll(string(data), "__BASEDIR__", *basedir)
+		m = strings.ReplaceAll(m, "__USER__", user)
+		if effectiveDSN != "" {
+			m = strings.TrimRight(m, "\n") + "\n" + dsnEnvLine(secretsPath)
+		}
+		if werr := os.WriteFile(healthCollectorSvcOut, []byte(m), 0o644); werr != nil {
+			fmt.Fprintf(os.Stderr, "warning: writing health-collector service unit: %v\n", werr)
+		}
+	}
+
+	// 5h. Materialize the token-scraper service (Claude Code session JSONL
+	// tailer, long-running poller). Previously managed only by the internal
+	// `teamster start` supervisor, which silently never got re-invoked on
+	// upgrade whenever grafana-mode=external (see
+	// installer-grafana-gate-token-scraper WU) — moved to a proper systemd
+	// unit, same pattern as health-collector: Type=simple, no timer,
+	// Restart=on-failure so systemd itself relaunches it on crash.
+	tokenScraperSvcTmpl := filepath.Join(*basedir, "etc", "teamster-token-scraper.service.tmpl")
+	tokenScraperSvcOut := filepath.Join(*basedir, "etc", "teamster-token-scraper.service")
+	if data, err := os.ReadFile(tokenScraperSvcTmpl); err == nil {
+		user := currentUsername()
+		m := strings.ReplaceAll(string(data), "__BASEDIR__", *basedir)
+		m = strings.ReplaceAll(m, "__USER__", user)
+		if werr := os.WriteFile(tokenScraperSvcOut, []byte(m), 0o644); werr != nil {
+			fmt.Fprintf(os.Stderr, "warning: writing token-scraper service unit: %v\n", werr)
+		}
+	}
+
 	// Write <basedir>/etc/teamster.yaml with the resolved topology. Runs in both
 	// wire and stage-only modes so operators can inspect the config before wiring.
 	writeYAMLConfig(yamlParams{
@@ -854,6 +891,7 @@ func run() error {
 	// 6. Merge hooks into ~/.claude/settings.json.
 	home := homeDir()
 	hookBin := filepath.Join(*basedir, "bin", "teamster")
+	statuslineBin := filepath.Join(*basedir, "lib", "scripts", "teamster-statusline.sh")
 	settingsPath := filepath.Join(home, ".claude", "settings.json")
 	dataDir := filepath.Join(*basedir, "var")
 	extraVars := map[string]string{}
@@ -901,16 +939,20 @@ func run() error {
 		extraVars["OTEL_RESOURCE_ATTRIBUTES"] = fmt.Sprintf("deployment.environment=%s", envLabel)
 		extraVars["CLAUDE_CODE_ENABLE_TELEMETRY"] = "1"
 	}
-	if err := mergeSettings(settingsPath, hookBin, ports.hookServerURL, dataDir, port, extraVars, domainCfg, modes, ports); err != nil {
+	if err := mergeSettings(settingsPath, hookBin, statuslineBin, ports.hookServerURL, dataDir, port, extraVars, domainCfg, modes, ports); err != nil {
 		return fmt.Errorf("merging settings.json: %w", err)
 	}
 
 	// 7. Register MCP servers.
 	activityBin := filepath.Join(*basedir, "bin", "activity-mcp")
 	wmsBin := filepath.Join(*basedir, "bin", "wms-mcp")
+	rosterBin := filepath.Join(*basedir, "bin", "roster-mcp")
+	healthBin := filepath.Join(*basedir, "bin", "health-mcp")
 	for _, mcp := range []struct{ name, bin string }{
 		{"activity", activityBin},
 		{"wms", wmsBin},
+		{"roster", rosterBin},
+		{"health", healthBin},
 	} {
 		registerMCPServer(mcp.name, mcp.bin)
 	}
@@ -966,6 +1008,8 @@ Teamster installed to: %s
   hook binary:   %s
   MCP activity:  %s
   MCP wms:       %s
+  MCP roster:    %s
+  MCP health:    %s
   settings:      %s (merged)
   CLAUDE.md:     %s (updated)
   plugin:        %s
@@ -976,7 +1020,7 @@ Watch activity:  %s
 `,
 		*basedir,
 		binPath, dataDir,
-		port, hookBin, activityBin, wmsBin,
+		port, hookBin, activityBin, wmsBin, rosterBin, healthBin,
 		settingsPath, claudeMDPath, pluginStatus, codexStatus,
 		filepath.Join(*basedir, "bin", "hookd"),
 		filepath.Join(*basedir, "bin", "feed"),
@@ -1433,6 +1477,18 @@ type hookMatcher struct {
 	Hooks   []hookEntry `json:"hooks"`
 }
 
+// hookEventNames is the full set of Claude Code hook events Teamster wires
+// itself into, shared by both the live-settings merge and the fragment
+// writer so the two paths can never drift apart. SubagentStart/SubagentStop
+// fire for Agent-tool (Task tool) subagent spawns — a different population
+// from Agent Teams teammates, which do not fire these (see CLAUDE.md
+// Pitfalls). TeammateIdle is the only push signal for teammate idle
+// transitions; TaskCompleted fires per in_progress task at turn end.
+var hookEventNames = []string{
+	"UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure", "Stop",
+	"SubagentStart", "SubagentStop", "TeammateIdle", "TaskCompleted",
+}
+
 // mergeSettings reads settings.json, applies the domain-named server flags
 // (--prometheus-url / --otlp-endpoint / --grafana-url / --teamster-server)
 // per the 4-case decision tree from the operator's brief, removes the legacy
@@ -1448,7 +1504,7 @@ type hookMatcher struct {
 // They feed into the domain-flag dispatch indirectly: --teamster-server's
 // flag-absent + bundle-absent + key-absent branch (case 4: no-op) means the
 // installer's own URL still wins as a final fallback applied here.
-func mergeSettings(path, hookBin, hookServerURL, dataDir string, port int, extraVars map[string]string, cfg domainConfig, modes modeConfig, ports portConfig) error {
+func mergeSettings(path, hookBin, statuslineBin, hookServerURL, dataDir string, port int, extraVars map[string]string, cfg domainConfig, modes modeConfig, ports portConfig) error {
 	_ = port          // kept in signature for symmetry; URL already encodes port
 	_ = hookServerURL // carried via ports.hookServerURL; kept for call-site readability
 	dtrace("teamster-install.merge", ">>", "mergeSettings", "path", path)
@@ -1531,10 +1587,18 @@ func mergeSettings(path, hookBin, hookServerURL, dataDir string, port int, extra
 	if hooks == nil {
 		hooks = make(map[string]interface{})
 	}
-	for _, event := range []string{"UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure", "Stop"} {
+	for _, event := range hookEventNames {
 		hooks[event] = mergeHookEvent(hooks[event], entry, hookBin)
 	}
 	settings["hooks"] = hooks
+
+	// statusLine + subagentStatusLine: forward Claude Code's exact,
+	// plan-aware context_window_size to hookd's POST /context (see
+	// context-window-detection.md), chaining any pre-existing operator
+	// command so their own display keeps working. Non-destructive, same
+	// wrap-don't-clobber pattern as hooks above.
+	applyStatusLine(settings, env, "statusLine", statuslineBin, "TEAMSTER_STATUSLINE_CHAIN")
+	applyStatusLine(settings, env, "subagentStatusLine", statuslineBin, "TEAMSTER_SUBAGENT_STATUSLINE_CHAIN")
 
 	out, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
@@ -1645,7 +1709,7 @@ func writeSettingsFragment(path, hookBin, hookServerURL, dataDir string, port in
 	matchers = append(matchers, entry)
 
 	hookEvents := map[string]interface{}{}
-	for _, event := range []string{"UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure", "Stop"} {
+	for _, event := range hookEventNames {
 		hookEvents[event] = matchers
 	}
 
@@ -1693,6 +1757,35 @@ func mergeHookEvent(existing interface{}, entry hookMatcher, hookBin string) []h
 
 func isTeamsterBinary(cmd string) bool {
 	return strings.HasSuffix(cmd, "/teamster") || cmd == "teamster"
+}
+
+// applyStatusLine wires statuslineBin into settings[key] (key is "statusLine"
+// or "subagentStatusLine"), chaining any pre-existing non-Teamster command
+// via the given env var — same non-destructive "wrap, don't clobber" pattern
+// as mergeHookEvent/isTeamsterBinary for hooks. Idempotent: re-running the
+// installer over its own previously-wired command leaves the chain var
+// untouched rather than overwriting it with our own script's path.
+//
+// chainVar is a distinct env key per slot (TEAMSTER_STATUSLINE_CHAIN /
+// TEAMSTER_SUBAGENT_STATUSLINE_CHAIN) because an operator's main and
+// subagent statusline commands can legitimately differ.
+func applyStatusLine(settings map[string]interface{}, env map[string]interface{}, key, statuslineBin, chainVar string) {
+	existing, _ := settings[key].(map[string]interface{})
+	existingCmd, _ := existing["command"].(string)
+
+	if existingCmd != "" && !isTeamsterStatusline(existingCmd, statuslineBin) {
+		env[chainVar] = existingCmd
+	}
+
+	settings[key] = map[string]interface{}{
+		"type":            "command",
+		"command":         statuslineBin,
+		"refreshInterval": 10,
+	}
+}
+
+func isTeamsterStatusline(cmd, statuslineBin string) bool {
+	return cmd == statuslineBin || strings.HasSuffix(cmd, "/teamster-statusline.sh")
 }
 
 // installPlugin registers the Teamster plugin and enables it in settings.json.

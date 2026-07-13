@@ -95,6 +95,19 @@ func (c *focusNudgeCache) check(sessionID, agentName string, dbCheck func() bool
 // hasFocus is permanent for the session — once set, the agent proved it
 // knows about focus. nudgeCount resets per turn to allow fresh nudges
 // only for agents that never set focus.
+// clearAgentTurn resets the per-turn nudge count for a single (session, agent)
+// pair without wiping hasFocus, leaving other agents in the session
+// untouched. Use this for a teammate's Stop event, where the rest of the
+// team is still mid-turn.
+func (c *focusNudgeCache) clearAgentTurn(sessionID, agentName string) {
+	k := cacheKey(sessionID, normalizeAgent(agentName))
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if s, ok := c.state[k]; ok {
+		s.nudgeCount = 0
+	}
+}
+
 func (c *focusNudgeCache) clearSession(sessionID string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

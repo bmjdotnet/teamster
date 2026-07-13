@@ -263,14 +263,19 @@ func buildStatusRows(cfg config.Config) []statusRow {
 	}
 
 	// ── token-scraper ─────────────────────────────────────────────────────────
-	scraperMode := cfg.CcusageMode
+	// Token-scraper lifecycle now tracks cfg.HookdMode (same split as
+	// health-collector): systemd unit under "systemd", supervisor-managed
+	// under "supervisor". CcusageMode="install" still means "we install it"
+	// but no longer implies supervisor management.
+	scraperMode := cfg.HookdMode
 	scraperEndpoint := "—"
 	scraperStatus := colorize("Not configured", ansiDim)
-	if scraperMode == "install" {
-		scraperEndpoint = "http://localhost:9124"
+	if cfg.CcusageMode == "install" {
+		scraperEndpoint = endpointURL(cfg.HookServerPort)
 		scraperStatus = checkStatus(checkParams{
-			mode:    scraperMode,
-			pidName: "token-scraper",
+			mode:       scraperMode,
+			pidName:    pidIfSupervisor(scraperMode, "token-scraper"),
+			systemdSvc: "teamster-token-scraper",
 			// no port: token-scraper is a poller, not a server
 			cfg:     cfg,
 			timeout: timeout,
@@ -281,6 +286,26 @@ func buildStatusRows(cfg config.Config) []statusRow {
 		status:   scraperStatus,
 		mode:     displayMode(scraperMode),
 		endpoint: scraperEndpoint,
+	})
+
+	// ── health-collector ───────────────────────────────────────────────────────
+	// No install-mode flag of its own (unlike token-scraper) — its lifecycle
+	// tracks cfg.HookdMode: systemd unit under "systemd", supervisor-managed
+	// process under "supervisor". Same split as the hookd row above.
+	hcMode := cfg.HookdMode
+	hcStatus := checkStatus(checkParams{
+		mode:       hcMode,
+		pidName:    pidIfSupervisor(hcMode, "health-collector"),
+		systemdSvc: "teamster-health-collector",
+		// no port: health-collector is a poller, not a server
+		cfg:     cfg,
+		timeout: timeout,
+	})
+	rows = append(rows, statusRow{
+		label:    "Health Collector (health-collector)",
+		status:   hcStatus,
+		mode:     displayMode(hcMode),
+		endpoint: "—",
 	})
 
 	return rows

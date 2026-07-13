@@ -73,6 +73,14 @@ func main() {
 
 	<-stop
 	logger.Info("shutting down")
-	httpSrv.Shutdown(context.Background()) //nolint:errcheck
-	srv.Close()                            //nolint:errcheck
+	// SSE connections (/events/stream, /health/stream) are permanently active
+	// from Shutdown's perspective, so an unbounded context makes it wait
+	// forever for any open ctop/feed/dashboard tab to disconnect — a
+	// guaranteed hang until systemd's 90s SIGKILL. A 10s deadline lets
+	// in-flight non-SSE requests finish, then force-closes everything; SSE
+	// clients already have reconnection logic for the next startup.
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+	httpSrv.Shutdown(shutdownCtx) //nolint:errcheck
+	srv.Close()                   //nolint:errcheck
 }

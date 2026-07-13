@@ -4,7 +4,7 @@
 ![Platform: Linux](https://img.shields.io/badge/platform-linux-lightgrey.svg)
 
 Teamster is a self-hosted observability and cost-attribution system for
-Claude Code and OpenAI's Codex CLI. It records what every agent does in real
+Claude Code and OpenAI Codex CLI. It records what every agent does in real
 time, attributes per-message token spend to declared work items, and presents
 both through Grafana dashboards and a terminal activity feed. Every dollar lands
 somewhere visible: attributed cost carries its attribution method, and whatever
@@ -38,6 +38,17 @@ tags automatically. Change the tags later and the numbers update retroactively.
 A real-time activity stream — in your terminal or a web panel — shows what
 every agent is reading, editing, running, and thinking, as it happens.
 A team of agents stops being a black box behind the lead's summary.
+
+**Know who's running and how they're doing.**
+An agent roster tracks every agent on the hub — leads, teammates, and
+subagents — with liveness, relationship, and parent linkage, and reflects
+the model each agent is actually using, even after a mid-session `/model`
+switch. A health collector monitors per-agent context-window usage, token
+totals, and pressure level so you can reap near-full agents before quality
+degrades. `ctop` is the terminal fleet dashboard: one view showing the full
+multi-team hierarchy — subagents and sub-subagents, their models, cost,
+activity, and context pressure — for every session on the hub. (Claude Code
+only for now; Codex integration is pending.)
 
 **Let Teamster run the session.**
 Type `/teamster:start` before your prompt and Teamster interviews you, recommends
@@ -367,6 +378,7 @@ Early alpha, but built for multi-user environments and trustable data.
 | `teamster restore <path>` | Restore from a backup directory |
 | `teamster install-remote user@host` | Install the client on a remote host |
 | `feed` | Terminal activity viewer |
+| `ctop` | Terminal fleet dashboard — agent hierarchy, cost, activity, context pressure |
 | `rollup --sweep` | Run the attribution pipeline manually |
 
 ## Slash commands

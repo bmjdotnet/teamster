@@ -14,6 +14,7 @@ var (
 	ColorDim     = lipgloss.Color("#484f58")
 	ColorBorder  = lipgloss.Color("#30363d")
 	ColorHighBg  = lipgloss.Color("#161b22")
+	ColorMetric  = lipgloss.Color("#39c5cf")
 )
 
 // Panel border styles.

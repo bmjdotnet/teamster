@@ -14,6 +14,7 @@ var tagColors = map[string][3]int{
 	"GOAL": {255, 200, 60},  // warm gold — mission declaration
 	"THNK": {140, 170, 130}, // sage — frequent, muted
 	"DONE": {0, 102, 0},     // deep green — conclusive (256#28)
+	"RCAP": {100, 160, 180}, // muted teal — idle recap context
 	"READ": {0, 0, 255},     // deep blue — passive file read (256#21)
 	"EDIT": {128, 128, 0},   // olive/dark yellow — active file write (256#3)
 	"GREP": {120, 140, 200}, // muted periwinkle — search variant
@@ -39,6 +40,11 @@ const (
 // RGB returns an ANSI truecolor foreground escape sequence.
 func RGB(r, g, b int) string {
 	return fmt.Sprintf("\033[38;2;%d;%d;%dm", r, g, b)
+}
+
+// BGRGB returns an ANSI truecolor background escape sequence.
+func BGRGB(r, g, b uint8) string {
+	return fmt.Sprintf("\033[48;2;%d;%d;%dm", r, g, b)
 }
 
 // EntityColor returns a deterministic RGB color derived from MD5(salt+name).

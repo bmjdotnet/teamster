@@ -10,6 +10,67 @@ TABLE activity_events
   INDEX idx_activity_pair_time nonunique (session_id,agent_name,timestamp)
   INDEX idx_activity_time nonunique (timestamp)
   INDEX PRIMARY unique (id)
+TABLE agent_health_gauge
+  COLUMN agent_name type=varchar(64) null=NO default= extra=
+  COLUMN collector_status type=varchar(16) null=NO default=fresh extra=
+  COLUMN composition_json type=json null=YES default=<NULL> extra=
+  COLUMN context_fill_pct type=double null=NO default=0 extra=
+  COLUMN context_reported_at type=datetime(6) null=YES default=<NULL> extra=
+  COLUMN context_reset_suspected type=tinyint(1) null=NO default=0 extra=
+  COLUMN context_source type=varchar(16) null=NO default=heuristic extra=
+  COLUMN context_tokens_free type=bigint null=NO default=0 extra=
+  COLUMN context_tokens_used type=bigint null=NO default=0 extra=
+  COLUMN context_window_tokens type=bigint null=NO default=0 extra=
+  COLUMN fidelity_notes type=json null=YES default=<NULL> extra=
+  COLUMN host type=varchar(128) null=NO default=<NULL> extra=
+  COLUMN last_activity_display type=varchar(512) null=NO default= extra=
+  COLUMN last_activity_tool type=varchar(128) null=NO default= extra=
+  COLUMN last_activity_ts type=datetime(6) null=YES default=<NULL> extra=
+  COLUMN long_context_active type=tinyint(1) null=NO default=0 extra=
+  COLUMN model type=varchar(128) null=NO default= extra=
+  COLUMN pressure_level type=varchar(16) null=NO default=ok extra=
+  COLUMN pressure_level_since type=datetime(6) null=YES default=<NULL> extra=
+  COLUMN roster_id type=varchar(36) null=YES default=<NULL> extra=
+  COLUMN runtime type=varchar(16) null=NO default=claude_code extra=
+  COLUMN session_cost_usd type=double null=NO default=0 extra=
+  COLUMN session_id type=varchar(64) null=NO default=<NULL> extra=
+  COLUMN session_total_cost_usd type=double null=NO default=0 extra=
+  COLUMN statusline_json type=json null=YES default=<NULL> extra=
+  COLUMN tokens_in_total type=bigint null=NO default=0 extra=
+  COLUMN tokens_out_total type=bigint null=NO default=0 extra=
+  COLUMN tool_call_counts_json type=json null=YES default=<NULL> extra=
+  COLUMN tool_calls_total type=bigint null=NO default=0 extra=
+  COLUMN updated_at type=datetime(6) null=NO default=CURRENT_TIMESTAMP(6) extra=DEFAULT_GENERATED on update CURRENT_TIMESTAMP(6)
+  INDEX idx_gauge_roster nonunique (roster_id)
+  INDEX idx_gauge_updated nonunique (updated_at)
+  INDEX PRIMARY unique (host,session_id,agent_name)
+TABLE agent_roster
+  COLUMN agent_name type=varchar(64) null=NO default= extra=
+  COLUMN bound_at type=datetime(6) null=YES default=<NULL> extra=
+  COLUMN bus_team type=varchar(64) null=NO default= extra=
+  COLUMN created_at type=datetime(6) null=NO default=CURRENT_TIMESTAMP(6) extra=DEFAULT_GENERATED
+  COLUMN host type=varchar(128) null=NO default= extra=
+  COLUMN model type=varchar(128) null=NO default= extra=
+  COLUMN parent_ref type=varchar(36) null=YES default=<NULL> extra=
+  COLUMN relationship type=varchar(16) null=NO default= extra=
+  COLUMN roster_id type=varchar(36) null=NO default=<NULL> extra=
+  COLUMN runtime type=varchar(16) null=NO default= extra=
+  COLUMN session_id type=varchar(64) null=YES default=<NULL> extra=
+  COLUMN team_name type=varchar(64) null=NO default= extra=
+  INDEX idx_roster_bus_team nonunique (bus_team)
+  INDEX idx_roster_host nonunique (host)
+  INDEX idx_roster_parent nonunique (parent_ref)
+  INDEX PRIMARY unique (roster_id)
+  INDEX uq_roster_identity unique (session_id,agent_name)
+TABLE agent_tokens
+  COLUMN expires_at type=datetime(6) null=YES default=<NULL> extra=
+  COLUMN issued_at type=datetime(6) null=NO default=CURRENT_TIMESTAMP(6) extra=DEFAULT_GENERATED
+  COLUMN last_used_at type=datetime(6) null=YES default=<NULL> extra=
+  COLUMN revoked_at type=datetime(6) null=YES default=<NULL> extra=
+  COLUMN roster_id type=varchar(36) null=NO default=<NULL> extra=
+  COLUMN token_hash type=varchar(64) null=NO default=<NULL> extra=
+  INDEX idx_tokens_roster nonunique (roster_id)
+  INDEX PRIMARY unique (token_hash)
 TABLE archived_v1_goals
   COLUMN created_at type=datetime(6) null=NO default=<NULL> extra=
   COLUMN description type=text null=NO default=<NULL> extra=
@@ -240,6 +301,7 @@ TABLE session_reconciliation
   INDEX PRIMARY unique (session_id)
 TABLE sessions
   COLUMN agent_name type=varchar(64) null=NO default= extra=
+  COLUMN bus_team type=varchar(64) null=NO default= extra=
   COLUMN cli_version type=varchar(32) null=NO default= extra=
   COLUMN cwd type=varchar(512) null=NO default= extra=
   COLUMN first_seen type=datetime(6) null=NO default=<NULL> extra=
@@ -249,7 +311,10 @@ TABLE sessions
   COLUMN last_seen type=datetime(6) null=NO default=<NULL> extra=
   COLUMN model type=varchar(128) null=NO default= extra=
   COLUMN originator type=varchar(32) null=NO default= extra=
+  COLUMN parent_agent_name type=varchar(64) null=NO default= extra=
+  COLUMN parent_session_id type=varchar(64) null=NO default= extra=
   COLUMN project_id type=varchar(64) null=NO default= extra=
+  COLUMN relationship type=varchar(16) null=NO default= extra=
   COLUMN runtime type=varchar(16) null=NO default=claude_code extra=
   COLUMN session_id type=varchar(64) null=NO default=<NULL> extra=
   COLUMN status type=enum('active','idle','closed') null=NO default=active extra=

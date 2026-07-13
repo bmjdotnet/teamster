@@ -15,7 +15,7 @@ import (
 	"github.com/bmjdotnet/teamster/internal/store"
 )
 
-//go:embed dashboard.html wms.html cost_flow.html tags.html
+//go:embed dashboard.html wms.html cost_flow.html tags.html health.html
 var assets embed.FS
 
 // HandleDashboard serves the embedded dashboard HTML.
@@ -27,6 +27,17 @@ func HandleDashboard(w http.ResponseWriter, r *http.Request) {
 	data, err := assets.ReadFile("dashboard.html")
 	if err != nil {
 		http.Error(w, "dashboard not found", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write(data) //nolint:errcheck
+}
+
+// HandleHealthPage serves the embedded muster health dashboard HTML.
+func HandleHealthPage(w http.ResponseWriter, r *http.Request) {
+	data, err := assets.ReadFile("health.html")
+	if err != nil {
+		http.Error(w, "health dashboard not found", http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

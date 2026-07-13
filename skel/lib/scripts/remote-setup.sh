@@ -68,8 +68,11 @@ except Exception as e:
     sys.exit(1)
 
 # --- hooks ---
+# Keep this event list in sync with hookEventNames in
+# src/cmd/teamster-install/main.go (the hub-local installer's equivalent).
 hooks = settings.setdefault("hooks", {})
-for event in ("UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure", "Stop"):
+for event in ("UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure", "Stop",
+              "SubagentStart", "SubagentStop", "TeammateIdle", "TaskCompleted"):
     entries = hooks.setdefault(event, [])
     # Upgrade tilde-form entries to absolute path in-place (re-run safety).
     # Also dedup: if absolute form already present, do nothing.

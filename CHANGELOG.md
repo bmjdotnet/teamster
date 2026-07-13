@@ -3,6 +3,28 @@
 All notable changes to Teamster are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## v0.2.5 (unreleased)
+
+### Added
+- **Fleet Dashboard** (`ctop`) — a single terminal dashboard showing the full agent hierarchy per session: subagents and sub-subagents, their models, cost, activity, and context pressure
+- **Live model tracking** — activity logs now reflect the model you're actually using, even after a mid-session `/model` switch
+- **Recap tagging** — session recaps and suggested next steps are now tagged distinctly instead of showing up as false "done" entries
+
+### Fixed
+- Cost figures are now accurate for extended (1-hour) prompt caching
+- hookd now retries if MySQL isn't ready yet at boot instead of failing outright
+- `token-scraper` and `health-collector` start, stop, and report status correctly on systemd-managed installs
+- Fixed a replication compatibility issue affecting MySQL/MariaDB
+- Team name now shows up correctly across dashboards 
+
+### Changed
+- Installer skips the tag-setup wizard on upgrades (already configured)
+- Golden schema fixture regenerated through migration v61
+
+### Known limitations
+- Fleet dashboard & health monitoring only support Claude Code runtime (Codex integration pending)
+- Teammates can briefly appear "closed" between turns
+
 ## v0.2.4 (2026-07-08)
 
 ### Added

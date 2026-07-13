@@ -88,14 +88,35 @@ Record this name as the `team` tag value for WMS attribution. The session's
 team is implicit — no creation step needed. Use this name when tagging the
 strategic Outcome (Step 6d) with `team:<name>`.
 
+## Step 2.1 — Register the team name
+
+Call `registerPeer` to write the team name into the operational tables so
+it is visible to health dashboards and scopes roster/health queries to
+team members:
+
+```
+registerPeer(
+  agent_name: "",
+  runtime: "claude_code",
+  relationship: "lead",
+  team_name: "<team-name>",
+  session_id: "<session_id from the conversation>"
+)
+```
+
+This is NOT the same as the `team` tag on the Outcome (Step 6d) — that is
+WMS-domain work attribution. This is operational identity: it makes the
+team name visible in ctop, the health API, and roster scoping.
+
 ## Step 3 — Read the protocol
 
-Before loading tools or creating anything, read these two files now (use the
+Before loading tools or creating anything, read these three files now (use the
 Read tool) — they define how you operate as team lead for the rest of this
 session:
 
 - ${CLAUDE_SKILL_DIR}/references/eight-rules.md
 - ${CLAUDE_SKILL_DIR}/references/field-guide.md
+- ${CLAUDE_SKILL_DIR}/references/muster-guide.md
 
 ## Step 4 — Load WMS tools
 

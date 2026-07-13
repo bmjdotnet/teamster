@@ -806,6 +806,59 @@ type TagVocabRow struct {
 	Key, Value, FacetSource string
 }
 
+// RosterEntry is one agent_roster row — the identity/credential anchor for
+// a registered agent, potentially unbound (session_id nil) until a spawned
+// peer completes self-registration.
+type RosterEntry struct {
+	RosterID     string
+	SessionID    *string
+	AgentName    string
+	Host         string
+	Runtime      string
+	Model        string
+	Relationship string
+	TeamName     string
+	BusTeam      string
+	ParentRef    *string
+	CreatedAt    time.Time
+	BoundAt      *time.Time
+}
+
+// AgentToken is one agent_tokens row — the credential record for a roster entry.
+// The raw token value is NEVER stored; only its SHA-256 hash.
+type AgentToken struct {
+	TokenHash  string
+	RosterID   string
+	IssuedAt   time.Time
+	ExpiresAt  *time.Time
+	RevokedAt  *time.Time
+	LastUsedAt *time.Time
+}
+
+// RosterFilter controls which roster entries ListRosterEntries returns.
+type RosterFilter struct {
+	Host         string
+	BusTeam      string
+	Runtime      string
+	Relationship string
+}
+
+// RosterStore is agent-roster identity and bearer-token persistence:
+// registration, binding, token lifecycle, and roster queries.
+type RosterStore interface {
+	CreateRosterEntry(ctx context.Context, entry RosterEntry) error
+	BindRosterSession(ctx context.Context, rosterID, sessionID string) error
+	GetRosterEntry(ctx context.Context, rosterID string) (RosterEntry, error)
+	ResolveRosterID(ctx context.Context, sessionID, agentName string) (string, error)
+	ListRosterEntries(ctx context.Context, filter RosterFilter) ([]RosterEntry, error)
+	UpsertRosterEntry(ctx context.Context, entry RosterEntry) error
+	CreateToken(ctx context.Context, token AgentToken) error
+	VerifyToken(ctx context.Context, tokenHash string) (AgentToken, RosterEntry, error)
+	RevokeToken(ctx context.Context, rosterID string) error
+	RevokeTokenCascade(ctx context.Context, rosterID string) (int64, error)
+	TouchTokenLastUsed(ctx context.Context, tokenHash string) error
+}
+
 // Store is the full persistence surface implemented by every backend. It is
 // the union of the WMS read/write halves plus the role-based sub-interfaces
 // above; no method lives only here.
@@ -825,6 +878,7 @@ type Store interface {
 	RecoveryStore
 	SweepStore
 	ReportingStore
+	RosterStore
 	Prober
 
 	// Close releases any underlying handles. Not on wms.Store historically;

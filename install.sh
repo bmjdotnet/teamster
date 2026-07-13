@@ -1027,7 +1027,7 @@ interview() {
     ask BASEDIR "Base directory" "$HOME/teamster"
 
     local hookd_choice=""
-    ask_choice hookd_choice "hookd supervision mode:" 1 \
+    ask_choice hookd_choice "Hub daemons (hookd + health-collector) supervision mode:" 1 \
         "systemd (default for hub installs)" \
         "supervisor (default for cleanroom / no-systemd hosts)"
     if [[ "$hookd_choice" == systemd* ]]; then
@@ -1490,7 +1490,7 @@ show_summary() {
     [[ "$INSTALL_MODE" == "client" ]] && info "Hub endpoint:    $HOOKD_ENDPOINT"
     info "Basedir:         $BASEDIR"
     if [[ "$INSTALL_MODE" == "hub" ]]; then
-        info "hookd mode:      $HOOKD_MODE"
+        info "daemon mode:     $HOOKD_MODE"
         info ""
         local _store_display="${STORE_MODE:-<unset>}"
         if [[ -n "$STORE_DSN" ]]; then
@@ -1499,7 +1499,7 @@ show_summary() {
             _dsn_masked="$(printf '%s' "$STORE_DSN" | sed 's|\(://[^:]*:\)[^@]*\(@\)|\1***\2|')"
             _store_display="${STORE_MODE} (${_dsn_masked})"
         fi
-        info "  hookd mode:      $HOOKD_MODE"
+        info "  daemon mode:     $HOOKD_MODE"
         info "  store mode:      $_store_display"
         info "  otelcol mode:    ${OTELCOL_MODE:-<unset>}${OTELCOL_ENDPOINT:+ ($OTELCOL_ENDPOINT)}"
         info "  prometheus mode: ${PROMETHEUS_MODE:-<unset>}${PROMETHEUS_ENDPOINT:+ ($PROMETHEUS_ENDPOINT)}"

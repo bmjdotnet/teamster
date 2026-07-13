@@ -14,7 +14,7 @@ the record is POSTed to hookd.
 
 | Field | Type | Description | Source | Stability |
 |-------|------|-------------|--------|-----------|
-| `hook_event_name` | string enum | Claude Code hook event that triggered this record. Values: `PreToolUse`, `PostToolUse`, `Stop`, `UserPromptSubmit`, `WMSStatusChange`, `WMSFocusChange` | Claude Code / hookobserver | stable |
+| `hook_event_name` | string enum | Claude Code hook event that triggered this record. Values: `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `Stop`, `UserPromptSubmit`, `SubagentStart`, `SubagentStop`, `TeammateIdle`, `TaskCompleted`, `WMSStatusChange`, `WMSFocusChange` | Claude Code / hookobserver | stable |
 | `session_id` | string | Opaque Claude Code session identifier. Falls back to `"unknown"` if absent. | Claude Code | stable |
 | `tool_name` | string | Name of the Claude Code tool being called (e.g. `Bash`, `Read`, `SendMessage`). Absent on `Stop` and WMS synthetic events. | Claude Code | stable |
 | `tool_input` | object\|string | Raw tool input as provided by Claude Code. May be a JSON object or a string-encoded JSON object. | Claude Code | stable |
@@ -147,7 +147,7 @@ Examples:
 
 ## 3. Tag Taxonomy
 
-The 16-tag taxonomy is the primary display-category system. Each JSONL record
+The 17-tag taxonomy is the primary display-category system. Each JSONL record
 carries exactly one `_tool_tag` value (or none, if the event is not a tool
 call). Tags are 4 characters wide (some have a leading space) so they align
 in monospace columns.
@@ -160,13 +160,14 @@ fallback.
 |-----|-------|-----------------------|-------------|-------------|-----------|
 | `GOAL` | 4 | `setOverallIntent` (MCP) | Mission declaration — agent's overall intent for the session | 255,200,60 (warm gold) | stable |
 | `THNK` | 4 | `reportActivity` (MCP) | Transient activity report — what the agent is doing right now | 140,170,130 (sage) | stable |
-| `DONE` | 4 | `completeActivity` (MCP); `TaskUpdate` status=completed; `Stop` event | Completion signal — task finished or turn concluded | 0,102,0 (deep green) | stable |
+| `DONE` | 4 | `completeActivity` (MCP); `TaskUpdate` status=completed; `Stop`, `SubagentStop` (real), `TaskCompleted` events | Completion signal — task finished or turn concluded | 0,102,0 (deep green) | stable |
+| `RCAP` | 4 | Phantom `SubagentStop` event (no `agent_type`, recap heuristic match) | Idle recap — Claude Code's context summary after ~3 min inactivity | 100,160,180 (muted teal) | stable |
 | `READ` | 4 | `Read`, `Grep`, `Glob` | Passive file or code read | 0,0,255 (deep blue) | stable |
 | `EDIT` | 4 | `Edit`, `Write`, `NotebookEdit` | Active file write or edit | 128,128,0 (olive) | stable |
 | `GREP` | 4 | (reserved; `Grep` maps to `READ`) | Search variant — reserved in color table | 120,140,200 (periwinkle) | experimental |
 | ` ACT` | 4 | `Bash` (with description) | Bash tool with intent description — human-readable action | 230,150,50 (amber) | stable |
 | `EXEC` | 4 | `Monitor` | Background process monitoring | 180,160,60 (olive dim) | stable |
-| `TEAM` | 4 | `Agent` | Agent lifecycle — spawning teammates | 180,120,220 (purple) | stable |
+| `TEAM` | 4 | `Agent`; `SubagentStart` event | Agent lifecycle — spawning teammates | 180,120,220 (purple) | stable |
 | `COMM` | 4 | `SendMessage` | Inter-agent or agent-to-human communication | 150,140,210 (lavender) | stable |
 | `TASK` | 4 | `TaskCreate`, `TaskGet`, `TaskList`, `TaskUpdate`; all `mcp__wms__*` tools | Work management operations | 240,110,170 (vivid pink) | stable |
 | ` WEB` | 4 | `WebSearch`, `WebFetch` | External web access | 210,130,180 (dusty rose) | stable |
@@ -184,9 +185,21 @@ fallback.
 - ` ACT` and ` WEB` and ` ASK` each have a leading space in their 4-char
   string. This is intentional: the space is part of the tag value used as a
   map key in `TOOL_TAGS` and `tagColors`.
-- `DONE` is emitted from three distinct sources: `completeActivity` MCP,
-  `TaskUpdate` with `status=completed`, and the `Stop` hook event (first
-  sentence of the final assistant message).
+- `DONE` is emitted from five distinct sources: `completeActivity` MCP,
+  `TaskUpdate` with `status=completed`, the `Stop` and `SubagentStop` (real,
+  with `agent_type`) hook events (first sentence of the final assistant
+  message), and the `TaskCompleted` hook event (`completed #<task_id>:
+  <task_subject>`).
+- `RCAP` is emitted from phantom `SubagentStop` events: Claude Code fires
+  `SubagentStop` with no `agent_type` for suggested next prompts (suppressed)
+  and idle recaps (tagged `RCAP`). The heuristic: text starting with an
+  uppercase letter and containing a space is classified as a recap.
+- `SubagentStart`/`SubagentStop` fire for Agent-tool (Task tool) subagent
+  spawns — Agent Teams teammates do not fire these (see the main repo's
+  CLAUDE.md Pitfalls section). `TeammateIdle` (teammate idle transition) and
+  `TaskCompleted` (per in_progress task at turn end) carry `teammate_name`/
+  `team_name` instead of `agent_type`; `TeammateIdle` sets no `_tool_tag` —
+  its only effect is refreshing the health dashboard's per-agent turn state.
 - `ToolSearch` is explicitly skipped — it is internal plumbing and never
   produces a tag.
 - When a Bash tool call omits the `description` parameter (`bash_exec_only`

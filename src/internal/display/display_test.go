@@ -32,3 +32,9 @@ func TestRenderDisplayParamHighlight(t *testing.T) {
 		})
 	}
 }
+
+func TestBGRGB(t *testing.T) {
+	if got, want := BGRGB(13, 17, 23), "\033[48;2;13;17;23m"; got != want {
+		t.Errorf("BGRGB(13,17,23) = %q, want %q", got, want)
+	}
+}

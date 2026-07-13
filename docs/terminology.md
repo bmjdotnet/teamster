@@ -85,13 +85,14 @@ drill-downs and dashboard analysis.
 
 ## Activity tags
 
-The activity feed uses a 16-tag taxonomy to categorize tool calls:
+The activity feed uses a 17-tag taxonomy to categorize tool calls:
 
 | Tag | Source | Meaning |
 |-----|--------|---------|
 | `[GOAL]` | `setOverallIntent` | Agent declares session mission |
 | `[THNK]` | `reportActivity` | Agent declares current turn intent |
 | `[DONE]` | `completeActivity` / `TaskUpdate(completed)` / Stop | Completion signal |
+| `[RCAP]` | Phantom `SubagentStop` (no `agent_type`, recap heuristic) | Idle recap |
 | `[READ]` | Read/Glob | File read |
 | `[EDIT]` | Edit/Write | File modification |
 | `[GREP]` | Grep | File search |

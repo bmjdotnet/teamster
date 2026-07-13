@@ -1110,7 +1110,12 @@ echo ""
 # snapshot all stores to $BASEDIR/backups before touching anything. Uses the
 # existing binary so the backup matches the schema of the running install.
 # Best-effort: failure warns but never aborts the upgrade.
+# IS_UPGRADE is captured here (before teamster-install replaces the binary
+# below) so later steps — e.g. the tag editor — can still tell fresh from
+# upgrade after $BASEDIR/bin/teamster stops being a reliable signal.
+IS_UPGRADE=0
 if [[ -x "$BASEDIR/bin/teamster" ]] && [[ -f "$BASEDIR/etc/teamster.yaml" ]]; then
+    IS_UPGRADE=1
     # Heal backup grants: older installs only granted on the DSN database,
     # but the backup config may list additional databases. Apply the missing
     # grants now so the pre-upgrade backup below doesn't fail with access-denied.
@@ -1302,7 +1307,7 @@ LDFLAGS="-X ${_vpkg}.Version=${TEAMSTER_VERSION} -X ${_vpkg}.Commit=${TEAMSTER_C
 dlog INFO install.compile "version" "version=$TEAMSTER_VERSION" "commit=$TEAMSTER_COMMIT" "build_time=$TEAMSTER_BUILD_TIME"
 
 cd "$REPO/src"
-for _target in teamster hookd feed activity-mcp wms-mcp teamster-install token-scraper codex-scraper rollup classify demogen relay backup; do
+for _target in teamster hookd feed ctop activity-mcp wms-mcp roster-mcp health-mcp teamster-install token-scraper codex-scraper rollup classify demogen relay backup health-collector; do
     if go build -trimpath -ldflags "$LDFLAGS" -o "$BUILDDIR/$_target" "./cmd/$_target"; then
         dlog INFO install.compile "built" "target=$_target" "rc=0"
     else
@@ -1312,7 +1317,7 @@ for _target in teamster hookd feed activity-mcp wms-mcp teamster-install token-s
     fi
 done
 unset _target _rc
-printf -- "${C_GREEN}  12 binaries compiled to %s${C_RESET}\n" "$BUILDDIR"
+printf -- "${C_GREEN}  17 binaries compiled to %s${C_RESET}\n" "$BUILDDIR"
 
 # Step 2.5: Download/build service binaries for install-mode services.
 if [[ "${PROMETHEUS_MODE:-install}" == "install" ]]; then
@@ -1655,6 +1660,62 @@ if [[ "$WIRE" -eq 1 ]] && [[ "$HOOKD_READ_ONLY" -eq 0 ]] && [[ "$HOOKD_MODE" != 
     fi
 fi
 
+# Sync the health-collector service (Muster: per-agent token usage gauge
+# collector, 15s poll interval) into systemd and enable it. Same guards as
+# the other hub daemons: only when wiring locally-managed systemd and not in
+# read-only replica mode. Type=simple daemon (no timer), so enable --now
+# starts it directly rather than enabling a timer pair.
+if [[ "$WIRE" -eq 1 ]] && [[ "$HOOKD_READ_ONLY" -eq 0 ]] && [[ "$HOOKD_MODE" != "supervisor" ]] && [[ "$HOOKD_MODE" != "external" ]] && command -v systemctl &>/dev/null; then
+    HEALTH_COLLECTOR_SVC_SRC="$BASEDIR/etc/teamster-health-collector.service"
+    if [[ -f "$HEALTH_COLLECTOR_SVC_SRC" ]]; then
+        printf -- "${C_BOLD_CYAN}--- Syncing health-collector service ---${C_RESET}\n"
+        sudo install -m 0644 "$HEALTH_COLLECTOR_SVC_SRC" /etc/systemd/system/teamster-health-collector.service
+        sudo systemctl daemon-reload
+        sudo systemctl enable --now teamster-health-collector.service 2>/dev/null \
+            && echo "    enabled + started teamster-health-collector.service" \
+            || printf -- "${C_YELLOW}    WARN: could not enable teamster-health-collector.service${C_RESET}\n"
+        dlog INFO install.health-collector "installed" "src=$HEALTH_COLLECTOR_SVC_SRC"
+    else
+        dlog WARN install.health-collector "src unit not present" "svc=$HEALTH_COLLECTOR_SVC_SRC"
+    fi
+fi
+
+# Sync the token-scraper service (Claude Code session JSONL tailer, long-
+# running poller) into systemd and enable it. Same guards + pattern as
+# health-collector: Type=simple daemon (no timer), enable --now starts it
+# directly. Previously managed only by the internal `teamster start`
+# supervisor, which never got re-invoked on upgrade whenever
+# grafana-mode=external — moved to systemd so it restarts reliably on its own,
+# independent of the supervisor bundle.
+if [[ "$WIRE" -eq 1 ]] && [[ "$HOOKD_READ_ONLY" -eq 0 ]] && [[ "$HOOKD_MODE" != "supervisor" ]] && [[ "$HOOKD_MODE" != "external" ]] && command -v systemctl &>/dev/null; then
+    # Kill any orphan token-scraper from a previous supervisor-managed era.
+    # The supervisor no longer manages token-scraper, so an upgrade from an
+    # older version may leave the old process running alongside the new
+    # systemd-managed one.
+    _ts_pid_file="$BASEDIR/var/pids/token-scraper.pid"
+    if [[ -f "$_ts_pid_file" ]]; then
+        _ts_pid=$(cat "$_ts_pid_file" 2>/dev/null | tr -d '[:space:]')
+        if [[ -n "$_ts_pid" ]] && kill -0 "$_ts_pid" 2>/dev/null; then
+            echo "    killing orphan supervisor-managed token-scraper (pid $_ts_pid)"
+            kill "$_ts_pid" 2>/dev/null || true
+            sleep 1
+        fi
+        rm -f "$_ts_pid_file"
+    fi
+    TOKEN_SCRAPER_SVC_SRC="$BASEDIR/etc/teamster-token-scraper.service"
+    if [[ -f "$TOKEN_SCRAPER_SVC_SRC" ]]; then
+        printf -- "${C_BOLD_CYAN}--- Syncing token-scraper service ---${C_RESET}\n"
+        sudo install -m 0644 "$TOKEN_SCRAPER_SVC_SRC" /etc/systemd/system/teamster-token-scraper.service
+        sudo systemctl daemon-reload
+        sudo systemctl enable --now teamster-token-scraper.service 2>/dev/null \
+            && echo "    enabled + started teamster-token-scraper.service" \
+            || printf -- "${C_YELLOW}    WARN: could not enable teamster-token-scraper.service${C_RESET}\n"
+        dlog INFO install.token-scraper "installed" "src=$TOKEN_SCRAPER_SVC_SRC"
+    else
+        dlog WARN install.token-scraper "src unit not present" "svc=$TOKEN_SCRAPER_SVC_SRC"
+    fi
+fi
+
 # Sync the logrotate config into /etc/logrotate.d/ so events.jsonl gets rotated.
 # teamster-install already materialized __BASEDIR__ in the config file.
 if [[ "$WIRE" -eq 1 ]] && [[ -f "$BASEDIR/etc/teamster-logrotate.conf" ]]; then
@@ -1812,6 +1873,27 @@ case "$RUNNING_MODE" in
         ;;
 esac
 
+# Restart health-collector if it's running under systemd — same reason as
+# hookd above: the binary on disk was just replaced, but the running process
+# still has the old one memory-mapped. Without a restart the collector serves
+# stale logic (wrong context-window heuristic, missing new features) until
+# the next host reboot or manual `systemctl restart`.
+if systemctl is-active --quiet teamster-health-collector 2>/dev/null; then
+    printf -- "${C_BOLD_CYAN}--- Restarting health-collector ---${C_RESET}\n"
+    sudo systemctl restart teamster-health-collector 2>/dev/null \
+        && echo "    restarted teamster-health-collector.service" \
+        || printf -- "${C_YELLOW}    WARN: could not restart teamster-health-collector.service${C_RESET}\n"
+fi
+
+# Restart token-scraper if it's running under systemd — same reason as
+# health-collector above: the binary on disk was just replaced.
+if systemctl is-active --quiet teamster-token-scraper 2>/dev/null; then
+    printf -- "${C_BOLD_CYAN}--- Restarting token-scraper ---${C_RESET}\n"
+    sudo systemctl restart teamster-token-scraper 2>/dev/null \
+        && echo "    restarted teamster-token-scraper.service" \
+        || printf -- "${C_YELLOW}    WARN: could not restart teamster-token-scraper.service${C_RESET}\n"
+fi
+
 # Run MySQL migrations when store backend is MySQL or dual+MySQL.
 # The migrate subcommand rejects dual: DSNs, so extract the mysql:// portion.
 if [[ "$STORE_DSN" == mysql://* ]]; then
@@ -1826,11 +1908,13 @@ if [[ -n "${MIGRATE_DSN:-}" ]]; then
         && printf -- "${C_GREEN}    migrations applied${C_RESET}\n" \
         || printf -- "${C_YELLOW}    WARN: migration failed — check MySQL connectivity${C_RESET}\n"
 
-    # Interactive tag vocabulary setup. Runs only when stdin is a terminal so
-    # non-interactive installs (CI, --basedir staging, piped scripts) are never
-    # blocked. The binary auto-detects first-run vs editor mode; on subsequent
-    # installs it goes straight to the editor menu for any adjustments.
-    if [[ -t 0 ]]; then
+    # Interactive tag vocabulary setup. Fresh installs only — an upgrade
+    # (IS_UPGRADE, captured in Step 0.5 above) already has a configured tag
+    # keyspace, and re-running the wizard mid-upgrade is disruptive; the
+    # operator can still run `teamster setup tags` manually any time. Also
+    # runs only when stdin is a terminal so non-interactive installs (CI,
+    # --basedir staging, piped scripts) are never blocked.
+    if [[ "$IS_UPGRADE" -eq 0 ]] && [[ -t 0 ]]; then
         echo ""
         printf -- "${C_BOLD_WHITE}--> Tag vocabulary setup...${C_RESET}\n"
         TEAMSTER_STORE_DSN="$MIGRATE_DSN" "$BASEDIR/bin/teamster" setup tags || true
@@ -1974,32 +2058,39 @@ fi
 
 fi
 
-# Restart the Teamster-MANAGED grafana bundle on upgrade so a freshly-staged
-# grafana plugin actually loads. Plugins are read only at grafana START, and the
-# `teamster stop` above killed the managed grafana along with the rest of the
-# supervisor's bundle — without this, an upgrade would stage the new plugin but
-# leave grafana down (or, if restarted out-of-band, only then pick it up), so the
-# treemap would be broken-until-manual-restart. `teamster start` is idempotent
-# (each component is guarded by processAlive) and re-launches grafana fresh.
-#
-# Gated strictly to grafana-mode=install (the supervisor owns this grafana) and
-# to the supervisor having been running before we stopped it — we never touch an
-# external/shared grafana (per 176c562) and never auto-start a supervisor the
-# operator hadn't running. hookd is restarted separately above; under hookd
-# systemd mode `teamster start` skips re-launching hookd but still brings up the
-# managed monitoring bundle.
-if [[ "$WIRE" -eq 1 ]] && [[ "${GRAFANA_MODE:-install}" == "install" ]] && [[ "$SUPERVISOR_WAS_RUNNING" -eq 1 ]]; then
+# Always restart the supervisor-managed bundle after an upgrade. `teamster
+# stop` above kills health-collector (non-systemd hosts) and any of
+# grafana/prometheus/otelcol in "install" mode — all of them need this to come
+# back. Gated only on WIRE and on the supervisor having been running before we
+# stopped it (never auto-start a supervisor the operator hadn't running) —
+# deliberately NOT gated on grafana-mode: a host with external Grafana still
+# needs its own managed components restarted. (Previously this whole restart
+# was gated on grafana-mode=install, which meant hosts with external Grafana
+# never got token-scraper relaunched after an upgrade — see
+# installer-grafana-gate-token-scraper WU. token-scraper itself has since
+# moved to its own systemd unit, restarted separately above, and is no longer
+# part of this supervisor bundle at all.)
+if [[ "$WIRE" -eq 1 ]] && [[ "$SUPERVISOR_WAS_RUNNING" -eq 1 ]]; then
     echo ""
-    printf -- "${C_BOLD_WHITE}--> Restarting managed monitoring bundle (loads staged grafana plugins)...${C_RESET}\n"
-    dlog INFO install.supervisor "restart managed bundle for plugin load"
+    printf -- "${C_BOLD_WHITE}--> Restarting supervisor-managed services...${C_RESET}\n"
+    dlog INFO install.supervisor "restart managed bundle"
     if "$BASEDIR/bin/teamster" start >/dev/null 2>&1; then
-        printf -- "${C_GREEN}    managed grafana restarted — staged plugins loaded${C_RESET}\n"
+        printf -- "${C_GREEN}    managed services restarted${C_RESET}\n"
         dlog INFO install.supervisor "managed bundle restarted" "rc=0"
     else
-        printf -- "${C_YELLOW}    WARN: 'teamster start' failed — run it manually so the new grafana plugin loads:${C_RESET}\n"
+        printf -- "${C_YELLOW}    WARN: 'teamster start' failed — run it manually so managed services come back up:${C_RESET}\n"
         printf -- "${C_YELLOW}            %s/bin/teamster start${C_RESET}\n" "$BASEDIR"
         dlog WARN install.supervisor "managed bundle restart failed — manual teamster start required"
     fi
+fi
+
+# Grafana plugins are read only at grafana START. When the supervisor owns
+# Grafana (grafana-mode=install), the restart above already brought it back up
+# with any freshly-staged plugin loaded — surface that explicitly here rather
+# than re-invoking `teamster start` a second time. An external/shared grafana
+# is handled separately above (reload-only, never restarted by Teamster).
+if [[ "$WIRE" -eq 1 ]] && [[ "${GRAFANA_MODE:-install}" == "install" ]] && [[ "$SUPERVISOR_WAS_RUNNING" -eq 1 ]]; then
+    printf -- "${C_GREEN}    staged grafana plugins loaded${C_RESET}\n"
 fi
 
 SCRIPT_OK=1

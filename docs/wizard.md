@@ -149,6 +149,15 @@ See [specs/CODEX-INSTALL.md](specs/CODEX-INSTALL.md) for exactly what gets
 written (MCP servers, skills, hooks, OTEL, the `AGENTS.md` merge) and the manual
 uninstall recipe.
 
+## Post-install tag vocabulary setup (fresh installs only)
+
+`lib/installrunner.sh` auto-launches the `teamster setup tags` interview
+after a fresh install (when stdin is a terminal) so a new hub starts with a
+configured tag keyspace. **Upgrades skip this** — an existing install already
+has a configured keyspace, and re-running the wizard mid-upgrade is
+disruptive. The wizard can still be run manually any time:
+`teamster setup tags` (editor) or `teamster setup tags --interview`.
+
 ## Key invariant
 
 The interview phase of `install.sh` mutates NOTHING on the host. All changes
