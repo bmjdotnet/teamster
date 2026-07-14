@@ -167,26 +167,9 @@ func (s *Store) ListWorkUnitsNeedingWorkType(ctx context.Context, jobName string
 		    AND t.tag_key = 'work-type' AND et.source = 'manual'
 		)
 		AND (
-		  (
-		    NOT EXISTS (
-		      SELECT 1 FROM entity_tags et2
-		      JOIN tags t2 ON t2.id = et2.tag_id
-		      WHERE et2.entity_type = 'workunit' AND et2.entity_id = wa.entity_id
-		        AND t2.tag_key = 'work-type'
-		    )
-		    AND (
-		      (SELECT last_run_at FROM job_heartbeats WHERE job_name = ?) IS NULL
-		      OR (wa.latest_closed IS NOT NULL
-		          AND wa.latest_closed > (SELECT last_run_at FROM job_heartbeats WHERE job_name = ?))
-		    )
-		  )
-		  OR EXISTS (
-		    SELECT 1 FROM entity_tags et3
-		    JOIN tags t3 ON t3.id = et3.tag_id
-		    WHERE et3.entity_type = 'workunit' AND et3.entity_id = wa.entity_id
-		      AND t3.tag_key = 'work-type'
-		      AND wa.latest_closed IS NOT NULL AND et3.applied_at < wa.latest_closed
-		  )
+		  (SELECT last_run_at FROM job_heartbeats WHERE job_name = ?) IS NULL
+		  OR (wa.latest_closed IS NOT NULL
+		      AND wa.latest_closed > (SELECT last_run_at FROM job_heartbeats WHERE job_name = ?))
 		)
 		ORDER BY wa.entity_id ASC`, wms.EntityWorkUnit, jobName, jobName)
 	if err != nil {

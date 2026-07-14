@@ -782,29 +782,24 @@ func (s *Store) EarliestClosureByEntity(ctx context.Context, keys [][2]string) (
 //
 // A workunit qualifies when it has at least one kind='state' interval AND it
 // does not already carry a manually-set work-type tag (manual always wins;
-// scanning it is pure waste since applyTag would just skip it). Beyond that,
-// two disjoint cohorts:
+// scanning it is pure waste since applyTag would just skip it).
 //
-//   - Has a (non-manual) work-type tag: selected only when its latest CLOSED
-//     interval ended after the tag's applied_at (new signal has arrived
-//     since the last classification, the same "unassembled or stale"
-//     idempotency test ListIntervalsNeedingPhase uses, just keyed on the
-//     workunit's own tag watermark instead of phase_assembled_at).
-//
-//   - No work-type tag at all: RuleClassifier.Classify skips silently (no
-//     tag write) when it finds no JSONL signal for an entity, so a workunit
-//     whose activity never yields a derivable work-type would otherwise be
-//     reselected forever (there is no tag watermark to ever satisfy) -
-//     confirmed live: 1976 of 1988 "no-tag" workunits every single pass.
-//     Fenced instead on job_heartbeats.last_run_at for jobName ("classify"):
-//     selected only when no heartbeat row exists yet (first run - process
-//     everything), or the workunit's latest closed interval ended after the
-//     last completed run (new activity not yet attempted).
-//
-// A workunit with only open intervals in either cohort is excluded once a
-// heartbeat/tag watermark is in place - no closed interval means no new
-// signal, so re-running would reproduce the same (non-)result at the cost of
-// another full log scan.
+// The activity watermark is job_heartbeats.last_run_at for jobName
+// ("classify"), NOT the work-type tag's own applied_at — an earlier version
+// of this query used applied_at (mirroring ListIntervalsNeedingPhase's
+// phase_assembled_at pattern), but TagEntity only refreshes applied_at when
+// the tag VALUE actually changes. Confirmed live: 1988 of 1988 already-tagged
+// workunits were reselected every single pass, because the vast majority
+// (1976) keep re-deriving the SAME work-type value every run (applied_at
+// never advances) while new closed intervals keep arriving (latest_closed
+// always advances) — applied_at < latest_closed was permanently true. A
+// workunit with no work-type tag at all has the same problem in the other
+// direction: RuleClassifier.Classify skips silently (no tag write) when it
+// finds no derivable JSONL signal, so there is no tag watermark to ever
+// satisfy. job_heartbeats sidesteps both failure modes: a workunit (tagged or
+// not) is selected only when there is no heartbeat row yet (first run —
+// process everything), or its latest CLOSED interval ended after the last
+// completed run (new activity not yet attempted this run).
 func (s *Store) ListWorkUnitsNeedingWorkType(ctx context.Context, jobName string) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT wa.entity_id
@@ -821,26 +816,9 @@ func (s *Store) ListWorkUnitsNeedingWorkType(ctx context.Context, jobName string
 		    AND t.tag_key = 'work-type' AND et.source = 'manual'
 		)
 		AND (
-		  (
-		    NOT EXISTS (
-		      SELECT 1 FROM entity_tags et2
-		      JOIN tags t2 ON t2.id = et2.tag_id
-		      WHERE et2.entity_type = 'workunit' AND et2.entity_id = wa.entity_id
-		        AND t2.tag_key = 'work-type'
-		    )
-		    AND (
-		      (SELECT last_run_at FROM job_heartbeats WHERE job_name = ?) IS NULL
-		      OR (wa.latest_closed IS NOT NULL
-		          AND wa.latest_closed > (SELECT last_run_at FROM job_heartbeats WHERE job_name = ?))
-		    )
-		  )
-		  OR EXISTS (
-		    SELECT 1 FROM entity_tags et3
-		    JOIN tags t3 ON t3.id = et3.tag_id
-		    WHERE et3.entity_type = 'workunit' AND et3.entity_id = wa.entity_id
-		      AND t3.tag_key = 'work-type'
-		      AND wa.latest_closed IS NOT NULL AND et3.applied_at < wa.latest_closed
-		  )
+		  (SELECT last_run_at FROM job_heartbeats WHERE job_name = ?) IS NULL
+		  OR (wa.latest_closed IS NOT NULL
+		      AND wa.latest_closed > (SELECT last_run_at FROM job_heartbeats WHERE job_name = ?))
 		)
 		ORDER BY wa.entity_id ASC`, wms.EntityWorkUnit, jobName, jobName)
 	if err != nil {

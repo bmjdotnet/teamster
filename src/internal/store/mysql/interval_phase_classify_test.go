@@ -225,63 +225,37 @@ func TestEarliestClosureByEntity(t *testing.T) {
 	}
 }
 
-// setTagAppliedAt overrides the applied_at watermark on an already-applied
-// (entity_type, entity_id, tag_key) tag row, so tests can place it precisely
-// before/after an interval's ended_at without racing wall-clock time.
-func setTagAppliedAt(t *testing.T, s *Store, entityType, entityID, tagKey string, at time.Time) {
-	t.Helper()
-	if _, err := s.db.ExecContext(context.Background(), `
-		UPDATE entity_tags et
-		JOIN tags t ON t.id = et.tag_id
-		SET et.applied_at = ?
-		WHERE et.entity_type = ? AND et.entity_id = ? AND t.tag_key = ?`,
-		at, entityType, entityID, tagKey); err != nil {
-		t.Fatalf("set applied_at for %s/%s/%s: %v", entityType, entityID, tagKey, err)
-	}
-}
-
 func TestListWorkUnitsNeedingWorkType(t *testing.T) {
 	s, _ := newTestStore(t)
 	ctx := context.Background()
 	now := time.Now().UTC().Truncate(time.Second)
 	start := now.Add(-time.Hour)
 
-	// wu-new: two intervals (must dedup), never classified — SELECTED.
+	// wu-new: two intervals (must dedup), never classified — SELECTED (first
+	// run: no job_heartbeats row for 'classify' exists in this fresh schema).
 	insertClosedInterval(t, s, wms.EntityWorkUnit, "wu-new", "active", "s1aaaaaaaaaa", "a", start, now, "", "", nil)
 	insertClosedInterval(t, s, wms.EntityWorkUnit, "wu-new", "review", "s1aaaaaaaaaa", "a", now, now.Add(time.Minute), "", "", nil)
 
-	// wu-manual: closed interval + manual work-type tag — SKIPPED (manual wins,
-	// regardless of any later interval; applyTag would no-op anyway).
+	// wu-manual: closed interval + manual work-type tag — SKIPPED (manual
+	// always wins, even on a first run; applyTag would no-op anyway).
 	insertClosedInterval(t, s, wms.EntityWorkUnit, "wu-manual", "active", "s2aaaaaaaaaa", "a", start, now, "", "", nil)
 	if err := s.TagEntity(ctx, wms.EntityWorkUnit, "wu-manual", "work-type", "feature", "manual", ""); err != nil {
 		t.Fatalf("tag wu-manual: %v", err)
 	}
 
-	// wu-fresh: closed interval, classified AFTER that interval ended — SKIPPED
-	// (no signal has arrived since the last classification).
-	freshEnd := now.Add(-2 * time.Hour)
-	insertClosedInterval(t, s, wms.EntityWorkUnit, "wu-fresh", "active", "s3aaaaaaaaaa", "a", freshEnd.Add(-time.Hour), freshEnd, "", "", nil)
-	if err := s.TagEntity(ctx, wms.EntityWorkUnit, "wu-fresh", "work-type", "feature", "classifier", ""); err != nil {
-		t.Fatalf("tag wu-fresh: %v", err)
+	// wu-tagged: already has a classifier work-type tag from a "prior pass" —
+	// still SELECTED on a first run (no heartbeat row means "process
+	// everything" regardless of tag state; this is the case that broke when
+	// the watermark used the tag's own applied_at instead of the heartbeat).
+	longAgo := now.Add(-3 * time.Hour)
+	insertClosedInterval(t, s, wms.EntityWorkUnit, "wu-tagged", "active", "s3aaaaaaaaaa", "a", longAgo.Add(-time.Hour), longAgo, "", "", nil)
+	if err := s.TagEntity(ctx, wms.EntityWorkUnit, "wu-tagged", "work-type", "feature", "classifier", ""); err != nil {
+		t.Fatalf("tag wu-tagged: %v", err)
 	}
-	setTagAppliedAt(t, s, wms.EntityWorkUnit, "wu-fresh", "work-type", freshEnd.Add(time.Minute))
-
-	// wu-stale: classified once, then a NEW closed interval arrives after that
-	// classification's applied_at — SELECTED (stale, needs re-derivation).
-	staleFirstEnd := now.Add(-3 * time.Hour)
-	insertClosedInterval(t, s, wms.EntityWorkUnit, "wu-stale", "active", "s4aaaaaaaaaa", "a", staleFirstEnd.Add(-time.Hour), staleFirstEnd, "", "", nil)
-	if err := s.TagEntity(ctx, wms.EntityWorkUnit, "wu-stale", "work-type", "feature", "classifier", ""); err != nil {
-		t.Fatalf("tag wu-stale: %v", err)
-	}
-	setTagAppliedAt(t, s, wms.EntityWorkUnit, "wu-stale", "work-type", staleFirstEnd.Add(time.Minute))
-	insertClosedInterval(t, s, wms.EntityWorkUnit, "wu-stale", "active", "s4aaaaaaaaaa", "a", staleFirstEnd.Add(time.Minute), now, "", "", nil)
 
 	// out-x: an outcome interval — must NOT appear (workunit grain only).
 	insertClosedInterval(t, s, wms.EntityOutcome, "out-x", "active", "s5aaaaaaaaaa", "a", start, now, "", "", nil)
 
-	// No job_heartbeats row for 'classify' exists in this fresh schema, so the
-	// no-tag cohort (wu-new) is selected via the "first run — process
-	// everything" branch, not the tag watermark.
 	ids, err := s.ListWorkUnitsNeedingWorkType(ctx, "classify")
 	if err != nil {
 		t.Fatalf("ListWorkUnitsNeedingWorkType: %v", err)
@@ -293,32 +267,36 @@ func TestListWorkUnitsNeedingWorkType(t *testing.T) {
 	if !got["wu-new"] {
 		t.Errorf("expected never-classified wu-new (no heartbeat row yet) in work set, got %v", ids)
 	}
-	if !got["wu-stale"] {
-		t.Errorf("expected stale wu-stale (new closed interval since classification) in work set, got %v", ids)
+	if !got["wu-tagged"] {
+		t.Errorf("expected already-tagged wu-tagged (no heartbeat row yet — first run processes everything) in work set, got %v", ids)
 	}
 	if got["wu-manual"] {
 		t.Errorf("manually-tagged wu-manual must be excluded, got %v", ids)
-	}
-	if got["wu-fresh"] {
-		t.Errorf("freshly-classified wu-fresh (no new signal since) must be excluded, got %v", ids)
 	}
 	if got["out-x"] {
 		t.Errorf("outcome interval leaked into workunit enumeration: %v", ids)
 	}
 	if len(ids) != 2 {
-		t.Errorf("work set size = %d, want 2 (wu-new, wu-stale); got %v", len(ids), ids)
+		t.Errorf("work set size = %d, want 2 (wu-new, wu-tagged); got %v", len(ids), ids)
 	}
 }
 
-// TestListWorkUnitsNeedingWorkType_NoTagCohortFencedByHeartbeat covers the
-// live-reported bug: RuleClassifier.Classify skips silently (no tag write)
-// when a workunit has no derivable JSONL signal, so a never-tagged workunit
-// has no tag watermark to ever satisfy — without a secondary fence it was
-// reselected on every single pass forever (1976 of 1988 "no-tag" workunits
-// live). The fence is job_heartbeats.last_run_at for the classify job: a
-// no-tag workunit is only reselected once new (closed) activity has arrived
-// since the last completed run.
-func TestListWorkUnitsNeedingWorkType_NoTagCohortFencedByHeartbeat(t *testing.T) {
+// TestListWorkUnitsNeedingWorkType_FencedByHeartbeat covers the live-reported
+// bug, in both directions the applied_at watermark failed:
+//   - No work-type tag at all: RuleClassifier.Classify skips silently (no tag
+//     write) when a workunit has no derivable JSONL signal, so it has no tag
+//     watermark to ever satisfy (1976 of 1988 "no-tag" workunits live).
+//   - Already has a work-type tag: TagEntity only refreshes applied_at when
+//     the tag VALUE changes, so a workunit that keeps re-deriving the SAME
+//     value every pass never advances its watermark while new closed
+//     intervals keep arriving — applied_at < latest_closed stayed
+//     permanently true (all 1988 already-tagged workunits live, once the
+//     no-tag cohort was separately fixed).
+//
+// job_heartbeats.last_run_at fixes both: a workunit (tagged, untagged, or
+// manually tagged) is only reselected once new (closed) activity has arrived
+// since the last completed classify run.
+func TestListWorkUnitsNeedingWorkType_FencedByHeartbeat(t *testing.T) {
 	s, _ := newTestStore(t)
 	ctx := context.Background()
 	now := time.Now().UTC().Truncate(time.Second)
@@ -327,15 +305,43 @@ func TestListWorkUnitsNeedingWorkType_NoTagCohortFencedByHeartbeat(t *testing.T)
 		t.Fatalf("seed job_heartbeats: %v", err)
 	}
 
-	// wu-before: no tag, latest closed interval ended BEFORE last_run_at —
-	// EXCLUDED (already attempted this activity, nothing new since).
-	insertClosedInterval(t, s, wms.EntityWorkUnit, "wu-before", "active", "s1bbbbbbbbbb", "a",
+	// wu-notag-before: no tag, latest closed interval ended BEFORE last_run_at
+	// — EXCLUDED (already attempted this activity, nothing new since).
+	insertClosedInterval(t, s, wms.EntityWorkUnit, "wu-notag-before", "active", "s1bbbbbbbbbb", "a",
 		lastRun.Add(-2*time.Hour), lastRun.Add(-time.Hour), "", "", nil)
 
-	// wu-after: no tag, latest closed interval ended AFTER last_run_at —
+	// wu-notag-after: no tag, latest closed interval ended AFTER last_run_at —
 	// SELECTED (new activity since the last completed run).
-	insertClosedInterval(t, s, wms.EntityWorkUnit, "wu-after", "active", "s2bbbbbbbbbb", "a",
+	insertClosedInterval(t, s, wms.EntityWorkUnit, "wu-notag-after", "active", "s2bbbbbbbbbb", "a",
 		lastRun.Add(-time.Hour), lastRun.Add(time.Minute), "", "", nil)
+
+	// wu-tagged-before: has a classifier work-type tag, latest closed interval
+	// ended BEFORE last_run_at — EXCLUDED. This is the key regression case:
+	// under the old applied_at-based check this WU would have been wrongly
+	// selected forever (applied_at never advances when the derived value is
+	// unchanged), even though nothing new has happened since the last run.
+	insertClosedInterval(t, s, wms.EntityWorkUnit, "wu-tagged-before", "active", "s3bbbbbbbbbb", "a",
+		lastRun.Add(-2*time.Hour), lastRun.Add(-time.Hour), "", "", nil)
+	if err := s.TagEntity(ctx, wms.EntityWorkUnit, "wu-tagged-before", "work-type", "feature", "classifier", ""); err != nil {
+		t.Fatalf("tag wu-tagged-before: %v", err)
+	}
+
+	// wu-tagged-after: has a classifier work-type tag, latest closed interval
+	// ended AFTER last_run_at — SELECTED (new activity since the last run).
+	insertClosedInterval(t, s, wms.EntityWorkUnit, "wu-tagged-after", "active", "s4bbbbbbbbbb", "a",
+		lastRun.Add(-time.Hour), lastRun.Add(time.Minute), "", "", nil)
+	if err := s.TagEntity(ctx, wms.EntityWorkUnit, "wu-tagged-after", "work-type", "feature", "classifier", ""); err != nil {
+		t.Fatalf("tag wu-tagged-after: %v", err)
+	}
+
+	// wu-manual-after: manually tagged, latest closed interval ended AFTER
+	// last_run_at — still EXCLUDED. Manual wins regardless of activity
+	// recency.
+	insertClosedInterval(t, s, wms.EntityWorkUnit, "wu-manual-after", "active", "s5bbbbbbbbbb", "a",
+		lastRun.Add(-time.Hour), lastRun.Add(time.Minute), "", "", nil)
+	if err := s.TagEntity(ctx, wms.EntityWorkUnit, "wu-manual-after", "work-type", "feature", "manual", ""); err != nil {
+		t.Fatalf("tag wu-manual-after: %v", err)
+	}
 
 	ids, err := s.ListWorkUnitsNeedingWorkType(ctx, "classify")
 	if err != nil {
@@ -345,13 +351,22 @@ func TestListWorkUnitsNeedingWorkType_NoTagCohortFencedByHeartbeat(t *testing.T)
 	for _, id := range ids {
 		got[id] = true
 	}
-	if got["wu-before"] {
-		t.Errorf("wu-before (no tag, no activity since last heartbeat) must be excluded, got %v", ids)
+	if got["wu-notag-before"] {
+		t.Errorf("wu-notag-before (no tag, no activity since last heartbeat) must be excluded, got %v", ids)
 	}
-	if !got["wu-after"] {
-		t.Errorf("expected wu-after (no tag, new activity since last heartbeat) in work set, got %v", ids)
+	if !got["wu-notag-after"] {
+		t.Errorf("expected wu-notag-after (no tag, new activity since last heartbeat) in work set, got %v", ids)
 	}
-	if len(ids) != 1 {
-		t.Errorf("work set size = %d, want 1 (wu-after only); got %v", len(ids), ids)
+	if got["wu-tagged-before"] {
+		t.Errorf("wu-tagged-before (tagged, no activity since last heartbeat) must be excluded — this is the regression case, got %v", ids)
+	}
+	if !got["wu-tagged-after"] {
+		t.Errorf("expected wu-tagged-after (tagged, new activity since last heartbeat) in work set, got %v", ids)
+	}
+	if got["wu-manual-after"] {
+		t.Errorf("wu-manual-after (manual tag) must be excluded regardless of activity recency, got %v", ids)
+	}
+	if len(ids) != 2 {
+		t.Errorf("work set size = %d, want 2 (wu-notag-after, wu-tagged-after); got %v", len(ids), ids)
 	}
 }

@@ -175,19 +175,23 @@ func (r *Runner) recordHeartbeat(ctx context.Context) {
 	}
 }
 
-// classifyWorkTypes re-derives work-type on every workunit that needs it —
-// never classified, or classified before its most recent closed interval —
-// reusing the inline RuleClassifier rules verbatim. Watermarked the same way
-// as the phase pass (GH #13 follow-up): the prior unwatermarked version
-// re-scanned every active workunit (2253 on this install) each tick, and each
-// scan is a full JSONL read via RuleClassifier.Classify, driving a 23-minute
-// pass that overran its own 10-minute timer. A workunit whose signal never
-// yields a derivable work-type has no tag watermark to ever satisfy, so the
-// "no tag" cohort is additionally fenced on job_heartbeats (jobNameClassify) —
-// without it, those workunits (1976 of 1988 live) were reselected forever
-// even after the first watermark pass. The classifier's manualKeys deference
-// protects operator-set work-type values. A per-workunit error is logged and
-// skipped so one bad entity does not stop the rest.
+// classifyWorkTypes re-derives work-type on every workunit that needs it,
+// reusing the inline RuleClassifier rules verbatim. Watermarked on
+// job_heartbeats (jobNameClassify), not on the work-type tag's own
+// applied_at (GH #13 follow-up, two live-diagnosed rounds): the prior
+// unwatermarked version re-scanned every active workunit (2253 on this
+// install) each tick, each scan a full JSONL read via RuleClassifier.Classify,
+// driving a 23-minute pass that overran its own 10-minute timer. An
+// applied_at-based watermark fails in both directions — a workunit with no
+// derivable signal never gets a tag written at all (nothing to satisfy the
+// watermark), and a workunit that keeps re-deriving the SAME work-type value
+// never advances applied_at (TagEntity only bumps it on a value change) — so
+// both cohorts (1976 no-tag, then all 1988 already-tagged) were reselected
+// forever. job_heartbeats.last_run_at sidesteps both: a workunit is selected
+// only when there's no heartbeat yet (first run) or its latest closed
+// interval ended after the last completed run. The classifier's manualKeys
+// deference protects operator-set work-type values. A per-workunit error is
+// logged and skipped so one bad entity does not stop the rest.
 func (r *Runner) classifyWorkTypes(ctx context.Context) error {
 	ids, err := r.store.ListWorkUnitsNeedingWorkType(ctx, jobNameClassify)
 	if err != nil {
