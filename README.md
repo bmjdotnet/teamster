@@ -7,7 +7,7 @@
 Teamster is a self-hosted **AI observatory** and **cost-attribution system** for
 Claude Code and OpenAI Codex. It records what every agent does in real
 time, attributes per-message token spend to declared work items, and presents
-both through Grafana dashboards and a terminal utilities. Every dollar lands
+both through Grafana dashboards and terminal utilities. Every dollar lands
 somewhere visible: attributed cost carries its attribution method, and whatever
 cannot be attributed is shown as a residual, not hidden.  Teamster allows you
 to perform ad-hoc, multidimensional analysis to link AI spend to actual work and
