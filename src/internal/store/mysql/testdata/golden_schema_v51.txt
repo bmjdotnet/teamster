@@ -246,6 +246,10 @@ TABLE gap_evidence
   INDEX idx_ge_entity nonunique (entity_type,entity_id)
   INDEX idx_ge_session nonunique (session_id)
   INDEX PRIMARY unique (message_id)
+TABLE job_heartbeats
+  COLUMN job_name type=varchar(64) null=NO default=<NULL> extra=
+  COLUMN last_run_at type=datetime(6) null=NO default=<NULL> extra=
+  INDEX PRIMARY unique (job_name)
 TABLE outcome_cost_rollup
   COLUMN agent_name type=varchar(128) null=NO default= extra=
   COLUMN bucket_day type=date null=NO default=<NULL> extra=
