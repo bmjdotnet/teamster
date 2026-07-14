@@ -43,7 +43,7 @@ type Store interface {
 	wms.Store
 	ListIntervalsNeedingPhase(ctx context.Context, limit int) ([]wms.EventRecord, error)
 	ClearClassifierPhases(ctx context.Context) (int64, error)
-	ListWorkUnitsNeedingWorkType(ctx context.Context) ([]string, error)
+	ListWorkUnitsNeedingWorkType(ctx context.Context, jobName string) ([]string, error)
 	// ListOutcomesNeedingPhase returns [outcomeID, workType] pairs for outcomes
 	// with no phase tag and no child workunits.
 	ListOutcomesNeedingPhase(ctx context.Context) ([][2]string, error)
@@ -181,11 +181,15 @@ func (r *Runner) recordHeartbeat(ctx context.Context) {
 // as the phase pass (GH #13 follow-up): the prior unwatermarked version
 // re-scanned every active workunit (2253 on this install) each tick, and each
 // scan is a full JSONL read via RuleClassifier.Classify, driving a 23-minute
-// pass that overran its own 10-minute timer. The classifier's manualKeys
-// deference protects operator-set work-type values. A per-workunit error is
-// logged and skipped so one bad entity does not stop the rest.
+// pass that overran its own 10-minute timer. A workunit whose signal never
+// yields a derivable work-type has no tag watermark to ever satisfy, so the
+// "no tag" cohort is additionally fenced on job_heartbeats (jobNameClassify) —
+// without it, those workunits (1976 of 1988 live) were reselected forever
+// even after the first watermark pass. The classifier's manualKeys deference
+// protects operator-set work-type values. A per-workunit error is logged and
+// skipped so one bad entity does not stop the rest.
 func (r *Runner) classifyWorkTypes(ctx context.Context) error {
-	ids, err := r.store.ListWorkUnitsNeedingWorkType(ctx)
+	ids, err := r.store.ListWorkUnitsNeedingWorkType(ctx, jobNameClassify)
 	if err != nil {
 		return fmt.Errorf("list workunits: %w", err)
 	}

@@ -780,19 +780,32 @@ func (s *Store) EarliestClosureByEntity(ctx context.Context, keys [][2]string) (
 // tick, each a full JSONL log scan via RuleClassifier.Classify, driving a
 // 23-minute pass that overran its own timer).
 //
-// A workunit qualifies when it has at least one kind='state' interval AND:
-//   - it does not already carry a manually-set work-type tag (manual always
-//     wins; scanning it is pure waste since applyTag would just skip it), AND
-//   - EITHER it has no work-type tag at all (never classified), OR its
-//     latest CLOSED interval ended after the tag's applied_at (new signal
-//     has arrived since the last classification — the same "unassembled or
-//     stale" idempotency test ListIntervalsNeedingPhase uses, just keyed on
-//     the workunit's own tag watermark instead of phase_assembled_at).
+// A workunit qualifies when it has at least one kind='state' interval AND it
+// does not already carry a manually-set work-type tag (manual always wins;
+// scanning it is pure waste since applyTag would just skip it). Beyond that,
+// two disjoint cohorts:
 //
-// A workunit with only open intervals and an existing non-manual tag is
-// excluded — no closed interval means no new signal, so re-running would
-// reproduce the same tags at the cost of another full log scan.
-func (s *Store) ListWorkUnitsNeedingWorkType(ctx context.Context) ([]string, error) {
+//   - Has a (non-manual) work-type tag: selected only when its latest CLOSED
+//     interval ended after the tag's applied_at (new signal has arrived
+//     since the last classification, the same "unassembled or stale"
+//     idempotency test ListIntervalsNeedingPhase uses, just keyed on the
+//     workunit's own tag watermark instead of phase_assembled_at).
+//
+//   - No work-type tag at all: RuleClassifier.Classify skips silently (no
+//     tag write) when it finds no JSONL signal for an entity, so a workunit
+//     whose activity never yields a derivable work-type would otherwise be
+//     reselected forever (there is no tag watermark to ever satisfy) -
+//     confirmed live: 1976 of 1988 "no-tag" workunits every single pass.
+//     Fenced instead on job_heartbeats.last_run_at for jobName ("classify"):
+//     selected only when no heartbeat row exists yet (first run - process
+//     everything), or the workunit's latest closed interval ended after the
+//     last completed run (new activity not yet attempted).
+//
+// A workunit with only open intervals in either cohort is excluded once a
+// heartbeat/tag watermark is in place - no closed interval means no new
+// signal, so re-running would reproduce the same (non-)result at the cost of
+// another full log scan.
+func (s *Store) ListWorkUnitsNeedingWorkType(ctx context.Context, jobName string) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT wa.entity_id
 		FROM (
@@ -808,11 +821,18 @@ func (s *Store) ListWorkUnitsNeedingWorkType(ctx context.Context) ([]string, err
 		    AND t.tag_key = 'work-type' AND et.source = 'manual'
 		)
 		AND (
-		  NOT EXISTS (
-		    SELECT 1 FROM entity_tags et2
-		    JOIN tags t2 ON t2.id = et2.tag_id
-		    WHERE et2.entity_type = 'workunit' AND et2.entity_id = wa.entity_id
-		      AND t2.tag_key = 'work-type'
+		  (
+		    NOT EXISTS (
+		      SELECT 1 FROM entity_tags et2
+		      JOIN tags t2 ON t2.id = et2.tag_id
+		      WHERE et2.entity_type = 'workunit' AND et2.entity_id = wa.entity_id
+		        AND t2.tag_key = 'work-type'
+		    )
+		    AND (
+		      (SELECT last_run_at FROM job_heartbeats WHERE job_name = ?) IS NULL
+		      OR (wa.latest_closed IS NOT NULL
+		          AND wa.latest_closed > (SELECT last_run_at FROM job_heartbeats WHERE job_name = ?))
+		    )
 		  )
 		  OR EXISTS (
 		    SELECT 1 FROM entity_tags et3
@@ -822,7 +842,7 @@ func (s *Store) ListWorkUnitsNeedingWorkType(ctx context.Context) ([]string, err
 		      AND wa.latest_closed IS NOT NULL AND et3.applied_at < wa.latest_closed
 		  )
 		)
-		ORDER BY wa.entity_id ASC`, wms.EntityWorkUnit)
+		ORDER BY wa.entity_id ASC`, wms.EntityWorkUnit, jobName, jobName)
 	if err != nil {
 		return nil, err
 	}

@@ -279,7 +279,10 @@ func TestListWorkUnitsNeedingWorkType(t *testing.T) {
 	// out-x: an outcome interval — must NOT appear (workunit grain only).
 	insertClosedInterval(t, s, wms.EntityOutcome, "out-x", "active", "s5aaaaaaaaaa", "a", start, now, "", "", nil)
 
-	ids, err := s.ListWorkUnitsNeedingWorkType(ctx)
+	// No job_heartbeats row for 'classify' exists in this fresh schema, so the
+	// no-tag cohort (wu-new) is selected via the "first run — process
+	// everything" branch, not the tag watermark.
+	ids, err := s.ListWorkUnitsNeedingWorkType(ctx, "classify")
 	if err != nil {
 		t.Fatalf("ListWorkUnitsNeedingWorkType: %v", err)
 	}
@@ -288,7 +291,7 @@ func TestListWorkUnitsNeedingWorkType(t *testing.T) {
 		got[id] = true
 	}
 	if !got["wu-new"] {
-		t.Errorf("expected never-classified wu-new in work set, got %v", ids)
+		t.Errorf("expected never-classified wu-new (no heartbeat row yet) in work set, got %v", ids)
 	}
 	if !got["wu-stale"] {
 		t.Errorf("expected stale wu-stale (new closed interval since classification) in work set, got %v", ids)
@@ -304,5 +307,51 @@ func TestListWorkUnitsNeedingWorkType(t *testing.T) {
 	}
 	if len(ids) != 2 {
 		t.Errorf("work set size = %d, want 2 (wu-new, wu-stale); got %v", len(ids), ids)
+	}
+}
+
+// TestListWorkUnitsNeedingWorkType_NoTagCohortFencedByHeartbeat covers the
+// live-reported bug: RuleClassifier.Classify skips silently (no tag write)
+// when a workunit has no derivable JSONL signal, so a never-tagged workunit
+// has no tag watermark to ever satisfy — without a secondary fence it was
+// reselected on every single pass forever (1976 of 1988 "no-tag" workunits
+// live). The fence is job_heartbeats.last_run_at for the classify job: a
+// no-tag workunit is only reselected once new (closed) activity has arrived
+// since the last completed run.
+func TestListWorkUnitsNeedingWorkType_NoTagCohortFencedByHeartbeat(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	lastRun := now.Add(-time.Hour)
+	if err := s.RecordJobHeartbeat(ctx, "classify", lastRun); err != nil {
+		t.Fatalf("seed job_heartbeats: %v", err)
+	}
+
+	// wu-before: no tag, latest closed interval ended BEFORE last_run_at —
+	// EXCLUDED (already attempted this activity, nothing new since).
+	insertClosedInterval(t, s, wms.EntityWorkUnit, "wu-before", "active", "s1bbbbbbbbbb", "a",
+		lastRun.Add(-2*time.Hour), lastRun.Add(-time.Hour), "", "", nil)
+
+	// wu-after: no tag, latest closed interval ended AFTER last_run_at —
+	// SELECTED (new activity since the last completed run).
+	insertClosedInterval(t, s, wms.EntityWorkUnit, "wu-after", "active", "s2bbbbbbbbbb", "a",
+		lastRun.Add(-time.Hour), lastRun.Add(time.Minute), "", "", nil)
+
+	ids, err := s.ListWorkUnitsNeedingWorkType(ctx, "classify")
+	if err != nil {
+		t.Fatalf("ListWorkUnitsNeedingWorkType: %v", err)
+	}
+	got := map[string]bool{}
+	for _, id := range ids {
+		got[id] = true
+	}
+	if got["wu-before"] {
+		t.Errorf("wu-before (no tag, no activity since last heartbeat) must be excluded, got %v", ids)
+	}
+	if !got["wu-after"] {
+		t.Errorf("expected wu-after (no tag, new activity since last heartbeat) in work set, got %v", ids)
+	}
+	if len(ids) != 1 {
+		t.Errorf("work set size = %d, want 1 (wu-after only); got %v", len(ids), ids)
 	}
 }

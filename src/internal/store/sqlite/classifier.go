@@ -151,7 +151,7 @@ func (s *Store) EarliestClosureByEntity(ctx context.Context, keys [][2]string) (
 // ListWorkUnitsNeedingWorkType returns the distinct workunit ids that need a
 // work-type (re)classification pass — see the mysql implementation's doc
 // comment for the full watermark rationale (GH #13 follow-up).
-func (s *Store) ListWorkUnitsNeedingWorkType(ctx context.Context) ([]string, error) {
+func (s *Store) ListWorkUnitsNeedingWorkType(ctx context.Context, jobName string) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT wa.entity_id
 		FROM (
@@ -167,11 +167,18 @@ func (s *Store) ListWorkUnitsNeedingWorkType(ctx context.Context) ([]string, err
 		    AND t.tag_key = 'work-type' AND et.source = 'manual'
 		)
 		AND (
-		  NOT EXISTS (
-		    SELECT 1 FROM entity_tags et2
-		    JOIN tags t2 ON t2.id = et2.tag_id
-		    WHERE et2.entity_type = 'workunit' AND et2.entity_id = wa.entity_id
-		      AND t2.tag_key = 'work-type'
+		  (
+		    NOT EXISTS (
+		      SELECT 1 FROM entity_tags et2
+		      JOIN tags t2 ON t2.id = et2.tag_id
+		      WHERE et2.entity_type = 'workunit' AND et2.entity_id = wa.entity_id
+		        AND t2.tag_key = 'work-type'
+		    )
+		    AND (
+		      (SELECT last_run_at FROM job_heartbeats WHERE job_name = ?) IS NULL
+		      OR (wa.latest_closed IS NOT NULL
+		          AND wa.latest_closed > (SELECT last_run_at FROM job_heartbeats WHERE job_name = ?))
+		    )
 		  )
 		  OR EXISTS (
 		    SELECT 1 FROM entity_tags et3
@@ -181,7 +188,7 @@ func (s *Store) ListWorkUnitsNeedingWorkType(ctx context.Context) ([]string, err
 		      AND wa.latest_closed IS NOT NULL AND et3.applied_at < wa.latest_closed
 		  )
 		)
-		ORDER BY wa.entity_id ASC`, wms.EntityWorkUnit)
+		ORDER BY wa.entity_id ASC`, wms.EntityWorkUnit, jobName, jobName)
 	if err != nil {
 		return nil, err
 	}
