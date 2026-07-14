@@ -59,15 +59,30 @@ func TestFleetModelAbbrev(t *testing.T) {
 		"claude-opus-4-6":     "opus-4-6",
 		"claude-opus-4-6[1m]": "opus-4-6",
 		"claude-sonnet-5":     "sonnet-5",
-		"claude-haiku-4-5":    "haiku-4-", // hard-truncated at fleetModelW (8), no ellipsis
+		"claude-haiku-4-5":    "haiku-4-5", // fits in full at fleetModelW (9) — was cutting to "haiku-4-" at the old width 8
 		"claude-fable-5":      "fable-5",
 		"":                    "--",
-		"gpt-5.1-codex":       "gpt-5.1-", // no "claude-" prefix to strip; hard-truncated at 8
+		"gpt-5.1-codex":       "gpt-5.1-c", // no "claude-" prefix to strip; hard-truncated at 9, no version field split
 	}
 	for in, want := range cases {
 		if got := fleetModelAbbrev(in); got != want {
 			t.Errorf("fleetModelAbbrev(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// TestFleetModelAbbrevNeverSplitsVersionNumber pins the truncation
+// backoff itself (operator report: "haiku-4-5" cutting to "haiku-4-" —
+// fleetModelW's widening to 9 already fixes every current model name, but
+// this guards any future longer one): a hard cut that would land on a
+// bare trailing "-" or split a multi-digit number in half backs off to
+// the last "-" boundary instead of showing a half-finished version field.
+func TestFleetModelAbbrevNeverSplitsVersionNumber(t *testing.T) {
+	if got := fleetModelAbbrev("xxx-123-456"); got != "xxx-123" {
+		t.Errorf("fleetModelAbbrev(%q) = %q, want %q (digit-split backoff)", "xxx-123-456", got, "xxx-123")
+	}
+	if got := fleetModelAbbrev("xxxxx-12-34"); got != "xxxxx-12" {
+		t.Errorf("fleetModelAbbrev(%q) = %q, want %q (trailing-dash backoff)", "xxxxx-12-34", got, "xxxxx-12")
 	}
 }
 
@@ -422,32 +437,40 @@ func names(rows []fleetRow) []string {
 	return out
 }
 
-// TestFleetTreeRowsTodaysLabelingStaysFlat is the no-regression guarantee:
-// under the current hookd heuristic (every non-lead is "teammate" with
-// parent_ref → the session lead), the derived list must be identical to
-// the input — no nesting, no prefixes, no suffixes, in both modes.
-func TestFleetTreeRowsTodaysLabelingStaysFlat(t *testing.T) {
+// TestFleetTreeRowsTeammatesOfLeadNest is the current no-regression
+// guarantee (operator correction 2026-07-14, superseding the prior
+// "stays flat" pin): under the current hookd heuristic (every non-lead is
+// "teammate" with parent_ref → the session lead), those teammates now nest
+// beneath the lead — dash-less connectors ("├"/"└") since they're durable
+// members, not ephemeral spawns — in tree mode, and pick up the "↳lead"
+// suffix in flat mode.
+func TestFleetTreeRowsTeammatesOfLeadNest(t *testing.T) {
 	rows := []Agent{
 		treeAgent("", "L", "", "lead"),
 		treeAgent("collector", "C", "L", "teammate"),
 		treeAgent("ux-design", "U", "L", "teammate"),
 	}
-	for _, flat := range []bool{false, true} {
-		got := fleetTreeRows(rows, flat)
-		if len(got) != 3 {
-			t.Fatalf("flat=%v: %d rows, want 3", flat, len(got))
+	got := names(fleetTreeRows(rows, false))
+	want := []string{"", "├collector", "└ux-design"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("flat=false row %d = %q, want %q (full: %v)", i, got[i], want[i], got)
 		}
-		for i, fr := range got {
-			if fr.agent.AgentName != rows[i].AgentName || fr.prefix != "" || fr.suffix != "" {
-				t.Errorf("flat=%v row %d = %+v, want undecorated input order", flat, i, names(got))
-			}
+	}
+
+	gotFlat := names(fleetTreeRows(rows, true))
+	wantFlat := []string{"", "collector ↳lead", "ux-design ↳lead"}
+	for i := range wantFlat {
+		if gotFlat[i] != wantFlat[i] {
+			t.Errorf("flat=true row %d = %q, want %q (full: %v)", i, gotFlat[i], wantFlat[i], gotFlat)
 		}
 	}
 }
 
-// TestFleetTreeRowsNestsSpawns covers the core tree: subagents pulled
-// beneath their spawner in input (sort) order, sibling connectors ├─/└─,
-// grandchild guide-line │ └─, and teammates staying top-level around them.
+// TestFleetTreeRowsNestsSpawns covers the core tree: teammates nest under
+// the lead with dash-less connectors ├/└, their own subagent spawns nest
+// deeper still with dashed connectors ├─/└─ and a │ guide-line tracking
+// whether the owning teammate has more siblings below.
 func TestFleetTreeRowsNestsSpawns(t *testing.T) {
 	rows := []Agent{
 		treeAgent("", "L", "", "lead"),
@@ -458,7 +481,7 @@ func TestFleetTreeRowsNestsSpawns(t *testing.T) {
 		treeAgent("ux-design", "U", "L", "teammate"),
 	}
 	got := names(fleetTreeRows(rows, false))
-	want := []string{"", "collector", "├─Explore", "│ └─grep-bot", "└─doc-scan", "ux-design"}
+	want := []string{"", "├collector", "│ ├─Explore", "│ │ └─grep-bot", "│ └─doc-scan", "└ux-design"}
 	if len(got) != len(want) {
 		t.Fatalf("rows = %v, want %v", got, want)
 	}
@@ -484,8 +507,8 @@ func TestFleetTreeRowsSubagentUnderLeadNests(t *testing.T) {
 }
 
 // TestFleetTreeRowsOrphanPromoted: a subagent whose parent_ref doesn't
-// resolve to a visible row is promoted to top level with the ↳ marker at
-// its normal sort position — never dropped.
+// resolve to a visible row is promoted to top level with the ↳ marker,
+// after the lead's own (now-nesting) subtree — never dropped.
 func TestFleetTreeRowsOrphanPromoted(t *testing.T) {
 	rows := []Agent{
 		treeAgent("", "L", "", "lead"),
@@ -493,7 +516,7 @@ func TestFleetTreeRowsOrphanPromoted(t *testing.T) {
 		treeAgent("ux-design", "U", "L", "teammate"),
 	}
 	got := names(fleetTreeRows(rows, false))
-	want := []string{"", "↳grep-bot", "ux-design"}
+	want := []string{"", "└ux-design", "↳grep-bot"}
 	for i := range want {
 		if got[i] != want[i] {
 			t.Errorf("row %d = %q, want %q (full: %v)", i, got[i], want[i], got)
@@ -553,7 +576,7 @@ func TestFleetTreeRowsFlatModeAnnotatesLineage(t *testing.T) {
 		treeAgent("probe", "P", "L", "subagent"),
 	}
 	got := names(fleetTreeRows(rows, true))
-	want := []string{"", "collector", "Explore ↳collector", "probe ↳lead"}
+	want := []string{"", "collector ↳lead", "Explore ↳collector", "probe ↳lead"}
 	for i := range want {
 		if got[i] != want[i] {
 			t.Errorf("flat row %d = %q, want %q (full: %v)", i, got[i], want[i], got)
@@ -589,7 +612,7 @@ func TestFleetTKeyTogglesFlatAndCursorFollowsAgent(t *testing.T) {
 	})
 	v := fleetView{m: &m}
 
-	// Forest order: header, ├@lead, ├@collector, │ └─@Explore, └@zeta.
+	// Forest order: header, └@lead, ├@collector, │ └─@Explore, └@zeta.
 	// Three j's from the header land on Explore.
 	v.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
 	v.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
@@ -671,21 +694,74 @@ func medicGroup() agentGroup {
 	}}
 }
 
-// TestFleetForestRowsMockupAConnectors pins the full v2 connector grammar
-// against the operator-approved mockup A: members dash-less (├/└, lead
-// first), spawns dashed one level deeper under a │/blank guide that tracks
-// whether their owning member has siblings below.
-func TestFleetForestRowsMockupAConnectors(t *testing.T) {
+// TestFleetForestRowsNestsTeammatesUnderLead pins the full v2 connector
+// grammar (operator correction 2026-07-14, superseding mockup A's flat
+// members list): the lead is the tree's sole root and gets the header's
+// dash-less connector, every teammate nests one level beneath it with its
+// own dash-less connector plus a flat leading space marking the nest, and
+// Agent-tool spawns nest deeper still under a │/blank guide, dashed to
+// mark them as ephemeral rather than durable members.
+func TestFleetForestRowsNestsTeammatesUnderLead(t *testing.T) {
 	got := forestNames(fleetForestRows([]agentGroup{medicGroup()}, nil, false))
 	want := []string{
 		"H:#medic",
-		"├@lead",
-		"├@collector",
-		"│ ├─@Explore",
-		"│ │ └─@grep-bot",
-		"│ └─@doc-scan",
-		"└@ux-design",
+		"└@lead",
+		" ├@collector",
+		" │ ├─@Explore",
+		" │ │ └─@grep-bot",
+		" │ └─@doc-scan",
+		" └@ux-design",
 	}
+	if len(got) != len(want) {
+		t.Fatalf("rows = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("row %d = %q, want %q (full: %v)", i, got[i], want[i], got)
+		}
+	}
+}
+
+// TestFleetTeamMemberRowsGuidesOrphanedSubtree covers the case
+// fleetTreeRows' single-root cont=nil walk can't see on its own: a second
+// header-level root (a subagent whose parent_ref is unresolvable) means
+// the lead is no longer the header's only child, so the lead's OWN
+// subtree (collector, and collector's own spawn) needs a "│ " guide
+// re-threaded onto every descendant to show the header has more coming
+// after it — otherwise collector reads as a peer of lead rather than its
+// child, and a deeper spawn detaches from the guide chain entirely.
+func TestFleetTeamMemberRowsGuidesOrphanedSubtree(t *testing.T) {
+	rows := []Agent{
+		treeAgent("", "L", "", "lead"),
+		treeAgent("collector", "C", "L", "teammate"),
+		treeAgent("Explore", "E", "C", "subagent"),
+		treeAgent("orphan", "O", "GONE", "subagent"),
+	}
+	got := forestNames(fleetTeamMemberRows(rows))
+	want := []string{"├@lead", " │ └@collector", " │   └─@Explore", "└↳@orphan"}
+	if len(got) != len(want) {
+		t.Fatalf("rows = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("row %d = %q, want %q (full: %v)", i, got[i], want[i], got)
+		}
+	}
+}
+
+// TestFleetTeamMemberRowsGuidesStrayTeammateSubtree: same guide-reflow
+// requirement, but the second header-level root is a TEAMMATE with an
+// unresolvable parent_ref (a plain root, not the ↳-marked orphan a
+// subagent gets) rather than a subagent — the lead's subtree still needs
+// its "│ " guide.
+func TestFleetTeamMemberRowsGuidesStrayTeammateSubtree(t *testing.T) {
+	rows := []Agent{
+		treeAgent("", "L", "", "lead"),
+		treeAgent("collector", "C", "L", "teammate"),
+		treeAgent("stray", "S", "MISSING", "teammate"),
+	}
+	got := forestNames(fleetTeamMemberRows(rows))
+	want := []string{"├@lead", " │ └@collector", "└@stray"}
 	if len(got) != len(want) {
 		t.Fatalf("rows = %v, want %v", got, want)
 	}
@@ -901,13 +977,78 @@ func TestFleetTeamHealthDotShape(t *testing.T) {
 }
 
 // TestFleetLeadRendersAtLead: operator decision 5 — the lead is a member
-// row named "@lead".
+// row named "@lead", and (2026-07-14) the tree's sole root, so its own
+// connector is always "└" rather than a peer "├".
 func TestFleetLeadRendersAtLead(t *testing.T) {
 	m := model{width: 140, height: 20, colorize: true}
 	m.agents.setRows(medicGroup().rows)
 	v := fleetView{m: &m}
 	out := display.StripANSI(v.View(140, 18))
-	if !strings.Contains(out, "├@lead") {
-		t.Errorf("view output missing ├@lead:\n%s", out)
+	if !strings.Contains(out, "└@lead") {
+		t.Errorf("view output missing └@lead:\n%s", out)
+	}
+}
+
+// TestFleetForestRowsGrandchildSpawnNestsUnderTeammate pins the exact
+// scenario from the operator's bug report: a teammate's own Agent-tool
+// spawn (a "sub-subagent" two levels below the lead) must keep nesting
+// correctly now that the teammate itself sits one level deeper than
+// before. Shape: #aka-crew — @lead (root), @wms-engine and @docs as its
+// teammates, @wms-child as wms-engine's own spawn.
+func TestFleetForestRowsGrandchildSpawnNestsUnderTeammate(t *testing.T) {
+	lead := treeAgent("", "L", "", "lead")
+	lead.TeamName = "aka-crew"
+	g := agentGroup{sessionID: "sess-aka", rows: []Agent{
+		lead,
+		treeAgent("wms-engine", "W", "L", "teammate"),
+		treeAgent("wms-child", "X", "W", "subagent"),
+		treeAgent("docs", "D", "L", "teammate"),
+	}}
+	got := forestNames(fleetForestRows([]agentGroup{g}, nil, false))
+	want := []string{
+		"H:#aka-crew",
+		"└@lead",
+		" ├@wms-engine",
+		" │ └─@wms-child",
+		" └@docs",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("rows = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("row %d = %q, want %q (full: %v)", i, got[i], want[i], got)
+		}
+	}
+}
+
+// TestFleetForestRowsDepthCapUnderTeammate: fleetMaxTreeDepth still caps a
+// spawn chain rooted under a TEAMMATE (not just one rooted directly under
+// the lead, which TestFleetTreeRowsDepthCapped already covers) — teammate
+// nesting spends one level of the same budget, so this exercises the cap
+// through the team-header path (fleetTeamMemberRows no longer touches
+// descendant prefixes at all, so this proves fleetTreeRows' own capping is
+// sufficient on its own).
+func TestFleetForestRowsDepthCapUnderTeammate(t *testing.T) {
+	lead := treeAgent("", "L", "", "lead")
+	lead.TeamName = "deep-crew"
+	g := agentGroup{sessionID: "sess-deep", rows: []Agent{
+		lead,
+		treeAgent("collector", "C", "L", "teammate"),
+		treeAgent("d1", "A", "C", "subagent"),
+		treeAgent("d2", "B", "A", "subagent"),
+		treeAgent("d3", "D3", "B", "subagent"),
+		treeAgent("d4", "D4", "D3", "subagent"),
+	}}
+	got := fleetForestRows([]agentGroup{g}, nil, false)
+	// index 0 = header, 1 = lead, 2 = collector, 3 = d1, 4 = d2, 5 = d3, 6 = d4.
+	// collector itself already spends one level of the cont budget (unlike
+	// TestFleetTreeRowsDepthCapped's chain, which hangs directly off the
+	// root lead), so d2 — not d3 — is the one that lands exactly at the cap.
+	capW := lipgloss.Width(got[4].prefix) // d2 — at the cap (cont length 3)
+	for _, i := range []int{5, 6} {       // d3, d4 — beyond the cap
+		if w := lipgloss.Width(got[i].prefix); w != capW {
+			t.Errorf("row %d prefix %q width = %d, want capped at %d (d2's %q)", i, got[i].prefix, w, capW, got[4].prefix)
+		}
 	}
 }

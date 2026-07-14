@@ -102,26 +102,29 @@ func fleetIsLead(a Agent) bool {
 }
 
 // fleetWantsNest reports whether r should nest beneath its spawner rather
-// than sit top-level. Labeling-robust by design (approved 2026-07-13):
-// relationship=="subagent" nests wherever hookd's Gate 1 refinement labels
-// one; a parent_ref resolving to a visible NON-lead row nests regardless
-// of label (covers grandchildren before the refinement lands). Teammates
-// of a lead stay flat — they are peers in the team mental model — which
-// also means today's degraded labeling (everything "teammate" with
-// parent_ref → lead) renders identically to the pre-hierarchy view.
+// than sit top-level. Labeling-robust by design: relationship=="subagent"
+// nests wherever hookd's Gate 1 refinement labels one; any row whose
+// parent_ref resolves to a visible row nests beneath it (operator
+// correction 2026-07-14 — a teammate's parent being the lead no longer
+// exempts it from nesting: the lead is the tree's sole root, every
+// teammate and its own Agent-tool spawns nest beneath it).
 func fleetWantsNest(r Agent, parent *Agent) bool {
 	if r.Relationship == "subagent" {
 		return true
 	}
-	return parent != nil && !fleetIsLead(*parent)
+	return parent != nil
 }
 
 // fleetConnector renders the plain tree-lineage prefix for a nested row.
 // cont holds one continuation flag per ancestor level (true = that
 // ancestor has more siblings below it, so its guide line "│" continues).
 // Depth beyond fleetMaxTreeDepth drops the OLDEST continuation cells —
-// the branch glyph and local structure stay intact.
-func fleetConnector(cont []bool, orphan bool) string {
+// the branch glyph and local structure stay intact. dashed picks the
+// branch glyph style: team members (lead/teammates) render dash-less
+// ("├"/"└") regardless of nesting depth, Agent-tool spawns render dashed
+// ("├─"/"└─") — the glyph is how the view tells a durable team member
+// from an ephemeral spawn, independent of how deep either is nested.
+func fleetConnector(cont []bool, orphan, dashed bool) string {
 	if orphan {
 		return "↳"
 	}
@@ -139,11 +142,14 @@ func fleetConnector(cont []bool, orphan bool) string {
 			b.WriteString("  ")
 		}
 	}
+	branch := "└"
 	if cont[len(cont)-1] {
-		b.WriteString("├─")
-	} else {
-		b.WriteString("└─")
+		branch = "├"
 	}
+	if dashed {
+		branch += "─"
+	}
+	b.WriteString(branch)
 	return b.String()
 }
 
@@ -225,7 +231,7 @@ func fleetTreeRows(rows []Agent, flat bool) []fleetRow {
 			return
 		}
 		emitted[i] = true
-		out = append(out, fleetRow{agent: rows[i], prefix: fleetConnector(cont, orphan[i])})
+		out = append(out, fleetRow{agent: rows[i], prefix: fleetConnector(cont, orphan[i], rows[i].Relationship == "subagent")})
 		kids := children[i]
 		for k, ci := range kids {
 			next := append(append([]bool{}, cont...), k < len(kids)-1)
@@ -289,12 +295,29 @@ func fleetAgentColWidth(rows []fleetRow) int {
 // --- team forest derivation (v2) ---
 
 // fleetTeamMemberRows converts one team's v1 spawn tree into member-level
-// rows per the v2 connector grammar (operator-approved mockup A): members
-// — lead first, teammates after — get a single dash-less connector
-// ("├"/"└"), Agent-tool spawns keep their v1 dashed connectors nested one
-// level deeper under a "│ "/"  " guide that tracks whether their owning
-// member has more siblings below. A within-team orphan (spawn whose
-// parent isn't visible) keeps its ↳ marker after the member connector.
+// rows for the v2 header display: the lead is the tree's sole root
+// (operator correction 2026-07-14, superseding mockup A's flat-members
+// grammar) and picks up the header's own dash-less connector ("├"/"└");
+// every teammate and its Agent-tool spawns nest correctly beneath it via
+// fleetTreeRows' ordinary recursive connector grammar — dash-less for
+// teammates, dashed for spawns (see fleetConnector). A teammate whose
+// parent_ref doesn't resolve is promoted to a second header-level root by
+// fleetTreeRows (↳ marker) and picks up the same header connector
+// treatment as the lead — and in THAT (now rare) multi-root case, a root
+// that isn't the header's last one needs a "│ " guide re-threaded onto
+// every one of its descendants: fleetTreeRows walks each root with a
+// fresh cont=nil (line ~242), so a root's own subtree correctly encodes
+// continuation relative to itself, but has no way to know whether the
+// header has more roots coming after it. The sole/last root (the common
+// case — just the lead, no orphans) needs no such guide patch: nothing
+// follows it, so its subtree's continuation guides are already complete
+// as fleetTreeRows computed them. Every row below a header-level root
+// (regardless of depth) also gets exactly one flat leading space — a
+// single indent marking "this is nested under the lead," not a
+// per-level guide unit — so a teammate visibly sits one column right of
+// the lead's own connector instead of lining up flush with it (operator
+// correction 2026-07-14, second pass: same-column dash-less connectors
+// alone don't read as nested at a glance).
 func fleetTeamMemberRows(rows []Agent) []fleetRow {
 	tree := fleetTreeRows(rows, false)
 	var topIdx []int
@@ -303,22 +326,35 @@ func fleetTeamMemberRows(rows []Agent) []fleetRow {
 			topIdx = append(topIdx, i)
 		}
 	}
+	isTop := make(map[int]bool, len(topIdx))
+	for _, ti := range topIdx {
+		isTop[ti] = true
+	}
 	for k, ti := range topIdx {
-		conn, guide := "├", "│ "
-		if k == len(topIdx)-1 {
-			conn, guide = "└", "  "
+		last := k == len(topIdx)-1
+		conn := "├"
+		if last {
+			conn = "└"
 		}
 		if tree[ti].prefix == "↳" {
 			tree[ti].prefix = conn + "↳"
 		} else {
 			tree[ti].prefix = conn
 		}
+		if last {
+			continue
+		}
 		end := len(tree)
 		if k+1 < len(topIdx) {
 			end = topIdx[k+1]
 		}
 		for j := ti + 1; j < end; j++ {
-			tree[j].prefix = guide + tree[j].prefix
+			tree[j].prefix = "│ " + tree[j].prefix
+		}
+	}
+	for i := range tree {
+		if !isTop[i] {
+			tree[i].prefix = " " + tree[i].prefix
 		}
 	}
 	return tree
@@ -592,12 +628,18 @@ func fleetCtxBar(fill float64, dim rowDim) string {
 // fleetModelAbbrev is the Fleet view's MODEL column: strip the "claude-"
 // prefix only — no family-letter/version abbreviation — "claude-opus-4-6"
 // -> "opus-4-6", "claude-sonnet-5" -> "sonnet-5", "claude-fable-5" ->
-// "fable-5". fleetModelW (8) fits every current family name in full;
+// "fable-5". fleetModelW (9) fits every current family name in full;
 // anything longer hard-truncates (no ellipsis — at this width an ellipsis
-// would eat a large fraction of the column). Empty renders "--". Wider and
-// more readable than the old letter+version abbreviation now that MODEL
-// sits in a more prominent position (before the status dot, operator
-// request) rather than squeezed for CTX-bar/ACTIVITY room.
+// would eat a large fraction of the column), but never mid-version-number:
+// a cut that would land on a bare trailing "-" or split a multi-digit
+// number in half backs off to the last "-" boundary instead, so a name is
+// never shown with a half-finished version field (operator report:
+// "haiku-4-5" was cutting to "haiku-4-" before fleetModelW widened to fit
+// it, but the boundary-backoff guards any future family name too).
+// Empty renders "--". Wider and more readable than the old letter+version
+// abbreviation now that MODEL sits in a more prominent position (before
+// the status dot, operator request) rather than squeezed for
+// CTX-bar/ACTIVITY room.
 func fleetModelAbbrev(model string) string {
 	if model == "" {
 		return "--"
@@ -608,10 +650,24 @@ func fleetModelAbbrev(model string) string {
 	}
 	base = strings.TrimPrefix(base, "claude-")
 	r := []rune(base)
-	if len(r) > fleetModelW {
-		r = r[:fleetModelW]
+	if len(r) <= fleetModelW {
+		return string(r)
 	}
-	return string(r)
+	cut := r[:fleetModelW]
+	last := cut[len(cut)-1]
+	splitDigits := isDigit(last) && isDigit(r[fleetModelW])
+	if last == '-' || splitDigits {
+		if idx := strings.LastIndex(string(cut), "-"); idx > 0 {
+			cut = cut[:idx]
+		}
+	}
+	return string(cut)
+}
+
+// isDigit reports whether r is an ASCII digit — fleetModelAbbrev's only
+// use, kept local rather than pulling in unicode for one check.
+func isDigit(r rune) bool {
+	return r >= '0' && r <= '9'
 }
 
 // --- view ---
@@ -799,7 +855,7 @@ func fleetColumnsForWidth(w int) fleetColSet {
 
 const (
 	fleetActivityDotW = 2 // activityGlyph's glyph + its own baked-in trailing space
-	fleetModelW       = 8 // fits "opus-4-6"/"sonnet-5"/"fable-5"/"haiku-4" in full
+	fleetModelW       = 9 // fits "opus-4-6"/"sonnet-5"/"fable-5"/"haiku-4-5" in full
 	fleetCtxW         = 4
 	fleetCostW        = 5
 	fleetTokW         = 5
