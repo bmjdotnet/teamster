@@ -58,7 +58,14 @@ type Store interface {
 	// when unset) so the caller can derive the right phase default without a
 	// second query.
 	ListWorkUnitsNeedingLifecycleTags(ctx context.Context) ([][3]string, error)
+	// RecordJobHeartbeat stamps classify's last-completed-run timestamp,
+	// independent of whether this pass produced any other write. Backs the
+	// "Classify Freshness" dashboard panel.
+	RecordJobHeartbeat(ctx context.Context, jobName string, at time.Time) error
 }
+
+// jobNameClassify is this job's key in job_heartbeats.
+const jobNameClassify = "classify"
 
 // intervalBatch caps how many intervals one phase pass derives, so a single run
 // stays bounded; the next timer tick picks up the rest.
@@ -143,6 +150,7 @@ func (r *Runner) Run(ctx context.Context, reclassify bool, reclassifyLimit int, 
 			}
 		}
 		r.log.Info("reclassify pass complete", "intervals_phased", total)
+		r.recordHeartbeat(ctx)
 		return nil
 	}
 
@@ -151,7 +159,20 @@ func (r *Runner) Run(ctx context.Context, reclassify bool, reclassifyLimit int, 
 		return fmt.Errorf("phase pass: %w", err)
 	}
 	r.log.Info("classify pass complete", "intervals_phased", derived)
+	r.recordHeartbeat(ctx)
 	return nil
+}
+
+// recordHeartbeat stamps this pass's completion time. Called only on Run's
+// success paths, so a genuinely failing classify (e.g. DB errors on every
+// pass) still shows as stale on the freshness dashboard rather than masking
+// the failure. A heartbeat write failure itself is logged, not propagated —
+// the pass's real work already committed and must not be undone by a
+// secondary write's error.
+func (r *Runner) recordHeartbeat(ctx context.Context) {
+	if err := r.store.RecordJobHeartbeat(ctx, jobNameClassify, time.Now()); err != nil {
+		r.log.Warn("heartbeat stamp failed", "job", jobNameClassify, "error", err)
+	}
 }
 
 // classifyWorkTypes re-derives work-type on every workunit that has activity,

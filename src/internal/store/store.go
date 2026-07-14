@@ -314,6 +314,11 @@ type ClassifierStore interface {
 	ListWorkUnitsWithActivity(ctx context.Context) ([]string, error)
 	ListOutcomesNeedingPhase(ctx context.Context) ([][2]string, error)
 	ListWorkUnitsNeedingLifecycleTags(ctx context.Context) ([][3]string, error)
+	// RecordJobHeartbeat upserts jobName's last-completed-run timestamp,
+	// independent of whether the run produced any other write — backs
+	// dashboard freshness metrics that need "is this job still running on
+	// schedule" rather than "when did it last produce output."
+	RecordJobHeartbeat(ctx context.Context, jobName string, at time.Time) error
 }
 
 // Prober is the store-reachability capability every backend answers: "am I

@@ -431,7 +431,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "Minutes since last classifier-derived interval (phase_assembled_at). Green < 15 min (within one classify timer cycle), yellow < 60, red = stale.",
+      "description": "Minutes since classify's last completed pass (job_heartbeats), stamped every pass regardless of whether it produced a classifier-derived phase write. Green < 15 min, yellow < 30, red = stale.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -452,7 +452,7 @@
               },
               {
                 "color": "red",
-                "value": 60
+                "value": 30
               }
             ]
           },
@@ -492,7 +492,7 @@
             "uid": "teamster-mysql"
           },
           "format": "table",
-          "rawSql": "SELECT ROUND(\n  TIMESTAMPDIFF(SECOND,\n    (SELECT MAX(phase_assembled_at) FROM wms_intervals WHERE phase_source = 'classifier'),\n    NOW()\n  ) / 60.0, 0\n) AS classify_lag_min",
+          "rawSql": "SELECT ROUND(\n  TIMESTAMPDIFF(SECOND,\n    (SELECT last_run_at FROM job_heartbeats WHERE job_name = 'classify'),\n    NOW()\n  ) / 60.0, 0\n) AS classify_lag_min",
           "refId": "A"
         }
       ],

@@ -1504,6 +1504,24 @@ WHERE NOT EXISTS (
 				ADD COLUMN session_total_cost_usd DOUBLE NOT NULL DEFAULT 0`,
 		},
 	},
+	{
+		// job_heartbeats stamps a job's last-completed-run time unconditionally,
+		// independent of whatever else that run did or didn't write elsewhere.
+		// First consumer: the "Classify Freshness" dashboard panel (bug4), which
+		// previously measured time since the last phase_source='classifier'
+		// write on wms_intervals and false-alarmed on the majority of passes
+		// that legitimately have nothing to phase (the no-signal path only
+		// stamps phase_source='').
+		Version: 62,
+		Name:    "job-heartbeats",
+		Stmts: []string{
+			`CREATE TABLE IF NOT EXISTS job_heartbeats (
+				job_name    VARCHAR(64) NOT NULL,
+				last_run_at DATETIME(6) NOT NULL,
+				PRIMARY KEY (job_name)
+			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+		},
+	},
 }
 
 // mergeProjectToProduct renames `project` tag rows to `product`, handling the

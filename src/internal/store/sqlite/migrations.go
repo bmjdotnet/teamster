@@ -1047,4 +1047,14 @@ var migrations = []store.Migration{
 				ADD COLUMN context_reported_at DATETIME DEFAULT NULL`,
 		},
 	},
+	{
+		Version: 61,
+		Name:    "job-heartbeats",
+		SQL: []string{
+			`CREATE TABLE IF NOT EXISTS job_heartbeats (
+				job_name    TEXT NOT NULL PRIMARY KEY,
+				last_run_at DATETIME NOT NULL
+			)`,
+		},
+	},
 }

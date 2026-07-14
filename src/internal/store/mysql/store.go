@@ -610,6 +610,20 @@ func (s *Store) MarkIntervalAssembled(ctx context.Context, id int64) error {
 	return err
 }
 
+// RecordJobHeartbeat upserts jobName's last-completed-run timestamp,
+// independent of whether the run produced any other write. Backs dashboard
+// freshness metrics that need "is this job still running on schedule"
+// rather than "when did it last produce output" (see job_heartbeats
+// migration comment).
+func (s *Store) RecordJobHeartbeat(ctx context.Context, jobName string, at time.Time) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO job_heartbeats (job_name, last_run_at)
+		VALUES (?, ?)
+		ON DUPLICATE KEY UPDATE last_run_at = VALUES(last_run_at)`,
+		jobName, at.UTC())
+	return err
+}
+
 // ListIntervalsNeedingPhase returns closed intervals whose phase is not yet
 // derived (or is stale) and is not a declared override — the work set for the
 // async phase classifier (cmd/classify). An interval qualifies when it is
