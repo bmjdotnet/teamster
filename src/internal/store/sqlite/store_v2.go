@@ -339,6 +339,15 @@ func (s *Store) UpdateOutcomeFocus(ctx context.Context, id, focus string) error 
 	return requireOneRow(res, "UpdateOutcomeFocus", "outcome", id)
 }
 
+func (s *Store) UpdateOutcomeTitle(ctx context.Context, id, title string) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE outcomes SET title = ?, updated_at = ? WHERE id = ?`, title, nowUTC(), id)
+	if err != nil {
+		return err
+	}
+	return requireOneRow(res, "UpdateOutcomeTitle", "outcome", id)
+}
+
 // --- WorkUnit Writer ---
 
 func (s *Store) CreateWorkUnit(ctx context.Context, wu *wms.WorkUnit) error {
@@ -418,6 +427,15 @@ func (s *Store) UpdateWorkUnitFocus(ctx context.Context, id, focus string) error
 		return err
 	}
 	return requireOneRow(res, "UpdateWorkUnitFocus", "workunit", id)
+}
+
+func (s *Store) UpdateWorkUnitTitle(ctx context.Context, id, title string) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE workunits SET title = ?, updated_at = ? WHERE id = ?`, title, nowUTC(), id)
+	if err != nil {
+		return err
+	}
+	return requireOneRow(res, "UpdateWorkUnitTitle", "workunit", id)
 }
 
 func (s *Store) AssignWorkUnit(ctx context.Context, id, agentID string) error {

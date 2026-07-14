@@ -52,6 +52,12 @@ func TestConformanceDim4_ErrNotFound_RequireOneRow(t *testing.T) {
 		if err := s.UpdateWorkUnitStatus(ctx, "dim4-no-such-workunit-2", wms.StatusActive); !errors.Is(err, store.ErrNotFound) {
 			t.Errorf("UpdateWorkUnitStatus(missing) err = %v, want ErrNotFound", err)
 		}
+		if err := s.UpdateOutcomeTitle(ctx, "dim4-no-such-outcome-2", "new title"); !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("UpdateOutcomeTitle(missing) err = %v, want ErrNotFound", err)
+		}
+		if err := s.UpdateWorkUnitTitle(ctx, "dim4-no-such-workunit-2", "new title"); !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("UpdateWorkUnitTitle(missing) err = %v, want ErrNotFound", err)
+		}
 	})
 }
 
