@@ -16,7 +16,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - hookd now retries if MySQL isn't ready yet at boot instead of failing outright
 - `token-scraper` and `health-collector` start, stop, and report status correctly on systemd-managed installs
 - Fixed a replication compatibility issue affecting MySQL/MariaDB
-- Team name now shows up correctly across dashboards 
+- Team name now shows up correctly across dashboards
+- Added rollup & classify guards to prevent continuous rescanning of historical wms data
 
 ### Changed
 - Installer skips the tag-setup wizard on upgrades (already configured)
