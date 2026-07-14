@@ -284,6 +284,22 @@ func (r *Runner) recoverRequiredTags(ctx context.Context, dryRun bool) error {
 // classifyPhases derives one phase per closed interval that needs it and writes
 // it to the wms_intervals.phase column. Returns the number of intervals for
 // which a phase was written.
+//
+// Performance (GH #13): a batch is up to intervalBatch (500) intervals, and
+// naively deriving each one's phase re-reads and re-scans the ENTIRE shared
+// JSONL event log from scratch per interval (JSONLSignalReader.ReadSignals is
+// a documented full linear scan) — O(intervals × log-file-size) per pass, the
+// root cause of classify passes taking 20-28 CPU-minutes instead of seconds.
+// batchReadSignals collapses this to a SINGLE scan per pass via
+// wms.BatchSignalReader, bucketing events by (session, agent) so intervals
+// that share a session benefit from each other's read instead of each paying
+// for its own full scan. It also bounds that one scan to the current batch's
+// own time range (computed fresh from the batch, not a persisted cursor) so a
+// pass never re-indexes JSONL regions covering intervals a PRIOR pass already
+// fully assembled — the log's full historical size no longer sets the
+// per-pass cost. Falls back to the original per-interval derivePhase path
+// when the configured SignalReader doesn't implement BatchSignalReader (e.g.
+// a test fake).
 func (r *Runner) classifyPhases(ctx context.Context) (int, error) {
 	intervals, err := r.store.ListIntervalsNeedingPhase(ctx, intervalBatch)
 	if err != nil {
@@ -305,12 +321,26 @@ func (r *Runner) classifyPhases(ctx context.Context) (int, error) {
 		reEntry = map[int64]bool{}
 	}
 
+	sigsByInterval, err := r.batchReadSignals(ctx, intervals, reEntry)
+	if err != nil {
+		r.log.Warn("batched signal read failed, falling back to per-interval reads", "error", err)
+		sigsByInterval = nil
+	}
+
 	written := 0
 	for _, rec := range intervals {
 		if ctx.Err() != nil {
 			return written, ctx.Err()
 		}
-		phase, err := r.derivePhase(ctx, rec, reEntry[rec.ID])
+		var (
+			phase string
+			err   error
+		)
+		if sigsByInterval != nil {
+			phase, err = r.derivePhaseWithSignals(rec, reEntry[rec.ID], sigsByInterval[rec.ID])
+		} else {
+			phase, err = r.derivePhase(ctx, rec, reEntry[rec.ID])
+		}
 		if errors.Is(err, errNoSignal) {
 			// No activity in this interval's window — leave phase NULL so it is
 			// reported as "unclassified", not mislabeled. Stamp phase_assembled_at
@@ -331,6 +361,62 @@ func (r *Runner) classifyPhases(ctx context.Context) (int, error) {
 		written++
 	}
 	return written, nil
+}
+
+// batchReadSignals builds one SessionWindow per batch interval that actually
+// needs signals (rework and review-state intervals are decided by reEntry/
+// rec.State alone, without touching the log — see derivePhaseWithSignals) and
+// issues a SINGLE JSONL scan for the whole set via wms.BatchSignalReader.
+// lowerBound/upperBound are the batch's own window extents, so the scan is
+// bounded to what THIS batch needs — a runtime-determined bound recomputed
+// fresh every call from the SQL-watermarked interval list
+// (ListIntervalsNeedingPhase's phase_assembled_at anti-join), rather than a
+// persisted byte-offset/line cursor. Returns (nil, nil) when r.signals
+// doesn't implement wms.BatchSignalReader — callers must fall back to the
+// per-interval path in that case.
+func (r *Runner) batchReadSignals(ctx context.Context, intervals []wms.EventRecord, reEntry map[int64]bool) (map[int64]*wms.ActivitySignals, error) {
+	batchReader, ok := r.signals.(wms.BatchSignalReader)
+	if !ok {
+		return nil, nil
+	}
+
+	var ids []int64
+	var windows []wms.SessionWindow
+	var lowerBound, upperBound time.Time
+	for _, rec := range intervals {
+		if reEntry[rec.ID] || rec.State == wms.StatusReview {
+			continue // phase is already determined without signals
+		}
+		w := intervalWindows(rec)
+		if len(w) == 0 {
+			continue // no session — never queries the log (matches derivePhase)
+		}
+		ids = append(ids, rec.ID)
+		windows = append(windows, w[0])
+		if lowerBound.IsZero() || w[0].Start.Before(lowerBound) {
+			lowerBound = w[0].Start
+		}
+		if w[0].End.After(upperBound) {
+			upperBound = w[0].End
+		}
+	}
+	if len(windows) == 0 {
+		return map[int64]*wms.ActivitySignals{}, nil
+	}
+
+	results, err := batchReader.ReadSignalsBatch(ctx, windows, r.logFile, lowerBound, upperBound)
+	if err != nil {
+		return nil, err
+	}
+	if len(results) != len(ids) {
+		return nil, fmt.Errorf("batch signal read: got %d results for %d windows", len(results), len(ids))
+	}
+
+	out := make(map[int64]*wms.ActivitySignals, len(ids))
+	for i, id := range ids {
+		out[id] = results[i]
+	}
+	return out, nil
 }
 
 // detectReEntry returns the set of batch interval ids that begin active work
@@ -425,14 +511,38 @@ func (r *Runner) derivePhase(ctx context.Context, rec wms.EventRecord, reEntry b
 	if err != nil {
 		return "", err
 	}
+	return classifyIntervalPhase(rec, len(windows) == 0, sigs)
+}
 
-	if sigs.TotalEvents == 0 {
+// derivePhaseWithSignals is derivePhase's counterpart for the batched signal
+// path (batchReadSignals): sigs was already read for this interval in the
+// pass's single JSONL scan, so no further I/O happens here. sigs is nil for
+// an interval batchReadSignals never queried the log for at all (matching
+// derivePhase's own "no window → no ReadSignals call" behavior).
+func (r *Runner) derivePhaseWithSignals(rec wms.EventRecord, reEntry bool, sigs *wms.ActivitySignals) (string, error) {
+	if reEntry {
+		return "rework", nil
+	}
+	if rec.State == wms.StatusReview {
+		return "review", nil
+	}
+	windows := intervalWindows(rec)
+	return classifyIntervalPhase(rec, len(windows) == 0, sigs)
+}
+
+// classifyIntervalPhase is the pure rule engine shared by derivePhase and
+// derivePhaseWithSignals: given an interval, whether it had no session window
+// at all, and its (possibly nil) signals, pick exactly one phase. See
+// derivePhase's original doc comment for the full priority-order rationale
+// (rework > review > test > build > design > build-default).
+func classifyIntervalPhase(rec wms.EventRecord, noWindow bool, sigs *wms.ActivitySignals) (string, error) {
+	if sigs == nil || sigs.TotalEvents == 0 {
 		// An interval with no readable signal window (no session/agent — the
 		// status-transition case) but a positive duration had real lifecycle
 		// activity we simply cannot scope to signals. Take the rule-6 build
 		// default rather than mislabel it unclassified. Only a genuinely empty
 		// interval (zero/unknown duration) stays NULL.
-		if len(windows) == 0 && intervalHasActivity(rec) {
+		if noWindow && intervalHasActivity(rec) {
 			return "build", nil
 		}
 		// No activity in this interval's window: leave phase NULL (unclassified)
