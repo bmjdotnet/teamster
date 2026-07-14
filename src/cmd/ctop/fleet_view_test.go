@@ -370,6 +370,61 @@ func TestFleetRenderAgentRowHasNoRuntimeDot(t *testing.T) {
 	}
 }
 
+// TestFleetRenderAgentRowColorSaltedBySession is the regression for GitHub
+// #16: the Fleet view's agent-name color must match feed's convention
+// (internal/render.FormatLine, EntityColor(agent, session)) — salted by
+// session ID — rather than hashing the bare name. Before the fix, ctop
+// passed an empty salt, so the same @name colored identically across every
+// session instead of matching feed's per-session color.
+func TestFleetRenderAgentRowColorSaltedBySession(t *testing.T) {
+	m := model{width: 160, colorize: true}
+	v := fleetView{m: &m}
+	cs := fleetColumnsForWidth(160)
+	cs, layout := fleetLayoutFor(160, 8, cs)
+
+	rowA := Agent{SessionID: "session-a", AgentName: "@scout", Liveness: "live", PressureLevel: "ok"}
+	rowB := Agent{SessionID: "session-b", AgentName: "@scout", Liveness: "live", PressureLevel: "ok"}
+
+	outA := v.renderAgentRow(fleetRow{agent: rowA}, false, cs, layout, 160)
+	outB := v.renderAgentRow(fleetRow{agent: rowB}, false, cs, layout, 160)
+
+	wantA := display.EntityColor("@scout", "session-a")
+	wantB := display.EntityColor("@scout", "session-b")
+	if !strings.Contains(outA, display.RGB(wantA[0], wantA[1], wantA[2])) {
+		t.Errorf("renderAgentRow(session-a) missing feed-matching color %v for @scout", wantA)
+	}
+	if !strings.Contains(outB, display.RGB(wantB[0], wantB[1], wantB[2])) {
+		t.Errorf("renderAgentRow(session-b) missing feed-matching color %v for @scout", wantB)
+	}
+	if wantA == wantB {
+		t.Fatal("test fixture invalid: session-a and session-b must hash @scout to different colors")
+	}
+}
+
+// TestFleetRenderAgentRowLeadColorMatchesNormalizedName is the regression
+// for the lead-row half of GitHub #16: a lead's Agent.AgentName is "", but
+// feed's FormatLine normalizes it to "@lead" before hashing
+// (internal/render/render.go). renderAgentRow must hash the same
+// normalized "@lead" string (via fleetRowName), not the raw empty
+// AgentName, or the lead's row color still wouldn't match feed.
+func TestFleetRenderAgentRowLeadColorMatchesNormalizedName(t *testing.T) {
+	m := model{width: 160, colorize: true}
+	v := fleetView{m: &m}
+	cs := fleetColumnsForWidth(160)
+	cs, layout := fleetLayoutFor(160, 8, cs)
+
+	lead := Agent{SessionID: "session-a", AgentName: "", Liveness: "live", PressureLevel: "ok"}
+	out := v.renderAgentRow(fleetRow{agent: lead}, false, cs, layout, 160)
+
+	want := display.EntityColor("@lead", "session-a")
+	if !strings.Contains(out, display.RGB(want[0], want[1], want[2])) {
+		t.Errorf("renderAgentRow(lead) missing feed-matching color %v for normalized \"@lead\"", want)
+	}
+	if got := display.EntityColor("", "session-a"); strings.Contains(out, display.RGB(got[0], got[1], got[2])) && got != want {
+		t.Errorf("renderAgentRow(lead) used raw empty AgentName hash %v instead of normalized \"@lead\" hash %v", got, want)
+	}
+}
+
 // TestFleetCostCellBoldForLeadOnly covers the lead-vs-teammate cost weight
 // distinction directly. Uses display.RGB/display.BOLD (raw ANSI, always
 // emitted) rather than lipgloss.NewStyle()'s GetBold()-style comparison —

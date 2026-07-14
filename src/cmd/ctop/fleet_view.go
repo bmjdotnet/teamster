@@ -1059,8 +1059,13 @@ func (v fleetView) renderAgentRow(fr fleetRow, isCursor bool, cs fleetColSet, la
 		marker = lipgloss.NewStyle().Bold(true).Foreground(tui.ColorAccent).Render("▸")
 	}
 
-	nc := display.EntityColor(r.AgentName, "")
+	// Salted with the session ID and hashed on the normalized display name
+	// (fleetRowName, so the lead's "" also becomes "@lead" here) to match
+	// feed's convention (internal/render.FormatLine) — an @name must hash
+	// to the same color in ctop as it does in feed for the same session
+	// (GitHub #16).
 	name := fleetRowName(fr)
+	nc := display.EntityColor(name, r.SessionID)
 	if dim == dimHalve {
 		nc = halveRGB(nc)
 	}
