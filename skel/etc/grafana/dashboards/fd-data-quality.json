@@ -127,7 +127,7 @@
             "uid": "teamster-mysql"
           },
           "format": "table",
-          "rawSql": "SELECT ROUND(\n  100.0 * SUM(CASE WHEN ua.method != 'unallocated' THEN 1 ELSE 0 END) / COUNT(*), 1\n) AS attribution_pct\nFROM usage_attribution ua\nJOIN token_ledger tl USING (message_id)\nWHERE tl.timestamp BETWEEN $__timeFrom() AND DATE_SUB(NOW(), INTERVAL 24 HOUR)",
+          "rawSql": "SELECT ROUND(\n  100.0 * SUM(CASE WHEN ua.method != 'unallocated' THEN 1 ELSE 0 END) / COUNT(*), 1\n) AS attribution_pct\nFROM usage_attribution ua\nJOIN token_ledger tl USING (message_id)\nWHERE tl.timestamp BETWEEN $__timeFrom() AND $__timeTo()",
           "refId": "A"
         }
       ],
@@ -602,7 +602,7 @@
             "uid": "teamster-mysql"
           },
           "format": "time_series",
-          "rawSql": "SELECT\n  $__timeGroupAlias(tl.timestamp, $agg),\n  ROUND(100.0 * SUM(CASE WHEN ua.method != 'unallocated' THEN 1 ELSE 0 END) / COUNT(*), 1) AS attribution_pct\nFROM usage_attribution ua\nJOIN token_ledger tl USING (message_id)\nWHERE tl.timestamp BETWEEN $__timeFrom() AND DATE_SUB(NOW(), INTERVAL 24 HOUR)\nGROUP BY 1\nORDER BY time",
+          "rawSql": "SELECT\n  $__timeGroupAlias(tl.timestamp, $agg),\n  ROUND(100.0 * SUM(CASE WHEN ua.method != 'unallocated' THEN 1 ELSE 0 END) / COUNT(*), 1) AS attribution_pct\nFROM usage_attribution ua\nJOIN token_ledger tl USING (message_id)\nWHERE tl.timestamp BETWEEN $__timeFrom() AND $__timeTo()\nGROUP BY 1\nORDER BY time",
           "refId": "A"
         }
       ],
@@ -1673,7 +1673,7 @@
             "uid": "teamster-mysql"
           },
           "format": "table",
-          "rawSql": "SELECT\n  session_id,\n  COALESCE(NULLIF(agent_name,''), '(lead)') AS agent_name,\n  COALESCE(NULLIF(team_name,''), '(no team)') AS team_name,\n  status,\n  ROUND(TIMESTAMPDIFF(SECOND, last_seen, NOW()) / 3600.0, 1) AS hours_stale\nFROM sessions\nWHERE status != 'closed'\n  AND last_seen < DATE_SUB(NOW(), INTERVAL 24 HOUR)\nORDER BY last_seen ASC\nLIMIT 20",
+          "rawSql": "SELECT\n  session_id,\n  COALESCE(NULLIF(agent_name,''), '(lead)') AS agent_name,\n  COALESCE(NULLIF(team_name,''), '(no team)') AS team_name,\n  status,\n  ROUND(TIMESTAMPDIFF(SECOND, last_seen, NOW()) / 3600.0, 1) AS hours_stale\nFROM sessions\nWHERE status != 'closed'\n  AND last_seen < $__timeTo()\nORDER BY last_seen ASC\nLIMIT 20",
           "refId": "A"
         }
       ],
