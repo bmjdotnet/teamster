@@ -80,4 +80,8 @@ GRANT SELECT ON `__STORE_DB__`.`warmup_evidence`       TO '__GRAFANA_DB_USER__'@
 GRANT SELECT ON `__STORE_DB__`.`synthesis_evidence`    TO '__GRAFANA_DB_USER__'@'%';
 GRANT SELECT ON `__STORE_DB__`.`gap_evidence`          TO '__GRAFANA_DB_USER__'@'%';
 
+-- Job heartbeat table (migration v62). The "Classify Freshness" panel reads
+-- last_run_at to show staleness of the classify pass.
+GRANT SELECT ON `__STORE_DB__`.`job_heartbeats`        TO '__GRAFANA_DB_USER__'@'%';
+
 FLUSH PRIVILEGES;
