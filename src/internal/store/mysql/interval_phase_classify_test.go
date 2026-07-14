@@ -11,8 +11,9 @@ import (
 
 // These tests cover the B4 classifier's additive store queries:
 // ListIntervalsNeedingPhase (the work set), ClearClassifierPhases (--reclassify),
-// and ListWorkUnitsWithActivity (the work-type enumeration). They reuse the
-// shared harness (freshBackfillDB + per-schema isolation) and SKIP when
+// and ListWorkUnitsNeedingWorkType (the work-type work set, watermarked the
+// same way as ListIntervalsNeedingPhase). They reuse the shared harness
+// (freshBackfillDB + per-schema isolation) and SKIP when
 // TEAMSTER_TEST_MYSQL_DSN is unset. Use the mysql:// URL DSN form — the tcp(...)
 // driver form makes these silently skip (vacuous green).
 
@@ -224,34 +225,84 @@ func TestEarliestClosureByEntity(t *testing.T) {
 	}
 }
 
-func TestListWorkUnitsWithActivity_DistinctWorkunitsOnly(t *testing.T) {
+// setTagAppliedAt overrides the applied_at watermark on an already-applied
+// (entity_type, entity_id, tag_key) tag row, so tests can place it precisely
+// before/after an interval's ended_at without racing wall-clock time.
+func setTagAppliedAt(t *testing.T, s *Store, entityType, entityID, tagKey string, at time.Time) {
+	t.Helper()
+	if _, err := s.db.ExecContext(context.Background(), `
+		UPDATE entity_tags et
+		JOIN tags t ON t.id = et.tag_id
+		SET et.applied_at = ?
+		WHERE et.entity_type = ? AND et.entity_id = ? AND t.tag_key = ?`,
+		at, entityType, entityID, tagKey); err != nil {
+		t.Fatalf("set applied_at for %s/%s/%s: %v", entityType, entityID, tagKey, err)
+	}
+}
+
+func TestListWorkUnitsNeedingWorkType(t *testing.T) {
 	s, _ := newTestStore(t)
 	ctx := context.Background()
 	now := time.Now().UTC().Truncate(time.Second)
 	start := now.Add(-time.Hour)
 
-	// Two intervals for wu-1 (must dedup), one for wu-2, plus an outcome interval
-	// (must NOT appear — workunit grain only).
-	insertClosedInterval(t, s, wms.EntityWorkUnit, "wu-1", "active", "s1aaaaaaaaaa", "a", start, now, "", "", nil)
-	insertClosedInterval(t, s, wms.EntityWorkUnit, "wu-1", "review", "s1aaaaaaaaaa", "a", now, now.Add(time.Minute), "", "", nil)
-	insertClosedInterval(t, s, wms.EntityWorkUnit, "wu-2", "active", "s2aaaaaaaaaa", "a", start, now, "", "", nil)
-	insertClosedInterval(t, s, wms.EntityOutcome, "out-x", "active", "s3aaaaaaaaaa", "a", start, now, "", "", nil)
+	// wu-new: two intervals (must dedup), never classified — SELECTED.
+	insertClosedInterval(t, s, wms.EntityWorkUnit, "wu-new", "active", "s1aaaaaaaaaa", "a", start, now, "", "", nil)
+	insertClosedInterval(t, s, wms.EntityWorkUnit, "wu-new", "review", "s1aaaaaaaaaa", "a", now, now.Add(time.Minute), "", "", nil)
 
-	ids, err := s.ListWorkUnitsWithActivity(ctx)
+	// wu-manual: closed interval + manual work-type tag — SKIPPED (manual wins,
+	// regardless of any later interval; applyTag would no-op anyway).
+	insertClosedInterval(t, s, wms.EntityWorkUnit, "wu-manual", "active", "s2aaaaaaaaaa", "a", start, now, "", "", nil)
+	if err := s.TagEntity(ctx, wms.EntityWorkUnit, "wu-manual", "work-type", "feature", "manual", ""); err != nil {
+		t.Fatalf("tag wu-manual: %v", err)
+	}
+
+	// wu-fresh: closed interval, classified AFTER that interval ended — SKIPPED
+	// (no signal has arrived since the last classification).
+	freshEnd := now.Add(-2 * time.Hour)
+	insertClosedInterval(t, s, wms.EntityWorkUnit, "wu-fresh", "active", "s3aaaaaaaaaa", "a", freshEnd.Add(-time.Hour), freshEnd, "", "", nil)
+	if err := s.TagEntity(ctx, wms.EntityWorkUnit, "wu-fresh", "work-type", "feature", "classifier", ""); err != nil {
+		t.Fatalf("tag wu-fresh: %v", err)
+	}
+	setTagAppliedAt(t, s, wms.EntityWorkUnit, "wu-fresh", "work-type", freshEnd.Add(time.Minute))
+
+	// wu-stale: classified once, then a NEW closed interval arrives after that
+	// classification's applied_at — SELECTED (stale, needs re-derivation).
+	staleFirstEnd := now.Add(-3 * time.Hour)
+	insertClosedInterval(t, s, wms.EntityWorkUnit, "wu-stale", "active", "s4aaaaaaaaaa", "a", staleFirstEnd.Add(-time.Hour), staleFirstEnd, "", "", nil)
+	if err := s.TagEntity(ctx, wms.EntityWorkUnit, "wu-stale", "work-type", "feature", "classifier", ""); err != nil {
+		t.Fatalf("tag wu-stale: %v", err)
+	}
+	setTagAppliedAt(t, s, wms.EntityWorkUnit, "wu-stale", "work-type", staleFirstEnd.Add(time.Minute))
+	insertClosedInterval(t, s, wms.EntityWorkUnit, "wu-stale", "active", "s4aaaaaaaaaa", "a", staleFirstEnd.Add(time.Minute), now, "", "", nil)
+
+	// out-x: an outcome interval — must NOT appear (workunit grain only).
+	insertClosedInterval(t, s, wms.EntityOutcome, "out-x", "active", "s5aaaaaaaaaa", "a", start, now, "", "", nil)
+
+	ids, err := s.ListWorkUnitsNeedingWorkType(ctx)
 	if err != nil {
-		t.Fatalf("ListWorkUnitsWithActivity: %v", err)
+		t.Fatalf("ListWorkUnitsNeedingWorkType: %v", err)
 	}
 	got := map[string]bool{}
 	for _, id := range ids {
 		got[id] = true
 	}
-	if !got["wu-1"] || !got["wu-2"] {
-		t.Errorf("expected wu-1 and wu-2, got %v", ids)
+	if !got["wu-new"] {
+		t.Errorf("expected never-classified wu-new in work set, got %v", ids)
+	}
+	if !got["wu-stale"] {
+		t.Errorf("expected stale wu-stale (new closed interval since classification) in work set, got %v", ids)
+	}
+	if got["wu-manual"] {
+		t.Errorf("manually-tagged wu-manual must be excluded, got %v", ids)
+	}
+	if got["wu-fresh"] {
+		t.Errorf("freshly-classified wu-fresh (no new signal since) must be excluded, got %v", ids)
 	}
 	if got["out-x"] {
 		t.Errorf("outcome interval leaked into workunit enumeration: %v", ids)
 	}
 	if len(ids) != 2 {
-		t.Errorf("distinct workunit count = %d, want 2 (got %v)", len(ids), ids)
+		t.Errorf("work set size = %d, want 2 (wu-new, wu-stale); got %v", len(ids), ids)
 	}
 }

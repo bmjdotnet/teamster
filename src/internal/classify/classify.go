@@ -38,12 +38,12 @@ import (
 // Store is the persistence surface the classifier needs. *mysql.Store satisfies
 // it; tests use a fake. It is a subset of the full wms.Store plus the two
 // additive B4 queries (ListIntervalsNeedingPhase, ClearClassifierPhases) and
-// the work-type enumeration (ListWorkUnitsWithActivity).
+// the work-type enumeration (ListWorkUnitsNeedingWorkType).
 type Store interface {
 	wms.Store
 	ListIntervalsNeedingPhase(ctx context.Context, limit int) ([]wms.EventRecord, error)
 	ClearClassifierPhases(ctx context.Context) (int64, error)
-	ListWorkUnitsWithActivity(ctx context.Context) ([]string, error)
+	ListWorkUnitsNeedingWorkType(ctx context.Context) ([]string, error)
 	// ListOutcomesNeedingPhase returns [outcomeID, workType] pairs for outcomes
 	// with no phase tag and no child workunits.
 	ListOutcomesNeedingPhase(ctx context.Context) ([][2]string, error)
@@ -175,12 +175,17 @@ func (r *Runner) recordHeartbeat(ctx context.Context) {
 	}
 }
 
-// classifyWorkTypes re-derives work-type on every workunit that has activity,
-// reusing the inline RuleClassifier rules verbatim. The classifier's manualKeys
+// classifyWorkTypes re-derives work-type on every workunit that needs it —
+// never classified, or classified before its most recent closed interval —
+// reusing the inline RuleClassifier rules verbatim. Watermarked the same way
+// as the phase pass (GH #13 follow-up): the prior unwatermarked version
+// re-scanned every active workunit (2253 on this install) each tick, and each
+// scan is a full JSONL read via RuleClassifier.Classify, driving a 23-minute
+// pass that overran its own 10-minute timer. The classifier's manualKeys
 // deference protects operator-set work-type values. A per-workunit error is
 // logged and skipped so one bad entity does not stop the rest.
 func (r *Runner) classifyWorkTypes(ctx context.Context) error {
-	ids, err := r.store.ListWorkUnitsWithActivity(ctx)
+	ids, err := r.store.ListWorkUnitsNeedingWorkType(ctx)
 	if err != nil {
 		return fmt.Errorf("list workunits: %w", err)
 	}

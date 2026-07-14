@@ -311,7 +311,7 @@ type ClassifierStore interface {
 	MarkIntervalAssembled(ctx context.Context, id int64) error
 	ClearClassifierPhases(ctx context.Context) (int64, error)
 	EarliestClosureByEntity(ctx context.Context, keys [][2]string) (map[[2]string]time.Time, error)
-	ListWorkUnitsWithActivity(ctx context.Context) ([]string, error)
+	ListWorkUnitsNeedingWorkType(ctx context.Context) ([]string, error)
 	ListOutcomesNeedingPhase(ctx context.Context) ([][2]string, error)
 	ListWorkUnitsNeedingLifecycleTags(ctx context.Context) ([][3]string, error)
 	// RecordJobHeartbeat upserts jobName's last-completed-run timestamp,

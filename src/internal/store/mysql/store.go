@@ -773,23 +773,56 @@ func (s *Store) EarliestClosureByEntity(ctx context.Context, keys [][2]string) (
 	return out, rows.Err()
 }
 
-// ListWorkUnitsWithActivity returns the distinct workunit ids that have at
-// least one kind='state' interval in wms_intervals AND do not already carry a
-// manually-set work-type tag. Workunits with source='manual' work-type are
-// excluded because the classifier defers to manual tags anyway — scanning them
-// is pure waste when the set is large (772 → ~100 on typical installs).
-func (s *Store) ListWorkUnitsWithActivity(ctx context.Context) ([]string, error) {
+// ListWorkUnitsNeedingWorkType returns the distinct workunit ids that need a
+// work-type (re)classification pass — the work-type mirror of
+// ListIntervalsNeedingPhase's watermark pattern (GH #13 follow-up: the
+// unwatermarked version re-scanned all ~2253 active workunits every 10-minute
+// tick, each a full JSONL log scan via RuleClassifier.Classify, driving a
+// 23-minute pass that overran its own timer).
+//
+// A workunit qualifies when it has at least one kind='state' interval AND:
+//   - it does not already carry a manually-set work-type tag (manual always
+//     wins; scanning it is pure waste since applyTag would just skip it), AND
+//   - EITHER it has no work-type tag at all (never classified), OR its
+//     latest CLOSED interval ended after the tag's applied_at (new signal
+//     has arrived since the last classification — the same "unassembled or
+//     stale" idempotency test ListIntervalsNeedingPhase uses, just keyed on
+//     the workunit's own tag watermark instead of phase_assembled_at).
+//
+// A workunit with only open intervals and an existing non-manual tag is
+// excluded — no closed interval means no new signal, so re-running would
+// reproduce the same tags at the cost of another full log scan.
+func (s *Store) ListWorkUnitsNeedingWorkType(ctx context.Context) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT DISTINCT wi.entity_id
-		FROM wms_intervals wi
-		WHERE wi.kind = 'state' AND wi.entity_type = ?
-		  AND NOT EXISTS (
-		    SELECT 1 FROM entity_tags et
-		    JOIN tags t ON t.id = et.tag_id
-		    WHERE et.entity_type = 'workunit' AND et.entity_id = wi.entity_id
-		      AND t.tag_key = 'work-type' AND et.source = 'manual'
+		SELECT wa.entity_id
+		FROM (
+		  SELECT entity_id, MAX(ended_at) AS latest_closed
+		  FROM wms_intervals
+		  WHERE kind = 'state' AND entity_type = ?
+		  GROUP BY entity_id
+		) wa
+		WHERE NOT EXISTS (
+		  SELECT 1 FROM entity_tags et
+		  JOIN tags t ON t.id = et.tag_id
+		  WHERE et.entity_type = 'workunit' AND et.entity_id = wa.entity_id
+		    AND t.tag_key = 'work-type' AND et.source = 'manual'
+		)
+		AND (
+		  NOT EXISTS (
+		    SELECT 1 FROM entity_tags et2
+		    JOIN tags t2 ON t2.id = et2.tag_id
+		    WHERE et2.entity_type = 'workunit' AND et2.entity_id = wa.entity_id
+		      AND t2.tag_key = 'work-type'
 		  )
-		ORDER BY wi.entity_id ASC`, wms.EntityWorkUnit)
+		  OR EXISTS (
+		    SELECT 1 FROM entity_tags et3
+		    JOIN tags t3 ON t3.id = et3.tag_id
+		    WHERE et3.entity_type = 'workunit' AND et3.entity_id = wa.entity_id
+		      AND t3.tag_key = 'work-type'
+		      AND wa.latest_closed IS NOT NULL AND et3.applied_at < wa.latest_closed
+		  )
+		)
+		ORDER BY wa.entity_id ASC`, wms.EntityWorkUnit)
 	if err != nil {
 		return nil, err
 	}

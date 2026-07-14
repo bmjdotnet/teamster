@@ -148,21 +148,40 @@ func (s *Store) EarliestClosureByEntity(ctx context.Context, keys [][2]string) (
 	return out, rows.Err()
 }
 
-// ListWorkUnitsWithActivity returns the distinct workunit ids that have at
-// least one kind='state' interval in wms_intervals AND do not already carry
-// a manually-set work-type tag.
-func (s *Store) ListWorkUnitsWithActivity(ctx context.Context) ([]string, error) {
+// ListWorkUnitsNeedingWorkType returns the distinct workunit ids that need a
+// work-type (re)classification pass — see the mysql implementation's doc
+// comment for the full watermark rationale (GH #13 follow-up).
+func (s *Store) ListWorkUnitsNeedingWorkType(ctx context.Context) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT DISTINCT wi.entity_id
-		FROM wms_intervals wi
-		WHERE wi.kind = 'state' AND wi.entity_type = ?
-		  AND NOT EXISTS (
-		    SELECT 1 FROM entity_tags et
-		    JOIN tags t ON t.id = et.tag_id
-		    WHERE et.entity_type = 'workunit' AND et.entity_id = wi.entity_id
-		      AND t.tag_key = 'work-type' AND et.source = 'manual'
+		SELECT wa.entity_id
+		FROM (
+		  SELECT entity_id, MAX(ended_at) AS latest_closed
+		  FROM wms_intervals
+		  WHERE kind = 'state' AND entity_type = ?
+		  GROUP BY entity_id
+		) wa
+		WHERE NOT EXISTS (
+		  SELECT 1 FROM entity_tags et
+		  JOIN tags t ON t.id = et.tag_id
+		  WHERE et.entity_type = 'workunit' AND et.entity_id = wa.entity_id
+		    AND t.tag_key = 'work-type' AND et.source = 'manual'
+		)
+		AND (
+		  NOT EXISTS (
+		    SELECT 1 FROM entity_tags et2
+		    JOIN tags t2 ON t2.id = et2.tag_id
+		    WHERE et2.entity_type = 'workunit' AND et2.entity_id = wa.entity_id
+		      AND t2.tag_key = 'work-type'
 		  )
-		ORDER BY wi.entity_id ASC`, wms.EntityWorkUnit)
+		  OR EXISTS (
+		    SELECT 1 FROM entity_tags et3
+		    JOIN tags t3 ON t3.id = et3.tag_id
+		    WHERE et3.entity_type = 'workunit' AND et3.entity_id = wa.entity_id
+		      AND t3.tag_key = 'work-type'
+		      AND wa.latest_closed IS NOT NULL AND et3.applied_at < wa.latest_closed
+		  )
+		)
+		ORDER BY wa.entity_id ASC`, wms.EntityWorkUnit)
 	if err != nil {
 		return nil, err
 	}
