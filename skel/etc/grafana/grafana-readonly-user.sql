@@ -16,6 +16,16 @@
 -- Idempotent: CREATE USER IF NOT EXISTS + ALTER USER refreshes the password on
 -- re-run; GRANTs are additive. Re-running never escalates beyond SELECT.
 --
+-- Not fresh-install-only: lib/installrunner.sh's provision_grafana_ro runs this
+-- on every install invocation where grafana-mode is install|external and --wire
+-- is set — including upgrades — because it is gated on grafana-mode/WIRE, not
+-- IS_UPGRADE. A guided `./install.sh` re-run auto-detects the prior grafana
+-- mode from the existing teamster.yaml, so a table added here shows up on the
+-- existing `grafana_ro` user the next time the operator upgrades through the
+-- guided installer. Only the advanced/scripted `lib/installrunner.sh
+-- --basedir=... --wire` path (invoked without re-passing --grafana-mode) skips
+-- it — same as any other flag omitted from that path.
+--
 -- Connection host is '%' so the datasource can reach MySQL whether the spine is
 -- local or on another host; tighten to a specific host if your fabric requires.
 
@@ -62,5 +72,12 @@ GRANT SELECT ON `__STORE_DB__`.`wms_journal`           TO '__GRAFANA_DB_USER__'@
 
 -- Outcome cost hierarchy (v42 migration). Materialized by rollup binary.
 GRANT SELECT ON `__STORE_DB__`.`outcome_cost_rollup`   TO '__GRAFANA_DB_USER__'@'%';
+
+-- Recovery-pass evidence tables (migrations v35/v37/v38/v39). Audit trail for
+-- the attribution recovery passes; the "Last Sweep Activity" panel reads these.
+GRANT SELECT ON `__STORE_DB__`.`recovery_evidence`     TO '__GRAFANA_DB_USER__'@'%';
+GRANT SELECT ON `__STORE_DB__`.`warmup_evidence`       TO '__GRAFANA_DB_USER__'@'%';
+GRANT SELECT ON `__STORE_DB__`.`synthesis_evidence`    TO '__GRAFANA_DB_USER__'@'%';
+GRANT SELECT ON `__STORE_DB__`.`gap_evidence`          TO '__GRAFANA_DB_USER__'@'%';
 
 FLUSH PRIVILEGES;

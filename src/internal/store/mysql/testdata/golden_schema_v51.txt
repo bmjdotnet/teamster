@@ -13,7 +13,7 @@ TABLE activity_events
 TABLE agent_health_gauge
   COLUMN agent_name type=varchar(64) null=NO default= extra=
   COLUMN collector_status type=varchar(16) null=NO default=fresh extra=
-  COLUMN composition_json type=json null=YES default=<NULL> extra=
+  COLUMN composition_json type=longtext null=YES default=<NULL> extra=
   COLUMN context_fill_pct type=double null=NO default=0 extra=
   COLUMN context_reported_at type=datetime(6) null=YES default=<NULL> extra=
   COLUMN context_reset_suspected type=tinyint(1) null=NO default=0 extra=
@@ -21,7 +21,7 @@ TABLE agent_health_gauge
   COLUMN context_tokens_free type=bigint null=NO default=0 extra=
   COLUMN context_tokens_used type=bigint null=NO default=0 extra=
   COLUMN context_window_tokens type=bigint null=NO default=0 extra=
-  COLUMN fidelity_notes type=json null=YES default=<NULL> extra=
+  COLUMN fidelity_notes type=longtext null=YES default=<NULL> extra=
   COLUMN host type=varchar(128) null=NO default=<NULL> extra=
   COLUMN last_activity_display type=varchar(512) null=NO default= extra=
   COLUMN last_activity_tool type=varchar(128) null=NO default= extra=
@@ -35,10 +35,10 @@ TABLE agent_health_gauge
   COLUMN session_cost_usd type=double null=NO default=0 extra=
   COLUMN session_id type=varchar(64) null=NO default=<NULL> extra=
   COLUMN session_total_cost_usd type=double null=NO default=0 extra=
-  COLUMN statusline_json type=json null=YES default=<NULL> extra=
+  COLUMN statusline_json type=longtext null=YES default=<NULL> extra=
   COLUMN tokens_in_total type=bigint null=NO default=0 extra=
   COLUMN tokens_out_total type=bigint null=NO default=0 extra=
-  COLUMN tool_call_counts_json type=json null=YES default=<NULL> extra=
+  COLUMN tool_call_counts_json type=longtext null=YES default=<NULL> extra=
   COLUMN tool_calls_total type=bigint null=NO default=0 extra=
   COLUMN updated_at type=datetime(6) null=NO default=CURRENT_TIMESTAMP(6) extra=DEFAULT_GENERATED on update CURRENT_TIMESTAMP(6)
   INDEX idx_gauge_roster nonunique (roster_id)
