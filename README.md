@@ -3,16 +3,21 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![Platform: Linux](https://img.shields.io/badge/platform-linux-lightgrey.svg)
 
-Teamster is a self-hosted observability and cost-attribution system for
-Claude Code and OpenAI Codex CLI. It records what every agent does in real
+
+Teamster is a self-hosted **AI observatory** and **cost-attribution system** for
+Claude Code and OpenAI Codex. It records what every agent does in real
 time, attributes per-message token spend to declared work items, and presents
-both through Grafana dashboards and a terminal activity feed. Every dollar lands
+both through Grafana dashboards and a terminal utilities. Every dollar lands
 somewhere visible: attributed cost carries its attribution method, and whatever
-cannot be attributed is shown as a residual, not hidden.
+cannot be attributed is shown as a residual, not hidden.  Teamster allows you
+to perform ad-hoc, multidimensional analysis to link AI spend to actual work and
+determine how effectively your agents are being used.
 
-See the creator's personal Teamster dashboard at [teamster.bmj.net](https://teamster.bmj.net).
+See the creator's personal Teamster dashboard at **[teamster.bmj.net](https://teamster.bmj.net)**:
 
-![AI Spend Overview](img/where_spend_goes.png)
+![Fleet View](img/fleet_view.png)
+
+![AI Spend Overview](img/where_spend_goes_small.png)
 
 1. **Where is the AI spend going?** — by product, work type, component, phase
 2. **Who is spending it?** — engineers, and the agents they run
