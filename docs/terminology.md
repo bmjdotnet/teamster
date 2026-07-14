@@ -20,8 +20,8 @@ Teamster's work management system (WMS) uses a two-level hierarchy:
 
 | Term | Meaning |
 |------|---------|
-| **Outcome** | A high-level objective or deliverable. Has a focus string, status, and tags. Outcomes are the primary unit for cost rollup and reporting. Created via `wms_createOutcome`. |
-| **Work Unit** | A concrete, bounded piece of work under an Outcome. Assigned to an agent. Tracks status, focus, and cost. Created via `wms_createWorkUnit`. |
+| **Outcome** | A high-level objective or deliverable. Has a focus string, status, and tags. Outcomes are the primary unit for cost rollup and reporting. Created via `wms_createOutcome`; title changed via `wms_renameOutcome` (no state-machine validation). |
+| **Work Unit** | A concrete, bounded piece of work under an Outcome. Assigned to an agent. Tracks status, focus, and cost. Created via `wms_createWorkUnit`; title changed via `wms_renameWorkUnit` (no state-machine validation). |
 | **Claude Task** | Claude Code's built-in flat task item (via TaskCreate). Separate from WMS — no hierarchy, no cost attribution, no rollup. |
 
 Status transitions follow a state machine: `pending` -> `active` -> `review` -> `done` (with `blocked` as an alternative). `abandoned` is a resolution tag (applied via `wms_tagEntity` with key `resolution`), not a status. Status changes cascade: completing the last Work Unit under an Outcome can trigger the Outcome's status to advance.

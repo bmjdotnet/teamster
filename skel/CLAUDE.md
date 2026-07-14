@@ -39,7 +39,7 @@ workflow enforcement, and work management for Claude Code Agent Teams.
 |-----------|------|
 | `hookd` | HTTP event server + web dashboard. Receives POST `/event`, serves SSE at `/events/stream`. Also serves POST `/telemetry`, POST `/session`, POST `/mcp/roster` (agent roster, 7 tools), and POST `/mcp/health` (agent health, 4 tools). Auto-registers agents on roster from first hook event. Tracks per-agent turn state (processing/idle). |
 | `activity-mcp` | MCP server: `reportActivity`, `setOverallIntent`, `completeActivity`, `setMode`. |
-| `wms-mcp` | MCP server: outcome/work-unit CRUD, tags, focus, dependencies. |
+| `wms-mcp` | MCP server: outcome/work-unit CRUD, rename, tags, focus, dependencies. |
 | `feed` | Terminal activity viewer (tails JSONL, colorizes). |
 | `rollup` | Cost-attribution pipeline. Allocates token spend to WMS entities. Runs on a systemd timer. |
 | `classify` | Phase and work-type classifier. Derives tags from activity signals. Runs every 5 minutes. |

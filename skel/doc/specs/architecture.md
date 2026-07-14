@@ -869,7 +869,7 @@ the token scraper, and the plugin. MCP endpoints point at the hub over HTTP.
 | `hookd` | Go | hub | HTTP event server. POST `/event` → JSONL. Dashboard, SSE, WMS page, metrics, MCP routes (`/mcp/activity`, `/mcp/wms`, `/mcp/roster`, `/mcp/health`). Focus-absent nudge on PreToolUse. Auto-registers agents on roster from first hook event. Tracks per-agent turn state (processing/idle). |
 | `feed` | Go | hub | Long-running terminal viewer. Tails events.jsonl, ANSI colorizes. |
 | `activity-mcp` | Go | hub | MCP stdio for activity tools (hub-local sessions). No-op: tools return confirmation strings; real data extracted from PreToolUse by hook client. Includes `setMode`. |
-| `wms-mcp` | Go | hub | MCP stdio for WMS CRUD (hub-local sessions). Outcome/WorkUnit lifecycle, tags, focus, dependencies. Writes MySQL, emits status events via HookObserver. |
+| `wms-mcp` | Go | hub | MCP stdio for WMS CRUD (hub-local sessions). Outcome/WorkUnit lifecycle, rename, tags, focus, dependencies. Writes MySQL, emits status events via HookObserver. |
 | `rollup` | Go | hub | Cost-attribution pipeline. Allocates token spend to WMS entities. Recovery passes for unallocated messages. Run by systemd timer. |
 | `classify` | Go | hub | Derives phase and work-type tags on intervals/workunits from rule-based signals. Run by systemd timer every 5 min. |
 | `token-scraper` | Go | hub | Reads **Claude Code** session transcripts, extracts per-message token usage, writes to token_ledger. Never reads Codex data. |

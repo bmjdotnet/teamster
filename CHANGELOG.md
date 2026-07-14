@@ -6,6 +6,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## v0.2.5 (unreleased)
 
 ### Added
+- `wms_renameOutcome`/`wms_renameWorkUnit` MCP tools — rename an outcome or work unit's title directly, without state-machine validation
 - **Fleet Dashboard** (`ctop`) — a single terminal dashboard showing the full agent hierarchy per session: subagents and sub-subagents, their models, cost, activity, and context pressure
 - **Live model tracking** — activity logs now reflect the model you're actually using, even after a mid-session `/model` switch
 - **Recap tagging** — session recaps and suggested next steps are now tagged distinctly instead of showing up as false "done" entries

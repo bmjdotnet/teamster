@@ -230,7 +230,7 @@ must run itself. When the flag is on, a tool that was never surfaced by a
 search is **hard-uncallable** — not merely discouraged: an operator VM triage
 confirmed at the wire level that the model never even emitted a
 `tools/call` attempt for a non-surfaced tool, because it simply wasn't in the
-model's declared function set. The `wms` server has 31 tools regardless of
+model's declared function set. The `wms` server has 34 tools regardless of
 this flag; the flag only changes how many of them a given turn can see
 without searching first.
 
@@ -300,11 +300,15 @@ This installer writes `default_tools_approval_mode = "approve"` for both
 `[mcp_servers.activity]` and `[mcp_servers.wms]` (see MCP servers above) —
 the verified fix for `codex exec`'s silent-cancel-without-a-TTY behavior.
 That setting removes Codex's human-in-the-loop confirmation over every
-mutating WMS tool it exposes (roughly 18 tools reachable by prompt-
+mutating WMS tool it exposes (roughly 20 tools reachable by prompt-
 injectable repo content: status/outcome/work-unit transitions, tagging,
-dependencies, focus, phase, work-unit assignment/claim, and creation). The
-audit trail an operator would lean on to reconstruct what happened after
-the fact covers that surface unevenly:
+dependencies, focus, phase, work-unit assignment/claim, creation, and
+rename). `default_tools_approval_mode` is set once per MCP server, not per
+tool, so a newly-added mutating tool (like the two rename tools below)
+inherits the same audit-trail-limited approval automatically — no installer
+or permissions config change is needed to cover it. The audit trail an
+operator would lean on to reconstruct what happened after the fact covers
+that surface unevenly:
 
 - **4 tools write a session-attributed `wms_journal` entry**:
   `wms_updateStatus`, `wms_updateOutcomeStatus`, `wms_updateWorkUnitStatus`,
@@ -324,11 +328,14 @@ the fact covers that surface unevenly:
   `wms_snapshotEntityTags`, and `wms_rollbackTags` (all write/read a
   tag-steward JSONL snapshot carrying entity/tag/old-value data with no
   session, agent, or host field at all).
-- **7 tools leave no durable trace of the caller at all**:
+- **9 tools leave no durable trace of the caller at all**:
   `wms_addDependency`, `wms_removeDependency`, `wms_assignWorkUnit`,
-  `wms_setFocus`, `wms_defineTag`, `wms_retireTag`, `wms_describeTag`. None
-  of their store calls are passed session, host, or agent identity, and no
-  other record captures it.
+  `wms_setFocus`, `wms_defineTag`, `wms_retireTag`, `wms_describeTag`,
+  `wms_renameOutcome`, `wms_renameWorkUnit`. None of their store calls are
+  passed session, host, or agent identity, and no other record captures it.
+  The two rename tools are a plain `UPDATE ... SET title = ?` with no
+  observer/journal wiring — same persistence shape as `wms_setFocus`, whose
+  code they were templated from.
 - **`wms_setPhase` is a distinct, sharper risk than "no trace": it can
   produce a misattributed one.** It doesn't create a new record — it
   updates the `phase`/`phase_source` columns on the `wms_intervals` row an
