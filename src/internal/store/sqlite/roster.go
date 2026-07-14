@@ -150,6 +150,8 @@ func (s *Store) UpsertRosterEntry(ctx context.Context, entry store.RosterEntry) 
 	if entry.RosterID == "" {
 		return fmt.Errorf("UpsertRosterEntry: roster_id is required")
 	}
+	// team_name only overwrites on a non-blank incoming value — see the
+	// identical comment in the mysql backend's UpsertRosterEntry (GitHub #15).
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO agent_roster (
 			roster_id, session_id, agent_name, host, runtime, model,
@@ -160,7 +162,7 @@ func (s *Store) UpsertRosterEntry(ctx context.Context, entry store.RosterEntry) 
 			runtime = excluded.runtime,
 			model = excluded.model,
 			relationship = excluded.relationship,
-			team_name = excluded.team_name,
+			team_name = COALESCE(NULLIF(excluded.team_name, ''), team_name),
 			bus_team = excluded.bus_team,
 			parent_ref = excluded.parent_ref`,
 		entry.RosterID, nullStr(entry.SessionID), entry.AgentName, entry.Host,

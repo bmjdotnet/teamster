@@ -93,6 +93,67 @@ func TestRosterUpsertIdempotent(t *testing.T) {
 	})
 }
 
+// TestRosterUpsertBlankTeamNamePreservesExisting guards against GitHub #15:
+// auto-registration call sites (dispatchObservability's isNew re-registration
+// after SessionTracker eviction, handleSession's Codex /session upsert)
+// build a fresh RosterEntry with no team_name carried over, so an upsert
+// with a blank team_name must not clobber an already-named team.
+func TestRosterUpsertBlankTeamNamePreservesExisting(t *testing.T) {
+	run(t, func(t *testing.T, s store.Store) {
+		ctx := context.Background()
+		now := time.Now().UTC().Truncate(time.Microsecond)
+		sid := "sess-blank-team"
+		entry := store.RosterEntry{
+			RosterID:     "r-blank-1",
+			SessionID:    &sid,
+			AgentName:    "",
+			Host:         "host-a",
+			Runtime:      "claude_code",
+			Relationship: "lead",
+			TeamName:     "muster-crew",
+			CreatedAt:    now,
+			BoundAt:      &now,
+		}
+		if err := s.UpsertRosterEntry(ctx, entry); err != nil {
+			t.Fatal(err)
+		}
+
+		// Simulate a re-registration/auto-register upsert that never learned
+		// the team name (zero-value RosterEntry with the same identity).
+		reregistered := entry
+		reregistered.TeamName = ""
+		reregistered.Host = "host-b" // other fields still overwrite normally
+		if err := s.UpsertRosterEntry(ctx, reregistered); err != nil {
+			t.Fatal(err)
+		}
+
+		got, err := s.GetRosterEntry(ctx, "r-blank-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.TeamName != "muster-crew" {
+			t.Fatalf("blank team_name upsert clobbered existing value: got %q, want %q", got.TeamName, "muster-crew")
+		}
+		if got.Host != "host-b" {
+			t.Fatalf("other fields should still overwrite normally: got host %q, want %q", got.Host, "host-b")
+		}
+
+		// A genuine team rename (non-blank incoming value) must still apply.
+		renamed := entry
+		renamed.TeamName = "new-crew"
+		if err := s.UpsertRosterEntry(ctx, renamed); err != nil {
+			t.Fatal(err)
+		}
+		got, err = s.GetRosterEntry(ctx, "r-blank-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.TeamName != "new-crew" {
+			t.Fatalf("non-blank team_name upsert should still apply: got %q, want %q", got.TeamName, "new-crew")
+		}
+	})
+}
+
 func TestRosterBindSession(t *testing.T) {
 	run(t, func(t *testing.T, s store.Store) {
 		ctx := context.Background()

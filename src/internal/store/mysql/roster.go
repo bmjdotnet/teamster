@@ -151,6 +151,12 @@ func (s *Store) UpsertRosterEntry(ctx context.Context, entry store.RosterEntry) 
 	if entry.RosterID == "" {
 		return fmt.Errorf("UpsertRosterEntry: roster_id is required")
 	}
+	// team_name only overwrites on a non-blank incoming value: auto-registration
+	// call sites (dispatchObservability's isNew re-registration after the
+	// in-memory SessionTracker evicts an idle session; handleSession's Codex
+	// /session upsert) build a fresh RosterEntry with no team_name carried
+	// over, and an unconditional overwrite here clobbers an already-named
+	// team back to blank on every idle-then-resume or scraper poll (GitHub #15).
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO agent_roster (
 			roster_id, session_id, agent_name, host, runtime, model,
@@ -161,7 +167,7 @@ func (s *Store) UpsertRosterEntry(ctx context.Context, entry store.RosterEntry) 
 			runtime = VALUES(runtime),
 			model = VALUES(model),
 			relationship = VALUES(relationship),
-			team_name = VALUES(team_name),
+			team_name = COALESCE(NULLIF(VALUES(team_name), ''), team_name),
 			bus_team = VALUES(bus_team),
 			parent_ref = VALUES(parent_ref)`,
 		entry.RosterID, entry.SessionID, entry.AgentName, entry.Host,
