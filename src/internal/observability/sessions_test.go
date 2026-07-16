@@ -152,6 +152,44 @@ func TestCloseSessionMarksAllPairs(t *testing.T) {
 	}
 }
 
+func TestCloseAgentMarksOnlyOneAgent(t *testing.T) {
+	tr := newTestTracker()
+	tr.Upsert("s1", "")
+	tr.Upsert("s1", "scout")
+	tr.Upsert("s1", "reviewer")
+
+	affected := tr.CloseAgent("s1", "@scout")
+	if len(affected) != 1 {
+		t.Fatalf("affected count: got %d, want 1", len(affected))
+	}
+	if affected[0] != (SessionKey{SessionID: "s1", AgentName: "@scout"}) {
+		t.Errorf("affected key: got %+v", affected[0])
+	}
+
+	scout, _ := tr.GetSnapshot("s1", "scout")
+	if scout.Status != SessionStatusStopped {
+		t.Errorf("scout status after CloseAgent: got %v", scout.Status)
+	}
+	lead, _ := tr.GetSnapshot("s1", "")
+	if lead.Status != SessionStatusActive {
+		t.Errorf("lead should still be active; got %v", lead.Status)
+	}
+	reviewer, _ := tr.GetSnapshot("s1", "reviewer")
+	if reviewer.Status != SessionStatusActive {
+		t.Errorf("reviewer should still be active; got %v", reviewer.Status)
+	}
+}
+
+func TestCloseAgentNoopOnUntrackedPair(t *testing.T) {
+	tr := newTestTracker()
+	tr.Upsert("s1", "")
+
+	affected := tr.CloseAgent("s1", "@nonexistent")
+	if affected != nil {
+		t.Errorf("affected: got %+v, want nil", affected)
+	}
+}
+
 func TestSweepRemovesTimedOutEntries(t *testing.T) {
 	tr := NewSessionTracker("h", 100*time.Millisecond, 50*time.Millisecond, nil)
 	tr.Upsert("s1", "")

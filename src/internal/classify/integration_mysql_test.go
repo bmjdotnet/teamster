@@ -453,3 +453,41 @@ func TestClassify_WorkTypeLandsOnWorkunit(t *testing.T) {
 		t.Errorf("work-type on workunit = %q, want research (READ/GREP dominant)", workType)
 	}
 }
+
+// TestClassify_RecordsHeartbeat is the bug4 regression: a pass with NOTHING to
+// phase (the common case — most passes have no backlog) must still stamp
+// job_heartbeats, since the "Classify Freshness" dashboard panel now reads
+// this instead of the classifier's phase_assembled_at write (which only
+// happens when there IS something to phase).
+func TestClassify_RecordsHeartbeat(t *testing.T) {
+	st := freshStore(t)
+	ctx := context.Background()
+
+	logFile := writeJSONL(t, []string{})
+	r := New(st, wms.NewJSONLSignalReader(), logFile, nil)
+
+	before := time.Now().UTC()
+	if err := r.Run(ctx, false, DefaultReclassifyLimit, false); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	after := time.Now().UTC()
+
+	var lastRunAt time.Time
+	storetest.QueryRow(t, ctx, st,
+		`SELECT last_run_at FROM job_heartbeats WHERE job_name = 'classify'`, nil, &lastRunAt)
+	if lastRunAt.Before(before) || lastRunAt.After(after) {
+		t.Errorf("job_heartbeats.last_run_at = %v, want between %v and %v", lastRunAt, before, after)
+	}
+
+	// A second pass — still nothing to phase — must move the heartbeat forward.
+	time.Sleep(10 * time.Millisecond)
+	if err := r.Run(ctx, false, DefaultReclassifyLimit, false); err != nil {
+		t.Fatalf("second Run: %v", err)
+	}
+	var secondRunAt time.Time
+	storetest.QueryRow(t, ctx, st,
+		`SELECT last_run_at FROM job_heartbeats WHERE job_name = 'classify'`, nil, &secondRunAt)
+	if !secondRunAt.After(lastRunAt) {
+		t.Errorf("second pass did not advance heartbeat: %v -> %v", lastRunAt, secondRunAt)
+	}
+}

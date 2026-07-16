@@ -91,7 +91,8 @@ var migrations = []store.Migration{
 		// store.ActivityStore). Front-loaded with their full head shape:
 		// sessions gains `username` at mysql v34, folded in here. runtime/cwd/
 		// model/originator/cli_version added at mysql v51 (codex-support) are
-		// also folded in here.
+		// also folded in here. parent_session_id/parent_agent_name/relationship/
+		// bus_team added at mysql v52 (muster-sessions-columns) folded in here.
 		Version: 3,
 		Name:    "sessions-activity",
 		SQL: []string{
@@ -114,6 +115,10 @@ var migrations = []store.Migration{
 				model       TEXT NOT NULL DEFAULT '',
 				originator  TEXT NOT NULL DEFAULT '',
 				cli_version TEXT NOT NULL DEFAULT '',
+				parent_session_id TEXT NOT NULL DEFAULT '',
+				parent_agent_name TEXT NOT NULL DEFAULT '',
+				relationship      TEXT NOT NULL DEFAULT '',
+				bus_team           TEXT NOT NULL DEFAULT '',
 				PRIMARY KEY (session_id, agent_name)
 			)`,
 			`CREATE INDEX IF NOT EXISTS idx_sessions_host ON sessions(host)`,
@@ -900,5 +905,156 @@ var migrations = []store.Migration{
 		// this entry exists only to keep version numbers aligned with mysql.
 		Version: 51,
 		Name:    "codex-support",
+	},
+	{
+		// muster-sessions-columns: front-loaded into v3 above.
+		Version: 52,
+		Name:    "muster-sessions-columns",
+	},
+	{
+		// muster-agent-roster: new table. Front-loaded here at its first
+		// version with its complete head shape (matching mysql v53).
+		Version: 53,
+		Name:    "muster-agent-roster",
+		SQL: []string{
+			`CREATE TABLE IF NOT EXISTS agent_roster (
+				roster_id    TEXT NOT NULL,
+				session_id   TEXT DEFAULT NULL,
+				agent_name   TEXT NOT NULL DEFAULT '',
+				host         TEXT NOT NULL DEFAULT '',
+				runtime      TEXT NOT NULL DEFAULT '',
+				model        TEXT NOT NULL DEFAULT '',
+				relationship TEXT NOT NULL DEFAULT '',
+				team_name    TEXT NOT NULL DEFAULT '',
+				bus_team     TEXT NOT NULL DEFAULT '',
+				parent_ref   TEXT DEFAULT NULL,
+				created_at   DATETIME NOT NULL,
+				bound_at     DATETIME DEFAULT NULL,
+				PRIMARY KEY (roster_id)
+			)`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS uq_roster_identity ON agent_roster(session_id, agent_name)`,
+			`CREATE INDEX IF NOT EXISTS idx_roster_host ON agent_roster(host)`,
+			`CREATE INDEX IF NOT EXISTS idx_roster_bus_team ON agent_roster(bus_team)`,
+			`CREATE INDEX IF NOT EXISTS idx_roster_parent ON agent_roster(parent_ref)`,
+		},
+	},
+	{
+		// muster-agent-tokens: new table. Front-loaded here at its first
+		// version with its complete head shape (matching mysql v54).
+		Version: 54,
+		Name:    "muster-agent-tokens",
+		SQL: []string{
+			`CREATE TABLE IF NOT EXISTS agent_tokens (
+				token_hash   TEXT NOT NULL,
+				roster_id    TEXT NOT NULL,
+				issued_at    DATETIME NOT NULL,
+				expires_at   DATETIME DEFAULT NULL,
+				revoked_at   DATETIME DEFAULT NULL,
+				last_used_at DATETIME DEFAULT NULL,
+				PRIMARY KEY (token_hash)
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_tokens_roster ON agent_tokens(roster_id)`,
+		},
+	},
+	{
+		// agent-health-gauge: new table. Front-loaded here at its first
+		// version with its complete head shape (matching mysql v55).
+		// JSON columns become TEXT (SQLite has no JSON type; the driver
+		// stores/retrieves them as text). TINYINT(1) → INTEGER.
+		// ON UPDATE CURRENT_TIMESTAMP(6) has no SQLite equivalent;
+		// the application layer sets updated_at on every write.
+		Version: 55,
+		Name:    "agent-health-gauge",
+		SQL: []string{
+			`CREATE TABLE IF NOT EXISTS agent_health_gauge (
+				host                    TEXT NOT NULL,
+				session_id              TEXT NOT NULL,
+				agent_name              TEXT NOT NULL DEFAULT '',
+				roster_id               TEXT DEFAULT NULL,
+				runtime                 TEXT NOT NULL DEFAULT 'claude_code',
+				model                   TEXT NOT NULL DEFAULT '',
+				long_context_active     INTEGER NOT NULL DEFAULT 0,
+				context_window_tokens   INTEGER NOT NULL DEFAULT 0,
+				context_tokens_used     INTEGER NOT NULL DEFAULT 0,
+				context_tokens_free     INTEGER NOT NULL DEFAULT 0,
+				context_fill_pct        REAL NOT NULL DEFAULT 0,
+				context_reset_suspected INTEGER NOT NULL DEFAULT 0,
+				composition_json        TEXT DEFAULT NULL,
+				tokens_in_total         INTEGER NOT NULL DEFAULT 0,
+				tokens_out_total        INTEGER NOT NULL DEFAULT 0,
+				tool_call_counts_json   TEXT DEFAULT NULL,
+				last_activity_ts        DATETIME DEFAULT NULL,
+				last_activity_tool      TEXT NOT NULL DEFAULT '',
+				last_activity_display   TEXT NOT NULL DEFAULT '',
+				pressure_level          TEXT NOT NULL DEFAULT 'ok',
+				pressure_level_since    DATETIME DEFAULT NULL,
+				collector_status        TEXT NOT NULL DEFAULT 'fresh',
+				updated_at              DATETIME NOT NULL,
+				fidelity_notes          TEXT DEFAULT NULL,
+				PRIMARY KEY (host, session_id, agent_name)
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_gauge_roster ON agent_health_gauge(roster_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_gauge_updated ON agent_health_gauge(updated_at)`,
+		},
+	},
+	{
+		// Mirrors mysql v56: context_source distinguishes an authoritative
+		// statusLine-reported context window from health-collector's own
+		// model-name heuristic.
+		Version: 56,
+		Name:    "gauge-context-source",
+		SQL: []string{
+			`ALTER TABLE agent_health_gauge
+				ADD COLUMN context_source TEXT NOT NULL DEFAULT 'heuristic'`,
+		},
+	},
+	{
+		// Mirrors mysql v57: session_cost_usd carries statusLine's
+		// cost.total_cost_usd (POST /context).
+		Version: 57,
+		Name:    "gauge-session-cost",
+		SQL: []string{
+			`ALTER TABLE agent_health_gauge
+				ADD COLUMN session_cost_usd REAL NOT NULL DEFAULT 0`,
+		},
+	},
+	{
+		// Mirrors mysql v58: tool_calls_total is a materialized scalar sum
+		// of the tool counts already carried (unstructured) in
+		// tool_call_counts_json.
+		Version: 58,
+		Name:    "gauge-tool-calls-total",
+		SQL: []string{
+			`ALTER TABLE agent_health_gauge
+				ADD COLUMN tool_calls_total INTEGER NOT NULL DEFAULT 0`,
+		},
+	},
+	{
+		// Mirrors mysql v59: statusline_json holds statusLine fields that
+		// don't warrant their own column.
+		Version: 59,
+		Name:    "gauge-statusline-json",
+		SQL: []string{
+			`ALTER TABLE agent_health_gauge
+				ADD COLUMN statusline_json TEXT DEFAULT NULL`,
+		},
+	},
+	{
+		Version: 60,
+		Name:    "gauge-context-reported-at",
+		SQL: []string{
+			`ALTER TABLE agent_health_gauge
+				ADD COLUMN context_reported_at DATETIME DEFAULT NULL`,
+		},
+	},
+	{
+		Version: 61,
+		Name:    "job-heartbeats",
+		SQL: []string{
+			`CREATE TABLE IF NOT EXISTS job_heartbeats (
+				job_name    TEXT NOT NULL PRIMARY KEY,
+				last_run_at DATETIME NOT NULL
+			)`,
+		},
 	},
 }

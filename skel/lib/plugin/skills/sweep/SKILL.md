@@ -30,16 +30,26 @@ deterministic passes cannot attribute.
 
 ---
 
-## Step 0 — Self-report to WMS
+## Step 0 — Declare identity and self-report to WMS
 
-Before any work, attribute your own cost:
+Before any work, declare your team identity and attribute your own cost.
+
+**Register as `#janitor`.** Every sweep session uses the same team name so
+they group consistently in ctop and Grafana. Extract your session_id from
+the scratchpad path in your system prompt (the UUID segment).
 
 ```
-wms_setFocus(entityType="outcome", entityID="sweep",
-             focus="LLM attribution sweep")
+ToolSearch("select:mcp__roster__registerPeer")
+registerPeer(
+  agent_name: "",
+  runtime: "claude_code",
+  relationship: "lead",
+  team_name: "janitor",
+  session_id: "<your session UUID>"
+)
 ```
 
-If `sweep` does not exist yet, create it first:
+**Set up the standing outcome** (if it doesn't exist yet):
 
 ```
 wms_createOutcome(id="sweep",
@@ -54,9 +64,18 @@ wms_tagEntity(entityType="outcome", entityID="sweep",
               tagKey="work-type", tagValue="admin", source="manual")
 wms_tagEntity(entityType="outcome", entityID="sweep",
               tagKey="component", tagValue="wms", source="manual")
+wms_tagEntity(entityType="outcome", entityID="sweep",
+              tagKey="team", tagValue="janitor", source="manual")
 ```
 
-Then set focus on it. Keep this focus for the entire run.
+**Attribute your cost:**
+
+```
+wms_setFocus(entityType="outcome", entityID="sweep",
+             focus="LLM attribution sweep")
+```
+
+Keep this focus for the entire run.
 
 ---
 

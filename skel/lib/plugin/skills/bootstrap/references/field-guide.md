@@ -312,3 +312,38 @@ Without `description`, only the raw command appears as `[EXEC]`. This is
 harder to scan and provides no intent context. The operator can see
 which agents are providing good observability and which aren't — be one
 of the former.
+
+## 21. Monitor context pressure — yours and your teammates'
+
+The muster health system tracks context-window usage per agent. A teammate
+at 70%+ fill is approaching the ceiling where output quality degrades —
+responses get shallower, instructions get missed, tool calls get sloppy.
+This degradation is gradual and invisible until you notice the output is
+wrong, by which point you've already wasted tokens on low-quality work.
+
+When a teammate approaches 70%: reap it (have it externalize its knowledge
+to a handoff doc), spawn a fresh replacement, and route by affinity to the
+new agent. Don't reuse a near-full agent "because it has context" — the
+context it has is exactly what's crowding out the instructions you're about
+to give it.
+
+Check your own fill too. The lead is not exempt from context ceilings, and
+a lead that loses coherence mid-session is worse than a teammate doing
+so — the lead's mistakes cascade to every dispatch.
+
+## 22. When two channels can disagree, pick one as authoritative and make the other a strict overlay
+
+ctop's Fleet view has two sources for "what is this agent doing right now":
+a polled health API snapshot and a live SSE event stream. Early versions let
+each render independently — SSE-seen agents got tag-colored text, agents
+only known from the health API poll fell back to dim/uncolored text, and
+recency (`activityTsFor`) was computed differently depending on which source
+had fired. The fix (`resolvedActivity` in `cmd/ctop/agents.go`) merges both
+into one `{tag, text, ts}` triple: the health API poll is authoritative, and
+the SSE tracker overlays it **only when its own timestamp is strictly
+newer** — same rendering path either way, so a health-API-only row can never
+diverge in color or shape from an SSE-seen one. The lesson generalizes: when
+a fast, ephemeral channel (SSE, in-memory cache) and a slow, durable one
+(polled API, DB) describe the same fact, don't let every consumer pick
+whichever one it happened to see first — merge once, behind one function,
+with an explicit precedence rule.

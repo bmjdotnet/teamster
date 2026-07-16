@@ -27,6 +27,13 @@ import (
 	"github.com/bmjdotnet/teamster/internal/version"
 )
 
+// longContextSuffix marks a model as running with the 1M-context beta enabled.
+// Claude Code's API response (transcript message.model) never carries this —
+// it's a client-side annotation that only lives in ~/.claude/settings.json's
+// "model" field (see configuredModel). Mirrors health-collector's identical
+// constant, which reads it back out of token_ledger.model.
+const longContextSuffix = "[1m]"
+
 // cursorEntry tracks read progress for one session JSONL file.
 type cursorEntry struct {
 	Offset int64 `json:"offset"`
@@ -243,6 +250,29 @@ func (s *scraper) agentNameFor(subPath string) string {
 	return "@" + meta.AgentType
 }
 
+// configuredModel reads the CLI's configured model out of
+// ~/.claude/settings.json. Mirrors internal/hook.getModel(): this is the
+// client-side model selection, which may carry a "[1m]" long-context-beta
+// suffix (e.g. "claude-fable-5[1m]") that the API never echoes back into a
+// transcript's message.model field. Returns "" on any error (missing file,
+// malformed JSON, no "model" key) — the caller then applies no suffix.
+func configuredModel() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
+	if err != nil {
+		return ""
+	}
+	var m map[string]interface{}
+	if json.Unmarshal(data, &m) != nil {
+		return ""
+	}
+	model, _ := m["model"].(string)
+	return model
+}
+
 // processFile ingests one session JSONL file. agentName is "" for main session
 // files (hookd resolves the agent) and the resolved teammate name for subagent
 // files (stamped directly onto each row).
@@ -250,6 +280,17 @@ func (s *scraper) processFile(ctx context.Context, path, agentName string) error
 	fi, err := os.Stat(path)
 	if err != nil {
 		return nil // file disappeared between glob and stat
+	}
+
+	// The lead's own transcript is the only one configuredModel's "[1m]"
+	// setting can be safely attributed to — a subagent may be dispatched on a
+	// different model entirely (see teamster-context-bug.md), so this is
+	// scoped to agentName == "" (main session file) only.
+	longContextBase := ""
+	if agentName == "" {
+		if cfg := configuredModel(); strings.HasSuffix(cfg, longContextSuffix) {
+			longContextBase = strings.TrimSuffix(cfg, longContextSuffix)
+		}
 	}
 
 	cursor, ok := s.cursors[path]
@@ -338,6 +379,9 @@ func (s *scraper) processFile(ctx context.Context, path, agentName string) error
 		}
 
 		u := usageFromLine(line)
+		if longContextBase != "" && u.model == longContextBase {
+			u.model += longContextSuffix
+		}
 		key := transcript.LineDedupKey(line)
 
 		if cur != nil && key == curKey {
@@ -449,7 +493,7 @@ func mergeUsage(dst *sessionUsage, src sessionUsage) {
 // emit prices and sends one deduplicated request row. Returns false on POST
 // failure (so the caller stops advancing the cursor). Honors dry-run.
 func (s *scraper) emit(u sessionUsage, agentName string) bool {
-	costUSD := pricing.ComputeCost(u.model, u.inputTokens, u.outputTokens, u.cacheReadTokens, u.cacheWriteTokens)
+	costUSD := pricing.ComputeCost(u.model, u.inputTokens, u.outputTokens, u.cacheReadTokens, u.cacheWrite5m, u.cacheWrite1h)
 
 	if s.dryRun {
 		slog.Info("dry-run",

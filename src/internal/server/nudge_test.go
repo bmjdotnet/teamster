@@ -116,6 +116,27 @@ func TestFocusNudgeCache_ClearSession_ResetsNudgeCount(t *testing.T) {
 	}
 }
 
+func TestFocusNudgeCache_ClearAgentTurn_LeavesOtherAgents(t *testing.T) {
+	var c focusNudgeCache
+	dbCheck := func() bool { return false }
+
+	// Exhaust the nudge budget for both agents this turn.
+	for i := 0; i < nudgeMaxCount; i++ {
+		c.check("sess1", "@agent", dbCheck)
+		c.check("sess1", "@other", dbCheck)
+	}
+
+	// A teammate's Stop clears only its own nudge budget.
+	c.clearAgentTurn("sess1", "@agent")
+
+	if _, ok := c.check("sess1", "@agent", dbCheck); !ok {
+		t.Fatal("expected nudge after clearAgentTurn resets this agent's count")
+	}
+	if _, ok := c.check("sess1", "@other", dbCheck); ok {
+		t.Fatal("other agent's nudge budget should still be exhausted")
+	}
+}
+
 func TestFocusNudgeCache_AgentKeyMismatch_StillNudged(t *testing.T) {
 	var c focusNudgeCache
 	dbCheck := func() bool { return false }

@@ -1,0 +1,13 @@
+[Unit]
+Description=Teamster Health Collector
+After=network.target teamster-hookd.service
+
+[Service]
+Type=simple
+User=__USER__
+ExecStart=__BASEDIR__/bin/health-collector
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

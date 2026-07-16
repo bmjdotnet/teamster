@@ -16,12 +16,19 @@ import (
 	"sync"
 	"time"
 
+	"database/sql"
+
+	"github.com/bmjdotnet/teamster/internal/agenthealth/gauge"
+	gaugemysql "github.com/bmjdotnet/teamster/internal/agenthealth/gauge/mysql"
 	"github.com/bmjdotnet/teamster/internal/config"
 	"github.com/bmjdotnet/teamster/internal/hook"
 	mcpactivity "github.com/bmjdotnet/teamster/internal/mcp/activity"
+	mcphealth "github.com/bmjdotnet/teamster/internal/mcp/health"
+	mcproster "github.com/bmjdotnet/teamster/internal/mcp/roster"
 	mcpwms "github.com/bmjdotnet/teamster/internal/mcp/wms"
 	"github.com/bmjdotnet/teamster/internal/observability"
 	"github.com/bmjdotnet/teamster/internal/redact"
+	"github.com/bmjdotnet/teamster/internal/roster"
 	"github.com/bmjdotnet/teamster/internal/store"
 	_ "github.com/bmjdotnet/teamster/internal/store/mysql" // registers mysql, mariadb
 	"github.com/bmjdotnet/teamster/internal/version"
@@ -36,16 +43,25 @@ const maxSSESubscribers = 100
 
 const writeTimeout = 60 * time.Second
 
+// ssePayload carries one event in both wire formats: html is the htmx-ready
+// snippet (existing behavior, internal/web.FormatEventHTML output); raw is
+// the original marshaled JSONL record line (no trailing newline), consumed
+// by ?format=json subscribers (e.g. ctop) that can't parse HTML.
+type ssePayload struct {
+	html []byte
+	raw  []byte
+}
+
 // eventBus fans out new event payloads to active SSE subscribers.
 type eventBus struct {
 	mu          sync.RWMutex
-	subscribers map[uint64]chan []byte
+	subscribers map[uint64]chan ssePayload
 	nextID      uint64
 }
 
 // subscribe registers a new subscriber and returns its ID and receive channel.
 // Returns (0, nil) when the subscriber limit has been reached.
-func (b *eventBus) subscribe() (uint64, chan []byte) {
+func (b *eventBus) subscribe() (uint64, chan ssePayload) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if len(b.subscribers) >= maxSSESubscribers {
@@ -53,7 +69,7 @@ func (b *eventBus) subscribe() (uint64, chan []byte) {
 	}
 	id := b.nextID
 	b.nextID++
-	ch := make(chan []byte, 64)
+	ch := make(chan ssePayload, 64)
 	b.subscribers[id] = ch
 	return id, ch
 }
@@ -66,7 +82,7 @@ func (b *eventBus) unsubscribe(id uint64) {
 }
 
 // publish sends payload to every subscriber; drops silently if the channel is full.
-func (b *eventBus) publish(payload []byte) {
+func (b *eventBus) publish(payload ssePayload) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	for _, ch := range b.subscribers {
@@ -94,6 +110,8 @@ type Server struct {
 	wmsStore        wms.Store
 	wmsEng          *wms.EngineImpl
 	obsStore        store.Store // new unified store (nil when store package not ready)
+	gaugeStore      gauge.GaugeStore
+	gaugeDB         *sql.DB
 	sessions        *observability.SessionTracker
 	metrics         *observability.Metrics
 	promRegistry    *prometheus.Registry
@@ -106,7 +124,14 @@ type Server struct {
 	pendingMCPMu    sync.Mutex
 	pendingMCPIdent map[string]mcpIdentity // key: "toolSuffix:entityID"
 	focusNudge      focusNudgeCache
+	pressureNudge   pressureNudgeCache
+	rosterLastSeen  lastSeenCache
+	turnStates      turnStateTracker
 }
+
+// storeOpenMaxAttempts bounds how many times NewServer retries store.Open
+// before giving up and starting with the /wms dashboard disabled.
+const storeOpenMaxAttempts = 10
 
 // NewServer opens (or creates) the JSONL log file in append mode and returns a ready Server.
 // If the store DSN is unset the /wms route will show an empty state.
@@ -151,10 +176,27 @@ func NewServer(cfg config.Config) (*Server, error) {
 		sweepStop:       sweepStop,
 		pendingMCPIdent: make(map[string]mcpIdentity),
 	}
-	s.bus.subscribers = make(map[uint64]chan []byte)
+	s.bus.subscribers = make(map[uint64]chan ssePayload)
 
 	if cfg.StoreDSN.Raw != "" {
-		ms, storeErr := store.Open(context.Background(), cfg.StoreDSN.Raw)
+		// Retry store.Open to ride out a boot race: on host startup hookd can
+		// come up before MySQL is accepting connections. Bounded attempts with
+		// exponential backoff (capped at 5s) so a genuinely-down store still
+		// lets the rest of the server start in bounded time.
+		var ms store.Store
+		var storeErr error
+		for attempt := 0; attempt < storeOpenMaxAttempts; attempt++ {
+			ms, storeErr = store.Open(context.Background(), cfg.StoreDSN.Raw)
+			if storeErr == nil {
+				break
+			}
+			wait := time.Duration(1<<uint(attempt)) * 100 * time.Millisecond
+			if wait > 5*time.Second {
+				wait = 5 * time.Second
+			}
+			slog.Warn("store not ready, retrying", "attempt", attempt+1, "of", storeOpenMaxAttempts, "error", storeErr, "backoff", wait)
+			time.Sleep(wait)
+		}
 		if storeErr == nil {
 			s.obsStore = ms
 			s.wmsStore = ms
@@ -182,8 +224,15 @@ func NewServer(cfg config.Config) (*Server, error) {
 			}
 			s.telemetryAgents = &agentCache{cache: make(map[string]string)}
 			go s.startTelemetryWriter()
+
+			if gdb, gErr := openGaugeDB(cfg.StoreDSN); gErr == nil {
+				s.gaugeDB = gdb
+				s.gaugeStore = gaugemysql.New(gdb)
+			} else {
+				slog.Warn("gauge store unavailable — /mcp/health disabled", "error", gErr)
+			}
 		} else {
-			slog.Error("WMS store unavailable — /wms dashboard disabled", "error", storeErr)
+			slog.Error("WMS store unavailable after retries — /wms dashboard disabled", "error", storeErr)
 		}
 	}
 
@@ -211,23 +260,41 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 		}
 		mux.Handle("/mcp/activity", timed(reject))
 		mux.Handle("/mcp/wms", timed(reject))
+		mux.Handle("/mcp/roster", timed(reject))
+		mux.Handle("/mcp/health", timed(reject))
 		mux.Handle("/telemetry", timed(reject))
 		mux.Handle("/session", timed(reject))
 		mux.Handle("/focus-timeline", timed(reject))
 		mux.Handle("/wms/api/drain", timed(reject))
+		mux.Handle("/nudge", timed(reject))
+		mux.Handle("/context", timed(reject))
 	} else {
 		mux.Handle("/mcp/activity", timed(s.handleMCPActivity))
 		mux.Handle("/mcp/wms", timed(s.handleMCPWMS))
+		mux.Handle("/mcp/roster", timed(s.handleMCPRoster))
+		mux.Handle("/mcp/health", timed(s.handleMCPHealth))
 		mux.Handle("/telemetry", timed(s.handleTelemetry))
 		mux.Handle("/session", timed(s.handleSession))
 		mux.Handle("/focus-timeline", timed(s.handleFocusTimeline))
 		mux.Handle("/wms/api/drain", timed(web.HandleDrainAPI(s.obsStore)))
+		mux.Handle("/nudge", timed(s.handleNudge))
+		mux.Handle("/context", timed(s.handleContextReport))
 	}
 
 	mux.Handle("/wms/cost-flow", timed(web.HandleCostFlowPage))
 	mux.Handle("/wms/api/cost-flow", timed(web.HandleCostFlowAPI(s.obsStore)))
 	mux.Handle("/wms/tags", timed(web.HandleTagsPage))
 	mux.Handle("/wms/api/tags", timed(web.HandleTagsAPI(s.obsStore)))
+
+	// Muster health dashboard data plane: pure reads, must work on read-only
+	// replicas, so these are registered unconditionally (unlike /mcp/health,
+	// which stays scoped/agent-facing and is rejected in read-only mode).
+	mux.Handle("GET /health/api/agents", timed(s.handleHealthAgentsAPI))
+	mux.Handle("GET /health/api/agents/{roster_id}", timed(s.handleHealthSnapshotAPI))
+	mux.Handle("GET /health/api/alerts", timed(s.handleHealthAlertsAPI))
+	mux.Handle("GET /health/api/team/{team_name}", timed(s.handleHealthTeamAPI))
+	mux.Handle("GET /health/dashboard", timed(web.HandleHealthPage))
+	mux.HandleFunc("/health/stream", s.handleSSE) // /events/stream alias; same handler, same bus
 	mux.Handle("/wms", timed(web.HandleWMS(s.obsStore)))
 	mux.Handle("/", timed(web.HandleDashboard))
 	mux.Handle("/metrics", timed(observability.Handler(s.promRegistry).ServeHTTP))
@@ -261,6 +328,9 @@ func (s *Server) Close() error {
 		if c, ok := s.wmsStore.(io.Closer); ok {
 			c.Close() //nolint:errcheck
 		}
+	}
+	if s.gaugeDB != nil {
+		s.gaugeDB.Close() //nolint:errcheck
 	}
 	return s.logFile.Close()
 }
@@ -314,12 +384,12 @@ func (s *Server) handleEvent(w http.ResponseWriter, r *http.Request) {
 
 	record := s.buildRecord(data)
 
-	line, err := json.Marshal(record)
+	raw, err := json.Marshal(record)
 	if err != nil {
 		http.Error(w, "marshal error", http.StatusInternalServerError)
 		return
 	}
-	line = append(line, '\n')
+	line := append(raw, '\n')
 
 	s.mu.Lock()
 	_, werr := s.logFile.Write(line)
@@ -332,9 +402,10 @@ func (s *Server) handleEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Publish formatted HTML to SSE subscribers.
+	// Publish both wire formats to SSE subscribers: html for the existing
+	// htmx dashboard, raw JSONL for ?format=json consumers (e.g. ctop).
 	html := web.FormatEventHTML(record)
-	s.bus.publish([]byte(html))
+	s.bus.publish(ssePayload{html: []byte(html), raw: raw})
 
 	// Observability branches — keyed on the typed event struct + raw map for enriched fields.
 	s.dispatchObservability(event, data)
@@ -372,9 +443,45 @@ func (s *Server) handleEvent(w http.ResponseWriter, r *http.Request) {
 		resp["additionalContext"] = hook.ACTIVITY_INSTRUCTION + hook.TEAM_DISPATCH_INSTRUCTION
 	}
 
+	// Pressure nudge: an independent signal from health-collector's threshold
+	// engine (POST /nudge), delivered the same way as the focus nudge above —
+	// injected as additionalContext on the target agent's next PreToolUse or
+	// UserPromptSubmit, one-shot. Appended rather than overwritten since either
+	// branch above may have already populated additionalContext for this event.
+	if event.SessionID != "" && (event.HookEventName == "PreToolUse" || event.HookEventName == "UserPromptSubmit") {
+		agent := agentNameFor(event.AgentType)
+		if msg := s.pressureNudge.consume(event.SessionID, agent); msg != "" {
+			if existing, ok := resp["additionalContext"].(string); ok && existing != "" {
+				resp["additionalContext"] = existing + "\n\n" + msg
+			} else {
+				resp["additionalContext"] = msg
+			}
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(resp) //nolint:errcheck
+}
+
+// modelFromData extracts the hook client's "_model" enrichment field: the
+// operator's configured model, read from the LOCAL ~/.claude/settings.json
+// by internal/hook.ProcessEvent's getModel() (hub-local clients) — set
+// unconditionally on every event, before the per-event-type switch, so it's
+// present (or absent) consistently across a session's whole lifecycle
+// rather than only on some events. That determinism is what makes it safe
+// to attach to every UpsertSession call in this file without a
+// read-before-write: a later empty value never clobbers an earlier
+// non-empty one, because the client re-derives the identical value from the
+// same static config file on every event. It is only ever a settings.json
+// default, not per-turn truth (an in-session /model switch won't be
+// reflected) — health-collector's token_ledger-derived model remains the
+// authoritative source once it's available; this just gives the sessions
+// table (and, via health-collector's fallback, agent_health_gauge) a value
+// immediately instead of staying empty until the token-scraper's first pass.
+func modelFromData(data map[string]interface{}) string {
+	v, _ := data["_model"].(string)
+	return v
 }
 
 // dispatchObservability runs the four observability branches from SPEC §6.4
@@ -387,18 +494,145 @@ func (s *Server) dispatchObservability(event hook.HookEvent, data map[string]int
 	// Upsert the session entry on every event that carries identity.
 	if event.SessionID != "" {
 		switch event.HookEventName {
-		case "PreToolUse", "UserPromptSubmit":
+		// SubagentStart shares the same auto-registration path: it carries
+		// agent_type (like a teammate's PreToolUse) and is the earliest
+		// signal a new Agent-tool subagent exists, so it should register a
+		// roster entry / session row just as promptly as a teammate's first
+		// tool call does. BUT SubagentStart also fires on every Agent-Teams
+		// teammate turn-resume (mailbox wakeup) with the SAME agent_type as
+		// its very first event — agent_type/agent_name is not a safe
+		// "have I seen this entity" discriminator on its own: it's a
+		// stable per-teammate name (correctly repeats every turn-resume)
+		// but ALSO a reusable subagent_type category label (correctly
+		// repeats across distinct parallel Agent-tool dispatches of, say,
+		// "general-purpose"). The in-memory SessionTracker's own Upsert
+		// isn't a reliable enough guard either — it can evict a long-idle
+		// teammate's entry via its own sweep/timeout, making that
+		// teammate's next turn-resume falsely look brand new. So
+		// SubagentStart alone checks the PERSISTENT roster store first: if
+		// a roster entry already exists for (session, agent_name), this is
+		// a known entity resuming, not a new spawn — skip registration
+		// entirely and just refresh liveness.
+		case "PreToolUse", "UserPromptSubmit", "SubagentStart":
+			knownFromRoster := false
+			if event.HookEventName == "SubagentStart" && s.obsStore != nil {
+				if _, err := s.obsStore.ResolveRosterID(ctx, event.SessionID, agentNameFor(agentType)); err == nil {
+					knownFromRoster = true
+				}
+			}
+			if knownFromRoster {
+				s.sessions.Upsert(event.SessionID, agentType) // refresh in-memory LastSeen only
+				if s.obsStore != nil {
+					agent := agentNameFor(agentType)
+					if s.rosterLastSeen.shouldRefresh(event.SessionID, agent) {
+						go func() {
+							_ = s.obsStore.UpsertSession(ctx, store.Session{
+								SessionID: event.SessionID,
+								AgentName: agent,
+								Host:      s.cfg.Host,
+								Username:  s.cfg.User,
+								Status:    store.SessionStatusActive,
+								Model:     modelFromData(data),
+							})
+						}()
+					}
+				}
+				s.metrics.HookEventsTotal.With(prometheus.Labels{
+					"event":      event.HookEventName,
+					"host":       s.cfg.Host,
+					"agent_name": agentNameFor(agentType),
+				}).Inc()
+				s.turnStates.StartTurn(event.SessionID, agentNameFor(agentType))
+				break
+			}
 			isNew := s.sessions.Upsert(event.SessionID, agentType)
 			if isNew {
 				s.metrics.SessionsTotal.With(prometheus.Labels{
 					"host": s.cfg.Host,
 				}).Inc()
+				// Early upsert: make the session visible in MySQL immediately
+				// (not just after Stop). Paired with an agent_roster row so
+				// roster queries can see live agents. §1.1 + §2.1 of P0-roster.
+				if s.obsStore != nil {
+					agent := agentNameFor(agentType)
+					now := time.Now().UTC()
+					go func() {
+						_ = s.obsStore.UpsertSession(ctx, store.Session{
+							SessionID: event.SessionID,
+							AgentName: agent,
+							Host:      s.cfg.Host,
+							Username:  s.cfg.User,
+							Status:    store.SessionStatusActive,
+							Runtime:   "claude_code",
+							Model:     modelFromData(data),
+						})
+						// Relationship heuristic for S2: empty agentType = lead,
+						// non-empty = teammate (the predominant Agent Teams case).
+						// Gate 1 refines via meta.json taskKind.
+						rel := "lead"
+						if agentType != "" {
+							rel = "teammate"
+						}
+						rosterID := roster.GenerateRosterID()
+						boundAt := now
+						sid := event.SessionID
+						entry := store.RosterEntry{
+							RosterID:     rosterID,
+							SessionID:    &sid,
+							AgentName:    agent,
+							Host:         s.cfg.Host,
+							Runtime:      "claude_code",
+							Relationship: rel,
+							CreatedAt:    now,
+							BoundAt:      &boundAt,
+						}
+						// For teammates, attempt to resolve the lead's roster_id
+						// as parent_ref. Best-effort: if the lead hasn't registered
+						// yet (race), leave parent_ref nil. Also inherit the lead's
+						// session-level team_name (set via registerPeer's
+						// propagateSessionTeam), so a teammate auto-registered after
+						// the team was named isn't stranded on an empty team_name.
+						if agentType != "" {
+							if parentID, err := s.obsStore.ResolveRosterID(ctx, event.SessionID, ""); err == nil {
+								entry.ParentRef = &parentID
+							}
+							if leadSess, err := s.obsStore.GetSession(ctx, store.SessionKey{SessionID: event.SessionID, AgentName: ""}); err == nil {
+								entry.TeamName = leadSess.TeamName
+							}
+						}
+						_ = s.obsStore.UpsertRosterEntry(ctx, entry)
+					}()
+				}
+			} else if s.obsStore != nil {
+				// Throttled last_seen refresh: once per ~30s per (session, agent).
+				agent := agentNameFor(agentType)
+				if s.rosterLastSeen.shouldRefresh(event.SessionID, agent) {
+					go func() {
+						_ = s.obsStore.UpsertSession(ctx, store.Session{
+							SessionID: event.SessionID,
+							AgentName: agent,
+							Host:      s.cfg.Host,
+							Username:  s.cfg.User,
+							Status:    store.SessionStatusActive,
+							Model:     modelFromData(data),
+						})
+					}()
+				}
 			}
 			s.metrics.HookEventsTotal.With(prometheus.Labels{
 				"event":      event.HookEventName,
 				"host":       s.cfg.Host,
 				"agent_name": agentNameFor(agentType),
 			}).Inc()
+			// SubagentStart marks the subagent processing the same way a
+			// lead's UserPromptSubmit does — without this, a subagent that
+			// never receives its own UserPromptSubmit would stay at the
+			// turnStateTracker's zero value (never "processing") for its
+			// entire lifetime, showing incorrectly idle in the health
+			// dashboard. SubagentStop (below) is the matching EndTurnForAgent.
+			if event.HookEventName == "UserPromptSubmit" || event.HookEventName == "SubagentStart" {
+				s.turnStates.StartTurn(event.SessionID, agentNameFor(agentType))
+			}
 			if event.HookEventName == "PreToolUse" && event.ToolName != "" {
 				s.metrics.ToolCallsTotal.With(prometheus.Labels{
 					"tool":       event.ToolName,
@@ -407,9 +641,9 @@ func (s *Server) dispatchObservability(event hook.HookEvent, data map[string]int
 					"status":     "",
 				}).Inc()
 			}
-		case "Stop":
+		case "Stop", "SubagentStop":
 			s.metrics.HookEventsTotal.With(prometheus.Labels{
-				"event":      "Stop",
+				"event":      event.HookEventName,
 				"host":       s.cfg.Host,
 				"agent_name": agentNameFor(agentType),
 			}).Inc()
@@ -419,6 +653,47 @@ func (s *Server) dispatchObservability(event hook.HookEvent, data map[string]int
 				"host":       s.cfg.Host,
 				"agent_name": agentNameFor(agentType),
 			}).Inc()
+		case "TeammateIdle":
+			// The only push signal for a teammate's idle transition — without
+			// it, turnStateTracker only flips to idle on Stop (session/agent
+			// end), so a teammate between turns reads as "processing" the
+			// whole time it's alive. Identity here is teammate_name, not
+			// agent_type (this isn't a tool call).
+			agent := agentNameFor(event.TeammateName)
+			if agent != "" {
+				s.turnStates.EndTurnForAgent(event.SessionID, agent)
+			}
+			s.metrics.HookEventsTotal.With(prometheus.Labels{
+				"event":      "TeammateIdle",
+				"host":       s.cfg.Host,
+				"agent_name": agent,
+			}).Inc()
+		case "TaskCompleted":
+			// Log-only: already written to JSONL by the generic handleEvent
+			// path above; no roster/session state to update.
+			s.metrics.HookEventsTotal.With(prometheus.Labels{
+				"event":      "TaskCompleted",
+				"host":       s.cfg.Host,
+				"agent_name": agentNameFor(event.TeammateName),
+			}).Inc()
+		}
+	}
+
+	// Gauge activity: data has already passed through hook.EnrichRecord (called
+	// from buildRecord before dispatchObservability runs), so _thought/_tool_tag/
+	// _tool_display/_done are populated the same way they are for the JSONL
+	// record's tag/display fields. Mirror that same precedence here so ctop/
+	// health.html's ACTIVITY column reflects whatever the feed shows, covering
+	// both ordinary tool calls and mcp__activity__reportActivity/
+	// completeActivity (which enrich to _thought/_done, not _tool_tag).
+	if s.gaugeStore != nil && event.SessionID != "" {
+		if tag, display := activityFromData(data); display != "" {
+			key := gauge.GaugeKey{Host: s.cfg.Host, SessionID: event.SessionID, AgentName: agentNameFor(agentType)}
+			go func() {
+				if err := s.gaugeStore.UpdateActivity(ctx, key, display, tag, time.Now()); err != nil {
+					slog.Warn("gauge UpdateActivity", "session", key.SessionID, "agent", key.AgentName, "error", err)
+				}
+			}()
 		}
 	}
 
@@ -523,12 +798,18 @@ func (s *Server) dispatchObservability(event hook.HookEvent, data map[string]int
 				"host":       s.cfg.Host,
 				"agent_name": agentNameFor(agentType),
 			}).Inc()
+			if msg := hook.StrField(toolInput, "message", 256); msg != "" {
+				s.turnStates.SetActivity(event.SessionID, agentNameFor(agentType), msg)
+			}
 		case "mcp__activity__setOverallIntent":
 			s.metrics.ActivityCallsTotal.With(prometheus.Labels{
 				"method":     "setOverallIntent",
 				"host":       s.cfg.Host,
 				"agent_name": agentNameFor(agentType),
 			}).Inc()
+			if msg := hook.StrField(toolInput, "message", 256); msg != "" {
+				s.turnStates.SetActivity(event.SessionID, agentNameFor(agentType), msg)
+			}
 		case "mcp__activity__completeActivity":
 			s.metrics.ActivityCallsTotal.With(prometheus.Labels{
 				"method":     "completeActivity",
@@ -599,10 +880,34 @@ func (s *Server) dispatchObservability(event hook.HookEvent, data map[string]int
 			}
 		}
 
-	case "Stop":
-		affectedKeys := s.sessions.CloseSession(event.SessionID)
-		s.subagentNames.clearSession(event.SessionID)
-		s.focusNudge.clearSession(event.SessionID)
+	case "Stop", "SubagentStop":
+		// Phantom SubagentStop (no agent_type): Claude Code fires these for
+		// suggested next prompts and idle recaps — not real subagent
+		// completions. They must not close the session or affect turn state.
+		if event.HookEventName == "SubagentStop" && agentType == "" {
+			break
+		}
+		var affectedKeys []observability.SessionKey
+		agent := agentNameFor(agentType)
+		if agentType != "" {
+			// Teammate/subagent stop: close only this agent. Both share the
+			// lead's session_id, so a session-wide close here would
+			// incorrectly mark still-active peers as stopped.
+			affectedKeys = s.sessions.CloseAgent(event.SessionID, agent)
+			s.subagentNames.clearAgent(event.SessionID, agentType)
+			s.focusNudge.clearAgentTurn(event.SessionID, agent)
+			s.pressureNudge.clearAgent(event.SessionID, agent)
+			s.rosterLastSeen.clearAgent(event.SessionID, agent)
+			s.turnStates.EndTurnForAgent(event.SessionID, agent)
+		} else {
+			// Lead stop: the session is ending, close every agent in it.
+			affectedKeys = s.sessions.CloseSession(event.SessionID)
+			s.subagentNames.clearSession(event.SessionID)
+			s.focusNudge.clearSession(event.SessionID)
+			s.pressureNudge.clearSession(event.SessionID)
+			s.rosterLastSeen.clearSession(event.SessionID)
+			s.turnStates.EndTurn(event.SessionID)
+		}
 		if s.obsStore != nil && len(affectedKeys) > 0 {
 			// Parse the event timestamp as the fallback for ResolveSessionEnd.
 			var stopFallback time.Time
@@ -628,6 +933,7 @@ func (s *Server) dispatchObservability(event hook.HookEvent, data map[string]int
 						Username:  s.cfg.User,
 						Status:    store.SessionStatusClosed,
 						LastSeen:  closeTime,
+						Model:     modelFromData(data),
 					})
 					n, drainErr := s.obsStore.CloseSessionIntervals(ctx, k.SessionID, k.AgentName, closeTime)
 					if drainErr != nil {
@@ -643,6 +949,30 @@ func (s *Server) dispatchObservability(event hook.HookEvent, data map[string]int
 		// Per-entity cost is written by the allocator (rollup → cost_rollup) from
 		// token_ledger ⋈ wms_intervals (kind='focus') — no Stop-time per-entity write here.
 	}
+}
+
+// activityFromData extracts the (tag, display) pair hook.EnrichRecord wrote
+// into data, in the same precedence buildRecord uses to fill the JSONL
+// record's tag/display fields. Only one of _thought/_tool_tag/_done is ever
+// set per event (EnrichRecord's switch is keyed on hook_event_name), so the
+// order here doesn't pick between competing signals — it just covers every
+// enrichment shape once, so this exact code doesn't need to be duplicated in
+// every case that produces one of them.
+func activityFromData(data map[string]interface{}) (tag, display string) {
+	str := func(key string) string {
+		v, _ := data[key].(string)
+		return v
+	}
+	if thought := str("_thought"); thought != "" {
+		return "THNK", thought
+	}
+	if toolTag := str("_tool_tag"); toolTag != "" {
+		return toolTag, str("_tool_display")
+	}
+	if done := str("_done"); done != "" {
+		return "DONE", done
+	}
+	return "", ""
 }
 
 // warnMissingRequiredTags implements W2 soft close-out enforcement: it loads the
@@ -710,12 +1040,12 @@ func (s *Server) emitCloseOutWarning(id, agentName string, missing []string, ses
 	record["entity_id"] = id
 	record["missing"] = missing
 
-	line, err := json.Marshal(record)
+	raw, err := json.Marshal(record)
 	if err != nil {
 		slog.Warn("closeout warning: marshal record", "entity_id", id, "error", err)
 		return
 	}
-	line = append(line, '\n')
+	line := append(raw, '\n')
 
 	s.mu.Lock()
 	_, werr := s.logFile.Write(line)
@@ -725,7 +1055,7 @@ func (s *Server) emitCloseOutWarning(id, agentName string, missing []string, ses
 		return
 	}
 
-	s.bus.publish([]byte(web.FormatEventHTML(record)))
+	s.bus.publish(ssePayload{html: []byte(web.FormatEventHTML(record)), raw: raw})
 }
 
 // hasAnyFocusInterval queries the DB to answer "has this session/agent ever
@@ -890,6 +1220,20 @@ func (m *subagentNameMap) clearSession(sessionID string) {
 	delete(m.names, sessionID)
 }
 
+// clearAgent removes a single agentType entry for sessionID, leaving other
+// agent types tracked for the same session untouched. Use this for a
+// teammate's Stop event, where the rest of the team is still mid-turn.
+func (m *subagentNameMap) clearAgent(sessionID, agentType string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if byType, ok := m.names[sessionID]; ok {
+		delete(byType, agentType)
+		if len(byType) == 0 {
+			delete(m.names, sessionID)
+		}
+	}
+}
+
 // normaliseToolInput coerces event.ToolInput (interface{}) to a
 // map[string]interface{} for StrField reads. Handles both direct map and
 // JSON-string-encoded forms.
@@ -940,6 +1284,11 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 
+	// format selects the wire representation: "" or "html" (default, existing
+	// htmx dashboard behavior, byte-identical to before) or "json" (raw JSONL,
+	// for non-HTML consumers like ctop).
+	jsonFormat := r.URL.Query().Get("format") == "json"
+
 	// Send history burst from JSONL before subscribing so no events are missed.
 	historyN := 0
 	if v := r.URL.Query().Get("history"); v != "" {
@@ -954,6 +1303,12 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 	if historyN > 0 {
 		lines := s.readLastLines(historyN)
 		for _, raw := range lines {
+			if jsonFormat {
+				// readLastLines strips newlines already; JSONL lines never
+				// contain raw newlines, so one `data:` field per event is safe.
+				fmt.Fprintf(w, "data: %s\n\n", raw)
+				continue
+			}
 			var rec map[string]interface{}
 			if err := json.Unmarshal([]byte(raw), &rec); err != nil {
 				continue
@@ -984,7 +1339,11 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			fmt.Fprintf(w, "data: %s\n\n", payload)
+			if jsonFormat {
+				fmt.Fprintf(w, "data: %s\n\n", payload.raw)
+			} else {
+				fmt.Fprintf(w, "data: %s\n\n", payload.html)
+			}
 			flusher.Flush()
 		}
 	}
@@ -1262,6 +1621,139 @@ func (s *Server) handleMCPWMS(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeRPCError(w, req.ID, -32601, "method not found: "+req.Method)
 	}
+}
+
+// handleMCPRoster accepts POST /mcp/roster with a JSON-RPC 2.0 body and
+// dispatches to the roster MCP package.
+func (s *Server) handleMCPRoster(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if s.obsStore == nil {
+		writeRPCError(w, nil, -32000, "roster store not available")
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodySize))
+	if err != nil {
+		http.Error(w, "read error", http.StatusBadRequest)
+		return
+	}
+
+	var req rpcRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeRPCError(w, nil, -32700, "parse error")
+		return
+	}
+
+	if req.ID == nil {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	switch req.Method {
+	case "initialize":
+		writeRPCResponse(w, req.ID, map[string]interface{}{
+			"protocolVersion": "2024-11-05",
+			"serverInfo":      map[string]interface{}{"name": "roster-mcp", "version": version.Version},
+			"capabilities":    map[string]interface{}{"tools": map[string]interface{}{}},
+		})
+	case "tools/list":
+		writeRPCResponse(w, req.ID, map[string]interface{}{"tools": mcproster.ToolDefs})
+	case "tools/call":
+		result, callErr := mcproster.HandleToolCall(s.obsStore, req.Params)
+		if callErr != nil {
+			writeRPCErrorWithReason(w, req.ID, mcproster.FormatError(callErr))
+		} else {
+			writeRPCResponse(w, req.ID, result)
+		}
+	default:
+		writeRPCError(w, req.ID, -32601, "method not found: "+req.Method)
+	}
+}
+
+// writeRPCErrorWithReason writes a JSON-RPC error response with a structured
+// error object that may include a reason field.
+func writeRPCErrorWithReason(w http.ResponseWriter, id interface{}, errObj map[string]interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck
+		"jsonrpc": "2.0",
+		"id":      id,
+		"error":   errObj,
+	})
+}
+
+// handleMCPHealth accepts POST /mcp/health with a JSON-RPC 2.0 body and
+// dispatches to the health MCP package.
+func (s *Server) handleMCPHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if s.obsStore == nil || s.gaugeStore == nil {
+		writeRPCError(w, nil, -32000, "health store not available")
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodySize))
+	if err != nil {
+		http.Error(w, "read error", http.StatusBadRequest)
+		return
+	}
+
+	var req rpcRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeRPCError(w, nil, -32700, "parse error")
+		return
+	}
+
+	if req.ID == nil {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	switch req.Method {
+	case "initialize":
+		writeRPCResponse(w, req.ID, map[string]interface{}{
+			"protocolVersion": "2024-11-05",
+			"serverInfo":      map[string]interface{}{"name": "health-mcp", "version": version.Version},
+			"capabilities":    map[string]interface{}{"tools": map[string]interface{}{}},
+		})
+	case "tools/list":
+		writeRPCResponse(w, req.ID, map[string]interface{}{"tools": mcphealth.ToolDefs})
+	case "tools/call":
+		result, callErr := mcphealth.HandleToolCall(s.obsStore, s.gaugeStore, s.turnStates.IsProcessing, req.Params)
+		if callErr != nil {
+			writeRPCErrorWithReason(w, req.ID, mcphealth.FormatError(callErr))
+		} else {
+			writeRPCResponse(w, req.ID, result)
+		}
+	default:
+		writeRPCError(w, req.ID, -32601, "method not found: "+req.Method)
+	}
+}
+
+// openGaugeDB opens a raw *sql.DB for the gauge store from the same StoreDSN
+// the main store uses. The gauge store owns its own connection pool.
+func openGaugeDB(dsn config.StoreDSN) (*sql.DB, error) {
+	if dsn.Scheme != "mysql" && dsn.Scheme != "mariadb" {
+		return nil, fmt.Errorf("gauge store requires mysql/mariadb, got %q", dsn.Scheme)
+	}
+	addr := dsn.Host
+	if dsn.Port > 0 {
+		addr = fmt.Sprintf("%s:%d", dsn.Host, dsn.Port)
+	}
+	driverDSN := fmt.Sprintf("%s:%s@tcp(%s)/%s?parseTime=true&loc=UTC&time_zone=%%27%%2B00%%3A00%%27",
+		dsn.User, dsn.Password, addr, dsn.Database)
+	db, err := sql.Open("mysql", driverDSN)
+	if err != nil {
+		return nil, fmt.Errorf("open gauge db: %w", err)
+	}
+	db.SetMaxOpenConns(5)
+	return db, nil
 }
 
 // handleEventsAPI serves GET /api/events?limit=N&since=TIMESTAMP.

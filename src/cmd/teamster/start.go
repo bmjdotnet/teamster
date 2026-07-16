@@ -289,25 +289,40 @@ func supervisorStart(cfg config.Config) error {
 		}
 	}
 
-	// Start token-scraper when mode=install (managed = BYO, skip).
-	if cfg.CcusageMode == "install" {
-		if processAlive("token-scraper", cfg) {
-			fmt.Println("token-scraper: already running")
-		} else if err := startComponent(ctx, cfg, "token-scraper"); err != nil {
-			return fmt.Errorf("token-scraper: %w", err)
+	// token-scraper and health-collector: systemd-managed under "systemd"
+	// hookd mode, supervisor-managed under "supervisor".
+	for _, name := range []string{"token-scraper", "health-collector"} {
+		svc := "teamster-" + name
+		if cfg.HookdMode == "systemd" {
+			if err := exec.Command("systemctl", "is-active", "--quiet", svc).Run(); err == nil {
+				fmt.Printf("%s: already running (systemd)\n", name)
+			} else {
+				cmd := exec.Command("sudo", "systemctl", "start", svc)
+				if err := cmd.Run(); err != nil {
+					slog.Warn("systemctl start failed", "service", svc, "error", err)
+				} else {
+					fmt.Printf("%s: started (systemd)\n", name)
+				}
+			}
+		} else if cfg.HookdMode == "supervisor" {
+			if processAlive(name, cfg) {
+				fmt.Printf("%s: already running\n", name)
+			} else if err := startComponent(ctx, cfg, name); err != nil {
+				return fmt.Errorf("%s: %w", name, err)
+			}
 		}
 	}
 
 	// Final verification — confirm all expected services are actually alive.
-	for _, name := range []string{"hookd", "otelcol", "prometheus", "grafana", "token-scraper"} {
+	for _, name := range []string{"hookd", "otelcol", "prometheus", "grafana", "health-collector"} {
 		if name == "hookd" && cfg.HookdMode == "systemd" {
 			continue
 		}
 		if name == "hookd" && cfg.HookdMode == "external" {
 			continue
 		}
-		if name == "token-scraper" {
-			if cfg.CcusageMode != "install" {
+		if name == "health-collector" {
+			if cfg.HookdMode != "supervisor" {
 				continue
 			}
 		} else if name != "hookd" {
@@ -347,7 +362,8 @@ func supervisorStop(cfg config.Config) error {
 	}
 
 	// 2. Directly stop ALL components — handles orphans from dead supervisors.
-	allComponents := []string{"token-scraper", "grafana", "prometheus", "otelcol", "hookd"}
+	// token-scraper is systemd-managed now, not part of this list.
+	allComponents := []string{"health-collector", "grafana", "prometheus", "otelcol", "hookd"}
 	var errs []string
 	for _, name := range allComponents {
 		shutdownRequested.Store(name, true)
@@ -355,8 +371,11 @@ func supervisorStop(cfg config.Config) error {
 			errs = append(errs, fmt.Sprintf("%s: %v", name, err))
 		}
 	}
-	// Also try systemd for hookd — may have been started under a different mode.
-	_ = exec.Command("sudo", "systemctl", "stop", "teamster-hookd").Run()
+	// Also stop systemd-managed services — may have been started under a
+	// different mode, or migrated from supervisor to systemd between versions.
+	for _, svc := range []string{"teamster-hookd", "teamster-token-scraper", "teamster-health-collector"} {
+		_ = exec.Command("sudo", "systemctl", "stop", svc).Run()
+	}
 
 	_ = os.Remove(supervisorPidPath)
 
@@ -400,6 +419,8 @@ func starterFor(name string) func(context.Context, config.Config) (*exec.Cmd, er
 		return StartGrafana
 	case "token-scraper":
 		return startTokenScraper
+	case "health-collector":
+		return startHealthCollector
 	default:
 		return nil
 	}
@@ -547,6 +568,42 @@ func startTokenScraper(ctx context.Context, cfg config.Config) (*exec.Cmd, error
 	return cmd, nil
 }
 
+// startHealthCollector launches the health-collector binary (supervisor mode).
+func startHealthCollector(ctx context.Context, cfg config.Config) (*exec.Cmd, error) {
+	basedir := prometheusBasedir(cfg)
+	binPath := filepath.Join(basedir, "bin", "health-collector")
+	logPath := filepath.Join(basedir, "var", "logs", "health-collector.log")
+
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		return nil, fmt.Errorf("mkdir logs: %w", err)
+	}
+	logFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("open log: %w", err)
+	}
+
+	cmd := exec.CommandContext(ctx, binPath)
+	cmd.Dir = basedir
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	setSetsid(cmd)
+
+	if err := cmd.Start(); err != nil {
+		logFile.Close()
+		return nil, err
+	}
+
+	pidPath := filepath.Join(basedir, "var", "pids", "health-collector.pid")
+	_ = os.WriteFile(pidPath, []byte(strconv.Itoa(cmd.Process.Pid)+"\n"), 0o644)
+
+	go func() {
+		_ = cmd.Wait()
+		logFile.Close()
+	}()
+
+	return cmd, nil
+}
+
 // processAlive checks both PID existence (via kill -0) and primary port bind.
 // Both must pass to declare the process alive. Stale PID files (process gone
 // but port unbound) return false.
@@ -585,6 +642,8 @@ func portFor(name string, cfg config.Config) int {
 		return cfg.GrafanaPort
 	case "token-scraper":
 		return 0 // token-scraper is a poller; no listen port
+	case "health-collector":
+		return 0 // health-collector is a poller; no listen port
 	default:
 		return 0
 	}

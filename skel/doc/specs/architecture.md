@@ -34,7 +34,11 @@ a local hookd. This is the default out of `./install.sh` with no flags.
 │  hookd  →  events.jsonl  →  feed (terminal viewer)                    │
 │         →  SSE dashboard (browser)                                     │
 │         →  /wms page (WMS hierarchy)                                   │
+│         →  /mcp/roster (agent roster MCP, 7 tools)                     │
+│         →  /mcp/health (agent health MCP, 4 tools)                     │
 │         →  /metrics (Prometheus)                                       │
+│                                                                        │
+│  health-collector (daemon, 15s poll) → agent_health_gauge (MySQL)      │
 │                                                                        │
 │  systemd timers:                                                       │
 │    teamster-rollup.timer   → rollup --sweep (full deterministic sweep)│
@@ -56,6 +60,8 @@ only the Python hook client. No daemons, databases, or Go binaries on remotes.
 │    POST /event          ← hook events from hub AND remote clients   │
 │    POST /mcp/activity   ← JSON-RPC 2.0 from remote Claude sessions  │
 │    POST /mcp/wms        ← JSON-RPC 2.0 from remote Claude sessions  │
+│    POST /mcp/roster     ← agent roster queries (7 tools)             │
+│    POST /mcp/health     ← agent health queries (4 tools)             │
 │    GET  /               ← SSE dashboard (htmx)                     │
 │    GET  /events/stream  ← SSE feed of events.jsonl                 │
 │    GET  /wms            ← WMS hierarchy page                       │
@@ -69,6 +75,7 @@ only the Python hook client. No daemons, databases, or Go binaries on remotes.
 │  MySQL (WMS store) activity-mcp (stdio, hub sessions only)          │
 │  wms-mcp (stdio, hub sessions only)                                 │
 │  events.jsonl      feed (terminal viewer)                           │
+│  health-collector (daemon, polls token_ledger → health gauges)      │
 │  supervisor (manages hookd + optional monitoring bundle)            │
 │                                                                     │
 │  systemd timers: rollup, classify, sweep, backup                    │
@@ -162,7 +169,8 @@ variables, and service templates.
 ```
 Claude Code session (hub-local)
   │
-  ├─[PreToolUse/PostToolUse/Stop/UserPromptSubmit hooks]
+  ├─[PreToolUse/PostToolUse/Stop/UserPromptSubmit/SubagentStart/
+  │  SubagentStop/TeammateIdle/TaskCompleted hooks]
   │   └─→ ~/teamster/bin/teamster   (Go, forked per hook event)
   │           ├─ reads hook JSON from stdin
   │           ├─ extracts agent identity (agent_type → @name)
@@ -217,7 +225,14 @@ Claude Code session (remote)
   ├─ GET  /wms/api/tags    → JSON tag data
   ├─ GET  /metrics         → Prometheus metrics (default registry)
   ├─ POST /mcp/activity    → JSON-RPC 2.0 activity MCP (for remote sessions)
-  └─ POST /mcp/wms         → JSON-RPC 2.0 WMS MCP (for remote sessions)
+  ├─ POST /mcp/wms         → JSON-RPC 2.0 WMS MCP (for remote sessions)
+  ├─ POST /mcp/roster      → JSON-RPC 2.0 roster MCP (7 tools: agent roster,
+  │                           liveness, registration, token verification;
+  │                           registerPeer propagates a set team_name onto
+  │                           the session row and sibling roster entries
+  │                           already bound to that session_id)
+  └─ POST /mcp/health      → JSON-RPC 2.0 health MCP (4 tools: agent health
+                              snapshots, team summaries, pressure alerts)
 
 ~/teamster/bin/feed         → tail ~/teamster/var/events.jsonl, ANSI render
 
@@ -236,6 +251,16 @@ Claude Code session (remote)
   ├─ POST hookd /telemetry → token_ledger rows (runtime='codex')
   ├─ upserts the Codex sessions row via a direct store connection
   └─ books thread_spawn subagent spend under the parent session (@<role>)
+
+~/teamster/bin/health-collector → agent health gauge collector (hub daemon, 15s poll)
+  ├─ polls token_ledger for per-agent token usage (E2 exception: direct SQL read)
+  │   and per-agent cost (session total shown on the lead/team header)
+  ├─ context window: Claude Code's own StatusLine report when available;
+  │   for Agent-Teams teammates (no StatusLine channel), derived from the
+  │   teammate's own subagents/ transcript + .meta.json sidecar; falls back
+  │   to a model-class table, then the lead's window (same model only)
+  ├─ resolves roster_id per agent via store.ResolveRosterID
+  └─ writes agent_health_gauge rows via GaugeStore.Upsert (overwrite semantics)
 
 ~/teamster/bin/backup       → timestamped snapshots of MySQL, OTel, and teamster config/state
   ├─ no sudo required (uses --defaults-extra-file for MySQL, DSN from teamster.yaml)
@@ -508,7 +533,8 @@ Two backends exist:
 
 - **`internal/store/mysql`** — the production backend (MySQL/MariaDB via
   `go-sql-driver/mysql`). Schemes `mysql` and `mariadb` (same backend, dual
-  driver-string target). Migrations v1–v50.
+  driver-string target). Migrations v1–v55 (v52–v54: muster roster/tokens,
+  v55: agent health gauge).
 - **`internal/store/sqlite`** — a pure-Go backend (`modernc.org/sqlite`, no
   cgo) that exists solely to validate the `Store` contract is truly
   backend-agnostic. It is not exposed as an install-time option (see
@@ -523,10 +549,17 @@ by a caller that needs only that slice:
 `SessionStore`, `IntervalStore`, `MaintenanceStore`, `ActivityStore`,
 `StatusStore`, `RelatedStore`, `ClassifierStore`, `TagAdminStore`,
 `TelemetryStore`, `AllocationStore`, `RecoveryStore`, `SweepStore`,
-`ReportingStore`, and the always-present `Prober` (`Ping`). See
-`src/internal/store/store.go` for the full method sets — e.g. `rollup`
+`ReportingStore`, `RosterStore`, and the always-present `Prober` (`Ping`).
+See `src/internal/store/store.go` for the full method sets — e.g. `rollup`
 depends only on `AllocationStore`/`RecoveryStore`, `classify` only on
 `ClassifierStore`, without either importing the others.
+
+`RosterStore` manages the `agent_roster` and `agent_tokens` tables — agent
+identity, session binding, and bearer-token lifecycle. A separate
+`GaugeStore` interface (`internal/agenthealth/gauge/`) owns the
+`agent_health_gauge` table — per-agent health snapshots with overwrite
+semantics. GaugeStore is deliberately outside `internal/store` (BOUNDARIES
+R2: different concern, different package).
 
 ### Typed error model
 
@@ -622,13 +655,14 @@ Enriched fields added by the hook client (Go or Python) and by hookd:
 | `_host` | hook client | Short hostname (hub or remote) |
 | `_model` | hook client | Model identifier from the payload |
 
-### Tag taxonomy (16 tags)
+### Tag taxonomy (17 tags)
 
 | Tag | Source | Meaning |
 |-----|--------|---------|
 | `[GOAL]` | `setOverallIntent` MCP tool (PreToolUse) | Agent declares session mission |
 | `[THNK]` | `reportActivity` MCP tool (PreToolUse) | Agent declares current turn intent |
 | `[DONE]` | `completeActivity` MCP tool, `TaskUpdate(completed)`, or Stop hook | Completion / turn end |
+| `[RCAP]` | Phantom `SubagentStop` event (no `agent_type`, recap heuristic) | Idle recap — context summary after inactivity |
 | `[READ]` | Read/Glob tool | File read |
 | `[EDIT]` | Edit/Write tool | File modification |
 | `[GREP]` | Grep tool | File search |
@@ -776,6 +810,7 @@ Backup configuration lives in the `backup:` section of `teamster.yaml` (merged i
 │   ├── teamster          (Go hook client + CLI, fired per Claude Code hook event)
 │   ├── hookd             (HTTP event server + dashboard)
 │   ├── feed              (terminal activity viewer)
+│   ├── ctop              (terminal fleet/health/focus/cost dashboard)
 │   ├── activity-mcp      (MCP stdio, hub-local sessions)
 │   ├── wms-mcp           (MCP stdio, hub-local sessions)
 │   ├── rollup            (cost-attribution pipeline)
@@ -831,14 +866,16 @@ the token scraper, and the plugin. MCP endpoints point at the hub over HTTP.
 |--------|----------|-------|---------|
 | `teamster` | Go | hub | Hook client. Forked per hook event. Reads stdin JSON, enriches, POSTs to hookd. Must exit 0 always. Also the CLI (`start`/`stop`/`status`/`wms-reset`/`tags`/`setup tags`/`wms drain`/`wms list`/`wms close`). |
 | `teamster.py` | Python | remote | Hook client on remotes. Pure stdlib. Same wire contract as Go version. |
-| `hookd` | Go | hub | HTTP event server. POST `/event` → JSONL. Dashboard, SSE, WMS page, metrics, MCP routes. Focus-absent nudge on PreToolUse. |
+| `hookd` | Go | hub | HTTP event server. POST `/event` → JSONL. Dashboard, SSE, WMS page, metrics, MCP routes (`/mcp/activity`, `/mcp/wms`, `/mcp/roster`, `/mcp/health`). Focus-absent nudge on PreToolUse. Auto-registers agents on roster from first hook event. Tracks per-agent turn state (processing/idle). |
 | `feed` | Go | hub | Long-running terminal viewer. Tails events.jsonl, ANSI colorizes. |
 | `activity-mcp` | Go | hub | MCP stdio for activity tools (hub-local sessions). No-op: tools return confirmation strings; real data extracted from PreToolUse by hook client. Includes `setMode`. |
-| `wms-mcp` | Go | hub | MCP stdio for WMS CRUD (hub-local sessions). Outcome/WorkUnit lifecycle, tags, focus, dependencies. Writes MySQL, emits status events via HookObserver. |
+| `wms-mcp` | Go | hub | MCP stdio for WMS CRUD (hub-local sessions). Outcome/WorkUnit lifecycle, rename, tags, focus, dependencies. Writes MySQL, emits status events via HookObserver. |
 | `rollup` | Go | hub | Cost-attribution pipeline. Allocates token spend to WMS entities. Recovery passes for unallocated messages. Run by systemd timer. |
 | `classify` | Go | hub | Derives phase and work-type tags on intervals/workunits from rule-based signals. Run by systemd timer every 5 min. |
 | `token-scraper` | Go | hub | Reads **Claude Code** session transcripts, extracts per-message token usage, writes to token_ledger. Never reads Codex data. |
 | `codex-scraper` | Go | hub | Codex rollout-JSONL cost/ledger tailer (systemd timer, oneshot). Sole writer of Codex `token_ledger` rows (via hookd `/telemetry`) and Codex `sessions` rows (direct store). Books `thread_spawn` subagent spend under the parent session as `@<role>`. No-op on hosts with no `codex` CLI. |
+| `health-collector` | Go | hub | Agent health gauge collector. Hub daemon, 15s poll interval. Reads `token_ledger` for per-agent token usage and cost, writes `agent_health_gauge` rows. Context window comes from Claude Code's StatusLine when available; an Agent-Teams teammate (no StatusLine channel) gets its window from its own transcript instead, falling back to a model-class table then the lead's window. Resolves `roster_id` per agent. |
+| `ctop` | Go | hub | Terminal Bubbletea dashboard over hookd's `/health/api/*` + `/health/stream` (HTTP client only — no DB/store imports), so `--server` can point it at any hub, hub-local or remote. Four views (keys 1–4): health, focus, cost, and fleet — a multi-team tree (team headers, lead + teammates + sub-spawns with tree connectors, collapse/expand) with a live activity log below the grid. Fleet is the default view on launch. |
 | `teamster-install` | Go | hub | Called by `lib/installrunner.sh`. Copies binaries, materializes systemd units, merges settings.json. |
 | `demogen` | Go | hub | Synthetic data generator for dashboards. Creates correlated demo data. `--clean` for teardown. |
 | `backup` | Go | hub | Backup engine. Takes timestamped snapshots of MySQL, OTel, and teamster config/state. No sudo. Also reachable via `teamster backup` and `teamster restore`. Run by systemd timer. |

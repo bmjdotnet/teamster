@@ -13,6 +13,7 @@ import (
 
 	"github.com/bmjdotnet/teamster/internal/backup"
 	"github.com/bmjdotnet/teamster/internal/logging"
+	_ "github.com/bmjdotnet/teamster/internal/store/mysql" // registers mysql, mariadb
 )
 
 func main() {

@@ -43,6 +43,127 @@ func closedRec(state, session, agent string) wms.EventRecord {
 	}
 }
 
+// fakeBatchSignalReader is a wms.BatchSignalReader whose ReadSignals arm
+// returns an obviously-wrong sentinel (a huge unmatched-tag count) so any test
+// relying on it accidentally being called instead of the batched path fails
+// loudly rather than silently passing.
+type fakeBatchSignalReader struct {
+	calls                     int
+	lastWindows               []wms.SessionWindow
+	lastLowerBound            time.Time
+	lastUpperBound            time.Time
+	perWindow                 []*wms.ActivitySignals
+	readSignalsCalledMistaken bool
+}
+
+func (f *fakeBatchSignalReader) ReadSignals(_ context.Context, _ []wms.SessionWindow, _ string) (*wms.ActivitySignals, error) {
+	f.readSignalsCalledMistaken = true
+	return &wms.ActivitySignals{ToolTagCounts: map[string]int{"SENTINEL_WRONG_PATH": 9999}, FilesTouched: map[string]int{}, TotalEvents: 9999}, nil
+}
+
+func (f *fakeBatchSignalReader) ReadSignalsBatch(_ context.Context, windows []wms.SessionWindow, _ string, lowerBound, upperBound time.Time) ([]*wms.ActivitySignals, error) {
+	f.calls++
+	f.lastWindows = windows
+	f.lastLowerBound = lowerBound
+	f.lastUpperBound = upperBound
+	out := make([]*wms.ActivitySignals, len(windows))
+	for i := range windows {
+		if i < len(f.perWindow) {
+			out[i] = f.perWindow[i]
+		} else {
+			out[i] = &wms.ActivitySignals{ToolTagCounts: map[string]int{}, FilesTouched: map[string]int{}}
+		}
+	}
+	return out, nil
+}
+
+// TestBatchReadSignals_ScansOnceAndScopesToSignalNeedingIntervals is the GH
+// #13 perf-fix regression: a batch of intervals must produce exactly ONE
+// ReadSignalsBatch call (not one per interval — the bug), the request must
+// exclude intervals whose phase is already determined without signals
+// (rework via reEntry, review via state) and sessionless intervals (which
+// never queried the log even pre-fix), and the lower/upper bound must be the
+// min/max Start/End of exactly the windows actually sent.
+func TestBatchReadSignals_ScansOnceAndScopesToSignalNeedingIntervals(t *testing.T) {
+	base := time.Date(2026, 6, 2, 10, 0, 0, 0, time.UTC)
+	mk := func(id int64, state, session, agent string, startMin, endMin int) wms.EventRecord {
+		s := base.Add(time.Duration(startMin) * time.Minute)
+		e := base.Add(time.Duration(endMin) * time.Minute)
+		return wms.EventRecord{
+			ID: id, EntityType: wms.EntityWorkUnit, EntityID: "wu", State: state,
+			StartedAt: s, EndedAt: &e, SessionID: session, AgentName: agent,
+		}
+	}
+
+	reworkRec := mk(1, "active", "sessrework0001", "ag", 0, 5)     // excluded: reEntry
+	reviewRec := mk(2, "review", "sessreview0001", "ag", 10, 15)   // excluded: review state
+	sessionless := mk(3, "active", "", "", 20, 25)                 // excluded: no session
+	active1 := mk(4, "active", "sessactive00001", "ag", 30, 35)     // included
+	active2 := mk(5, "active", "sessactive00002", "ag", 100, 105)   // included, widest window
+
+	intervals := []wms.EventRecord{reworkRec, reviewRec, sessionless, active1, active2}
+	reEntry := map[int64]bool{reworkRec.ID: true}
+
+	fake := &fakeBatchSignalReader{}
+	r := New(nil, fake, "unused.jsonl", nil)
+
+	sigs, err := r.batchReadSignals(context.Background(), intervals, reEntry)
+	if err != nil {
+		t.Fatalf("batchReadSignals: %v", err)
+	}
+	if fake.calls != 1 {
+		t.Fatalf("ReadSignalsBatch called %d times, want exactly 1 (one scan per pass, not per interval)", fake.calls)
+	}
+	if fake.readSignalsCalledMistaken {
+		t.Fatalf("ReadSignals (per-window) was called — batched path should never fall back to it when available")
+	}
+	if len(fake.lastWindows) != 2 {
+		t.Fatalf("windows sent = %d, want 2 (only active1, active2 — rework/review/sessionless excluded)", len(fake.lastWindows))
+	}
+	if len(sigs) != 2 {
+		t.Fatalf("result map has %d entries, want 2", len(sigs))
+	}
+	if _, ok := sigs[reworkRec.ID]; ok {
+		t.Error("rework interval should not be in the signals map (never queried)")
+	}
+	if _, ok := sigs[reviewRec.ID]; ok {
+		t.Error("review interval should not be in the signals map (never queried)")
+	}
+	if _, ok := sigs[sessionless.ID]; ok {
+		t.Error("sessionless interval should not be in the signals map (never queried)")
+	}
+	if _, ok := sigs[active1.ID]; !ok {
+		t.Error("active1 missing from signals map")
+	}
+	if _, ok := sigs[active2.ID]; !ok {
+		t.Error("active2 missing from signals map")
+	}
+
+	wantLower := active1.StartedAt // earliest Start among included windows
+	wantUpper := *active2.EndedAt  // latest End among included windows
+	if !fake.lastLowerBound.Equal(wantLower) {
+		t.Errorf("lowerBound = %v, want %v (active1's Start — the earliest included window)", fake.lastLowerBound, wantLower)
+	}
+	if !fake.lastUpperBound.Equal(wantUpper) {
+		t.Errorf("upperBound = %v, want %v (active2's End — the latest included window)", fake.lastUpperBound, wantUpper)
+	}
+}
+
+// TestBatchReadSignals_FallsBackWhenReaderLacksBatchSupport confirms
+// batchReadSignals reports "no batch support" (nil, nil) — not an error — for
+// a plain wms.SignalReader, so classifyPhases's fallback to the per-interval
+// derivePhase path is a graceful degrade, not a failure.
+func TestBatchReadSignals_FallsBackWhenReaderLacksBatchSupport(t *testing.T) {
+	r := New(nil, &fakeSignalReader{}, "unused.jsonl", nil)
+	sigs, err := r.batchReadSignals(context.Background(), []wms.EventRecord{closedRec("active", "sess", "ag")}, map[int64]bool{})
+	if err != nil {
+		t.Fatalf("batchReadSignals: %v", err)
+	}
+	if sigs != nil {
+		t.Fatalf("sigs = %v, want nil (signal that the caller must fall back)", sigs)
+	}
+}
+
 func TestDerivePhase_Rules(t *testing.T) {
 	ctx := context.Background()
 

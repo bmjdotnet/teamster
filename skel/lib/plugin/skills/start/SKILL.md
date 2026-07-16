@@ -254,15 +254,19 @@ dispatch, **Read the chosen skill's file and follow its steps yourself, inline,
 in this same session**, reusing the focus slug + Step-1 context AND the
 confirmed tag set.
 
-- **Subagent** → Read `../solo/SKILL.md` and follow its steps inline: create the
-  strategic Outcome, **skip Step 4 (the context-tag interview)** — tags were
-  already confirmed here, apply them after the Outcome is created — then set
-  focus and work. (You already called `setMode("solo")`.)
+- **Subagent** → Read `../solo/SKILL.md` and follow its steps inline: generate a
+  team name from the slug (solo Step 1.1), **register it via `registerPeer`
+  (solo Step 1.2 — do not skip this)**, create the strategic Outcome, **skip
+  Step 4 (the context-tag interview)** — tags were already confirmed here,
+  apply them (including `team:<name>`) after the Outcome is created — then
+  set focus and work. (You already called `setMode("solo")`.)
 - **Team** → Read `../bootstrap/SKILL.md` and follow its steps inline: generate a
-  team name from the slug, load WMS tools, create the strategic Outcome,
+  team name from the slug, **register it via `registerPeer` (bootstrap Step
+  2.1 — do not skip this)**, load WMS tools, create the strategic Outcome,
   **skip Step 6 (the context-tag interview)** — tags were already confirmed
   here, apply them after the Outcome is created — then dispatch. (You already
-  called `setMode("team")`.)
+  called `setMode("team")`.) Do not call `registerPeer` a second time here —
+  it is called exactly once, in bootstrap's Step 2.1.
 
 Carry the context forward — do **not** re-ask the focus slug, do **not** re-run
 the tag interview, and do **not** call the Skill tool to enter the sibling skill.

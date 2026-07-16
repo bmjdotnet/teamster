@@ -1,0 +1,13 @@
+[Unit]
+Description=Teamster token-scraper (Claude Code session JSONL tailer)
+After=network.target teamster-hookd.service
+
+[Service]
+Type=simple
+User=__USER__
+ExecStart=__BASEDIR__/bin/token-scraper
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

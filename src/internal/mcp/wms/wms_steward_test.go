@@ -741,3 +741,58 @@ func assertUntagSnapshot(t *testing.T, path, key string, want map[string]string)
 		t.Errorf("untag snapshot bindings = %v, want %v", got, want)
 	}
 }
+
+// TestRenameOutcomeAndWorkUnit covers wms_renameOutcome/wms_renameWorkUnit:
+// title updates persist and the response echoes old → new title. Also
+// asserts the empty-title guard mirrors wms_setPhase's arg-error shape.
+func TestRenameOutcomeAndWorkUnit(t *testing.T) {
+	store, oid := newStewardStore(t)
+	ctx := context.Background()
+
+	r, ce := call(t, store, ToolRenameOutcome, map[string]interface{}{
+		"id": oid, "title": "Renamed outcome title",
+	})
+	if ce != nil {
+		t.Fatalf("renameOutcome: %v", ce)
+	}
+	if text := resultText(t, r); !strings.Contains(text, "Test outcome") || !strings.Contains(text, "Renamed outcome title") {
+		t.Errorf("renameOutcome response = %q, want old and new titles", text)
+	}
+	o, err := store.GetOutcome(ctx, oid)
+	if err != nil {
+		t.Fatalf("GetOutcome after rename: %v", err)
+	}
+	if o.Title != "Renamed outcome title" {
+		t.Errorf("outcome title = %q, want %q", o.Title, "Renamed outcome title")
+	}
+
+	if _, ce := call(t, store, ToolRenameOutcome, map[string]interface{}{"id": oid, "title": ""}); ce == nil {
+		t.Error("renameOutcome with empty title was accepted; want arg error")
+	}
+
+	const wuID = "wu-rename"
+	if err := store.CreateWorkUnit(ctx, &wms.WorkUnit{ID: wuID, OutcomeID: oid, Title: "Original workunit title", Status: wms.StatusPending}); err != nil {
+		t.Fatalf("seed workunit: %v", err)
+	}
+
+	r, ce = call(t, store, ToolRenameWorkUnit, map[string]interface{}{
+		"id": wuID, "title": "Renamed workunit title",
+	})
+	if ce != nil {
+		t.Fatalf("renameWorkUnit: %v", ce)
+	}
+	if text := resultText(t, r); !strings.Contains(text, "Original workunit title") || !strings.Contains(text, "Renamed workunit title") {
+		t.Errorf("renameWorkUnit response = %q, want old and new titles", text)
+	}
+	wu, err := store.GetWorkUnit(ctx, wuID)
+	if err != nil {
+		t.Fatalf("GetWorkUnit after rename: %v", err)
+	}
+	if wu.Title != "Renamed workunit title" {
+		t.Errorf("workunit title = %q, want %q", wu.Title, "Renamed workunit title")
+	}
+
+	if _, ce := call(t, store, ToolRenameWorkUnit, map[string]interface{}{"id": wuID, "title": ""}); ce == nil {
+		t.Error("renameWorkUnit with empty title was accepted; want arg error")
+	}
+}

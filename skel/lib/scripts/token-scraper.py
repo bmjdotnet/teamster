@@ -213,6 +213,36 @@ def _agent_name_from_transcript(path: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Long-context ("[1m]") config
+# ---------------------------------------------------------------------------
+
+# Claude Code's API response (transcript message.model) never echoes back the
+# "[1m]" long-context-beta annotation — it's a client-side label that only
+# lives in ~/.claude/settings.json's "model" field (e.g. "claude-fable-5[1m]").
+# Mirrors the Go scraper's identical constant and health-collector's copy
+# (cmd/health-collector/main.go's longContextSuffix), which reads it back out
+# of token_ledger.model.
+_LONG_CONTEXT_SUFFIX = "[1m]"
+
+
+def _configured_model() -> str:
+    """Read the CLI's configured model from ~/.claude/settings.json.
+
+    Mirrors Go's configuredModel() (cmd/token-scraper/main.go). Returns "" on
+    any error (missing file, malformed JSON, no "model" key) — the caller then
+    applies no suffix.
+    """
+    try:
+        path = os.path.join(os.path.expanduser("~"), ".claude", "settings.json")
+        with open(path) as f:
+            data = json.load(f)
+        model = data.get("model", "")
+        return model if isinstance(model, str) else ""
+    except Exception:
+        return ""
+
+
+# ---------------------------------------------------------------------------
 # Dedup / usage helpers
 # ---------------------------------------------------------------------------
 
@@ -812,6 +842,17 @@ class Scraper:
         post_failed = False
         focus_events: list[dict] = []
 
+        # The lead's own transcript is the only one _configured_model()'s
+        # "[1m]" setting can be safely attributed to — a subagent may be
+        # dispatched on a different model entirely (see
+        # teamster-context-bug.md), so this is scoped to agent_name == ""
+        # (main session file) only.
+        long_context_base = ""
+        if not agent_name:
+            cfg_model = _configured_model()
+            if cfg_model.endswith(_LONG_CONTEXT_SUFFIX):
+                long_context_base = cfg_model[:-len(_LONG_CONTEXT_SUFFIX)]
+
         # Derive session_id from filename: <session_id>.jsonl or
         # subagents/agent-<id>.jsonl — for subagents, walk up to the main
         # session dir name.
@@ -903,6 +944,8 @@ class Scraper:
                 continue
 
             u = _usage_from_line(line)
+            if long_context_base and u["model"] == long_context_base:
+                u["model"] = u["model"] + _LONG_CONTEXT_SUFFIX
             key = u["message_id"]  # == dedupKey(line)
 
             if cur is not None and key == cur_key:

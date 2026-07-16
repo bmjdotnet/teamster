@@ -287,9 +287,11 @@ type Writer interface {
 	RemoveOutcomeEdge(ctx context.Context, parentID, childID string) error
 	UpdateOutcomeStatus(ctx context.Context, id, status string) error
 	UpdateOutcomeFocus(ctx context.Context, id, focus string) error
+	UpdateOutcomeTitle(ctx context.Context, id, title string) error
 	CreateWorkUnit(ctx context.Context, wu *WorkUnit) error
 	UpdateWorkUnitStatus(ctx context.Context, id, status string) error
 	UpdateWorkUnitFocus(ctx context.Context, id, focus string) error
+	UpdateWorkUnitTitle(ctx context.Context, id, title string) error
 	AssignWorkUnit(ctx context.Context, id, agentID string) error
 	ClaimWorkUnit(ctx context.Context, id, agentID string) error
 	AddEntityDependency(ctx context.Context, dep *Dependency) error

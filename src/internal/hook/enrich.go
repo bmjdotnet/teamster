@@ -40,9 +40,12 @@ func EnrichRecord(data map[string]interface{}) {
 	toolName := str("tool_name")
 	agentType := str("agent_type")
 
-	// Agent identity.
+	// Agent identity. TeammateIdle/TaskCompleted carry teammate_name instead
+	// of agent_type — see the matching fallback in ProcessEvent.
 	if agentType != "" {
 		set("_agent_name", "@"+agentType)
+	} else if teammateName := str("teammate_name"); teammateName != "" {
+		set("_agent_name", "@"+teammateName)
 	}
 
 	// Host identity — use "host" field (set by Python client) or _host.
@@ -230,28 +233,9 @@ func EnrichRecord(data map[string]interface{}) {
 		if msg == "" {
 			msg = lastMsg
 		}
-		if msg != "" {
-			sentence := strings.TrimSpace(msg)
-			// First-sentence extraction: terminator must be followed by whitespace
-			// or end-of-string to avoid chopping filenames ("foo.md"), versions
-			// ("v1.2.3"), or abbreviations ("U.S.").
-			for i := 0; i < len(sentence); i++ {
-				c := sentence[i]
-				if c != '.' && c != '!' && c != '?' {
-					continue
-				}
-				if i+1 == len(sentence) || sentence[i+1] == ' ' || sentence[i+1] == '\n' || sentence[i+1] == '\t' {
-					sentence = sentence[:i+1]
-					break
-				}
-			}
-			if len(sentence) > 256 { // sanity bound, not tight — display layer clips to terminal width
-				sentence = sentence[:256]
-			}
-			if sentence != "" {
-				set("_tool_tag", "DONE")
-				set("_tool_display", sentence)
-			}
+		if sentence := firstSentence(msg); sentence != "" {
+			set("_tool_tag", "DONE")
+			set("_tool_display", sentence)
 		}
 		// Usage extraction from transcript_path only works for hub-local sessions.
 		if transcriptPath := str("transcript_path"); transcriptPath != "" {
@@ -264,5 +248,57 @@ func EnrichRecord(data map[string]interface{}) {
 				}
 			}
 		}
+
+	case "SubagentStart":
+		// No feed display enrichment here — the PreToolUse for the Agent
+		// tool already fires first and produces a richer "Spawning @name
+		// <model>: desc" TEAM line (see hook.go's "Agent" case); a second
+		// "Subagent started: __name__" line from this event was a
+		// duplicate, worse than the first. _agent_name is still derived
+		// above (universal, not per-case) for hookd-side roster/turn-state
+		// tracking (server.go) — SubagentStart just isn't a feed-display
+		// event.
+
+	case "SubagentStop":
+		if alreadyEnriched {
+			return
+		}
+		if agentType == "" {
+			// Phantom SubagentStop — not a real subagent. Claude Code fires
+			// these for suggested next prompts and idle recaps. Prefer
+			// last_assistant_message (where Claude Code puts the text) over
+			// stop_response (which Stop events use for the assistant's reply).
+			lastMsg, _ := data["last_assistant_message"].(string)
+			if lastMsg == "" {
+				lastMsg, _ = data["stop_response"].(string)
+			}
+			if lastMsg != "" && isRecapText(lastMsg) {
+				set("_tool_tag", "RCAP")
+				set("_tool_display", firstSentence(lastMsg))
+			}
+			return
+		}
+		lastMsg, _ := data["last_assistant_message"].(string)
+		if sentence := firstSentence(lastMsg); sentence != "" {
+			set("_tool_tag", "DONE")
+			set("_tool_display", sentence)
+		} else {
+			set("_tool_tag", "DONE")
+			set("_tool_display", "Subagent finished")
+		}
+
+	case "TaskCompleted":
+		if alreadyEnriched {
+			return
+		}
+		display := "completed"
+		if taskID := str("task_id"); taskID != "" {
+			display += " #" + taskID
+		}
+		if subject := str("task_subject"); subject != "" {
+			display += ": " + subject
+		}
+		set("_tool_tag", "DONE")
+		set("_tool_display", display)
 	}
 }

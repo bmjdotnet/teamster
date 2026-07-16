@@ -291,6 +291,48 @@ else
     fail "journal entry carries the Codex session id" "$r"
 fi
 
+# ── Scenario 7: Rename round-trip ────────────────────────────────────────────
+# Rename is a title-only update with no state-machine validation — o1 and w1
+# are already "done" (Scenario 2's rollup) and rename must still succeed,
+# proving it bypasses status entirely rather than just working on this one
+# status by coincidence.
+
+responses=$(rpc_batch \
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"wms_renameOutcome","arguments":{"id":"o1","title":"Renamed Outcome"}}}' \
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"wms_renameWorkUnit","arguments":{"id":"w1","title":"Renamed Work Unit"}}}' \
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"wms_getOutcome","arguments":{"id":"o1"}}}' \
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"wms_getWorkUnit","arguments":{"id":"w1"}}}' \
+)
+
+r=$(resp_for "$responses" 2)
+if echo "$r" | grep -q 'Renamed outcome'; then
+    pass "renameOutcome on a done outcome"
+else
+    fail "renameOutcome on a done outcome" "$r"
+fi
+
+r=$(resp_for "$responses" 3)
+if echo "$r" | grep -q 'Renamed workunit'; then
+    pass "renameWorkUnit on a done work unit"
+else
+    fail "renameWorkUnit on a done work unit" "$r"
+fi
+
+r=$(resp_for "$responses" 4)
+if echo "$r" | grep -q 'Renamed Outcome'; then
+    pass "getOutcome reflects new title"
+else
+    fail "getOutcome reflects new title" "$r"
+fi
+
+r=$(resp_for "$responses" 5)
+if echo "$r" | grep -q 'Renamed Work Unit'; then
+    pass "getWorkUnit reflects new title"
+else
+    fail "getWorkUnit reflects new title" "$r"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""

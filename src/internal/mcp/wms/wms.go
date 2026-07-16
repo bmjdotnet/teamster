@@ -653,6 +653,22 @@ func HandleToolCall(store wms.Store, eng wms.Engine, rawParams json.RawMessage) 
 		msg += wms.FormatCloseoutWarnings(wms.CloseoutWarnings(ctx, store, entityID, newStatus))
 		return TextResult(msg), nil
 
+	case ToolRenameOutcome:
+		entityID := strArg("id")
+		newTitle := strArg("title")
+		if newTitle == "" {
+			return Result{}, &CallError{Code: -32602, Message: "title is required"}
+		}
+		o, err := store.GetOutcome(ctx, entityID)
+		if err != nil {
+			return Result{}, &CallError{Code: -32000, Message: err.Error()}
+		}
+		oldTitle := o.Title
+		if err := store.UpdateOutcomeTitle(ctx, entityID, newTitle); err != nil {
+			return Result{}, &CallError{Code: -32000, Message: err.Error()}
+		}
+		return TextResult(fmt.Sprintf("Renamed outcome %s: %q → %q", entityID, oldTitle, newTitle)), nil
+
 	// --- v2 WorkUnit tools ---
 
 	case ToolCreateWorkUnit:
@@ -741,6 +757,22 @@ func HandleToolCall(store wms.Store, eng wms.Engine, rawParams json.RawMessage) 
 			SessionID: p.Meta.SessionID, AgentName: p.Meta.AgentType, Host: p.Meta.Host,
 		})
 		return TextResult(fmt.Sprintf("Updated workunit %s: %s → %s", entityID, oldStatus, newStatus)), nil
+
+	case ToolRenameWorkUnit:
+		entityID := strArg("id")
+		newTitle := strArg("title")
+		if newTitle == "" {
+			return Result{}, &CallError{Code: -32602, Message: "title is required"}
+		}
+		wu, err := store.GetWorkUnit(ctx, entityID)
+		if err != nil {
+			return Result{}, &CallError{Code: -32000, Message: err.Error()}
+		}
+		oldTitle := wu.Title
+		if err := store.UpdateWorkUnitTitle(ctx, entityID, newTitle); err != nil {
+			return Result{}, &CallError{Code: -32000, Message: err.Error()}
+		}
+		return TextResult(fmt.Sprintf("Renamed workunit %s: %q → %q", entityID, oldTitle, newTitle)), nil
 
 	case ToolAssignWorkUnit:
 		if err := store.AssignWorkUnit(ctx, strArg("id"), strArg("agentID")); err != nil {
@@ -1665,6 +1697,18 @@ var ToolDefs = []map[string]interface{}{
 		},
 	},
 	{
+		"name":        ToolRenameOutcome,
+		"description": "Rename an outcome — updates its title. No state-machine validation; use to correct naming mistakes or scope changes.",
+		"inputSchema": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"id":    map[string]interface{}{"type": "string"},
+				"title": map[string]interface{}{"type": "string", "description": "New title for the outcome."},
+			},
+			"required": []string{"id", "title"},
+		},
+	},
+	{
 		"name":        ToolCreateWorkUnit,
 		"description": "Create a new work unit under an outcome.",
 		"inputSchema": map[string]interface{}{
@@ -1711,6 +1755,18 @@ var ToolDefs = []map[string]interface{}{
 				"status": map[string]interface{}{"type": "string"},
 			},
 			"required": []string{"id", "status"},
+		},
+	},
+	{
+		"name":        ToolRenameWorkUnit,
+		"description": "Rename a work unit — updates its title. No state-machine validation; use to correct naming mistakes or scope changes.",
+		"inputSchema": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"id":    map[string]interface{}{"type": "string"},
+				"title": map[string]interface{}{"type": "string", "description": "New title for the work unit."},
+			},
+			"required": []string{"id", "title"},
 		},
 	},
 	{

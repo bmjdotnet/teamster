@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -14,6 +15,8 @@ import (
 	"github.com/bmjdotnet/teamster/internal/config"
 	"github.com/bmjdotnet/teamster/internal/hook"
 	"github.com/bmjdotnet/teamster/internal/observability"
+	"github.com/bmjdotnet/teamster/internal/store"
+	"github.com/bmjdotnet/teamster/internal/store/sqlite"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 )
@@ -138,6 +141,91 @@ func TestDispatchObservability_BareToolName_IsIgnored(t *testing.T) {
 	if snap.OutcomeID != "" {
 		t.Errorf("OutcomeID populated by bare-name event: got %q, want %q", snap.OutcomeID, "")
 	}
+}
+
+// TestDispatchObservability_TeammateInheritsLeadTeamName confirms the
+// early-upsert roster-registration path (dispatchObservability's isNew
+// branch) copies the lead's session-level team_name onto a teammate's
+// auto-registered roster entry — so a teammate that joins after
+// /teamster:bootstrap has named the team isn't stranded with an empty
+// team_name until it separately calls registerPeer.
+func TestDispatchObservability_TeammateInheritsLeadTeamName(t *testing.T) {
+	obsStore, err := sqlite.New(":memory:")
+	if err != nil {
+		t.Fatalf("sqlite open: %v", err)
+	}
+	defer obsStore.Close()
+
+	tracker := observability.NewSessionTracker("testhost", 5*time.Minute, 30*time.Second, nil)
+	s := &Server{
+		cfg:      config.Config{Host: "testhost"},
+		sessions: tracker,
+		metrics:  observability.NewMetrics(prometheus.NewRegistry()),
+		obsStore: obsStore,
+	}
+	ctx := context.Background()
+
+	// Lead's first event: auto-registers the lead's session + roster entry
+	// via a detached goroutine. Wait for the session row before naming the
+	// team below, or SetSessionTeam races the insert and updates 0 rows.
+	s.dispatchObservability(hook.HookEvent{
+		HookEventName: "UserPromptSubmit",
+		SessionID:     "sess-1",
+	}, nil)
+	waitForSessionRow(t, obsStore, "sess-1")
+
+	// Simulate /teamster:bootstrap naming the team on the lead's session
+	// (the write path registerPeer's propagateSessionTeam exercises).
+	if err := obsStore.SetSessionTeam(ctx, "sess-1", "ops"); err != nil {
+		t.Fatalf("SetSessionTeam: %v", err)
+	}
+
+	// Teammate's first event: auto-registers and should inherit "ops" from
+	// the lead's session row.
+	s.dispatchObservability(hook.HookEvent{
+		HookEventName: "UserPromptSubmit",
+		SessionID:     "sess-1",
+		AgentType:     "scout",
+	}, nil)
+
+	entry := waitForRosterEntry(t, obsStore, "sess-1", "@scout")
+	if entry.TeamName != "ops" {
+		t.Fatalf("teammate roster team_name = %q, want ops", entry.TeamName)
+	}
+}
+
+// waitForSessionRow polls until the lead's (session_id, agent_name="") row
+// exists (the early-upsert roster path writes it from a detached goroutine)
+// or a 2s deadline elapses.
+func waitForSessionRow(t *testing.T, s store.Store, sessionID string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := s.GetSession(context.Background(), store.SessionKey{SessionID: sessionID}); err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("session row for %s never appeared within deadline", sessionID)
+}
+
+// waitForRosterEntry polls until a roster entry exists for (sessionID,
+// agentName) — the early-upsert roster path writes it from a detached
+// goroutine — or a 2s deadline elapses.
+func waitForRosterEntry(t *testing.T, s store.Store, sessionID, agentName string) store.RosterEntry {
+	t.Helper()
+	ctx := context.Background()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if rosterID, err := s.ResolveRosterID(ctx, sessionID, agentName); err == nil {
+			if entry, err := s.GetRosterEntry(ctx, rosterID); err == nil {
+				return entry
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("roster entry for (%s, %s) never appeared within deadline", sessionID, agentName)
+	return store.RosterEntry{}
 }
 
 func TestResolveSubagentName_Basic(t *testing.T) {
@@ -336,6 +424,31 @@ func TestResolveSubagentName_ClearSession(t *testing.T) {
 	}
 }
 
+func TestResolveSubagentName_ClearAgent(t *testing.T) {
+	s := &Server{}
+
+	s.resolveSubagentName(hook.HookEvent{
+		HookEventName: "PreToolUse",
+		SessionID:     "sess1",
+		ToolName:      "Agent",
+		ToolInput:     map[string]interface{}{"name": "worker"},
+	}, map[string]interface{}{})
+
+	s.subagentNames.clearAgent("sess1", "general-purpose")
+
+	eventData := map[string]interface{}{"_agent_name": "@general-purpose"}
+	s.resolveSubagentName(hook.HookEvent{
+		HookEventName: "PreToolUse",
+		SessionID:     "sess1",
+		ToolName:      "Read",
+		AgentType:     "general-purpose",
+	}, eventData)
+
+	if got := eventData["_agent_name"]; got != "@general-purpose" {
+		t.Errorf("_agent_name = %q, want raw %q after clearAgent", got, "@general-purpose")
+	}
+}
+
 func mfNames(mfs []*dto.MetricFamily) string {
 	names := make([]string, 0, len(mfs))
 	for _, mf := range mfs {
@@ -365,7 +478,7 @@ func TestHandleEvent_UserPromptSubmit_ReturnsAdditionalContext(t *testing.T) {
 			"testhost", 5*time.Minute, 30*time.Second, nil,
 		),
 	}
-	s.bus.subscribers = make(map[uint64]chan []byte)
+	s.bus.subscribers = make(map[uint64]chan ssePayload)
 
 	payload, _ := json.Marshal(map[string]interface{}{
 		"hook_event_name": "UserPromptSubmit",
@@ -430,7 +543,7 @@ func TestHandleEvent_PostToolUse_ObjectToolResponse_Codex(t *testing.T) {
 			"testhost", 5*time.Minute, 30*time.Second, nil,
 		),
 	}
-	s.bus.subscribers = make(map[uint64]chan []byte)
+	s.bus.subscribers = make(map[uint64]chan ssePayload)
 
 	// Shape captured live off a Codex mcp__activity__reportActivity call
 	// (see the codex-remote-kit research notes, wp-r7-verification).

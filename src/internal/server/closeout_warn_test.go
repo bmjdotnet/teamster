@@ -127,7 +127,7 @@ func TestEmitCloseOutWarning_WMSStatusChange(t *testing.T) {
 			tags:     []wms.EntityTag{{TagKey: "phase"}}, // work-type missing
 		},
 	}
-	s.bus.subscribers = make(map[uint64]chan []byte)
+	s.bus.subscribers = make(map[uint64]chan ssePayload)
 
 	s.dispatchObservability(hook.HookEvent{HookEventName: "WMSStatusChange"}, map[string]interface{}{
 		"hook_event_name": "WMSStatusChange",
@@ -172,7 +172,7 @@ func TestEmitCloseOutWarning_NoWarnWhenSatisfied(t *testing.T) {
 			tags:     []wms.EntityTag{{TagKey: "work-type"}},
 		},
 	}
-	s.bus.subscribers = make(map[uint64]chan []byte)
+	s.bus.subscribers = make(map[uint64]chan ssePayload)
 
 	s.dispatchObservability(hook.HookEvent{HookEventName: "WMSStatusChange"}, map[string]interface{}{
 		"hook_event_name": "WMSStatusChange",

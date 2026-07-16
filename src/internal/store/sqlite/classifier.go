@@ -25,6 +25,17 @@ func (s *Store) MarkIntervalAssembled(ctx context.Context, id int64) error {
 	return err
 }
 
+// RecordJobHeartbeat upserts jobName's last-completed-run timestamp,
+// independent of whether the run produced any other write.
+func (s *Store) RecordJobHeartbeat(ctx context.Context, jobName string, at time.Time) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO job_heartbeats (job_name, last_run_at)
+		VALUES (?, ?)
+		ON CONFLICT(job_name) DO UPDATE SET last_run_at = excluded.last_run_at`,
+		jobName, at.UTC())
+	return err
+}
+
 // ListIntervalsNeedingPhase returns closed intervals whose phase is not yet
 // derived (or is stale) and is not a declared override. limit <= 0 defaults
 // to 500.
@@ -137,21 +148,30 @@ func (s *Store) EarliestClosureByEntity(ctx context.Context, keys [][2]string) (
 	return out, rows.Err()
 }
 
-// ListWorkUnitsWithActivity returns the distinct workunit ids that have at
-// least one kind='state' interval in wms_intervals AND do not already carry
-// a manually-set work-type tag.
-func (s *Store) ListWorkUnitsWithActivity(ctx context.Context) ([]string, error) {
+// ListWorkUnitsNeedingWorkType returns the distinct workunit ids that need a
+// work-type (re)classification pass — see the mysql implementation's doc
+// comment for the full watermark rationale (GH #13 follow-up).
+func (s *Store) ListWorkUnitsNeedingWorkType(ctx context.Context, jobName string) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT DISTINCT wi.entity_id
-		FROM wms_intervals wi
-		WHERE wi.kind = 'state' AND wi.entity_type = ?
-		  AND NOT EXISTS (
-		    SELECT 1 FROM entity_tags et
-		    JOIN tags t ON t.id = et.tag_id
-		    WHERE et.entity_type = 'workunit' AND et.entity_id = wi.entity_id
-		      AND t.tag_key = 'work-type' AND et.source = 'manual'
-		  )
-		ORDER BY wi.entity_id ASC`, wms.EntityWorkUnit)
+		SELECT wa.entity_id
+		FROM (
+		  SELECT entity_id, MAX(ended_at) AS latest_closed
+		  FROM wms_intervals
+		  WHERE kind = 'state' AND entity_type = ?
+		  GROUP BY entity_id
+		) wa
+		WHERE NOT EXISTS (
+		  SELECT 1 FROM entity_tags et
+		  JOIN tags t ON t.id = et.tag_id
+		  WHERE et.entity_type = 'workunit' AND et.entity_id = wa.entity_id
+		    AND t.tag_key = 'work-type' AND et.source = 'manual'
+		)
+		AND (
+		  (SELECT last_run_at FROM job_heartbeats WHERE job_name = ?) IS NULL
+		  OR (wa.latest_closed IS NOT NULL
+		      AND wa.latest_closed > (SELECT last_run_at FROM job_heartbeats WHERE job_name = ?))
+		)
+		ORDER BY wa.entity_id ASC`, wms.EntityWorkUnit, jobName, jobName)
 	if err != nil {
 		return nil, err
 	}

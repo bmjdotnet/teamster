@@ -134,6 +134,21 @@ func TestEnrichRecord_Tags(t *testing.T) {
 			wantDisplay: "Spawning @store: Handle the sqlite layer",
 		},
 		{
+			// No context-window label — a hardcoded model→window map was
+			// tried and reverted (operator: wrong for a product, breaks
+			// across subscription tiers/new sizes/other runtimes, no real
+			// source of truth at hook time). ctop shows real context data
+			// shortly after via statusLine/transcript instead.
+			name: "Agent with model → no context window label",
+			data: mkEvent("PreToolUse", "Agent", map[string]interface{}{
+				"name":        "store",
+				"model":       "sonnet",
+				"description": "Handle the sqlite layer",
+			}),
+			wantTag:     "TEAM",
+			wantDisplay: "Spawning @store <sonnet>: Handle the sqlite layer",
+		},
+		{
 			name: "SendMessage → COMM tag",
 			data: mkEvent("PreToolUse", "SendMessage", map[string]interface{}{
 				"to":      "store",
@@ -219,6 +234,83 @@ func TestEnrichRecord_Tags(t *testing.T) {
 				"stop_response":   "",
 			},
 		},
+		{
+			// No tag/display: PreToolUse for the Agent tool already fires
+			// first and produces a richer "Spawning @name <model>: desc"
+			// TEAM line — SubagentStart duplicating it as "Subagent
+			// started: __name__" was a worse, redundant feed line.
+			name: "SubagentStart → no feed display (PreToolUse Agent already covers it)",
+			data: map[string]interface{}{
+				"hook_event_name": "SubagentStart",
+				"agent_id":        "a1",
+				"agent_type":      "general-purpose",
+			},
+		},
+		{
+			name: "SubagentStop with last_assistant_message → DONE tag",
+			data: map[string]interface{}{
+				"hook_event_name":        "SubagentStop",
+				"agent_id":               "a1",
+				"agent_type":             "general-purpose",
+				"last_assistant_message": "Found the bug. It was a race condition.",
+			},
+			wantTag:     "DONE",
+			wantDisplay: "Found the bug.",
+		},
+		{
+			name: "SubagentStop with no message → fallback DONE display",
+			data: map[string]interface{}{
+				"hook_event_name": "SubagentStop",
+				"agent_id":        "a1",
+				"agent_type":      "general-purpose",
+			},
+			wantTag:     "DONE",
+			wantDisplay: "Subagent finished",
+		},
+		{
+			name: "Phantom SubagentStop suggested prompt → suppressed",
+			data: map[string]interface{}{
+				"hook_event_name":        "SubagentStop",
+				"last_assistant_message": "inspect spirit",
+			},
+		},
+		{
+			name: "Phantom SubagentStop recap → RCAP tag",
+			data: map[string]interface{}{
+				"hook_event_name":        "SubagentStop",
+				"last_assistant_message": "Debugging why demo hosts stop replicating data from hub01.",
+			},
+			wantTag:     "RCAP",
+			wantDisplay: "Debugging why demo hosts stop replicating data from hub01.",
+		},
+		{
+			name: "Phantom SubagentStop lowercase suggested prompt → suppressed",
+			data: map[string]interface{}{
+				"hook_event_name":        "SubagentStop",
+				"last_assistant_message": "yes, start with the product migration",
+			},
+		},
+		{
+			name: "Phantom SubagentStop recap via stop_response → RCAP tag",
+			data: map[string]interface{}{
+				"hook_event_name": "SubagentStop",
+				"stop_response":   "Working on the auth middleware rewrite for compliance requirements.",
+			},
+			wantTag:     "RCAP",
+			wantDisplay: "Working on the auth middleware rewrite for compliance requirements.",
+		},
+		{
+			name: "TaskCompleted → DONE tag with task id and subject",
+			data: map[string]interface{}{
+				"hook_event_name": "TaskCompleted",
+				"task_id":         "42",
+				"task_subject":    "fix auth bug",
+				"teammate_name":   "store",
+				"team_name":       "myteam",
+			},
+			wantTag:     "DONE",
+			wantDisplay: "completed #42: fix auth bug",
+		},
 	}
 
 	for _, tt := range tests {
@@ -267,6 +359,30 @@ func TestEnrichRecord_Tags(t *testing.T) {
 	}
 }
 
+func TestIsRecapText(t *testing.T) {
+	tests := []struct {
+		text string
+		want bool
+	}{
+		{"Debugging why demo hosts stop replicating data from hub01.", true},
+		{"Working on the auth middleware rewrite.", true},
+		{"Cleaning up stale Teamster WMS data.", true},
+		{"inspect spirit", false},
+		{"yes, start with the product migration", false},
+		{"commit both repos", false},
+		{"reboot phantom", false},
+		{"", false},
+		{"   ", false},
+		{"A", false},       // uppercase but no space → single word
+		{"Go ahead", true}, // uppercase + space
+	}
+	for _, tt := range tests {
+		if got := isRecapText(tt.text); got != tt.want {
+			t.Errorf("isRecapText(%q) = %v, want %v", tt.text, got, tt.want)
+		}
+	}
+}
+
 func TestEnrichRecord_Identity(t *testing.T) {
 	t.Run("agent_type populated → _agent_name set", func(t *testing.T) {
 		data := map[string]interface{}{
@@ -303,6 +419,30 @@ func TestEnrichRecord_Identity(t *testing.T) {
 		EnrichRecord(data)
 		if _, exists := data["_agent_name"]; exists {
 			t.Errorf("_agent_name should not be set when agent_type is absent")
+		}
+	})
+
+	t.Run("TeammateIdle: teammate_name falls back to _agent_name", func(t *testing.T) {
+		data := map[string]interface{}{
+			"hook_event_name": "TeammateIdle",
+			"teammate_name":   "store",
+			"team_name":       "myteam",
+		}
+		EnrichRecord(data)
+		if v, _ := data["_agent_name"].(string); v != "@store" {
+			t.Errorf("_agent_name = %q, want %q", v, "@store")
+		}
+	})
+
+	t.Run("agent_type takes precedence over teammate_name", func(t *testing.T) {
+		data := map[string]interface{}{
+			"hook_event_name": "SubagentStop",
+			"agent_type":      "general-purpose",
+			"teammate_name":   "store",
+		}
+		EnrichRecord(data)
+		if v, _ := data["_agent_name"].(string); v != "@general-purpose" {
+			t.Errorf("_agent_name = %q, want %q", v, "@general-purpose")
 		}
 	})
 }

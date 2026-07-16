@@ -15,6 +15,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/bmjdotnet/teamster/internal/redact"
 )
@@ -51,8 +53,8 @@ const TEAM_DISPATCH_INSTRUCTION = "\n\n" +
 var TOOL_TAGS = map[string]string{
 	"Read": "READ", "Grep": "READ", "Glob": "READ",
 	"Edit": "EDIT", "Write": "EDIT", "NotebookEdit": "EDIT",
-	"Bash":  " ACT",
-	"Agent": "TEAM",
+	"Bash":        " ACT",
+	"Agent":       "TEAM",
 	"SendMessage": "COMM",
 	"TaskCreate":  "TASK", "TaskUpdate": "TASK",
 	"TaskGet": "TASK", "TaskList": "TASK",
@@ -64,14 +66,14 @@ var TOOL_TAGS = map[string]string{
 
 // HookEvent represents the JSON payload Claude Code sends to the hook client.
 type HookEvent struct {
-	HookEventName        string      `json:"hook_event_name"`
-	SessionID            string      `json:"session_id"`
-	ToolName             string      `json:"tool_name"`
-	ToolInput            interface{} `json:"tool_input"`
-	AgentID              string      `json:"agent_id"`
-	AgentType            string      `json:"agent_type"`
-	CWD                  string      `json:"cwd"`
-	TranscriptPath       string      `json:"transcript_path"`
+	HookEventName  string      `json:"hook_event_name"`
+	SessionID      string      `json:"session_id"`
+	ToolName       string      `json:"tool_name"`
+	ToolInput      interface{} `json:"tool_input"`
+	AgentID        string      `json:"agent_id"`
+	AgentType      string      `json:"agent_type"`
+	CWD            string      `json:"cwd"`
+	TranscriptPath string      `json:"transcript_path"`
 	// ToolResponse is untyped like ToolInput: Claude Code sends a string, but
 	// Codex sends a JSON object for MCP tool calls (the raw tool_result
 	// shape) — a string field here made json.Unmarshal reject every
@@ -82,6 +84,20 @@ type HookEvent struct {
 	ToolResponse         interface{} `json:"tool_response"`
 	StopResponse         string      `json:"stop_response"`
 	LastAssistantMessage string      `json:"last_assistant_message"`
+
+	// SubagentStart/SubagentStop fields (Agent-tool local_agent spawns).
+	AgentTranscriptPath string `json:"agent_transcript_path"`
+	StopHookActive      bool   `json:"stop_hook_active"`
+
+	// TeammateIdle/TaskCompleted fields (in-process Agent Teams teammates —
+	// identity here is teammate_name, not agent_type).
+	TeammateName string `json:"teammate_name"`
+	TeamName     string `json:"team_name"`
+
+	// TaskCompleted fields.
+	TaskID          string `json:"task_id"`
+	TaskSubject     string `json:"task_subject"`
+	TaskDescription string `json:"task_description"`
 }
 
 // ToolResult replaces Python tuples returned by GetToolTarget.
@@ -350,9 +366,14 @@ func ProcessEvent(event HookEvent, rawData map[string]interface{}, serverURL, de
 		effectiveSolo = false
 	}
 
-	// Agent identity.
+	// Agent identity. TeammateIdle/TaskCompleted carry teammate_name instead
+	// of agent_type (they aren't tool calls, so Claude Code doesn't stamp the
+	// usual agent_type field) — fall back to it so these events still show
+	// the right @agent in the feed.
 	if event.AgentType != "" {
 		rawData["_agent_name"] = "@" + event.AgentType
+	} else if event.TeammateName != "" {
+		rawData["_agent_name"] = "@" + event.TeammateName
 	}
 
 	rawData["_host"] = getHostID()
@@ -361,8 +382,15 @@ func ProcessEvent(event HookEvent, rawData map[string]interface{}, serverURL, de
 	// Write current session ID for MCP server.
 	writeSessionID(sessionID)
 
-	// Model from settings.
-	if model := getModel(); model != "" {
+	// Model: read the live value from the transcript so a mid-session /model
+	// switch is reflected on every event, not just Stop. settings.json is a
+	// fallback for the rare case there's no transcript yet — it never tracks
+	// per-session model changes.
+	if event.TranscriptPath != "" {
+		if model := getModelFromTranscript(event.TranscriptPath); model != "" {
+			rawData["_model"] = model
+		}
+	} else if model := getModel(); model != "" {
 		rawData["_model"] = model
 	}
 
@@ -538,29 +566,54 @@ func ProcessEvent(event HookEvent, rawData map[string]interface{}, serverURL, de
 		if lastMsg == "" {
 			lastMsg = event.LastAssistantMessage
 		}
-		if lastMsg != "" {
-			sentence := strings.TrimSpace(lastMsg)
-			// First-sentence extraction: terminator must be followed by whitespace
-			// or end-of-string, otherwise it's a filename ("CLAUDE.md"), version
-			// ("v1.2.3"), slug ("mcp-medic.t1"), or abbreviation ("U.S.").
-			for i := 0; i < len(sentence); i++ {
-				c := sentence[i]
-				if c != '.' && c != '!' && c != '?' {
-					continue
-				}
-				if i+1 == len(sentence) || sentence[i+1] == ' ' || sentence[i+1] == '\n' || sentence[i+1] == '\t' {
-					sentence = sentence[:i+1]
-					break
-				}
-			}
-			if len(sentence) > 256 { // sanity bound, not tight — display layer clips to terminal width
-				sentence = sentence[:256]
-			}
-			if sentence != "" {
-				rawData["_tool_tag"] = "DONE"
-				rawData["_tool_display"] = sentence
-			}
+		if sentence := firstSentence(lastMsg); sentence != "" {
+			rawData["_tool_tag"] = "DONE"
+			rawData["_tool_display"] = sentence
 		}
+
+	case "SubagentStart":
+		// No feed display enrichment — the Agent tool's own PreToolUse
+		// already fires first and produces a richer "Spawning @name
+		// <model>: desc" TEAM line (see the "Agent" case below); a second
+		// "Subagent started: __name__" line here was a duplicate, worse
+		// than the first. SubagentStart still updates hookd-side
+		// roster/turn-state (server.go) via _agent_name (set elsewhere in
+		// this function) — it just isn't a feed-display event.
+
+	case "SubagentStop":
+		if event.AgentType == "" {
+			// Phantom SubagentStop — not a real subagent. Claude Code fires
+			// these for suggested next prompts and idle recaps. Prefer
+			// LastAssistantMessage (where Claude Code puts the text) over
+			// StopResponse (which Stop events use for the assistant's reply).
+			msg := event.LastAssistantMessage
+			if msg == "" {
+				msg = event.StopResponse
+			}
+			if msg != "" && isRecapText(msg) {
+				rawData["_tool_tag"] = "RCAP"
+				rawData["_tool_display"] = firstSentence(msg)
+			}
+			break
+		}
+		if sentence := firstSentence(event.LastAssistantMessage); sentence != "" {
+			rawData["_tool_tag"] = "DONE"
+			rawData["_tool_display"] = sentence
+		} else {
+			rawData["_tool_tag"] = "DONE"
+			rawData["_tool_display"] = "Subagent finished"
+		}
+
+	case "TaskCompleted":
+		display := "completed"
+		if event.TaskID != "" {
+			display += " #" + event.TaskID
+		}
+		if event.TaskSubject != "" {
+			display += ": " + event.TaskSubject
+		}
+		rawData["_tool_tag"] = "DONE"
+		rawData["_tool_display"] = display
 	}
 
 	// Strip large fields that hookd's buildRecord never persists. Without this,
@@ -676,6 +729,60 @@ func getModel() string {
 		return ""
 	}
 	model, _ := m["model"].(string)
+	return model
+}
+
+// transcriptTailSize bounds how much of the transcript getModelFromTranscript
+// reads. Reading only the tail keeps it cheap enough to call on every hook
+// event — unlike extractTranscriptUsage, which scans the whole file and is
+// reserved for Stop.
+const transcriptTailSize = 32 * 1024
+
+// getModelFromTranscript returns the model from the most recent assistant
+// message in the transcript, reading only the last transcriptTailSize bytes.
+func getModelFromTranscript(transcriptPath string) string {
+	f, err := os.Open(transcriptPath)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return ""
+	}
+	start := info.Size() - transcriptTailSize
+	if start < 0 {
+		start = 0
+	}
+	if _, err := f.Seek(start, io.SeekStart); err != nil {
+		return ""
+	}
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return ""
+	}
+
+	lines := strings.Split(string(data), "\n")
+	if start > 0 && len(lines) > 0 {
+		// Drop the first (likely partial) line left over from seeking mid-file.
+		lines = lines[1:]
+	}
+
+	var model string
+	for _, line := range lines {
+		var d map[string]interface{}
+		if err := json.Unmarshal([]byte(line), &d); err != nil {
+			continue
+		}
+		if d["type"] != "assistant" {
+			continue
+		}
+		msg, _ := d["message"].(map[string]interface{})
+		if m, _ := msg["model"].(string); m != "" && !strings.HasPrefix(m, "<") {
+			model = m
+		}
+	}
 	return model
 }
 
@@ -889,9 +996,51 @@ func basename(path string) string {
 	return path
 }
 
+// firstSentence extracts the leading sentence from a message for DONE-tagged
+// display text (Stop/SubagentStop's last_assistant_message). A terminator
+// must be followed by whitespace or end-of-string, otherwise it's a filename
+// ("CLAUDE.md"), version ("v1.2.3"), slug ("mcp-medic.t1"), or abbreviation
+// ("U.S."). Clips to 256 chars — not a tight bound, the display layer clips
+// to terminal width anyway. Returns "" for an empty/whitespace-only input.
+func firstSentence(s string) string {
+	sentence := strings.TrimSpace(s)
+	if sentence == "" {
+		return ""
+	}
+	for i := 0; i < len(sentence); i++ {
+		c := sentence[i]
+		if c != '.' && c != '!' && c != '?' {
+			continue
+		}
+		if i+1 == len(sentence) || sentence[i+1] == ' ' || sentence[i+1] == '\n' || sentence[i+1] == '\t' {
+			sentence = sentence[:i+1]
+			break
+		}
+	}
+	if len(sentence) > 256 {
+		sentence = sentence[:256]
+	}
+	return sentence
+}
+
 func flattenNewlines(s string) string {
 	if !strings.Contains(s, "\n") {
 		return s
 	}
 	return strings.Join(strings.Fields(s), " ")
+}
+
+// isRecapText distinguishes a Claude Code idle recap from a suggested next
+// prompt in phantom SubagentStop events (no agent_type). Recaps are
+// sentence-like descriptions of work context ("Debugging why demo hosts stop
+// replicating data from hub01."); suggested prompts are conversational
+// ("inspect spirit", "yes, start with the migration"). The heuristic: a
+// recap starts with an uppercase letter and contains at least one space.
+func isRecapText(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+	r, _ := utf8.DecodeRuneInString(s)
+	return unicode.IsUpper(r) && strings.Contains(s, " ")
 }

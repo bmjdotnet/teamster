@@ -1315,6 +1315,213 @@ WHERE NOT EXISTS (
 					ADD COLUMN reasoning_output_tokens  BIGINT UNSIGNED NOT NULL DEFAULT 0 AFTER output_tokens`,
 		},
 	},
+	{
+		// muster-sessions-columns: additive columns on sessions for the agent
+		// roster system (P0 §1.2). All NOT NULL DEFAULT '' so existing rows stay
+		// valid with no backfill. VARCHAR(16) for relationship (not ENUM) so new
+		// values (lead, teammate, subagent, peer, service) need no schema migration.
+		Version: 52,
+		Name:    "muster-sessions-columns",
+		Stmts: []string{
+			`ALTER TABLE sessions
+				ADD COLUMN parent_session_id VARCHAR(64)  NOT NULL DEFAULT '' AFTER originator,
+				ADD COLUMN parent_agent_name VARCHAR(64)  NOT NULL DEFAULT '' AFTER parent_session_id,
+				ADD COLUMN relationship      VARCHAR(16)  NOT NULL DEFAULT '' AFTER parent_agent_name,
+				ADD COLUMN bus_team           VARCHAR(64)  NOT NULL DEFAULT '' AFTER relationship`,
+		},
+	},
+	{
+		// muster-agent-roster: the canonical identity table for registered agents
+		// (P0 §2.1). PK is roster_id (server-generated UUID), not (session_id,
+		// agent_name). session_id is nullable — NULL means "registered but not yet
+		// bound" (spawn-time registration, peer hasn't self-registered yet).
+		// The UNIQUE KEY on (session_id, agent_name) allows multiple NULLs in
+		// session_id (MySQL 8.0 / MariaDB 11.8 behavior for UNIQUE indexes).
+		Version: 53,
+		Name:    "muster-agent-roster",
+		Stmts: []string{
+			`CREATE TABLE IF NOT EXISTS agent_roster (
+				roster_id    VARCHAR(36)  NOT NULL,
+				session_id   VARCHAR(64)  DEFAULT NULL,
+				agent_name   VARCHAR(64)  NOT NULL DEFAULT '',
+				host         VARCHAR(128) NOT NULL DEFAULT '',
+				runtime      VARCHAR(16)  NOT NULL DEFAULT '',
+				model        VARCHAR(128) NOT NULL DEFAULT '',
+				relationship VARCHAR(16)  NOT NULL DEFAULT '',
+				team_name    VARCHAR(64)  NOT NULL DEFAULT '',
+				bus_team     VARCHAR(64)  NOT NULL DEFAULT '',
+				parent_ref   VARCHAR(36)  DEFAULT NULL,
+				created_at   DATETIME(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+				bound_at     DATETIME(6)  DEFAULT NULL,
+				PRIMARY KEY (roster_id),
+				UNIQUE KEY uq_roster_identity (session_id, agent_name),
+				INDEX idx_roster_host (host),
+				INDEX idx_roster_bus_team (bus_team),
+				INDEX idx_roster_parent (parent_ref)
+			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+		},
+	},
+	{
+		// muster-agent-tokens: bearer-token credentials for roster entries (P0
+		// §2.1). token_hash is SHA-256 hex (64 chars); the raw token is NEVER
+		// stored. FK to agent_roster is logical only — no physical FOREIGN KEY
+		// constraint, matching the existing pattern (sessions uses no FKs to
+		// other domain tables).
+		Version: 54,
+		Name:    "muster-agent-tokens",
+		Stmts: []string{
+			`CREATE TABLE IF NOT EXISTS agent_tokens (
+				token_hash   VARCHAR(64)  NOT NULL,
+				roster_id    VARCHAR(36)  NOT NULL,
+				issued_at    DATETIME(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+				expires_at   DATETIME(6)  DEFAULT NULL,
+				revoked_at   DATETIME(6)  DEFAULT NULL,
+				last_used_at DATETIME(6)  DEFAULT NULL,
+				PRIMARY KEY (token_hash),
+				INDEX idx_tokens_roster (roster_id)
+			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+		},
+	},
+	{
+		// agent-health-gauge: per-agent health snapshot table owned by the
+		// agenthealth concern (P2). Logically separate from the roster/session
+		// tables (BOUNDARIES.md R2) but in the same MySQL instance (composed
+		// mode). PK is (host, session_id, agent_name) — the collector's natural
+		// key, avoiding a roster_resolveId round trip on every write. roster_id
+		// is a cached FK for cross-concern joins. Upsert (last-write-wins)
+		// semantics, not append-only.
+		Version: 55,
+		Name:    "agent-health-gauge",
+		Stmts: []string{
+			`CREATE TABLE IF NOT EXISTS agent_health_gauge (
+				host                    VARCHAR(128) NOT NULL,
+				session_id              VARCHAR(64)  NOT NULL,
+				agent_name              VARCHAR(64)  NOT NULL DEFAULT '',
+				roster_id               VARCHAR(36)  DEFAULT NULL,
+				runtime                 VARCHAR(16)  NOT NULL DEFAULT 'claude_code',
+				model                   VARCHAR(128) NOT NULL DEFAULT '',
+				long_context_active     TINYINT(1)   NOT NULL DEFAULT 0,
+				context_window_tokens   BIGINT       NOT NULL DEFAULT 0,
+				context_tokens_used     BIGINT       NOT NULL DEFAULT 0,
+				context_tokens_free     BIGINT       NOT NULL DEFAULT 0,
+				context_fill_pct        DOUBLE       NOT NULL DEFAULT 0,
+				context_reset_suspected TINYINT(1)   NOT NULL DEFAULT 0,
+				composition_json        LONGTEXT     DEFAULT NULL,
+				tokens_in_total         BIGINT       NOT NULL DEFAULT 0,
+				tokens_out_total        BIGINT       NOT NULL DEFAULT 0,
+				tool_call_counts_json   LONGTEXT     DEFAULT NULL,
+				last_activity_ts        DATETIME(6)  DEFAULT NULL,
+				last_activity_tool      VARCHAR(128) NOT NULL DEFAULT '',
+				last_activity_display   VARCHAR(512) NOT NULL DEFAULT '',
+				pressure_level          VARCHAR(16)  NOT NULL DEFAULT 'ok',
+				pressure_level_since    DATETIME(6)  DEFAULT NULL,
+				collector_status        VARCHAR(16)  NOT NULL DEFAULT 'fresh',
+				updated_at              DATETIME(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+				fidelity_notes          LONGTEXT     DEFAULT NULL,
+				PRIMARY KEY (host, session_id, agent_name),
+				KEY idx_gauge_roster (roster_id),
+				KEY idx_gauge_updated (updated_at)
+			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+		},
+	},
+	{
+		// context_source distinguishes an authoritative statusLine-reported
+		// context window (POST /context, exact — Claude Code's own resolved
+		// context_window_size, plan/entitlement-aware) from health-collector's
+		// own model-name heuristic (the "[1m]" suffix table, which the
+		// context-window-detection research confirmed is frequently wrong).
+		// health-collector defers to a fresh 'statusline' row instead of
+		// recomputing the heuristic over it.
+		Version: 56,
+		Name:    "gauge-context-source",
+		Stmts: []string{
+			`ALTER TABLE agent_health_gauge
+				ADD COLUMN context_source VARCHAR(16) NOT NULL DEFAULT 'heuristic'`,
+		},
+	},
+	{
+		// session_cost_usd carries statusLine's cost.total_cost_usd (POST
+		// /context), the same session-wide dollar figure Claude Code already
+		// shows on-screen. Only ever set by a main-statusLine tick (the
+		// lead's own agent_name="" row) — subagentStatusLine's per-task
+		// payload has no per-task cost field, so teammate rows keep the
+		// column at its default 0.
+		Version: 57,
+		Name:    "gauge-session-cost",
+		Stmts: []string{
+			`ALTER TABLE agent_health_gauge
+				ADD COLUMN session_cost_usd DOUBLE NOT NULL DEFAULT 0`,
+		},
+	},
+	{
+		// tool_calls_total is a materialized scalar sum of the tool
+		// counts already carried (unstructured) in tool_call_counts_json
+		// -- health-collector now also sources it from Prometheus's
+		// teamster_tool_calls_total counter, letting the health MCP list
+		// view and ctop's T column read it without a JSON-parse per row.
+		Version: 58,
+		Name:    "gauge-tool-calls-total",
+		Stmts: []string{
+			`ALTER TABLE agent_health_gauge
+				ADD COLUMN tool_calls_total BIGINT NOT NULL DEFAULT 0`,
+		},
+	},
+	{
+		// statusline_json holds statusLine fields that don't warrant their
+		// own column (cache_read/creation_input_tokens, output_tokens from
+		// the main statusLine; status from subagentStatusLine tasks) — a
+		// pre-encoded JSON object string, rendered by dashboards when
+		// present (same pattern as composition_json/tool_call_counts_json).
+		Version: 59,
+		Name:    "gauge-statusline-json",
+		Stmts: []string{
+			`ALTER TABLE agent_health_gauge
+				ADD COLUMN statusline_json LONGTEXT DEFAULT NULL`,
+		},
+	},
+	{
+		Version: 60,
+		Name:    "gauge-context-reported-at",
+		Stmts: []string{
+			`ALTER TABLE agent_health_gauge
+				ADD COLUMN context_reported_at DATETIME(6) DEFAULT NULL`,
+		},
+	},
+	{
+		// session_total_cost_usd is the full session's spend — SUM(cost_usd)
+		// across every agent_name in token_ledger for the session, including
+		// agents already swept out of agent_health_gauge by SweepOffline's 2h
+		// idle cutoff. Only ever set on the lead's row (agent_name=""), since
+		// health-collector computes it once per session per tick rather than
+		// once per teammate. Unlike session_cost_usd (per-agent, can only grow
+		// while that agent is still polled), this is durable: token_ledger
+		// rows are never deleted, so it never drops even after a teammate's
+		// gauge row ages out.
+		Version: 61,
+		Name:    "gauge-session-total-cost",
+		Stmts: []string{
+			`ALTER TABLE agent_health_gauge
+				ADD COLUMN session_total_cost_usd DOUBLE NOT NULL DEFAULT 0`,
+		},
+	},
+	{
+		// job_heartbeats stamps a job's last-completed-run time unconditionally,
+		// independent of whatever else that run did or didn't write elsewhere.
+		// First consumer: the "Classify Freshness" dashboard panel (bug4), which
+		// previously measured time since the last phase_source='classifier'
+		// write on wms_intervals and false-alarmed on the majority of passes
+		// that legitimately have nothing to phase (the no-signal path only
+		// stamps phase_source='').
+		Version: 62,
+		Name:    "job-heartbeats",
+		Stmts: []string{
+			`CREATE TABLE IF NOT EXISTS job_heartbeats (
+				job_name    VARCHAR(64) NOT NULL,
+				last_run_at DATETIME(6) NOT NULL,
+				PRIMARY KEY (job_name)
+			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+		},
+	},
 }
 
 // mergeProjectToProduct renames `project` tag rows to `product`, handling the

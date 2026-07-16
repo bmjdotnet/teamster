@@ -17,7 +17,7 @@ func TestMergeSettingsPerms(t *testing.T) {
 	extraVars := map[string]string{"TEAMSTER_STORE_DSN": fakeDSN}
 	merge := func() {
 		t.Helper()
-		if err := mergeSettings(path, "/opt/teamster/bin/teamster",
+		if err := mergeSettings(path, "/opt/teamster/bin/teamster", "/opt/teamster/lib/scripts/teamster-statusline.sh",
 			"http://localhost:9125/event", dir+"/var", 9125,
 			extraVars, domainConfig{}, modeConfig{}, portConfig{}); err != nil {
 			t.Fatalf("mergeSettings: %v", err)

@@ -84,18 +84,53 @@ Generate a **concise, punchy team name** from the focus slug:
 - Avoid generic names (`teamster`, `team`, `dev`, `build`) — they collide.
 - Avoid the project's own name as the bare team name.
 
+**Cross-session reuse is fine.** If an existing `team` tag value fits the
+work (check `wms_listTags(tagKey="team")`), reuse it — two sessions sharing
+a team name signals they're part of the same effort. Don't force uniqueness
+when continuity is the right signal.
+
 Record this name as the `team` tag value for WMS attribution. The session's
 team is implicit — no creation step needed. Use this name when tagging the
 strategic Outcome (Step 6d) with `team:<name>`.
 
+## Step 2.1 — Register the team name
+
+Call `registerPeer` to write the team name into the operational tables so
+it is visible to health dashboards and scopes roster/health queries to
+team members.
+
+**You MUST pass `session_id`.**  hookd auto-registers a roster entry for
+your session on the first hook event (before this skill runs). When you
+pass `session_id`, `registerPeer` finds that existing entry and updates its
+`team_name` in place — no duplicate, no orphan. Without `session_id`, it
+creates a second unbound entry that ctop and health never see.
+
+Extract your session_id from the scratchpad path in your system prompt
+(the UUID segment, e.g. `.../6ebee3a6-.../scratchpad` → `6ebee3a6-...`).
+
+```
+registerPeer(
+  agent_name: "",
+  runtime: "claude_code",
+  relationship: "lead",
+  team_name: "<team-name>",
+  session_id: "<your session UUID>"
+)
+```
+
+This is NOT the same as the `team` tag on the Outcome (Step 6d) — that is
+WMS-domain work attribution. This is operational identity: it makes the
+team name visible in ctop, the health API, and roster scoping.
+
 ## Step 3 — Read the protocol
 
-Before loading tools or creating anything, read these two files now (use the
+Before loading tools or creating anything, read these three files now (use the
 Read tool) — they define how you operate as team lead for the rest of this
 session:
 
 - ${CLAUDE_SKILL_DIR}/references/eight-rules.md
 - ${CLAUDE_SKILL_DIR}/references/field-guide.md
+- ${CLAUDE_SKILL_DIR}/references/muster-guide.md
 
 ## Step 4 — Load WMS tools
 

@@ -206,6 +206,25 @@ func (t *SessionTracker) CloseSession(sessionID string) []SessionKey {
 	return affected
 }
 
+// CloseAgent marks a single (sessionID, agentName) pair as stopped and returns
+// its key if found, or nil if the pair was not tracked. Use this for a
+// teammate's Stop event, where other agents sharing sessionID are still
+// active and must not be marked stopped alongside it.
+func (t *SessionTracker) CloseAgent(sessionID, agentName string) []SessionKey {
+	now := time.Now()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	key := SessionKey{SessionID: sessionID, AgentName: agentName}
+	s, ok := t.sessions[key]
+	if !ok {
+		return nil
+	}
+	s.Status = SessionStatusStopped
+	s.LastSeen = now
+	t.sessions[key] = s
+	return []SessionKey{key}
+}
+
 // Snapshot returns a value-copy of the current map for scrape-safe iteration.
 func (t *SessionTracker) Snapshot() []sessionSnapshot {
 	t.mu.RLock()

@@ -4,14 +4,29 @@ package pricing
 import (
 	"log/slog"
 	"strings"
+	"sync"
 )
 
-// ModelPricing holds per-token USD rates for a model.
+// fallbackWarned dedups the same-class-fallback warning so a long-running
+// poller (token-scraper) logs it once per model instead of once per record —
+// previously this line alone grew token-scraper's log file to 6.5GB.
+var fallbackWarned sync.Map // key: model string
+
+// ModelPricing holds per-token USD rates for a model. Anthropic bills cache
+// writes at two tiers depending on the cache TTL: a 5-minute tier (1.25x the
+// base input rate) and a 1-hour tier (2x the base input rate) — see
+// https://platform.claude.com/docs/en/docs/about-claude/pricing#prompt-caching
+// (fetched 2026-07-13). CacheWrite5m/CacheWrite1h are separate fields, not a
+// multiplier applied to Input, because the multiplier isn't guaranteed
+// constant across model generations and a future rate table (rate-store
+// externalization) needs independently editable columns. OpenAI publishes no
+// cache-write tier at all, so both fields are 0 for OpenAI entries.
 type ModelPricing struct {
-	Input      float64
-	Output     float64
-	CacheRead  float64
-	CacheWrite float64
+	Input        float64
+	Output       float64
+	CacheRead    float64
+	CacheWrite5m float64
+	CacheWrite1h float64
 }
 
 // Known maps model ID to USD-per-token rates. Keys are dateless model families;
@@ -21,51 +36,63 @@ type ModelPricing struct {
 // sonnet-4-7, …) auto-price at their class's last-known rate until real pricing
 // lands — they are NOT added here.
 var Known = map[string]ModelPricing{
-	"claude-opus-4-5": {Input: 0.000005, Output: 0.000025, CacheRead: 0.0000005, CacheWrite: 0.00000625},
-	"claude-opus-4-6": {Input: 0.000005, Output: 0.000025, CacheRead: 0.0000005, CacheWrite: 0.00000625},
-	"claude-opus-4-7": {Input: 0.000005, Output: 0.000025, CacheRead: 0.0000005, CacheWrite: 0.00000625},
+	"claude-opus-4-5": {Input: 0.000005, Output: 0.000025, CacheRead: 0.0000005, CacheWrite5m: 0.00000625, CacheWrite1h: 0.00001},
+	"claude-opus-4-6": {Input: 0.000005, Output: 0.000025, CacheRead: 0.0000005, CacheWrite5m: 0.00000625, CacheWrite1h: 0.00001},
+	"claude-opus-4-7": {Input: 0.000005, Output: 0.000025, CacheRead: 0.0000005, CacheWrite5m: 0.00000625, CacheWrite1h: 0.00001},
 	// All opus 4.5+ models share the $5/$25 per Mtok rate; only opus 4.0/4.1 were
 	// $15/$75. Explicit entries for each known model avoid the classRates fallback
 	// (which logs a warning for unrecognized models). Rates verified empirically
 	// from COMPLETED anchor session a856fa7e (OTel $154.69) using DEDUPED token
 	// counts (one row per message.id|requestId) — raw token_ledger sums were ~2.6x
 	// inflated by per-content-block duplication.
-	"claude-opus-4-8":   {Input: 0.000005, Output: 0.000025, CacheRead: 0.0000005, CacheWrite: 0.00000625},
-	"claude-sonnet-4-5": {Input: 0.000003, Output: 0.000015, CacheRead: 0.0000003, CacheWrite: 0.00000375},
-	"claude-sonnet-4-6": {Input: 0.000003, Output: 0.000015, CacheRead: 0.0000003, CacheWrite: 0.00000375},
-	"claude-haiku-4-5":  {Input: 0.0000008, Output: 0.000004, CacheRead: 0.00000008, CacheWrite: 0.000001},
-	// fable-5 prices at 2x the opus-4-8 tier (operator-confirmed 2x opus ratio):
-	// $10 input / $50 output / $1.00 cache-read / $12.50 cache-write per Mtok
-	// (same standard ratio).
-	// Derived the same way. On the COMPLETED anchor a856fa7e, reconstructing cost
-	// from the DEDUPED per-model token vectors at these rates gives $152.43 vs OTel
-	// $154.69 (-1.5%; independently reproduced across all 110 transcript files).
-	// The live, still-accruing fable-dominated session d70a6bf1 is a secondary,
-	// MOVING check (do not anchor to a fixed dollar figure for it — its OTel cost
-	// grows; it was ~$85 and climbing at last read, ~-5% vs reconstruction because
-	// its on-disk transcript lags the live metric). The estimate is sensitive to
-	// the cache-read rate (cache-read dominates token volume), so treat it as a
-	// best estimate, not list pricing. Without this entry fable priced at $0 (no
-	// class token "fable" existed), valuing all production fable output at $0.
-	"claude-fable-5": {Input: 0.00001, Output: 0.00005, CacheRead: 0.000001, CacheWrite: 0.0000125},
+	"claude-opus-4-8":   {Input: 0.000005, Output: 0.000025, CacheRead: 0.0000005, CacheWrite5m: 0.00000625, CacheWrite1h: 0.00001},
+	"claude-sonnet-4-5": {Input: 0.000003, Output: 0.000015, CacheRead: 0.0000003, CacheWrite5m: 0.00000375, CacheWrite1h: 0.000006},
+	"claude-sonnet-4-6": {Input: 0.000003, Output: 0.000015, CacheRead: 0.0000003, CacheWrite5m: 0.00000375, CacheWrite1h: 0.000006},
+	// claude-sonnet-5: the official pricing page (platform.claude.com/docs/en/docs/
+	// about-claude/pricing, fetched 2026-07-13) lists an INTRODUCTORY rate of
+	// $2/$10 (input/output) through 2026-08-31, reverting to $3/$15 (same as
+	// sonnet-4-5/4-6) from 2026-09-01. Deliberately using the $3/$15 STANDARD
+	// rate here, not the page's current introductory rate: empirically verified
+	// against this account's actual OTel-billed cost (COMPLETED anchor session
+	// e475e409, sonnet-5 $357.41 reconstructed vs $357.41 OTel — exact match at
+	// $3/$15) AND independently confirmed live on 2026-07-13 (session
+	// 639afc8d..., switching to the $2/$10 intro rate would have DECREASED the
+	// reconstructed total, moving it further from the live statusLine figure,
+	// not closer). This account is not receiving the introductory discount —
+	// whether that's an eligibility/tier reason or something else, the
+	// $3/$15/$0.30/$3.75-5m/$6.00-1h rate is what's actually being billed.
+	// Promoted from the classRates same-class fallback (which coincidentally
+	// carried the same numeric rate) to an exact entry so it stops logging the
+	// per-call fallback WARN.
+	"claude-sonnet-5":  {Input: 0.000003, Output: 0.000015, CacheRead: 0.0000003, CacheWrite5m: 0.00000375, CacheWrite1h: 0.000006},
+	"claude-haiku-4-5": {Input: 0.0000008, Output: 0.000004, CacheRead: 0.00000008, CacheWrite5m: 0.000001, CacheWrite1h: 0.0000016},
+	// fable-5: verified exact against this account's actual OTel-billed cost
+	// (COMPLETED anchor session e475e409, fable-5 $364.97 reconstructed vs
+	// $365.02 OTel) — matches the official pricing page (platform.claude.com/
+	// docs/en/docs/about-claude/pricing, fetched 2026-07-13) exactly: $10 input /
+	// $50 output / $1.00 cache-read / $12.50 5m cache-write / $20 1h
+	// cache-write per Mtok. No longer a best-estimate — see EVIDENCE.md §2 in
+	// the pricing-externalization kit for the full reconciliation.
+	"claude-fable-5": {Input: 0.00001, Output: 0.00005, CacheRead: 0.000001, CacheWrite5m: 0.0000125, CacheWrite1h: 0.00002},
 
 	// OpenAI / Codex models. Rates verified against the official pricing page
 	// (https://developers.openai.com/api/docs/pricing, fetched 2026-07-07) —
 	// not derived from memory or third-party aggregators, several of which
 	// disagreed with each other and with the official page when checked.
 	// OpenAI publishes no separate cache-write tier for any of these models
-	// (unlike Anthropic's four-bucket cache-read/cache-write split), so
-	// CacheWrite is 0 for all entries here — see the token-type mapping note
-	// below Known for how callers (the Codex ledger tailer, WP3) should map
-	// Codex's token_type enum onto these four ComputeCost buckets.
+	// (unlike Anthropic's five-bucket input/output/cache-read/cache-write-5m/
+	// cache-write-1h split), so both CacheWrite fields are 0 for all entries
+	// here — see the token-type mapping note below Known for how callers (the
+	// Codex ledger tailer, WP3) should map Codex's token_type enum onto these
+	// ComputeCost buckets.
 	//
 	// gpt-5.5 is the CLI's actual configured default in this environment
 	// (~/.codex/config.toml: model = "gpt-5.5") as of Codex CLI 0.137.0.
-	"gpt-5.5":      {Input: 0.000005, Output: 0.00003, CacheRead: 0.0000005, CacheWrite: 0},
-	"gpt-5.5-pro":  {Input: 0.00003, Output: 0.00018, CacheRead: 0, CacheWrite: 0}, // no cached-input tier published for -pro
-	"gpt-5.4":      {Input: 0.0000025, Output: 0.000015, CacheRead: 0.00000025, CacheWrite: 0},
-	"gpt-5.4-mini": {Input: 0.00000075, Output: 0.0000045, CacheRead: 0.000000075, CacheWrite: 0},
-	"gpt-5.4-nano": {Input: 0.0000002, Output: 0.00000125, CacheRead: 0.00000002, CacheWrite: 0},
+	"gpt-5.5":      {Input: 0.000005, Output: 0.00003, CacheRead: 0.0000005, CacheWrite5m: 0, CacheWrite1h: 0},
+	"gpt-5.5-pro":  {Input: 0.00003, Output: 0.00018, CacheRead: 0, CacheWrite5m: 0, CacheWrite1h: 0}, // no cached-input tier published for -pro
+	"gpt-5.4":      {Input: 0.0000025, Output: 0.000015, CacheRead: 0.00000025, CacheWrite5m: 0, CacheWrite1h: 0},
+	"gpt-5.4-mini": {Input: 0.00000075, Output: 0.0000045, CacheRead: 0.000000075, CacheWrite5m: 0, CacheWrite1h: 0},
+	"gpt-5.4-nano": {Input: 0.0000002, Output: 0.00000125, CacheRead: 0.00000002, CacheWrite5m: 0, CacheWrite1h: 0},
 	// gpt-5.3-codex is OpenAI's current Codex-specific fine-tune (listed under
 	// "Specialized Models" on the pricing page). Codex CLI 0.137.0's binary
 	// also references gpt-5.1-codex/gpt-5.2-codex as selectable model IDs, but
@@ -73,7 +100,7 @@ var Known = map[string]ModelPricing{
 	// public pricing table) — deliberately NOT given a fabricated entry here;
 	// they fall through to the logged same-$0 warning path in priceFor below
 	// rather than guess.
-	"gpt-5.3-codex": {Input: 0.00000175, Output: 0.000014, CacheRead: 0.000000175, CacheWrite: 0},
+	"gpt-5.3-codex": {Input: 0.00000175, Output: 0.000014, CacheRead: 0.000000175, CacheWrite5m: 0, CacheWrite1h: 0},
 	// o3 and o4-mini (both real selectable Codex model IDs — o3 appears
 	// verbatim in `codex --help`'s own usage example, o4-mini in the CLI
 	// binary's strings) are deliberately NOT given entries: neither appears as
@@ -97,17 +124,17 @@ var Known = map[string]ModelPricing{
 //   cacheReadTokens  -> cached_input_tokens (billed at the cache-read rate)
 //   outputTokens     -> output_tokens AS-IS (reasoning_output_tokens is
 //                        already included in this total; do NOT add it again)
-//   cacheWriteTokens -> 0 always (no cache-write token type exists in Codex's
+//   cacheWrite5m/1h  -> 0 always (no cache-write token type exists in Codex's
 //                        enum, and OpenAI publishes no cache-write tier)
 
 // classRates is the most-recent known rate per model class, used by the
 // same-class fallback when a model matches no exact or prefix key. Kept in sync
 // with Known: each class's latest published tier.
 var classRates = map[string]ModelPricing{
-	"opus":   {Input: 0.000005, Output: 0.000025, CacheRead: 0.0000005, CacheWrite: 0.00000625},
-	"sonnet": {Input: 0.000003, Output: 0.000015, CacheRead: 0.0000003, CacheWrite: 0.00000375},
-	"haiku":  {Input: 0.0000008, Output: 0.000004, CacheRead: 0.00000008, CacheWrite: 0.000001},
-	"fable":  {Input: 0.00001, Output: 0.00005, CacheRead: 0.000001, CacheWrite: 0.0000125},
+	"opus":   {Input: 0.000005, Output: 0.000025, CacheRead: 0.0000005, CacheWrite5m: 0.00000625, CacheWrite1h: 0.00001},
+	"sonnet": {Input: 0.000003, Output: 0.000015, CacheRead: 0.0000003, CacheWrite5m: 0.00000375, CacheWrite1h: 0.000006},
+	"haiku":  {Input: 0.0000008, Output: 0.000004, CacheRead: 0.00000008, CacheWrite5m: 0.000001, CacheWrite1h: 0.0000016},
+	"fable":  {Input: 0.00001, Output: 0.00005, CacheRead: 0.000001, CacheWrite5m: 0.0000125, CacheWrite1h: 0.00002},
 }
 
 // classFor derives the model class (opus / sonnet / haiku) from a model string.
@@ -143,8 +170,10 @@ func priceFor(model string) (ModelPricing, bool) {
 		return bestP, true
 	}
 	if class := classFor(model); class != "" {
-		slog.Warn("priced model via same-class fallback (estimate, not authoritative)",
-			"model", model, "class", class)
+		if _, alreadyWarned := fallbackWarned.LoadOrStore(model, true); !alreadyWarned {
+			slog.Warn("priced model via same-class fallback (estimate, not authoritative)",
+				"model", model, "class", class)
+		}
 		return classRates[class], true
 	}
 	// No exact/prefix/class match: this model has zero pricing coverage and
@@ -158,8 +187,14 @@ func priceFor(model string) (ModelPricing, bool) {
 }
 
 // ComputeCost returns the total USD cost for the given token counts.
+// cacheWrite5mTokens/cacheWrite1hTokens are the two cache-write TTL buckets
+// (see ModelPricing) — a caller with only a single lumped cache-write figure
+// (no TTL split available) should pass it as cacheWrite5mTokens and 0 for
+// cacheWrite1hTokens, matching the pre-split behavior (an undercount for any
+// 1h-tier tokens misclassified this way, never an overcount) and should not
+// exist in practice: every current call site has the real split in scope.
 // Returns 0 for unknown models.
-func ComputeCost(model string, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens int64) float64 {
+func ComputeCost(model string, inputTokens, outputTokens, cacheReadTokens, cacheWrite5mTokens, cacheWrite1hTokens int64) float64 {
 	p, ok := priceFor(model)
 	if !ok {
 		return 0
@@ -167,5 +202,6 @@ func ComputeCost(model string, inputTokens, outputTokens, cacheReadTokens, cache
 	return float64(inputTokens)*p.Input +
 		float64(outputTokens)*p.Output +
 		float64(cacheReadTokens)*p.CacheRead +
-		float64(cacheWriteTokens)*p.CacheWrite
+		float64(cacheWrite5mTokens)*p.CacheWrite5m +
+		float64(cacheWrite1hTokens)*p.CacheWrite1h
 }

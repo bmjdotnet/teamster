@@ -60,11 +60,14 @@ func TestConformanceDim1_Outcome(t *testing.T) {
 		if err := s.UpdateOutcomeFocus(ctx, "dim1-o1", "revised focus"); err != nil {
 			t.Fatalf("UpdateOutcomeFocus: %v", err)
 		}
+		if err := s.UpdateOutcomeTitle(ctx, "dim1-o1", "revised title"); err != nil {
+			t.Fatalf("UpdateOutcomeTitle: %v", err)
+		}
 		got, err = s.GetOutcome(ctx, "dim1-o1")
 		if err != nil {
 			t.Fatalf("GetOutcome after update: %v", err)
 		}
-		if got.Status != wms.StatusActive || got.Focus != "revised focus" {
+		if got.Status != wms.StatusActive || got.Focus != "revised focus" || got.Title != "revised title" {
 			t.Fatalf("update did not persist: %+v", got)
 		}
 
@@ -119,11 +122,14 @@ func TestConformanceDim1_WorkUnit(t *testing.T) {
 		if err := s.UpdateWorkUnitFocus(ctx, "dim1-wu1", "revised"); err != nil {
 			t.Fatalf("UpdateWorkUnitFocus: %v", err)
 		}
+		if err := s.UpdateWorkUnitTitle(ctx, "dim1-wu1", "revised title"); err != nil {
+			t.Fatalf("UpdateWorkUnitTitle: %v", err)
+		}
 		got, err = s.GetWorkUnit(ctx, "dim1-wu1")
 		if err != nil {
 			t.Fatalf("GetWorkUnit after update: %v", err)
 		}
-		if got.AgentID != "@dim1-agent" || got.Status != wms.StatusActive || got.Focus != "revised" {
+		if got.AgentID != "@dim1-agent" || got.Status != wms.StatusActive || got.Focus != "revised" || got.Title != "revised title" {
 			t.Fatalf("update did not persist: %+v", got)
 		}
 
