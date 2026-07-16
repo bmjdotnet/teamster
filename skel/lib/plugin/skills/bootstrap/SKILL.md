@@ -84,6 +84,11 @@ Generate a **concise, punchy team name** from the focus slug:
 - Avoid generic names (`teamster`, `team`, `dev`, `build`) — they collide.
 - Avoid the project's own name as the bare team name.
 
+**Cross-session reuse is fine.** If an existing `team` tag value fits the
+work (check `wms_listTags(tagKey="team")`), reuse it — two sessions sharing
+a team name signals they're part of the same effort. Don't force uniqueness
+when continuity is the right signal.
+
 Record this name as the `team` tag value for WMS attribution. The session's
 team is implicit — no creation step needed. Use this name when tagging the
 strategic Outcome (Step 6d) with `team:<name>`.
@@ -92,7 +97,16 @@ strategic Outcome (Step 6d) with `team:<name>`.
 
 Call `registerPeer` to write the team name into the operational tables so
 it is visible to health dashboards and scopes roster/health queries to
-team members:
+team members.
+
+**You MUST pass `session_id`.**  hookd auto-registers a roster entry for
+your session on the first hook event (before this skill runs). When you
+pass `session_id`, `registerPeer` finds that existing entry and updates its
+`team_name` in place — no duplicate, no orphan. Without `session_id`, it
+creates a second unbound entry that ctop and health never see.
+
+Extract your session_id from the scratchpad path in your system prompt
+(the UUID segment, e.g. `.../6ebee3a6-.../scratchpad` → `6ebee3a6-...`).
 
 ```
 registerPeer(
@@ -100,7 +114,7 @@ registerPeer(
   runtime: "claude_code",
   relationship: "lead",
   team_name: "<team-name>",
-  session_id: "<session_id from the conversation>"
+  session_id: "<your session UUID>"
 )
 ```
 

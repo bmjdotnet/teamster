@@ -1,17 +1,18 @@
 ---
 name: solo
-description: Stand up a Teamster SOLO session — one primary agent, no team. Creates the strategic WMS Outcome directly, runs the context-tag interview with the operator, sets focus, then proceeds with work inline. Use when TEAMSTER_SOLO=1 and the work fits a single agent. For multi-agent work use /teamster:start instead.
+description: Stand up a Teamster SOLO session — one primary agent, declares a team name for identity. Creates the strategic WMS Outcome directly, runs the context-tag interview with the operator, sets focus, then proceeds with work inline. Use when TEAMSTER_SOLO=1 and the work fits a single agent. For multi-agent work use /teamster:start instead.
 disable-model-invocation: true
 argument-hint: "[focus slug — what this session is working on]"
 ---
 
 # Start a Teamster Solo Session
 
-This is the **teamless** counterpart to team mode. Run it when this project is
-configured for solo operation (`TEAMSTER_SOLO=1` in the project's
+This is the **single-agent** counterpart to team mode. Run it when this project
+is configured for solo operation (`TEAMSTER_SOLO=1` in the project's
 `.claude/settings.json` env) and the work fits **one primary agent**. There is
-no team, no dispatch routing. You — the one primary agent — do the WMS
-bookkeeping inline, then proceed with the work directly.
+no dispatch routing, but you still declare a team name for identity — "solo"
+means one agent, not anonymous. You do the WMS bookkeeping inline, then proceed
+with the work directly.
 
 If the work genuinely needs parallel agents working different files at once,
 stop and use `/teamster:start` instead — that stands up a real team. Solo mode
@@ -51,7 +52,60 @@ Outcome's id and frames the context-tag interview.
     conversation, recent files, and the working directory (2–3 max). The
     operator can always pick "Other" and type their own.
 
-There is no team name to generate — solo sessions have no team.
+## Step 1.1 — Generate a team name
+
+Even in solo mode, every session declares a **team name** — a creative,
+purpose-aligned identifier that becomes the canonical session identity in
+ctop, the health dashboard, and Grafana. "Solo" means one agent, not
+anonymous.
+
+Generate a **concise, punchy team name** from the focus slug:
+
+- 1-3 words, lowercase, hyphenated, <=24 chars
+- Memorable and on-brand for the objective — a portmanteau of the slug's
+  key nouns, or something creative/amusing that evokes the work. Examples:
+  - focus "fix the wms dashboard" -> `wms-wrangler` or `dashfix`
+  - focus "add prometheus exporter" -> `promscout` or `metricsmith`
+  - focus "refactor the hook client" -> `hookwright` or `fishhook`
+- Avoid generic names (`teamster`, `team`, `dev`, `build`) — they collide.
+- Avoid the project's own name as the bare team name.
+
+**Cross-session reuse is fine.** If an existing `team` tag value fits the
+work (check `wms_listTags(tagKey="team")`), reuse it — two sessions sharing
+a team name signals they're part of the same effort. Don't force uniqueness
+when continuity is the right signal.
+
+Record this name — you'll use it in Step 1.2 and when tagging the Outcome
+(Step 4).
+
+## Step 1.2 — Register the team name
+
+Call `registerPeer` to write the team name into the operational tables so
+it is visible to ctop, the health API, and roster scoping.
+
+**You MUST pass `session_id`.**  hookd auto-registers a roster entry for
+your session on the first hook event (before this skill runs). When you
+pass `session_id`, `registerPeer` finds that existing entry and updates its
+`team_name` in place — no duplicate, no orphan. Without `session_id`, it
+creates a second unbound entry that ctop and health never see.
+
+Extract your session_id from the scratchpad path in your system prompt
+(the UUID segment, e.g. `.../6ebee3a6-.../scratchpad` → `6ebee3a6-...`).
+
+```
+ToolSearch("select:mcp__roster__registerPeer")
+registerPeer(
+  agent_name: "",
+  runtime: "claude_code",
+  relationship: "lead",
+  team_name: "<team-name>",
+  session_id: "<your session UUID>"
+)
+```
+
+This makes the session's team identity visible in the operational layer —
+separate from the `team` WMS tag (Step 4), which is for cost attribution.
+Both must be set.
 
 ### Verify referenced artifacts before proceeding
 
@@ -213,6 +267,11 @@ tags yourself** with `mcp__wms__wms_tagEntity` on the strategic Outcome (source
   with `mcp__wms__wms_defineTag(tagKey, category, cardinality, values,
   description)` — pick `single` or `multi` — before applying it.
 
+**Apply the team name tag.** After applying the operator-confirmed tags, also
+apply `team:<team-name>` on the Outcome (the name you generated in Step 1.1).
+This is the WMS-layer counterpart to the `registerPeer` call in Step 1.2 — both
+must be set for the team identity to appear consistently in ctop AND Grafana.
+
 ### Per-entity tagging: Outcome vs. WorkUnit
 
 Context tags on the Outcome are inherited down the DAG automatically — you do
@@ -351,11 +410,14 @@ plan: run this ritual yourself so the engine has nothing to flag.
 
 ## What solo mode does NOT do
 
-- No team ceremony — the implicit team handles itself.
 - No dispatch routing or affinity — there are no peers to route to.
 - No "keep teammates alive" discipline — ephemeral subagents are meant to exit.
 - It does not replace team mode. If the work needs durable parallel agents on
   different files, use `/teamster:start` and stand up a real team.
+
+Solo mode still declares a team name (Steps 1.1–1.2) — "solo" means one
+agent, not anonymous. The team name is the canonical session identifier in
+ctop, health dashboards, and Grafana.
 
 ## Reference
 
