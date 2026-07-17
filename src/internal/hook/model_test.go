@@ -35,6 +35,108 @@ func TestGetModelFromTranscript_ReflectsModelSwitch(t *testing.T) {
 	}
 }
 
+func TestGetModelFromMetaSidecar(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "agent-a1.meta.json")
+	if err := os.WriteFile(p, []byte(`{"agentType":"general-purpose","model":"haiku"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := getModelFromMetaSidecar(p); got != "haiku" {
+		t.Fatalf("got %q, want haiku", got)
+	}
+}
+
+func TestGetModelFromMetaSidecar_MissingFile(t *testing.T) {
+	if got := getModelFromMetaSidecar("/nonexistent/agent-a1.meta.json"); got != "" {
+		t.Fatalf("got %q, want empty string", got)
+	}
+}
+
+func TestGetModelFromMetaSidecar_MalformedJSON(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "agent-a1.meta.json")
+	if err := os.WriteFile(p, []byte(`not json`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := getModelFromMetaSidecar(p); got != "" {
+		t.Fatalf("got %q, want empty string", got)
+	}
+}
+
+// TestProcessEvent_SubagentStart_DerivesModelFromChildTranscript is the
+// regression test for the bug this WP fixes: event.AgentTranscriptPath is
+// left empty by Claude Code, so the child transcript model must be derived
+// from the parent's TranscriptPath + AgentID instead.
+func TestProcessEvent_SubagentStart_DerivesModelFromChildTranscript(t *testing.T) {
+	sessionDir := t.TempDir()
+	parentTranscript := filepath.Join(sessionDir, "session1.jsonl")
+	if err := os.WriteFile(parentTranscript, []byte(assistantLine("claude-opus-4-6[1m]")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	subagentsDir := filepath.Join(sessionDir, "session1", "subagents")
+	if err := os.MkdirAll(subagentsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	childTranscript := filepath.Join(subagentsDir, "agent-a1.jsonl")
+	if err := os.WriteFile(childTranscript, []byte(assistantLine("claude-sonnet-5")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	event := HookEvent{
+		HookEventName:  "SubagentStart",
+		SessionID:      "session1",
+		AgentID:        "a1",
+		TranscriptPath: parentTranscript,
+	}
+	rawData := map[string]interface{}{}
+	ProcessEvent(event, rawData, unreachableServerURL(t), t.TempDir(), false)
+
+	if got := rawData["_model"]; got != "claude-sonnet-5" {
+		t.Fatalf("_model = %v, want claude-sonnet-5 (child transcript model, not parent's)", got)
+	}
+}
+
+// TestProcessEvent_SubagentStart_FallsBackToMetaSidecar covers the case
+// where SubagentStart fires before the child has produced any assistant
+// turn — the .meta.json sidecar's launch-time model alias is used instead.
+func TestProcessEvent_SubagentStart_FallsBackToMetaSidecar(t *testing.T) {
+	sessionDir := t.TempDir()
+	parentTranscript := filepath.Join(sessionDir, "session1.jsonl")
+	if err := os.WriteFile(parentTranscript, []byte(assistantLine("claude-opus-4-6[1m]")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	subagentsDir := filepath.Join(sessionDir, "session1", "subagents")
+	if err := os.MkdirAll(subagentsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	metaPath := filepath.Join(subagentsDir, "agent-a1.meta.json")
+	if err := os.WriteFile(metaPath, []byte(`{"agentType":"general-purpose","model":"haiku"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// No agent-a1.jsonl written: the child transcript doesn't exist yet.
+
+	event := HookEvent{
+		HookEventName:  "SubagentStart",
+		SessionID:      "session1",
+		AgentID:        "a1",
+		TranscriptPath: parentTranscript,
+	}
+	rawData := map[string]interface{}{}
+	ProcessEvent(event, rawData, unreachableServerURL(t), t.TempDir(), false)
+
+	if got := rawData["_model"]; got != "haiku" {
+		t.Fatalf("_model = %v, want haiku (from meta sidecar fallback)", got)
+	}
+}
+
+// unreachableServerURL returns a URL ProcessEvent's postEvent will fail to
+// reach quickly (loopback, closed port) — tests only care about rawData
+// mutation, not the POST itself.
+func unreachableServerURL(t *testing.T) string {
+	t.Helper()
+	return "http://127.0.0.1:1/event"
+}
+
 func TestGetModelFromTranscript_MissingFile(t *testing.T) {
 	if got := getModelFromTranscript("/nonexistent/transcript.jsonl"); got != "" {
 		t.Fatalf("got %q, want empty string", got)

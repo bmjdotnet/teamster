@@ -269,6 +269,11 @@ func collectTick(ctx context.Context, st store.Store, gs gauge.GaugeStore, engin
 			if rid, err := st.ResolveRosterID(ctx, sk.SessionID, sk.AgentName); err == nil {
 				rosterIDs[k] = rid
 			}
+		} else if _, err := st.GetRosterEntry(ctx, rosterIDs[k]); err != nil {
+			// Cached roster_id no longer resolves (e.g. purged by SQL
+			// cleanup) — drop it so the next tick re-resolves via
+			// ResolveRosterID instead of joining against a dead row.
+			delete(rosterIDs, k)
 		}
 		if _, ok := teamNames[k]; !ok {
 			if rid, ok := rosterIDs[k]; ok && rid != "" {
@@ -463,8 +468,15 @@ func backfillModelFromSession(ctx context.Context, st sessionModelReader, gs gau
 }
 
 func discoverActiveSessions(ctx context.Context, rx store.RawExecutor) ([]store.SessionKey, error) {
+	// Include recently-closed sessions: short-lived sub-subagents can
+	// go active→closed between poll ticks (15s) and would never be
+	// discovered if we only looked at status='active'. A 5-minute
+	// grace window ensures they get at least one gauge write.
+	cutoff := time.Now().UTC().Add(-5 * time.Minute)
 	rows, err := rx.QueryRaw(ctx,
-		`SELECT DISTINCT session_id, agent_name FROM sessions WHERE status = 'active'`)
+		`SELECT DISTINCT session_id, agent_name FROM sessions
+		 WHERE status = 'active'
+		    OR (status = 'closed' AND last_seen > ?)`, cutoff)
 	if err != nil {
 		return nil, err
 	}

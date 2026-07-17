@@ -31,6 +31,13 @@ WRONG:  @builder, @tester, @reviewer (generic, interchangeable)
 RIGHT:  @store, @engine, @display, @hook-client (domain expertise)
 ```
 
+This applies to sub-subagents too: when a teammate spawns its own Agent-tool
+subagent for a bounded sub-task, use distinct `subagent_type` values when
+possible to give each child a unique identity in the fleet view's hierarchy.
+Note: CC currently blocks `name` from teammate-spawned agents; hookd
+auto-numbers same-type siblings (`@Explore`, `@Explore-2`, etc.) to ensure
+unique identities regardless.
+
 **III. Thou shalt route work by affinity.**
 
 Ask: "which agent already touched these files?" Send the task to that agent via

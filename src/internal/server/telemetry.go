@@ -19,6 +19,7 @@ type TelemetryRow struct {
 	MessageID        string  `json:"message_id"`
 	SessionID        string  `json:"session_id"`
 	AgentName        string  `json:"agent_name"`
+	AgentID          string  `json:"agent_id"`
 	Host             string  `json:"host"`
 	Username         string  `json:"username"`
 	Model            string  `json:"model"`
@@ -222,6 +223,17 @@ func (s *Server) insertTelemetryChunk(chunk []TelemetryRow) error {
 	rows := make([]store.TelemetryRow, 0, len(chunk))
 
 	for _, row := range chunk {
+		// agent_id (CC's per-instance identifier) resolves to the roster's
+		// numbered name (e.g. "@Explore-5") registered by hookd's
+		// SubagentStart handler — takes priority over the scraper's own
+		// sidecar-derived agent_name (e.g. "@Explore"), which doesn't know
+		// about sibling collisions the roster already resolved.
+		if row.AgentID != "" {
+			if resolved, err := s.obsStore.ResolveByAgentID(context.Background(), row.SessionID, row.AgentID); err == nil && resolved != "" {
+				row.AgentName = resolved
+			}
+		}
+
 		agentName := row.AgentName
 		if agentName == "" {
 			agentName = s.resolveAgentForTelemetry(row.SessionID)

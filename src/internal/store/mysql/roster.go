@@ -160,8 +160,8 @@ func (s *Store) UpsertRosterEntry(ctx context.Context, entry store.RosterEntry) 
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO agent_roster (
 			roster_id, session_id, agent_name, host, runtime, model,
-			relationship, team_name, bus_team, parent_ref, created_at, bound_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			relationship, team_name, bus_team, parent_ref, agent_id, created_at, bound_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON DUPLICATE KEY UPDATE
 			host = VALUES(host),
 			runtime = VALUES(runtime),
@@ -169,14 +169,33 @@ func (s *Store) UpsertRosterEntry(ctx context.Context, entry store.RosterEntry) 
 			relationship = VALUES(relationship),
 			team_name = COALESCE(NULLIF(VALUES(team_name), ''), team_name),
 			bus_team = VALUES(bus_team),
-			parent_ref = VALUES(parent_ref)`,
+			parent_ref = VALUES(parent_ref),
+			agent_id = COALESCE(NULLIF(VALUES(agent_id), ''), agent_id)`,
 		entry.RosterID, entry.SessionID, entry.AgentName, entry.Host,
 		entry.Runtime, entry.Model, entry.Relationship, entry.TeamName,
-		entry.BusTeam, entry.ParentRef, entry.CreatedAt.UTC(), nullableTime(entry.BoundAt))
+		entry.BusTeam, entry.ParentRef, entry.AgentID, entry.CreatedAt.UTC(), nullableTime(entry.BoundAt))
 	if err != nil {
 		return fmt.Errorf("UpsertRosterEntry: %w", err)
 	}
 	return nil
+}
+
+// ResolveByAgentID maps CC's per-instance agent_id (stable across turn-resumes,
+// the transcript filename identity) back to the roster's registered agent_name —
+// the join key that lets components which only see agent_id (token-scraper,
+// telemetry ingest) attribute spend to hookd's numbered name.
+func (s *Store) ResolveByAgentID(ctx context.Context, sessionID, agentID string) (string, error) {
+	var name string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT agent_name FROM agent_roster WHERE session_id = ? AND agent_id = ? LIMIT 1`,
+		sessionID, agentID).Scan(&name)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", store.NotFound("ResolveByAgentID", "roster", sessionID+"/"+agentID)
+		}
+		return "", fmt.Errorf("ResolveByAgentID: %w", err)
+	}
+	return name, nil
 }
 
 func (s *Store) CreateToken(ctx context.Context, token store.AgentToken) error {

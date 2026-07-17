@@ -155,8 +155,8 @@ func (s *Store) UpsertRosterEntry(ctx context.Context, entry store.RosterEntry) 
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO agent_roster (
 			roster_id, session_id, agent_name, host, runtime, model,
-			relationship, team_name, bus_team, parent_ref, created_at, bound_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			relationship, team_name, bus_team, parent_ref, agent_id, created_at, bound_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(session_id, agent_name) DO UPDATE SET
 			host = excluded.host,
 			runtime = excluded.runtime,
@@ -164,15 +164,32 @@ func (s *Store) UpsertRosterEntry(ctx context.Context, entry store.RosterEntry) 
 			relationship = excluded.relationship,
 			team_name = COALESCE(NULLIF(excluded.team_name, ''), team_name),
 			bus_team = excluded.bus_team,
-			parent_ref = excluded.parent_ref`,
+			parent_ref = excluded.parent_ref,
+			agent_id = COALESCE(NULLIF(excluded.agent_id, ''), agent_id)`,
 		entry.RosterID, nullStr(entry.SessionID), entry.AgentName, entry.Host,
 		entry.Runtime, entry.Model, entry.Relationship, entry.TeamName,
-		entry.BusTeam, nullStr(entry.ParentRef), entry.CreatedAt.UTC(),
+		entry.BusTeam, nullStr(entry.ParentRef), entry.AgentID, entry.CreatedAt.UTC(),
 		nullTimePtr(entry.BoundAt))
 	if err != nil {
 		return fmt.Errorf("UpsertRosterEntry: %w", err)
 	}
 	return nil
+}
+
+// ResolveByAgentID maps CC's per-instance agent_id back to the roster's
+// registered agent_name — see the identical comment on the mysql backend.
+func (s *Store) ResolveByAgentID(ctx context.Context, sessionID, agentID string) (string, error) {
+	var name string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT agent_name FROM agent_roster WHERE session_id = ? AND agent_id = ? LIMIT 1`,
+		sessionID, agentID).Scan(&name)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", store.NotFound("ResolveByAgentID", "roster", sessionID+"/"+agentID)
+		}
+		return "", fmt.Errorf("ResolveByAgentID: %w", err)
+	}
+	return name, nil
 }
 
 func (s *Store) CreateToken(ctx context.Context, token store.AgentToken) error {

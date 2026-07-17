@@ -1057,4 +1057,14 @@ var migrations = []store.Migration{
 			)`,
 		},
 	},
+	{
+		// agent-id is CC's stable per-instance identifier — see the identical
+		// comment on the mysql backend's v63 "roster-agent-id" migration.
+		Version: 62,
+		Name:    "roster-agent-id",
+		SQL: []string{
+			`ALTER TABLE agent_roster ADD COLUMN agent_id TEXT NOT NULL DEFAULT ''`,
+			`CREATE INDEX IF NOT EXISTS idx_roster_agent_id ON agent_roster(session_id, agent_id)`,
+		},
+	},
 }

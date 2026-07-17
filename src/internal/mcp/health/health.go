@@ -394,6 +394,96 @@ func handleListAgents(ctx context.Context, mainStore store.Store, gaugeStore gau
 		views = append(views, v)
 	}
 
+	// Roster fallback: short-lived sub-subagents get a roster entry from
+	// preRegisterSubagent but may come and go faster than health-collector's
+	// 15s poll ever writes a gauge row for them — without this pass they're
+	// registered but invisible in ctop. Coverage is keyed off the raw gauge
+	// rows (not the post-filter views above) so an agent whose gauge row
+	// exists but was excluded by the liveness filter isn't re-added here
+	// under a second, roster-derived liveness computation.
+	covered := make(map[string]bool, len(rows))
+	for _, g := range rows {
+		covered[g.SessionID+"|"+g.AgentName] = true
+	}
+
+	entries, err := mainStore.ListRosterEntries(ctx, store.RosterFilter{})
+	if err != nil {
+		return Result{}, internalErr(err.Error())
+	}
+
+	for _, entry := range entries {
+		if filter.Host != "" && entry.Host != filter.Host {
+			continue
+		}
+		if filter.Runtime != "" && entry.Runtime != filter.Runtime {
+			continue
+		}
+
+		var sessionID string
+		if entry.SessionID != nil {
+			sessionID = *entry.SessionID
+		}
+		if covered[sessionID+"|"+entry.AgentName] {
+			continue
+		}
+
+		if callerTeam != "" && entry.TeamName != callerTeam {
+			continue
+		}
+		if callerTeam == "" && callerSessionID != "" && sessionID != callerSessionID {
+			continue
+		}
+
+		var session *store.Session
+		if sessionID != "" {
+			if sess, err := mainStore.GetSession(ctx, store.SessionKey{SessionID: sessionID, AgentName: entry.AgentName}); err == nil {
+				session = &sess
+			}
+		}
+
+		rosterID := entry.RosterID
+		v := agentHealthView{
+			RosterID:     &rosterID,
+			Host:         entry.Host,
+			SessionID:    sessionID,
+			AgentName:    entry.AgentName,
+			Runtime:      entry.Runtime,
+			TeamName:     entry.TeamName,
+			Relationship: entry.Relationship,
+			ParentRef:    entry.ParentRef,
+			Liveness:     mcproster.ComputeLiveness(entry, session),
+		}
+		if session != nil {
+			if session.Focus != "" {
+				v.CurrentFocus = session.Focus
+			}
+			v.Username = session.Username
+			if session.Model != "" {
+				v.Model = session.Model
+			}
+			// A roster-fallback row has no gauge data, so LastActivityTs is
+			// otherwise nil — filterStaleClosedMembers (ctop) treats a nil
+			// timestamp as unknown-therefore-stale and drops the row, hiding
+			// recently-finished kids. Seed it from the session's own
+			// last-seen time so they stay visible.
+			ts := session.LastSeen.UTC().Format("2006-01-02T15:04:05Z")
+			v.LastActivityTs = &ts
+		}
+		if turnLookup != nil {
+			v.IsProcessing = turnLookup(sessionID, entry.AgentName)
+		}
+
+		if len(livenessFilter) > 0 {
+			if v.Liveness != "" && !livenessFilter[v.Liveness] {
+				continue
+			}
+		} else if v.Liveness != "" && !defaultLivenessOK(v.Liveness) {
+			continue
+		}
+
+		views = append(views, v)
+	}
+
 	return JSONResult(views), nil
 }
 

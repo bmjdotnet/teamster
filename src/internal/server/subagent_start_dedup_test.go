@@ -24,14 +24,13 @@ func TestSubagentStartDoesNotDuplicateRosterEntryOnTurnResume(t *testing.T) {
 	first := waitForRosterEntry(t, s.obsStore, "sess-1", "@collector")
 
 	// Second SubagentStart: same teammate resuming on a later mailbox
-	// wakeup — same session, same agent_type, DIFFERENT agent_id (a fresh
-	// per-turn id, not the discriminator the fix keys on for teammates).
-	// Must NOT create a second roster entry.
+	// wakeup — same session, same agent_type, same agent_id (stable
+	// across turn-resumes). Must NOT create a second roster entry.
 	s.dispatchObservability(hook.HookEvent{
 		HookEventName: "SubagentStart",
 		SessionID:     "sess-1",
 		AgentType:     "collector",
-		AgentID:       "acollector222",
+		AgentID:       "acollector111",
 	}, map[string]interface{}{})
 
 	second := waitForRosterEntry(t, s.obsStore, "sess-1", "@collector")

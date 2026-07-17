@@ -572,6 +572,28 @@ func ProcessEvent(event HookEvent, rawData map[string]interface{}, serverURL, de
 		}
 
 	case "SubagentStart":
+		// Model: override the parent-transcript value set unconditionally
+		// above (line ~389) with the CHILD's own model — a subagent can run
+		// a different model than its spawner, and event.TranscriptPath here
+		// is the parent's, not this instance's. event.AgentTranscriptPath is
+		// left empty by Claude Code, so the child transcript path is derived
+		// from the parent's TranscriptPath + AgentID instead: the parent's
+		// <session>.jsonl sits beside a <session>/subagents/agent-<id>.*
+		// pair (same layout health-collector's teammate_context.go relies
+		// on). Falls back to the agent-<id>.meta.json sidecar's launch-time
+		// model alias (e.g. "haiku") when the child transcript has no
+		// assistant turn yet — SubagentStart fires before the first response
+		// lands.
+		if event.AgentID != "" && event.TranscriptPath != "" {
+			childDir := strings.TrimSuffix(event.TranscriptPath, ".jsonl")
+			childBase := filepath.Join(childDir, "subagents", "agent-"+event.AgentID)
+			if model := getModelFromTranscript(childBase + ".jsonl"); model != "" {
+				rawData["_model"] = model
+			} else if model := getModelFromMetaSidecar(childBase + ".meta.json"); model != "" {
+				rawData["_model"] = model
+			}
+		}
+
 		// No feed display enrichment — the Agent tool's own PreToolUse
 		// already fires first and produces a richer "Spawning @name
 		// <model>: desc" TEAM line (see the "Agent" case below); a second
@@ -784,6 +806,25 @@ func getModelFromTranscript(transcriptPath string) string {
 		}
 	}
 	return model
+}
+
+// getModelFromMetaSidecar reads the "model" field out of a subagent's
+// agent-<id>.meta.json sidecar (written alongside its .jsonl transcript at
+// launch time). Fallback for getModelFromTranscript when the child
+// transcript doesn't exist yet or has no assistant turn — the sidecar's
+// model is the launch-time alias (e.g. "haiku"), available immediately.
+func getModelFromMetaSidecar(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var m struct {
+		Model string `json:"model"`
+	}
+	if json.Unmarshal(data, &m) != nil {
+		return ""
+	}
+	return m.Model
 }
 
 func writeSessionID(sessionID string) {

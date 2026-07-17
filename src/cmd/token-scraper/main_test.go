@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -66,5 +67,40 @@ func TestAgentNameFor(t *testing.T) {
 				t.Fatalf("agentNameFor(%s) = %q, want %q", tt.file, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestProcessSubagentsSendsAgentID proves processSubagents extracts the
+// numbered id from a subagent transcript's filename (agent-<id>.jsonl) and
+// stamps it onto the telemetry row's agent_id field, so hookd's telemetry
+// ingest can resolve the type-name (agent_name, e.g. "@Explore") to the
+// numbered name (e.g. "@Explore-5"). Main session rows carry no agent_id.
+func TestProcessSubagentsSendsAgentID(t *testing.T) {
+	s, cap := newCaptureScraper(t)
+	dir := t.TempDir()
+	mainPath := filepath.Join(dir, "sess-1.jsonl")
+	subDir := filepath.Join(dir, "sess-1", "subagents")
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatalf("mkdir subagents dir: %v", err)
+	}
+
+	subPath := filepath.Join(subDir, "agent-abc123.jsonl")
+	writeJSONL(t, subPath, []map[string]any{
+		asstLine("u1", "msg_A", "req_A", "claude-opus-4-8", 100, 10, 0, 500, "text"),
+	})
+	if err := os.WriteFile(filepath.Join(subDir, "agent-abc123.meta.json"), []byte(`{"agentType":"Explore"}`), 0o644); err != nil {
+		t.Fatalf("write meta: %v", err)
+	}
+
+	s.processSubagents(context.Background(), mainPath)
+
+	if len(cap.rows) != 1 {
+		t.Fatalf("expected 1 row, got %d: %+v", len(cap.rows), cap.rows)
+	}
+	if got := cap.rows[0].AgentID; got != "abc123" {
+		t.Errorf("agent_id = %q, want %q", got, "abc123")
+	}
+	if got := cap.rows[0].AgentName; got != "@Explore" {
+		t.Errorf("agent_name = %q, want %q", got, "@Explore")
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/bmjdotnet/teamster/internal/config"
@@ -85,6 +86,17 @@ func main() {
 	raw, err := io.ReadAll(os.Stdin)
 	if err != nil {
 		os.Exit(0)
+	}
+
+	if os.Getenv("TEAMSTER_DEBUG_RAW") != "" {
+		if p := filepath.Join(cfg.DataDir, "raw-hook-debug.jsonl"); p != "" {
+			f, err := os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+			if err == nil {
+				f.Write(raw)
+				f.Write([]byte("\n"))
+				f.Close()
+			}
+		}
 	}
 
 	var event hook.HookEvent

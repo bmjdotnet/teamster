@@ -107,7 +107,7 @@ func TestProcessFileDedupsContentBlockLines(t *testing.T) {
 		asstLine("u5", "msg_C", "req_C", "claude-opus-4-8", 2, 136, 34087, 5433, "tool_use"),
 	})
 
-	if err := s.processFile(context.Background(), path, "@agent"); err != nil {
+	if err := s.processFile(context.Background(), path, "@agent", ""); err != nil {
 		t.Fatalf("processFile: %v", err)
 	}
 
@@ -157,7 +157,7 @@ func TestProcessFileResumesAcrossBoundary(t *testing.T) {
 	}
 	// First write only the first content-block line of request A.
 	writeJSONL(t, path, full[:1])
-	if err := s.processFile(context.Background(), path, "@agent"); err != nil {
+	if err := s.processFile(context.Background(), path, "@agent", ""); err != nil {
 		t.Fatalf("processFile pass1: %v", err)
 	}
 	// At clean EOF the trailing group flushes (we cannot know more is coming),
@@ -169,7 +169,7 @@ func TestProcessFileResumesAcrossBoundary(t *testing.T) {
 	// Now append the completing line and re-process.
 	writeJSONL(t, path, full) // rewrite whole file
 	cap.rows = nil
-	if err := s.processFile(context.Background(), path, "@agent"); err != nil {
+	if err := s.processFile(context.Background(), path, "@agent", ""); err != nil {
 		t.Fatalf("processFile pass2: %v", err)
 	}
 	// The second pass re-reads from the cursor; the completing line re-emits the
@@ -200,7 +200,7 @@ func TestEmitStampsHostUsername(t *testing.T) {
 		asstLine("u1", "msg_A", "req_A", "claude-opus-4-8", 100, 10, 0, 500, "text"),
 	})
 
-	if err := s.processFile(context.Background(), path, "@agent"); err != nil {
+	if err := s.processFile(context.Background(), path, "@agent", ""); err != nil {
 		t.Fatalf("processFile: %v", err)
 	}
 	if len(cap.rows) != 1 {

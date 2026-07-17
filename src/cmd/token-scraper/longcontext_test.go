@@ -42,7 +42,7 @@ func TestProcessFileAppliesLongContextSuffixToMainSession(t *testing.T) {
 		asstLine("u1", "msg_A", "req_A", "claude-fable-5", 100, 10, 0, 500, "text"),
 	})
 
-	if err := s.processFile(context.Background(), path, ""); err != nil {
+	if err := s.processFile(context.Background(), path, "", ""); err != nil {
 		t.Fatalf("processFile: %v", err)
 	}
 	if len(cap.rows) != 1 {
@@ -69,7 +69,7 @@ func TestProcessFileLongContextSuffixNotAppliedToSubagent(t *testing.T) {
 		asstLine("u1", "msg_A", "req_A", "claude-fable-5", 100, 10, 0, 500, "text"),
 	})
 
-	if err := s.processFile(context.Background(), path, "@teammate"); err != nil {
+	if err := s.processFile(context.Background(), path, "@teammate", ""); err != nil {
 		t.Fatalf("processFile: %v", err)
 	}
 	if len(cap.rows) != 1 {
@@ -95,7 +95,7 @@ func TestProcessFileLongContextSuffixRequiresBaseMatch(t *testing.T) {
 		asstLine("u1", "msg_A", "req_A", "claude-opus-4-8", 100, 10, 0, 500, "text"),
 	})
 
-	if err := s.processFile(context.Background(), path, ""); err != nil {
+	if err := s.processFile(context.Background(), path, "", ""); err != nil {
 		t.Fatalf("processFile: %v", err)
 	}
 	if len(cap.rows) != 1 {
@@ -119,7 +119,7 @@ func TestProcessFileNoSuffixWithoutLongContextConfig(t *testing.T) {
 		asstLine("u1", "msg_A", "req_A", "claude-opus-4-8", 100, 10, 0, 500, "text"),
 	})
 
-	if err := s.processFile(context.Background(), path, ""); err != nil {
+	if err := s.processFile(context.Background(), path, "", ""); err != nil {
 		t.Fatalf("processFile: %v", err)
 	}
 	if len(cap.rows) != 1 {

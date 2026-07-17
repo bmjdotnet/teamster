@@ -66,7 +66,7 @@ func (s *Store) UpsertSession(ctx context.Context, sess store.Session) error {
 			status = excluded.status,
 			runtime = excluded.runtime,
 			cwd = excluded.cwd,
-			model = excluded.model,
+			model = COALESCE(NULLIF(excluded.model,''), model),
 			originator = excluded.originator,
 			cli_version = excluded.cli_version`,
 		sess.SessionID, sess.AgentName, sess.Host, sess.Username, sess.TeamName,

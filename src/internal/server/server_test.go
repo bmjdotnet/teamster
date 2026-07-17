@@ -174,14 +174,23 @@ func TestDispatchObservability_TeammateInheritsLeadTeamName(t *testing.T) {
 	}, nil)
 	waitForSessionRow(t, obsStore, "sess-1")
 
-	// Simulate /teamster:bootstrap naming the team on the lead's session
-	// (the write path registerPeer's propagateSessionTeam exercises).
-	if err := obsStore.SetSessionTeam(ctx, "sess-1", "ops"); err != nil {
-		t.Fatalf("SetSessionTeam: %v", err)
+	// Simulate /teamster:bootstrap naming the team: registerPeer writes
+	// team_name to the roster entry (not the sessions table).
+	leadRosterID, err := obsStore.ResolveRosterID(ctx, "sess-1", "")
+	if err != nil {
+		t.Fatalf("ResolveRosterID for lead: %v", err)
+	}
+	leadEntry, err := obsStore.GetRosterEntry(ctx, leadRosterID)
+	if err != nil {
+		t.Fatalf("GetRosterEntry for lead: %v", err)
+	}
+	leadEntry.TeamName = "ops"
+	if err := obsStore.UpsertRosterEntry(ctx, leadEntry); err != nil {
+		t.Fatalf("UpsertRosterEntry with team: %v", err)
 	}
 
 	// Teammate's first event: auto-registers and should inherit "ops" from
-	// the lead's session row.
+	// the lead's roster entry.
 	s.dispatchObservability(hook.HookEvent{
 		HookEventName: "UserPromptSubmit",
 		SessionID:     "sess-1",
@@ -243,6 +252,11 @@ func TestResolveSubagentName_Basic(t *testing.T) {
 		},
 	}, spawnData)
 
+	// Simulate SubagentStart's own registration popping the queued name —
+	// peek() (used by resolveSubagentName below) only reads the sticky
+	// resolved map; it never touches the FIFO itself.
+	s.subagentNames.pop("sess1", "general-purpose")
+
 	// Subagent event arrives with agent_type="general-purpose".
 	eventData := map[string]interface{}{"_agent_name": "@general-purpose"}
 	s.resolveSubagentName(hook.HookEvent{
@@ -271,6 +285,9 @@ func TestResolveSubagentName_ExplicitSubagentType(t *testing.T) {
 			"subagent_type": "Explore",
 		},
 	}, map[string]interface{}{})
+
+	// Simulate SubagentStart's own registration popping the queued name.
+	s.subagentNames.pop("sess1", "Explore")
 
 	eventData := map[string]interface{}{"_agent_name": "@Explore"}
 	s.resolveSubagentName(hook.HookEvent{
@@ -365,10 +382,9 @@ func TestResolveSubagentName_SessionIsolation(t *testing.T) {
 	}
 }
 
-func TestResolveSubagentName_LastSpawnWins(t *testing.T) {
+func TestResolveSubagentName_FIFOOrdering(t *testing.T) {
 	s := &Server{}
 
-	// First spawn: name "alpha".
 	s.resolveSubagentName(hook.HookEvent{
 		HookEventName: "PreToolUse",
 		SessionID:     "sess1",
@@ -376,7 +392,6 @@ func TestResolveSubagentName_LastSpawnWins(t *testing.T) {
 		ToolInput:     map[string]interface{}{"name": "alpha"},
 	}, map[string]interface{}{})
 
-	// Second spawn (same type): name "beta".
 	s.resolveSubagentName(hook.HookEvent{
 		HookEventName: "PreToolUse",
 		SessionID:     "sess1",
@@ -384,17 +399,44 @@ func TestResolveSubagentName_LastSpawnWins(t *testing.T) {
 		ToolInput:     map[string]interface{}{"name": "beta"},
 	}, map[string]interface{}{})
 
-	eventData := map[string]interface{}{"_agent_name": "@general-purpose"}
+	// Simulate SubagentStart popping "alpha" (the first queued spawn) before
+	// its own first tool-call event arrives.
+	s.subagentNames.pop("sess1", "general-purpose")
+
+	first := map[string]interface{}{"_agent_name": "@general-purpose"}
 	s.resolveSubagentName(hook.HookEvent{
 		HookEventName: "PreToolUse",
 		SessionID:     "sess1",
 		ToolName:      "Read",
 		AgentType:     "general-purpose",
-	}, eventData)
+	}, first)
+	if got := first["_agent_name"]; got != "@alpha" {
+		t.Errorf("first resolve = %q, want @alpha (FIFO)", got)
+	}
 
-	got := eventData["_agent_name"]
-	if got != "@beta" {
-		t.Errorf("_agent_name = %q, want %q (last spawn wins)", got, "@beta")
+	// Simulate the second concurrent spawn's SubagentStart popping "beta".
+	s.subagentNames.pop("sess1", "general-purpose")
+
+	second := map[string]interface{}{"_agent_name": "@general-purpose"}
+	s.resolveSubagentName(hook.HookEvent{
+		HookEventName: "PreToolUse",
+		SessionID:     "sess1",
+		ToolName:      "Read",
+		AgentType:     "general-purpose",
+	}, second)
+	if got := second["_agent_name"]; got != "@beta" {
+		t.Errorf("second resolve = %q, want @beta (FIFO)", got)
+	}
+
+	sticky := map[string]interface{}{"_agent_name": "@general-purpose"}
+	s.resolveSubagentName(hook.HookEvent{
+		HookEventName: "PreToolUse",
+		SessionID:     "sess1",
+		ToolName:      "Read",
+		AgentType:     "general-purpose",
+	}, sticky)
+	if got := sticky["_agent_name"]; got != "@beta" {
+		t.Errorf("sticky fallback = %q, want @beta (last-popped)", got)
 	}
 }
 
@@ -407,6 +449,10 @@ func TestResolveSubagentName_ClearSession(t *testing.T) {
 		ToolName:      "Agent",
 		ToolInput:     map[string]interface{}{"name": "worker"},
 	}, map[string]interface{}{})
+
+	// Simulate SubagentStart popping+resolving "worker" before the clear —
+	// clearSession must purge both the FIFO and the sticky resolved map.
+	s.subagentNames.pop("sess1", "general-purpose")
 
 	s.subagentNames.clearSession("sess1")
 
@@ -433,6 +479,10 @@ func TestResolveSubagentName_ClearAgent(t *testing.T) {
 		ToolName:      "Agent",
 		ToolInput:     map[string]interface{}{"name": "worker"},
 	}, map[string]interface{}{})
+
+	// Simulate SubagentStart popping+resolving "worker" before the clear —
+	// clearAgent must purge both the FIFO and the sticky resolved map.
+	s.subagentNames.pop("sess1", "general-purpose")
 
 	s.subagentNames.clearAgent("sess1", "general-purpose")
 

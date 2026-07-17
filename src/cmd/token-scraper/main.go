@@ -65,6 +65,7 @@ type telemetryRow struct {
 	MessageID        string  `json:"message_id"`
 	SessionID        string  `json:"session_id"`
 	AgentName        string  `json:"agent_name"`
+	AgentID          string  `json:"agent_id"`
 	Host             string  `json:"host"`
 	Username         string  `json:"username"`
 	Model            string  `json:"model"`
@@ -184,7 +185,7 @@ func (s *scraper) poll(ctx context.Context) error {
 		if ctx.Err() != nil {
 			break
 		}
-		if err := s.processFile(ctx, path, ""); err != nil {
+		if err := s.processFile(ctx, path, "", ""); err != nil {
 			slog.Error("process file error", "path", path, "error", err)
 		}
 		s.processSubagents(ctx, path)
@@ -216,7 +217,8 @@ func (s *scraper) processSubagents(ctx context.Context, mainPath string) {
 			return
 		}
 		agentName := s.agentNameFor(sub)
-		if err := s.processFile(ctx, sub, agentName); err != nil {
+		agentID := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(sub), "agent-"), ".jsonl")
+		if err := s.processFile(ctx, sub, agentName, agentID); err != nil {
 			slog.Error("process subagent file error", "path", sub, "error", err)
 		}
 	}
@@ -275,8 +277,10 @@ func configuredModel() string {
 
 // processFile ingests one session JSONL file. agentName is "" for main session
 // files (hookd resolves the agent) and the resolved teammate name for subagent
-// files (stamped directly onto each row).
-func (s *scraper) processFile(ctx context.Context, path, agentName string) error {
+// files (stamped directly onto each row). agentID is likewise "" for main
+// session files and the subagent's numbered id (the "<id>" in agent-<id>.jsonl)
+// for subagent files, letting hookd resolve the type-name to a numbered name.
+func (s *scraper) processFile(ctx context.Context, path, agentName, agentID string) error {
 	fi, err := os.Stat(path)
 	if err != nil {
 		return nil // file disappeared between glob and stat
@@ -345,7 +349,7 @@ func (s *scraper) processFile(ctx context.Context, path, agentName string) error
 		if cur == nil {
 			return true
 		}
-		if !s.emit(*cur, agentName) {
+		if !s.emit(*cur, agentName, agentID) {
 			postErr = errPostFailed
 			return false
 		}
@@ -492,7 +496,7 @@ func mergeUsage(dst *sessionUsage, src sessionUsage) {
 
 // emit prices and sends one deduplicated request row. Returns false on POST
 // failure (so the caller stops advancing the cursor). Honors dry-run.
-func (s *scraper) emit(u sessionUsage, agentName string) bool {
+func (s *scraper) emit(u sessionUsage, agentName, agentID string) bool {
 	costUSD := pricing.ComputeCost(u.model, u.inputTokens, u.outputTokens, u.cacheReadTokens, u.cacheWrite5m, u.cacheWrite1h)
 
 	if s.dryRun {
@@ -500,6 +504,7 @@ func (s *scraper) emit(u sessionUsage, agentName string) bool {
 			"session_id", u.sessionID,
 			"message_id", u.messageID,
 			"agent_name", agentName,
+			"agent_id", agentID,
 			"model", u.model,
 			"cost_usd", costUSD,
 			"total_input", u.totalInput,
@@ -511,6 +516,7 @@ func (s *scraper) emit(u sessionUsage, agentName string) bool {
 		MessageID:        u.messageID,
 		SessionID:        u.sessionID,
 		AgentName:        agentName, // "" for main (hookd resolves); set for subagent files
+		AgentID:          agentID,   // "" for main; the subagent's numbered id for subagent files
 		Host:             s.host,
 		Username:         s.username, // OS user whose ~/.claude holds this transcript
 		Model:            u.model,

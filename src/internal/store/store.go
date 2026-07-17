@@ -825,6 +825,7 @@ type RosterEntry struct {
 	TeamName     string
 	BusTeam      string
 	ParentRef    *string
+	AgentID      string
 	CreatedAt    time.Time
 	BoundAt      *time.Time
 }
@@ -855,6 +856,7 @@ type RosterStore interface {
 	BindRosterSession(ctx context.Context, rosterID, sessionID string) error
 	GetRosterEntry(ctx context.Context, rosterID string) (RosterEntry, error)
 	ResolveRosterID(ctx context.Context, sessionID, agentName string) (string, error)
+	ResolveByAgentID(ctx context.Context, sessionID, agentID string) (string, error)
 	ListRosterEntries(ctx context.Context, filter RosterFilter) ([]RosterEntry, error)
 	UpsertRosterEntry(ctx context.Context, entry RosterEntry) error
 	CreateToken(ctx context.Context, token AgentToken) error

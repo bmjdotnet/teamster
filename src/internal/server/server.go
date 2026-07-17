@@ -101,32 +101,44 @@ type mcpIdentity struct {
 	ExpiresAt time.Time
 }
 
+// instanceEntry is one registered Agent-tool subagent instance, keyed in
+// Server.instanceRegistry by sessionID + "|" + agent_id — the unique
+// per-instance identifier every hook event carries. Distinguishes a
+// genuine new spawn (key absent) from a turn-resume of an already-registered
+// instance (key present).
+type instanceEntry struct {
+	name     string // unique roster name (e.g., "@Explore-2")
+	rosterID string
+}
+
 // Server receives hook telemetry events via HTTP and writes them to a JSONL log.
 type Server struct {
-	cfg             config.Config
-	logFile         *os.File
-	mu              sync.Mutex
-	bus             eventBus
-	wmsStore        wms.Store
-	wmsEng          *wms.EngineImpl
-	obsStore        store.Store // new unified store (nil when store package not ready)
-	gaugeStore      gauge.GaugeStore
-	gaugeDB         *sql.DB
-	sessions        *observability.SessionTracker
-	metrics         *observability.Metrics
-	promRegistry    *prometheus.Registry
-	sweepStop       chan struct{}
-	telemetry       *telemetryQueue
-	telemetryAgents *agentCache
-	telemetryCtx    context.Context
-	telemetryCancel context.CancelFunc
-	subagentNames   subagentNameMap
-	pendingMCPMu    sync.Mutex
-	pendingMCPIdent map[string]mcpIdentity // key: "toolSuffix:entityID"
-	focusNudge      focusNudgeCache
-	pressureNudge   pressureNudgeCache
-	rosterLastSeen  lastSeenCache
-	turnStates      turnStateTracker
+	cfg              config.Config
+	logFile          *os.File
+	mu               sync.Mutex
+	bus              eventBus
+	wmsStore         wms.Store
+	wmsEng           *wms.EngineImpl
+	obsStore         store.Store // new unified store (nil when store package not ready)
+	gaugeStore       gauge.GaugeStore
+	gaugeDB          *sql.DB
+	sessions         *observability.SessionTracker
+	metrics          *observability.Metrics
+	promRegistry     *prometheus.Registry
+	sweepStop        chan struct{}
+	telemetry        *telemetryQueue
+	telemetryAgents  *agentCache
+	telemetryCtx     context.Context
+	telemetryCancel  context.CancelFunc
+	subagentNames    subagentNameMap
+	regMu            sync.Mutex
+	instanceRegistry map[string]instanceEntry
+	pendingMCPMu     sync.Mutex
+	pendingMCPIdent  map[string]mcpIdentity // key: "toolSuffix:entityID"
+	focusNudge       focusNudgeCache
+	pressureNudge    pressureNudgeCache
+	rosterLastSeen   lastSeenCache
+	turnStates       turnStateTracker
 }
 
 // storeOpenMaxAttempts bounds how many times NewServer retries store.Open
@@ -168,13 +180,14 @@ func NewServer(cfg config.Config) (*Server, error) {
 	sessions.StartSweeper(sweepStop)
 
 	s := &Server{
-		cfg:             cfg,
-		logFile:         f,
-		sessions:        sessions,
-		metrics:         metrics,
-		promRegistry:    reg,
-		sweepStop:       sweepStop,
-		pendingMCPIdent: make(map[string]mcpIdentity),
+		cfg:              cfg,
+		logFile:          f,
+		sessions:         sessions,
+		metrics:          metrics,
+		promRegistry:     reg,
+		sweepStop:        sweepStop,
+		pendingMCPIdent:  make(map[string]mcpIdentity),
+		instanceRegistry: make(map[string]instanceEntry),
 	}
 	s.bus.subscribers = make(map[uint64]chan ssePayload)
 
@@ -514,38 +527,23 @@ func (s *Server) dispatchObservability(event hook.HookEvent, data map[string]int
 		// a known entity resuming, not a new spawn — skip registration
 		// entirely and just refresh liveness.
 		case "PreToolUse", "UserPromptSubmit", "SubagentStart":
-			knownFromRoster := false
-			if event.HookEventName == "SubagentStart" && s.obsStore != nil {
-				if _, err := s.obsStore.ResolveRosterID(ctx, event.SessionID, agentNameFor(agentType)); err == nil {
-					knownFromRoster = true
-				}
-			}
-			if knownFromRoster {
-				s.sessions.Upsert(event.SessionID, agentType) // refresh in-memory LastSeen only
-				if s.obsStore != nil {
-					agent := agentNameFor(agentType)
-					if s.rosterLastSeen.shouldRefresh(event.SessionID, agent) {
-						go func() {
-							_ = s.obsStore.UpsertSession(ctx, store.Session{
-								SessionID: event.SessionID,
-								AgentName: agent,
-								Host:      s.cfg.Host,
-								Username:  s.cfg.User,
-								Status:    store.SessionStatusActive,
-								Model:     modelFromData(data),
-							})
-						}()
-					}
-				}
+			if event.HookEventName == "SubagentStart" {
+				agent := s.registerSubagentStart(ctx, event, data)
 				s.metrics.HookEventsTotal.With(prometheus.Labels{
 					"event":      event.HookEventName,
 					"host":       s.cfg.Host,
-					"agent_name": agentNameFor(agentType),
+					"agent_name": agent,
 				}).Inc()
-				s.turnStates.StartTurn(event.SessionID, agentNameFor(agentType))
 				break
 			}
-			isNew := s.sessions.Upsert(event.SessionID, agentType)
+
+			agent := resolvedAgentName(data, agentType)
+			isNew := s.sessions.Upsert(event.SessionID, strings.TrimPrefix(agent, "@"))
+			if spawnerType, _ := data["_spawner_type"].(string); spawnerType != "" {
+				// Sub-subagent: SubagentStart is the registration authority.
+				// Skip roster/session creation here to prevent competing writes.
+				break
+			}
 			if isNew {
 				s.metrics.SessionsTotal.With(prometheus.Labels{
 					"host": s.cfg.Host,
@@ -554,24 +552,39 @@ func (s *Server) dispatchObservability(event hook.HookEvent, data map[string]int
 				// (not just after Stop). Paired with an agent_roster row so
 				// roster queries can see live agents. §1.1 + §2.1 of P0-roster.
 				if s.obsStore != nil {
-					agent := agentNameFor(agentType)
 					now := time.Now().UTC()
+					spawnerType, _ := data["_spawner_type"].(string)
 					go func() {
-						_ = s.obsStore.UpsertSession(ctx, store.Session{
+						sess := store.Session{
 							SessionID: event.SessionID,
 							AgentName: agent,
 							Host:      s.cfg.Host,
 							Username:  s.cfg.User,
 							Status:    store.SessionStatusActive,
 							Runtime:   "claude_code",
-							Model:     modelFromData(data),
-						})
+						}
+						// Model only for the lead — teammate events carry
+						// the lead's _model (hook client reads the parent
+						// transcript), so stamping it clobbers the sessions
+						// row. health-collector sources teammate model from
+						// token_ledger.model (authoritative).
+						if agentType == "" {
+							sess.Model = modelFromData(data)
+						}
+						_ = s.obsStore.UpsertSession(ctx, sess)
 						// Relationship heuristic for S2: empty agentType = lead,
 						// non-empty = teammate (the predominant Agent Teams case).
+						// A non-empty spawnerType means a teammate spawned this via
+						// the Agent tool — a sub-subagent, not a direct teammate.
 						// Gate 1 refines via meta.json taskKind.
 						rel := "lead"
+						parentAgent := ""
 						if agentType != "" {
 							rel = "teammate"
+							if spawnerType != "" {
+								parentAgent = agentNameFor(spawnerType)
+								rel = "subagent"
+							}
 						}
 						rosterID := roster.GenerateRosterID()
 						boundAt := now
@@ -586,18 +599,21 @@ func (s *Server) dispatchObservability(event hook.HookEvent, data map[string]int
 							CreatedAt:    now,
 							BoundAt:      &boundAt,
 						}
-						// For teammates, attempt to resolve the lead's roster_id
-						// as parent_ref. Best-effort: if the lead hasn't registered
-						// yet (race), leave parent_ref nil. Also inherit the lead's
-						// session-level team_name (set via registerPeer's
-						// propagateSessionTeam), so a teammate auto-registered after
-						// the team was named isn't stranded on an empty team_name.
+						// Attempt to resolve the parent's roster_id as parent_ref —
+						// the spawning teammate for an Agent-tool sub-subagent,
+						// else the lead. Best-effort: if the parent hasn't
+						// registered yet (race), leave parent_ref nil. Also
+						// inherit the lead's team_name from the roster (not
+						// sessions — registerPeer writes team_name to
+						// agent_roster, not the sessions table).
 						if agentType != "" {
-							if parentID, err := s.obsStore.ResolveRosterID(ctx, event.SessionID, ""); err == nil {
+							if parentID, err := s.obsStore.ResolveRosterID(ctx, event.SessionID, parentAgent); err == nil {
 								entry.ParentRef = &parentID
 							}
-							if leadSess, err := s.obsStore.GetSession(ctx, store.SessionKey{SessionID: event.SessionID, AgentName: ""}); err == nil {
-								entry.TeamName = leadSess.TeamName
+							if leadRID, err := s.obsStore.ResolveRosterID(ctx, event.SessionID, ""); err == nil {
+								if leadRoster, err := s.obsStore.GetRosterEntry(ctx, leadRID); err == nil {
+									entry.TeamName = leadRoster.TeamName
+								}
 							}
 						}
 						_ = s.obsStore.UpsertRosterEntry(ctx, entry)
@@ -605,39 +621,35 @@ func (s *Server) dispatchObservability(event hook.HookEvent, data map[string]int
 				}
 			} else if s.obsStore != nil {
 				// Throttled last_seen refresh: once per ~30s per (session, agent).
-				agent := agentNameFor(agentType)
 				if s.rosterLastSeen.shouldRefresh(event.SessionID, agent) {
 					go func() {
-						_ = s.obsStore.UpsertSession(ctx, store.Session{
+						sess := store.Session{
 							SessionID: event.SessionID,
 							AgentName: agent,
 							Host:      s.cfg.Host,
 							Username:  s.cfg.User,
 							Status:    store.SessionStatusActive,
-							Model:     modelFromData(data),
-						})
+						}
+						if agentType == "" {
+							sess.Model = modelFromData(data)
+						}
+						_ = s.obsStore.UpsertSession(ctx, sess)
 					}()
 				}
 			}
 			s.metrics.HookEventsTotal.With(prometheus.Labels{
 				"event":      event.HookEventName,
 				"host":       s.cfg.Host,
-				"agent_name": agentNameFor(agentType),
+				"agent_name": agent,
 			}).Inc()
-			// SubagentStart marks the subagent processing the same way a
-			// lead's UserPromptSubmit does — without this, a subagent that
-			// never receives its own UserPromptSubmit would stay at the
-			// turnStateTracker's zero value (never "processing") for its
-			// entire lifetime, showing incorrectly idle in the health
-			// dashboard. SubagentStop (below) is the matching EndTurnForAgent.
-			if event.HookEventName == "UserPromptSubmit" || event.HookEventName == "SubagentStart" {
-				s.turnStates.StartTurn(event.SessionID, agentNameFor(agentType))
+			if event.HookEventName == "UserPromptSubmit" {
+				s.turnStates.StartTurn(event.SessionID, agent)
 			}
 			if event.HookEventName == "PreToolUse" && event.ToolName != "" {
 				s.metrics.ToolCallsTotal.With(prometheus.Labels{
 					"tool":       event.ToolName,
 					"host":       s.cfg.Host,
-					"agent_name": agentNameFor(agentType),
+					"agent_name": agent,
 					"status":     "",
 				}).Inc()
 			}
@@ -688,7 +700,7 @@ func (s *Server) dispatchObservability(event hook.HookEvent, data map[string]int
 	// completeActivity (which enrich to _thought/_done, not _tool_tag).
 	if s.gaugeStore != nil && event.SessionID != "" {
 		if tag, display := activityFromData(data); display != "" {
-			key := gauge.GaugeKey{Host: s.cfg.Host, SessionID: event.SessionID, AgentName: agentNameFor(agentType)}
+			key := gauge.GaugeKey{Host: s.cfg.Host, SessionID: event.SessionID, AgentName: resolvedAgentName(data, agentType)}
 			go func() {
 				if err := s.gaugeStore.UpdateActivity(ctx, key, display, tag, time.Now()); err != nil {
 					slog.Warn("gauge UpdateActivity", "session", key.SessionID, "agent", key.AgentName, "error", err)
@@ -796,25 +808,25 @@ func (s *Server) dispatchObservability(event hook.HookEvent, data map[string]int
 			s.metrics.ActivityCallsTotal.With(prometheus.Labels{
 				"method":     "reportActivity",
 				"host":       s.cfg.Host,
-				"agent_name": agentNameFor(agentType),
+				"agent_name": resolvedAgentName(data, agentType),
 			}).Inc()
 			if msg := hook.StrField(toolInput, "message", 256); msg != "" {
-				s.turnStates.SetActivity(event.SessionID, agentNameFor(agentType), msg)
+				s.turnStates.SetActivity(event.SessionID, resolvedAgentName(data, agentType), msg)
 			}
 		case "mcp__activity__setOverallIntent":
 			s.metrics.ActivityCallsTotal.With(prometheus.Labels{
 				"method":     "setOverallIntent",
 				"host":       s.cfg.Host,
-				"agent_name": agentNameFor(agentType),
+				"agent_name": resolvedAgentName(data, agentType),
 			}).Inc()
 			if msg := hook.StrField(toolInput, "message", 256); msg != "" {
-				s.turnStates.SetActivity(event.SessionID, agentNameFor(agentType), msg)
+				s.turnStates.SetActivity(event.SessionID, resolvedAgentName(data, agentType), msg)
 			}
 		case "mcp__activity__completeActivity":
 			s.metrics.ActivityCallsTotal.With(prometheus.Labels{
 				"method":     "completeActivity",
 				"host":       s.cfg.Host,
-				"agent_name": agentNameFor(agentType),
+				"agent_name": resolvedAgentName(data, agentType),
 			}).Inc()
 		}
 
@@ -888,8 +900,19 @@ func (s *Server) dispatchObservability(event hook.HookEvent, data map[string]int
 			break
 		}
 		var affectedKeys []observability.SessionKey
-		agent := agentNameFor(agentType)
+		agent := agentNameFor(agentType) // fallback
 		if agentType != "" {
+			// Resolve the unique auto-numbered name (e.g. "@Explore-2") the
+			// matching SubagentStart assigned, rather than the raw agentType
+			// label every same-type spawn shares.
+			instKey := event.SessionID + "|" + event.AgentID
+			s.regMu.Lock()
+			if inst, ok := s.instanceRegistry[instKey]; ok {
+				agent = inst.name
+				delete(s.instanceRegistry, instKey)
+			}
+			s.regMu.Unlock()
+
 			// Teammate/subagent stop: close only this agent. Both share the
 			// lead's session_id, so a session-wide close here would
 			// incorrectly mark still-active peers as stopped.
@@ -907,6 +930,13 @@ func (s *Server) dispatchObservability(event hook.HookEvent, data map[string]int
 			s.pressureNudge.clearSession(event.SessionID)
 			s.rosterLastSeen.clearSession(event.SessionID)
 			s.turnStates.EndTurn(event.SessionID)
+			s.regMu.Lock()
+			for k := range s.instanceRegistry {
+				if strings.HasPrefix(k, event.SessionID+"|") {
+					delete(s.instanceRegistry, k)
+				}
+			}
+			s.regMu.Unlock()
 		}
 		if s.obsStore != nil && len(affectedKeys) > 0 {
 			// Parse the event timestamp as the fallback for ResolveSessionEnd.
@@ -933,7 +963,12 @@ func (s *Server) dispatchObservability(event hook.HookEvent, data map[string]int
 						Username:  s.cfg.User,
 						Status:    store.SessionStatusClosed,
 						LastSeen:  closeTime,
-						Model:     modelFromData(data),
+						// Model intentionally omitted — this Stop event's data is
+						// one agent's own model, but affectedKeys can span every
+						// agent in the session (lead Stop closes the whole
+						// session); the store's COALESCE guard on this column
+						// protects against clobbering another agent's already-
+						// captured model with the lead's.
 					})
 					n, drainErr := s.obsStore.CloseSessionIntervals(ctx, k.SessionID, k.AgentName, closeTime)
 					if drainErr != nil {
@@ -949,6 +984,250 @@ func (s *Server) dispatchObservability(event hook.HookEvent, data map[string]int
 		// Per-entity cost is written by the allocator (rollup → cost_rollup) from
 		// token_ledger ⋈ wms_intervals (kind='focus') — no Stop-time per-entity write here.
 	}
+}
+
+// registerSubagentStart is the sole registration authority for sub-subagent
+// SubagentStart events. It resolves the instance key (session + the
+// spawn's own agent_id, a unique per-instance identifier unlike
+// agent_type, which is a reusable category label shared by every same-type
+// spawn) against instanceRegistry: a known key is a turn-resume (mailbox
+// wakeup or hookd-restart already-registered instance) and only needs a
+// liveness refresh; an unknown key is a potentially new spawn, resolved via
+// registerNewSubagentInstance. Returns the resolved unique agent name.
+func (s *Server) registerSubagentStart(ctx context.Context, event hook.HookEvent, data map[string]interface{}) string {
+	instKey := event.SessionID + "|" + event.AgentID
+
+	s.regMu.Lock()
+	if inst, ok := s.instanceRegistry[instKey]; ok {
+		s.regMu.Unlock()
+		// Upsert's second parameter is a raw agentType — it prefixes with
+		// "@" internally — so trim inst.name's existing prefix rather than
+		// double-prefixing.
+		s.sessions.Upsert(event.SessionID, strings.TrimPrefix(inst.name, "@"))
+		if s.obsStore != nil && s.rosterLastSeen.shouldRefresh(event.SessionID, inst.name) {
+			go func() {
+				_ = s.obsStore.UpsertSession(ctx, store.Session{
+					SessionID: event.SessionID,
+					AgentName: inst.name,
+					Host:      s.cfg.Host,
+					Username:  s.cfg.User,
+					Status:    store.SessionStatusActive,
+					// Model intentionally omitted — the store's COALESCE guard on
+					// that column protects against an empty value clobbering one
+					// already captured from a prior event.
+				})
+			}()
+		}
+		// SubagentStart marks the subagent processing the same way a lead's
+		// UserPromptSubmit does — without this, a subagent that never
+		// receives its own UserPromptSubmit would stay at the
+		// turnStateTracker's zero value (never "processing") for its entire
+		// lifetime, showing incorrectly idle in the health dashboard.
+		// SubagentStop is the matching EndTurnForAgent.
+		s.turnStates.StartTurn(event.SessionID, inst.name)
+		return inst.name
+	}
+	s.regMu.Unlock()
+
+	// Unknown key — new spawn or hookd-restart resume.
+	name := s.registerNewSubagentInstance(ctx, event, data, instKey)
+	s.turnStates.StartTurn(event.SessionID, name)
+	return name
+}
+
+// registerNewSubagentInstance handles a SubagentStart whose instance key is
+// not yet in instanceRegistry — either a genuine new spawn or a resume after
+// a hookd restart (which wiped the in-memory registry but left the roster
+// row behind in the store). The uniqueify-check-through-UpsertRosterEntry
+// sequence runs under regMu (mirroring the deleted preRegisterSubagent's
+// locking discipline): two concurrent same-type spawns must not both see
+// the base name as free and race to claim it. Only the trailing UpsertSession
+// runs outside the lock — by that point the roster row is already durably
+// unique, so it can't collide with a peer's registration.
+func (s *Server) registerNewSubagentInstance(ctx context.Context, event hook.HookEvent, data map[string]interface{}, instKey string) string {
+	sessionID := event.SessionID
+	agentType := event.AgentType
+
+	// Ground-truth enrichment from the launch-time sidecar, when available —
+	// the child's own .meta.json sits beside its transcript at
+	// <parentTranscriptDir>/subagents/agent-<id>.meta.json (same layout
+	// hook.go's getModelFromMetaSidecar and health-collector's
+	// teammate_context.go rely on). Best-effort: absent file or fields just
+	// mean this stays nil and registration falls back to the FIFO/TTL
+	// name-matching heuristic below.
+	var sidecarMeta *subagentMeta
+	if event.AgentID != "" && event.TranscriptPath != "" {
+		childDir := strings.TrimSuffix(event.TranscriptPath, ".jsonl")
+		metaPath := filepath.Join(childDir, "subagents", "agent-"+event.AgentID+".meta.json")
+		if meta, err := readSubagentMeta(metaPath); err == nil {
+			sidecarMeta = meta
+		}
+	}
+
+	baseName, spawnerType := s.subagentNames.pop(sessionID, agentType)
+	if baseName == "" {
+		// FIFO empty or expired: no Agent-tool PreToolUse queued a name for
+		// this spawn within the TTL. Check the roster before assuming this
+		// is genuinely new — a hookd restart clears instanceRegistry but not
+		// the persistent roster, so a live subagent's next turn-resume would
+		// otherwise be mis-registered as a fresh spawn under a "-2" name.
+		resolvedName := resolvedAgentName(data, agentType)
+		if s.obsStore != nil {
+			if rosterID, err := s.obsStore.ResolveRosterID(ctx, sessionID, resolvedName); err == nil {
+				// Before adopting: check no other instance already maps to
+				// this name (concurrent same-type agents after hookd
+				// restart could otherwise both try to adopt it).
+				alreadyClaimed := false
+				s.regMu.Lock()
+				for _, existing := range s.instanceRegistry {
+					if existing.name == resolvedName {
+						alreadyClaimed = true
+						break
+					}
+				}
+				if !alreadyClaimed {
+					if s.instanceRegistry == nil {
+						s.instanceRegistry = make(map[string]instanceEntry)
+					}
+					s.instanceRegistry[instKey] = instanceEntry{name: resolvedName, rosterID: rosterID}
+					s.regMu.Unlock()
+					data["_agent_name"] = resolvedName
+					s.sessions.Upsert(sessionID, strings.TrimPrefix(resolvedName, "@"))
+					return resolvedName
+				}
+				s.regMu.Unlock()
+				// Fall through to create a new entry — this name is already
+				// adopted by a sibling's resume.
+			}
+		}
+		baseName = agentNameFor(agentType)
+		spawnerType = ""
+	}
+
+	rel := "teammate"
+	parentAgent := "" // resolves to the lead when empty
+	if spawnerType != "" {
+		rel = "subagent"
+		parentAgent = agentNameFor(spawnerType)
+	}
+	if sidecarMeta != nil && sidecarMeta.SpawnDepth > 0 {
+		rel = "subagent"
+	}
+
+	now := time.Now().UTC()
+	sid := sessionID
+	boundAt := now
+
+	s.regMu.Lock()
+	if s.instanceRegistry == nil {
+		s.instanceRegistry = make(map[string]instanceEntry)
+	}
+	unique := baseName
+	if s.obsStore != nil {
+		if _, err := s.obsStore.ResolveRosterID(ctx, sessionID, unique); err == nil {
+			for i := 2; i <= 64; i++ {
+				candidate := fmt.Sprintf("%s-%d", baseName, i)
+				if _, err := s.obsStore.ResolveRosterID(ctx, sessionID, candidate); err != nil {
+					unique = candidate
+					break
+				}
+			}
+		}
+		if unique == baseName {
+			if _, err := s.obsStore.ResolveRosterID(ctx, sessionID, unique); err == nil {
+				// All 64 candidates exhausted; skip registration rather
+				// than overwriting an existing entry.
+				s.regMu.Unlock()
+				data["_agent_name"] = unique
+				s.sessions.Upsert(sessionID, strings.TrimPrefix(unique, "@"))
+				return unique
+			}
+		}
+	}
+	rosterID := roster.GenerateRosterID()
+	entry := store.RosterEntry{
+		RosterID:     rosterID,
+		SessionID:    &sid,
+		AgentName:    unique,
+		AgentID:      event.AgentID,
+		Host:         s.cfg.Host,
+		Runtime:      "claude_code",
+		Relationship: rel,
+		CreatedAt:    now,
+		BoundAt:      &boundAt,
+	}
+	if sidecarMeta != nil && sidecarMeta.Model != "" {
+		entry.Model = sidecarMeta.Model
+	}
+	if s.obsStore != nil {
+		// Sidecar parentAgentId, when present, is exact — prefer it over the
+		// FIFO/TTL name-matching heuristic's parentAgent guess, which can
+		// misattribute under concurrent same-type spawns.
+		if sidecarMeta != nil && sidecarMeta.ParentAgentID != "" {
+			if parentID, err := s.obsStore.ResolveByAgentID(ctx, sessionID, sidecarMeta.ParentAgentID); err == nil {
+				entry.ParentRef = &parentID
+			}
+		}
+		if entry.ParentRef == nil {
+			if parentID, err := s.obsStore.ResolveRosterID(ctx, sessionID, parentAgent); err == nil {
+				entry.ParentRef = &parentID
+			}
+		}
+		if leadRID, err := s.obsStore.ResolveRosterID(ctx, sessionID, ""); err == nil {
+			if leadRoster, err := s.obsStore.GetRosterEntry(ctx, leadRID); err == nil {
+				entry.TeamName = leadRoster.TeamName
+			}
+		}
+		_ = s.obsStore.UpsertRosterEntry(ctx, entry)
+	}
+	s.instanceRegistry[instKey] = instanceEntry{name: unique, rosterID: rosterID}
+	s.regMu.Unlock()
+
+	s.subagentNames.setResolved(sessionID, agentType, unique, spawnerType)
+	data["_agent_name"] = unique
+	s.sessions.Upsert(sessionID, strings.TrimPrefix(unique, "@"))
+
+	if s.obsStore != nil {
+		// Model intentionally omitted — the store's COALESCE guard on that
+		// column protects against an empty value clobbering one already
+		// captured from a prior event.
+		_ = s.obsStore.UpsertSession(ctx, store.Session{
+			SessionID: sessionID,
+			AgentName: unique,
+			Host:      s.cfg.Host,
+			Username:  s.cfg.User,
+			Status:    store.SessionStatusActive,
+			Runtime:   "claude_code",
+		})
+	}
+
+	return unique
+}
+
+// subagentMeta is the subset of a Claude Code agent-<id>.meta.json sidecar
+// (written alongside a subagent's transcript at launch time) that
+// registerNewSubagentInstance uses to enrich roster registration with ground
+// truth the FIFO/TTL name-matching heuristic can't provide. Fields absent
+// from a given sidecar (e.g. a plain Agent-tool spawn has no model/
+// parentAgentId/spawnDepth, only agentType/description/toolUseId) just
+// zero-value and are treated as "not available" by the caller.
+type subagentMeta struct {
+	ParentAgentID string `json:"parentAgentId"`
+	Model         string `json:"model"`
+	SpawnDepth    int    `json:"spawnDepth"`
+}
+
+// readSubagentMeta reads and parses a subagent's meta.json sidecar.
+func readSubagentMeta(path string) (*subagentMeta, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var m subagentMeta
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil, err
+	}
+	return &m, nil
 }
 
 // activityFromData extracts the (tag, display) pair hook.EnrichRecord wrote
@@ -1082,6 +1361,18 @@ func agentNameFor(agentType string) string {
 	return "@" + agentType
 }
 
+// resolvedAgentName prefers the human-given name resolved by
+// resolveSubagentName (data["_agent_name"], e.g. "@thirdparty-investigator")
+// over the generic agentNameFor(agentType) label (e.g. "@general-purpose"),
+// so Agent-tool sub-subagents register and get attributed under the name the
+// spawning agent gave them rather than colliding on their shared type.
+func resolvedAgentName(data map[string]interface{}, agentType string) string {
+	if name, _ := data["_agent_name"].(string); name != "" {
+		return name
+	}
+	return agentNameFor(agentType)
+}
+
 // stashMCPIdentity records hook-derived identity for injection into the
 // subsequent MCP call keyed by toolSuffix:entityID (10 s TTL).
 func (s *Server) stashMCPIdentity(toolSuffix, entityID, sessionID, agentType string) {
@@ -1177,61 +1468,139 @@ func (s *Server) injectMCPIdentity(raw json.RawMessage) json.RawMessage {
 	return json.RawMessage(out)
 }
 
+// subagentEntry is one queued Agent-tool spawn: the human-given name and the
+// agent_type of whichever agent (lead or teammate) called the Agent tool.
+type subagentEntry struct {
+	name       string
+	spawner    string
+	recordedAt time.Time
+}
+
+// subagentEntryTTL bounds how long a queued Agent-tool spawn is trusted as
+// "this is the SubagentStart we're waiting for". Past this age, pop() treats
+// the entry as stale (still dequeues it, so it doesn't block later pops, but
+// reports it as not-found) — the Agent-tool PreToolUse queued a name for a
+// spawn that (for whatever reason) never sent a timely SubagentStart, so
+// matching it to an unrelated later spawn of the same type would misattribute.
+const subagentEntryTTL = 60 * time.Second
+
 // subagentNameMap tracks the human-given name for subagents spawned via the
 // Agent tool. Claude Code sets agent_type to the subagent's type descriptor
 // (e.g. "general-purpose") rather than the name the lead gave it; this map
 // resolves the type back to the name so feed shows "@scraper-research" instead
 // of "@general-purpose".
 //
-// Keyed by (session_id, agent_type) → display name ("@scraper-research").
-// For concurrent same-type subagents the last-spawned name wins — imperfect
-// but far better than the raw type for every event.
+// Keyed by "session_id|agent_type" → FIFO queue of entries, one per Agent-tool
+// spawn of that type. record() appends on the Agent-tool PreToolUse; pop()
+// dequeues the oldest entry — used exclusively by SubagentStart's own
+// registration (registerNewSubagentInstance) to decide whether a given
+// spawn was predicted by a preceding Agent-tool call, and mirrors the result
+// into resolved regardless of TTL outcome. peek() is the read-only,
+// FIFO-untouched lookup every other event uses (via resolveSubagentName) to
+// display the resolved name for an already-registered instance — it never
+// dequeues, so it can be called on every event without disturbing pop()'s
+// bookkeeping. For concurrent same-type spawns, once all queued names are
+// popped every further peek() shares the last-popped entry until
+// setResolved overwrites it with a uniquified name.
 type subagentNameMap struct {
-	mu    sync.Mutex
-	names map[string]map[string]string // session_id → agent_type → "@name"
+	mu       sync.Mutex
+	m        map[string][]subagentEntry
+	resolved map[string]subagentEntry
 }
 
-func (m *subagentNameMap) record(sessionID, agentType, name string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.names == nil {
-		m.names = make(map[string]map[string]string)
-	}
-	byType := m.names[sessionID]
-	if byType == nil {
-		byType = make(map[string]string)
-		m.names[sessionID] = byType
-	}
-	byType[agentType] = "@" + name
+func subagentNameKey(sessionID, agentType string) string {
+	return sessionID + "|" + agentType
 }
 
-func (m *subagentNameMap) resolve(sessionID, agentType string) string {
+func (m *subagentNameMap) record(sessionID, agentType, name, spawnerType string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.names == nil {
-		return ""
+	if m.m == nil {
+		m.m = make(map[string][]subagentEntry)
 	}
-	return m.names[sessionID][agentType]
+	key := subagentNameKey(sessionID, agentType)
+	m.m[key] = append(m.m[key], subagentEntry{name: "@" + name, spawner: spawnerType, recordedAt: time.Now()})
+}
+
+// pop dequeues the oldest queued entry for (sessionID, agentType), mirroring
+// it into resolved. Returns ("", "") when the queue is empty OR the dequeued
+// entry is older than subagentEntryTTL — in the TTL case the entry is still
+// consumed (and still mirrored to resolved as a display fallback), just not
+// reported as a confirmed match to the caller.
+func (m *subagentNameMap) pop(sessionID, agentType string) (name, spawner string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := subagentNameKey(sessionID, agentType)
+	queue := m.m[key]
+	if len(queue) == 0 {
+		return "", ""
+	}
+	entry := queue[0]
+	if len(queue) == 1 {
+		delete(m.m, key)
+	} else {
+		m.m[key] = queue[1:]
+	}
+	if m.resolved == nil {
+		m.resolved = make(map[string]subagentEntry)
+	}
+	m.resolved[key] = entry
+	if time.Since(entry.recordedAt) > subagentEntryTTL {
+		return "", ""
+	}
+	return entry.name, entry.spawner
+}
+
+// peek returns the sticky last-resolved name for (sessionID, agentType)
+// without touching the FIFO queue — for display resolution only, safe to
+// call on every event.
+func (m *subagentNameMap) peek(sessionID, agentType string) (name, spawner string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := subagentNameKey(sessionID, agentType)
+	entry := m.resolved[key]
+	return entry.name, entry.spawner
+}
+
+// setResolved overwrites the sticky resolved entry for (sessionID, agentType)
+// directly — used after uniquify-ing a popped base name (e.g. "@Explore" →
+// "@Explore-2") so subsequent peek() calls return the FINAL registered name,
+// not the pre-collision one pop() mirrored in.
+func (m *subagentNameMap) setResolved(sessionID, agentType, name, spawnerType string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.resolved == nil {
+		m.resolved = make(map[string]subagentEntry)
+	}
+	m.resolved[subagentNameKey(sessionID, agentType)] = subagentEntry{name: name, spawner: spawnerType}
 }
 
 func (m *subagentNameMap) clearSession(sessionID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	delete(m.names, sessionID)
+	prefix := sessionID + "|"
+	for k := range m.m {
+		if strings.HasPrefix(k, prefix) {
+			delete(m.m, k)
+		}
+	}
+	for k := range m.resolved {
+		if strings.HasPrefix(k, prefix) {
+			delete(m.resolved, k)
+		}
+	}
 }
 
-// clearAgent removes a single agentType entry for sessionID, leaving other
-// agent types tracked for the same session untouched. Use this for a
-// teammate's Stop event, where the rest of the team is still mid-turn.
+// clearAgent removes the queued and resolved entries for a single agentType
+// for sessionID, leaving other agent types tracked for the same session
+// untouched. Use this for a teammate's Stop event, where the rest of the team
+// is still mid-turn.
 func (m *subagentNameMap) clearAgent(sessionID, agentType string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if byType, ok := m.names[sessionID]; ok {
-		delete(byType, agentType)
-		if len(byType) == 0 {
-			delete(m.names, sessionID)
-		}
-	}
+	key := subagentNameKey(sessionID, agentType)
+	delete(m.m, key)
+	delete(m.resolved, key)
 }
 
 // normaliseToolInput coerces event.ToolInput (interface{}) to a
@@ -1376,23 +1745,48 @@ func (s *Server) readLastLines(n int) []string {
 // resolveSubagentName captures agent names from Agent tool calls and resolves
 // them for subsequent subagent events. Claude Code sets agent_type to the type
 // descriptor ("general-purpose") for non-team subagents; this method overrides
-// _agent_name with the human-given name from the Agent tool_input.
+// _agent_name with the human-given name from the Agent tool_input, and stashes
+// the spawning agent's type in _spawner_type so dispatchObservability's roster
+// registration can resolve the correct parent_ref (see resolvedAgentName).
 func (s *Server) resolveSubagentName(event hook.HookEvent, data map[string]interface{}) {
+	// FIFO push MUST run before the instanceRegistry early-return: a teammate
+	// already in the registry (its own agent_id resolves) can still be
+	// spawning a child via Agent — the child's spawn info goes into the FIFO
+	// keyed by the child's subagent_type, not the parent's agent_id.
 	if event.HookEventName == "PreToolUse" && event.ToolName == "Agent" {
 		ti := normaliseToolInput(event.ToolInput)
 		name := hook.StrField(ti, "name", 64)
-		if name != "" {
-			agentType := hook.StrField(ti, "subagent_type", 64)
-			if agentType == "" {
-				agentType = "general-purpose"
-			}
-			s.subagentNames.record(event.SessionID, agentType, name)
+		agentType := hook.StrField(ti, "subagent_type", 64)
+		if agentType == "" {
+			agentType = "general-purpose"
 		}
+		displayName := name
+		if displayName == "" {
+			displayName = agentType
+		}
+		s.subagentNames.record(event.SessionID, agentType, displayName, event.AgentType)
+	}
+
+	if event.AgentID != "" {
+		instKey := event.SessionID + "|" + event.AgentID
+		s.regMu.Lock()
+		if inst, ok := s.instanceRegistry[instKey]; ok {
+			data["_agent_name"] = inst.name
+			s.regMu.Unlock()
+			if _, spawner := s.subagentNames.peek(event.SessionID, event.AgentType); spawner != "" {
+				data["_spawner_type"] = spawner
+			}
+			return
+		}
+		s.regMu.Unlock()
 	}
 
 	if event.AgentType != "" {
-		if resolved := s.subagentNames.resolve(event.SessionID, event.AgentType); resolved != "" {
+		if resolved, spawner := s.subagentNames.peek(event.SessionID, event.AgentType); resolved != "" {
 			data["_agent_name"] = resolved
+			if spawner != "" {
+				data["_spawner_type"] = spawner
+			}
 		}
 	}
 }

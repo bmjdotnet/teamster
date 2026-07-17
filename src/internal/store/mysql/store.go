@@ -1491,7 +1491,7 @@ func (s *Store) UpsertSession(ctx context.Context, sess store.Session) error {
 			status = VALUES(status),
 			runtime = VALUES(runtime),
 			cwd = VALUES(cwd),
-			model = VALUES(model),
+			model = COALESCE(NULLIF(VALUES(model),''), model),
 			originator = VALUES(originator),
 			cli_version = VALUES(cli_version)`,
 		sess.SessionID, sess.AgentName, sess.Host, sess.Username, sess.TeamName,

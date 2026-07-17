@@ -385,6 +385,12 @@ domain-named agent:
 - Give the agent a descriptive `name` for addressability (Rule II)
 - Use `subagent_type: general-purpose`
 
+Teammates spawning their own Agent-tool subagents for bounded sub-tasks
+should use distinct `subagent_type` values when possible — the fleet view
+nests sub-subagents under their spawning teammate by type. Note: CC
+currently blocks `name` from teammate Agent tool calls; hookd auto-numbers
+same-type siblings to ensure unique identities.
+
 **3. Write the technical brief and send it directly.**
 Send via `SendMessage` to the identified (or newly spawned) agent. Include:
 - File paths and expected outcome

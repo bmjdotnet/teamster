@@ -7,10 +7,16 @@ activity.
 ## What muster tracks
 
 **Roster** — every agent registered on the hub: leads, teammates, subagents,
-Codex sessions. Each has a roster_id, relationship (lead/teammate/peer),
+Codex sessions. Each has a roster_id, relationship (lead/teammate/subagent/peer),
 liveness (live/idle/stale/closed/unbound), and parent linkage. Agents appear
 on the roster automatically when their first hook event arrives — no
-explicit registration step.
+explicit registration step. A teammate that spawns its own Agent-tool
+subagent registers the sub-subagent with relationship "subagent" and
+parent_ref pointing to the spawning teammate (not the lead), enabling
+ctop's fleet view to render a nested tree. CC currently blocks `name` from
+teammate-spawned Agent tool calls, so these sub-subagents would otherwise
+collide on identity; hookd auto-numbers same-type siblings (`@Explore`,
+`@Explore-2`, etc.) to keep roster identities unique regardless.
 
 **Health** — per-agent context-window usage, token totals, last activity,
 and pressure level. Updated by the health-collector daemon every 15 seconds.

@@ -1522,6 +1522,19 @@ WHERE NOT EXISTS (
 			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 		},
 	},
+	{
+		// agent-id is CC's stable per-instance identifier (transcript filename
+		// identity, present on every agent-typed hook event) — the universal
+		// join key that lets hookd's registered numbered name (e.g. "@Explore-5")
+		// be resolved by token-scraper and health-collector, which only know the
+		// reusable type name. See agent-naming-v2 kit WP1/WP3c.
+		Version: 63,
+		Name:    "roster-agent-id",
+		Stmts: []string{
+			`ALTER TABLE agent_roster ADD COLUMN agent_id VARCHAR(64) NOT NULL DEFAULT ''`,
+			`CREATE INDEX idx_roster_agent_id ON agent_roster (session_id, agent_id)`,
+		},
+	},
 }
 
 // mergeProjectToProduct renames `project` tag rows to `product`, handling the
