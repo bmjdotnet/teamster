@@ -33,7 +33,7 @@
       "id": 900,
       "options": {
         "mode": "html",
-        "content": "<div style=\"display:flex; gap:6px; align-items:center; flex-wrap:wrap; padding:2px 0; margin: -4px 0;\">\n  <a href=\"/d/landing-page?from=${__from}&to=${__to}\" style=\"padding:4px 12px; background:#1e1e2e; color:#8ab4f8; border-radius:4px; text-decoration:none; font-size:13px; font-weight:600; border:1px solid #333;\">Home</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/activity-feed?from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Activity</a>\n  <a href=\"/d/fd-ai-spend-overview-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Spend</a>\n  <a href=\"/d/fd-cost-explorer-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Trace</a>\n  <a href=\"/d/fd-usage-effectiveness-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Usage</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/cost-by-tag-value?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Simple Cost</a>\n  <a href=\"/d/tag-stack-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Multidim</a>\n  <a href=\"/d/entity-cost-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Work</a>\n  <a href=\"/d/fd-outcome-accounting-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Outcomes</a>\n  <a href=\"/d/outcome-cost-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Outcome Cost</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/fd-data-quality-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#2a2a4a; color:#8ab4f8; border-radius:4px; text-decoration:none; font-size:12px; font-weight:600; border:1px solid #4a4a6a;\">Health</a>\n</div>",
+        "content": "<div style=\"display:flex; gap:6px; align-items:center; flex-wrap:wrap; padding:2px 0; margin: -4px 0;\">\n  <a href=\"/d/landing-page?from=${__from}&to=${__to}\" style=\"padding:4px 12px; background:#1e1e2e; color:#8ab4f8; border-radius:4px; text-decoration:none; font-size:13px; font-weight:600; border:1px solid #333;\">Home</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/fleet-view?from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Fleet</a>\n  <a href=\"/d/fd-ai-spend-overview-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Spend</a>\n  <a href=\"/d/fd-cost-explorer-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Trace</a>\n  <a href=\"/d/fd-usage-effectiveness-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Usage</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/cost-by-tag-value?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Simple Cost</a>\n  <a href=\"/d/tag-stack-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Multidim</a>\n  <a href=\"/d/entity-cost-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Work</a>\n  <a href=\"/d/fd-outcome-accounting-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Outcomes</a>\n  <a href=\"/d/outcome-cost-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Outcome Cost</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/fd-data-quality-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#2a2a4a; color:#8ab4f8; border-radius:4px; text-decoration:none; font-size:12px; font-weight:600; border:1px solid #4a4a6a;\">Health</a>\n</div>",
         "code": {
           "language": "html",
           "showLineNumbers": false,
@@ -56,7 +56,7 @@
       },
       "id": 1,
       "panels": [],
-      "title": "Verdict — Attribution & Pipeline Health",
+      "title": "Verdict \u2014 Attribution & Pipeline Health",
       "type": "row"
     },
     {
@@ -509,7 +509,7 @@
       },
       "id": 10,
       "panels": [],
-      "title": "Attribution Pipeline — Coverage & Method Mix",
+      "title": "Attribution Pipeline \u2014 Coverage & Method Mix",
       "type": "row"
     },
     {
@@ -614,7 +614,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: all attribution methods in selected window. Shows the recovery pipeline contribution — temporal_join=direct, transcript/warmup/gap/synthesis=recovered.",
+      "description": "scope: all attribution methods in selected window. Shows the recovery pipeline contribution \u2014 temporal_join=direct, transcript/warmup/gap/synthesis=recovered.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -710,7 +710,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "Recovery method totals for selected window. Headline: only ~33% direct — the rest recovered by sweep passes.",
+      "description": "Recovery method totals for selected window. Headline: only ~33% direct \u2014 the rest recovered by sweep passes.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -971,7 +971,7 @@
       },
       "id": 20,
       "panels": [],
-      "title": "Ingest — Hookd & Scrapers",
+      "title": "Ingest \u2014 Hookd & Scrapers",
       "type": "row"
     },
     {
@@ -1205,7 +1205,7 @@
         "type": "prometheus",
         "uid": "teamster-prometheus"
       },
-      "description": "Process up/down for hookd (the only Teamster service with a Prometheus scrape target). MCP servers are stdio — not scraped.",
+      "description": "Process up/down for hookd (the only Teamster service with a Prometheus scrape target). MCP servers are stdio \u2014 not scraped.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1431,7 +1431,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "Tag key drift: keys defined with conflicting category or cardinality. Live data shows work-type and source duplicated — causes incorrect cost splits.",
+      "description": "Tag key drift: keys defined with conflicting category or cardinality. Live data shows work-type and source duplicated \u2014 causes incorrect cost splits.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1836,7 +1836,7 @@
       },
       "id": 40,
       "panels": [],
-      "title": "Attribution Flow — Sankey",
+      "title": "Attribution Flow \u2014 Sankey",
       "type": "row"
     },
     {
@@ -1899,7 +1899,7 @@
           "refId": "A"
         }
       ],
-      "title": "Attribution Flow (spend → confidence → entity tier)",
+      "title": "Attribution Flow (spend \u2192 confidence \u2192 entity tier)",
       "type": "volkovlabs-echarts-panel"
     }
   ],

@@ -33,7 +33,7 @@
       "id": 900,
       "options": {
         "mode": "html",
-        "content": "<div style=\"display:flex; gap:6px; align-items:center; flex-wrap:wrap; padding:2px 0; margin: -4px 0;\">\n  <a href=\"/d/landing-page?from=${__from}&to=${__to}\" style=\"padding:4px 12px; background:#1e1e2e; color:#8ab4f8; border-radius:4px; text-decoration:none; font-size:13px; font-weight:600; border:1px solid #333;\">Home</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/activity-feed?from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Activity</a>\n  <a href=\"/d/fd-ai-spend-overview-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Spend</a>\n  <a href=\"/d/fd-cost-explorer-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Trace</a>\n  <a href=\"/d/fd-usage-effectiveness-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Usage</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/cost-by-tag-value?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Simple Cost</a>\n  <a href=\"/d/tag-stack-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#2a2a4a; color:#8ab4f8; border-radius:4px; text-decoration:none; font-size:12px; font-weight:600; border:1px solid #4a4a6a;\">Multidim</a>\n  <a href=\"/d/entity-cost-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Work</a>\n  <a href=\"/d/fd-outcome-accounting-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Outcomes</a>\n  <a href=\"/d/outcome-cost-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Outcome Cost</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/fd-data-quality-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Health</a>\n</div>",
+        "content": "<div style=\"display:flex; gap:6px; align-items:center; flex-wrap:wrap; padding:2px 0; margin: -4px 0;\">\n  <a href=\"/d/landing-page?from=${__from}&to=${__to}\" style=\"padding:4px 12px; background:#1e1e2e; color:#8ab4f8; border-radius:4px; text-decoration:none; font-size:13px; font-weight:600; border:1px solid #333;\">Home</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/fleet-view?from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Fleet</a>\n  <a href=\"/d/fd-ai-spend-overview-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Spend</a>\n  <a href=\"/d/fd-cost-explorer-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Trace</a>\n  <a href=\"/d/fd-usage-effectiveness-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Usage</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/cost-by-tag-value?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Simple Cost</a>\n  <a href=\"/d/tag-stack-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#2a2a4a; color:#8ab4f8; border-radius:4px; text-decoration:none; font-size:12px; font-weight:600; border:1px solid #4a4a6a;\">Multidim</a>\n  <a href=\"/d/entity-cost-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Work</a>\n  <a href=\"/d/fd-outcome-accounting-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Outcomes</a>\n  <a href=\"/d/outcome-cost-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Outcome Cost</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/fd-data-quality-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Health</a>\n</div>",
         "code": {
           "language": "html",
           "showLineNumbers": false,
@@ -56,7 +56,7 @@
       },
       "id": 100,
       "panels": [],
-      "title": "Overview — $stack_level_1 Stats",
+      "title": "Overview \u2014 $stack_level_1 Stats",
       "type": "row"
     },
     {
@@ -268,7 +268,7 @@
       },
       "id": 110,
       "panels": [],
-      "title": "Cost by Tag Stack ($stack_level_1 → $stack_level_2)",
+      "title": "Cost by Tag Stack ($stack_level_1 \u2192 $stack_level_2)",
       "type": "row"
     },
     {
@@ -276,7 +276,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "Cost grouped by the selected tag stack levels. All cost is included. Cost with no WMS focus entity (entity_type='') appears as '(unallocated)' — no entity exists, so no tag can apply; this is an attribution gap, not a tagging gap. Cost whose entity exists but has no value for a level's key appears as '(untagged)'. Entities with multiple values for a key have their cost split evenly across the values (1/n weights), so the panel total always reconciles with Total Cost. Note: not all tag dimensions co-occur — e.g. product-tagged cost is rarely also work-type-tagged, so a large '(untagged)' share at Level 2 reflects real low overlap, not missing data. Pick Level 1/Level 2 keys that share entities (e.g. work-type → phase) for a dense stack.",
+      "description": "Cost grouped by the selected tag stack levels. All cost is included. Cost with no WMS focus entity (entity_type='') appears as '(unallocated)' \u2014 no entity exists, so no tag can apply; this is an attribution gap, not a tagging gap. Cost whose entity exists but has no value for a level's key appears as '(untagged)'. Entities with multiple values for a key have their cost split evenly across the values (1/n weights), so the panel total always reconciles with Total Cost. Note: not all tag dimensions co-occur \u2014 e.g. product-tagged cost is rarely also work-type-tagged, so a large '(untagged)' share at Level 2 reflects real low overlap, not missing data. Pick Level 1/Level 2 keys that share entities (e.g. work-type \u2192 phase) for a dense stack.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -364,7 +364,7 @@
           "refId": "A"
         }
       ],
-      "title": "Cost by $stack_level_1 → $stack_level_2 (stacked bars)",
+      "title": "Cost by $stack_level_1 \u2192 $stack_level_2 (stacked bars)",
       "transformations": [
         {
           "id": "groupingToMatrix",
@@ -383,7 +383,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "Two-dimensional cost matrix: Level 1 rows × Level 2 columns. Cell background scales with cost (column-relative).",
+      "description": "Two-dimensional cost matrix: Level 1 rows \u00d7 Level 2 columns. Cell background scales with cost (column-relative).",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -475,7 +475,7 @@
           "refId": "A"
         }
       ],
-      "title": "Cost Matrix: $stack_level_1 × $stack_level_2",
+      "title": "Cost Matrix: $stack_level_1 \u00d7 $stack_level_2",
       "transformations": [
         {
           "id": "groupingToMatrix",
@@ -605,7 +605,7 @@
           "refId": "A"
         }
       ],
-      "title": "Cost Table: $stack_level_1 → $stack_level_2 (filter: $filter_value)",
+      "title": "Cost Table: $stack_level_1 \u2192 $stack_level_2 (filter: $filter_value)",
       "type": "table"
     },
     {
@@ -626,7 +626,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "Cost series over time, one series per Level 1 tag value. Cost with no WMS focus entity (entity_type='') appears as '(unallocated)' — an attribution gap, not a tagging gap; cost whose entity has no Level 1 tag appears as '(untagged)'. Multi-valued entities are split evenly (1/n weights), so the stacked total reconciles with Total Cost. Stacked area shows total spend and each dimension's share over time.",
+      "description": "Cost series over time, one series per Level 1 tag value. Cost with no WMS focus entity (entity_type='') appears as '(unallocated)' \u2014 an attribution gap, not a tagging gap; cost whose entity has no Level 1 tag appears as '(untagged)'. Multi-valued entities are split evenly (1/n weights), so the stacked total reconciles with Total Cost. Stacked area shows total spend and each dimension's share over time.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -920,7 +920,7 @@
           "refId": "A"
         }
       ],
-      "title": "Phase Cost Waterfall (design → build → test → review → rework)",
+      "title": "Phase Cost Waterfall (design \u2192 build \u2192 test \u2192 review \u2192 rework)",
       "type": "barchart"
     },
     {

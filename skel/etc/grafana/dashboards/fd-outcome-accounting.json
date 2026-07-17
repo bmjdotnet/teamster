@@ -33,7 +33,7 @@
       "id": 900,
       "options": {
         "mode": "html",
-        "content": "<div style=\"display:flex; gap:6px; align-items:center; flex-wrap:wrap; padding:2px 0; margin: -4px 0;\">\n  <a href=\"/d/landing-page?from=${__from}&to=${__to}\" style=\"padding:4px 12px; background:#1e1e2e; color:#8ab4f8; border-radius:4px; text-decoration:none; font-size:13px; font-weight:600; border:1px solid #333;\">Home</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/activity-feed?from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Activity</a>\n  <a href=\"/d/fd-ai-spend-overview-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Spend</a>\n  <a href=\"/d/fd-cost-explorer-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Trace</a>\n  <a href=\"/d/fd-usage-effectiveness-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Usage</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/cost-by-tag-value?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Simple Cost</a>\n  <a href=\"/d/tag-stack-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Multidim</a>\n  <a href=\"/d/entity-cost-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Work</a>\n  <a href=\"/d/fd-outcome-accounting-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#2a2a4a; color:#8ab4f8; border-radius:4px; text-decoration:none; font-size:12px; font-weight:600; border:1px solid #4a4a6a;\">Outcomes</a>\n  <a href=\"/d/outcome-cost-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Outcome Cost</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/fd-data-quality-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Health</a>\n</div>",
+        "content": "<div style=\"display:flex; gap:6px; align-items:center; flex-wrap:wrap; padding:2px 0; margin: -4px 0;\">\n  <a href=\"/d/landing-page?from=${__from}&to=${__to}\" style=\"padding:4px 12px; background:#1e1e2e; color:#8ab4f8; border-radius:4px; text-decoration:none; font-size:13px; font-weight:600; border:1px solid #333;\">Home</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/fleet-view?from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Fleet</a>\n  <a href=\"/d/fd-ai-spend-overview-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Spend</a>\n  <a href=\"/d/fd-cost-explorer-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Trace</a>\n  <a href=\"/d/fd-usage-effectiveness-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Usage</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/cost-by-tag-value?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Simple Cost</a>\n  <a href=\"/d/tag-stack-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Multidim</a>\n  <a href=\"/d/entity-cost-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Work</a>\n  <a href=\"/d/fd-outcome-accounting-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#2a2a4a; color:#8ab4f8; border-radius:4px; text-decoration:none; font-size:12px; font-weight:600; border:1px solid #4a4a6a;\">Outcomes</a>\n  <a href=\"/d/outcome-cost-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Outcome Cost</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/fd-data-quality-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Health</a>\n</div>",
         "code": {
           "language": "html",
           "showLineNumbers": false,
@@ -64,7 +64,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: all spend incl. unallocated — cost_facts for the period. Includes outcome, workunit, and unallocated entity types. Note: includes legacy v1 entities (project/goal/task/workitem) not shown in the Outcome Ledger below.",
+      "description": "scope: all spend incl. unallocated \u2014 cost_facts for the period. Includes outcome, workunit, and unallocated entity types. Note: includes legacy v1 entities (project/goal/task/workitem) not shown in the Outcome Ledger below.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -253,7 +253,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: cost_facts rows with entity_type='' (no WMS entity) — the disclosed residual",
+      "description": "scope: cost_facts rows with entity_type='' (no WMS entity) \u2014 the disclosed residual",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -459,7 +459,7 @@
       },
       "id": 30,
       "panels": [],
-      "title": "Attestation — Work Mix & Attribution Methods",
+      "title": "Attestation \u2014 Work Mix & Attribution Methods",
       "type": "row"
     },
     {
@@ -467,7 +467,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: all spend incl. unallocated — cost by work-type tag using canonical facet query with fractional weighting. (untagged)=entity with no work-type tag. (unallocated)=no WMS entity.",
+      "description": "scope: all spend incl. unallocated \u2014 cost by work-type tag using canonical facet query with fractional weighting. (untagged)=entity with no work-type tag. (unallocated)=no WMS entity.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -715,7 +715,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: all spend incl. unallocated — cost by phase tag using canonical facet query with fractional weighting. Consistent cost basis with work-type mix.",
+      "description": "scope: all spend incl. unallocated \u2014 cost by phase tag using canonical facet query with fractional weighting. Consistent cost basis with work-type mix.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1067,7 +1067,7 @@
           "refId": "A"
         }
       ],
-      "title": "Attribution Method Mix — Defensibility Statement",
+      "title": "Attribution Method Mix \u2014 Defensibility Statement",
       "type": "table"
     },
     {
@@ -1080,7 +1080,7 @@
       },
       "id": 20,
       "panels": [],
-      "title": "Workunit Drill — $outcome",
+      "title": "Workunit Drill \u2014 $outcome",
       "type": "row"
     },
     {
@@ -1177,7 +1177,7 @@
           "refId": "A"
         }
       ],
-      "title": "Outcome Cost Over Time — $outcome",
+      "title": "Outcome Cost Over Time \u2014 $outcome",
       "type": "timeseries"
     },
     {
@@ -1340,7 +1340,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: attributed only — one row per outcome with cost activity in the window. CTE-based aggregate-first query (<1s for 30d). Confidence % = (direct + inferred) share of messages. Designed for invoice/budget review export.",
+      "description": "scope: attributed only \u2014 one row per outcome with cost activity in the window. CTE-based aggregate-first query (<1s for 30d). Confidence % = (direct + inferred) share of messages. Designed for invoice/budget review export.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -1640,7 +1640,7 @@
         "includeAll": true,
         "label": "Outcome (drill)",
         "name": "outcome",
-        "query": "SELECT CONCAT(o.id, ' — ', o.title) AS __text, o.id AS __value FROM outcomes o ORDER BY o.created_at DESC LIMIT 200",
+        "query": "SELECT CONCAT(o.id, ' \u2014 ', o.title) AS __text, o.id AS __value FROM outcomes o ORDER BY o.created_at DESC LIMIT 200",
         "refresh": 2,
         "type": "query"
       }

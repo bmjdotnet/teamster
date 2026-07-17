@@ -33,7 +33,7 @@
       "id": 900,
       "options": {
         "mode": "html",
-        "content": "<div style=\"display:flex; gap:6px; align-items:center; flex-wrap:wrap; padding:2px 0; margin: -4px 0;\">\n  <a href=\"/d/landing-page?from=${__from}&to=${__to}\" style=\"padding:4px 12px; background:#1e1e2e; color:#8ab4f8; border-radius:4px; text-decoration:none; font-size:13px; font-weight:600; border:1px solid #333;\">Home</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/activity-feed?from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Activity</a>\n  <a href=\"/d/fd-ai-spend-overview-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Spend</a>\n  <a href=\"/d/fd-cost-explorer-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Trace</a>\n  <a href=\"/d/fd-usage-effectiveness-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#2a2a4a; color:#8ab4f8; border-radius:4px; text-decoration:none; font-size:12px; font-weight:600; border:1px solid #4a4a6a;\">Usage</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/cost-by-tag-value?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Simple Cost</a>\n  <a href=\"/d/tag-stack-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Multidim</a>\n  <a href=\"/d/entity-cost-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Work</a>\n  <a href=\"/d/fd-outcome-accounting-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Outcomes</a>\n  <a href=\"/d/outcome-cost-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Outcome Cost</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/fd-data-quality-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Health</a>\n</div>",
+        "content": "<div style=\"display:flex; gap:6px; align-items:center; flex-wrap:wrap; padding:2px 0; margin: -4px 0;\">\n  <a href=\"/d/landing-page?from=${__from}&to=${__to}\" style=\"padding:4px 12px; background:#1e1e2e; color:#8ab4f8; border-radius:4px; text-decoration:none; font-size:13px; font-weight:600; border:1px solid #333;\">Home</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/fleet-view?from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Fleet</a>\n  <a href=\"/d/fd-ai-spend-overview-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Spend</a>\n  <a href=\"/d/fd-cost-explorer-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Trace</a>\n  <a href=\"/d/fd-usage-effectiveness-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#2a2a4a; color:#8ab4f8; border-radius:4px; text-decoration:none; font-size:12px; font-weight:600; border:1px solid #4a4a6a;\">Usage</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/cost-by-tag-value?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Simple Cost</a>\n  <a href=\"/d/tag-stack-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Multidim</a>\n  <a href=\"/d/entity-cost-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Work</a>\n  <a href=\"/d/fd-outcome-accounting-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Outcomes</a>\n  <a href=\"/d/outcome-cost-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Outcome Cost</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/fd-data-quality-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Health</a>\n</div>",
         "code": {
           "language": "html",
           "showLineNumbers": false,
@@ -64,7 +64,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "Cost share by model family over time — watch for expensive models displacing cheaper ones on routine work.\nscope: immediate ledger (attribution pending)",
+      "description": "Cost share by model family over time \u2014 watch for expensive models displacing cheaper ones on routine work.\nscope: immediate ledger (attribution pending)",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -222,7 +222,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "Fable/Opus cost on work-type=docs or test, as % of all Fable/Opus cost. High values are a model-fit review prompt — not a verdict.\nscope: attributed spend (cost_facts + entity_tags_resolved + fractional weighting per A2)",
+      "description": "Fable/Opus cost on work-type=docs or test, as % of all Fable/Opus cost. High values are a model-fit review prompt \u2014 not a verdict.\nscope: attributed spend (cost_facts + entity_tags_resolved + fractional weighting per A2)",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1429,7 +1429,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "Active and review-state workunits open longer than 24 hours. Actionable stalls — check focus and agent assignment.\nscope: WMS v2 workunits (open state intervals)",
+      "description": "Active and review-state workunits open longer than 24 hours. Actionable stalls \u2014 check focus and agent assignment.\nscope: WMS v2 workunits (open state intervals)",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1535,7 +1535,7 @@
           "refId": "A"
         }
       ],
-      "title": "Stall Table — Active/Review WUs Age >24h",
+      "title": "Stall Table \u2014 Active/Review WUs Age >24h",
       "type": "table"
     },
     {
@@ -1689,7 +1689,7 @@
           "refId": "A"
         }
       ],
-      "title": "Rework Tax — Rework + Review Share of Attributed Cost",
+      "title": "Rework Tax \u2014 Rework + Review Share of Attributed Cost",
       "type": "timeseries"
     },
     {
@@ -1813,7 +1813,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "Top 20 agents by cost. cache_read/msg is the context-bloat signal — heat-colored (higher = more bloated context). Agents may use multiple models; model column shows the most-used by cost.\nscope: attributed spend (cost_facts joined to token_ledger)",
+      "description": "Top 20 agents by cost. cache_read/msg is the context-bloat signal \u2014 heat-colored (higher = more bloated context). Agents may use multiple models; model column shows the most-used by cost.\nscope: attributed spend (cost_facts joined to token_ledger)",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1967,7 +1967,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "Average cache-read tokens per message by outcome — higher values mean context is growing without pruning.\nscope: attributed spend (cost_facts)",
+      "description": "Average cache-read tokens per message by outcome \u2014 higher values mean context is growing without pruning.\nscope: attributed spend (cost_facts)",
       "fieldConfig": {
         "defaults": {
           "color": {

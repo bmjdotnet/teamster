@@ -395,6 +395,12 @@ func handleRegisterPeer(ctx context.Context, s store.Store, args map[string]inte
 	if agentName == "" && relationship != "lead" {
 		return Result{}, validationErr("agent_name is required")
 	}
+	// Guard: models sometimes put the relationship value ("lead") in agent_name.
+	// That creates a ghost roster entry alongside the real "" one.
+	switch agentName {
+	case "lead", "teammate", "subagent", "peer", "service":
+		return Result{}, validationErr("agent_name must be the agent's display name (e.g. '@store'), not the relationship value — for the lead, pass empty string")
+	}
 	if runtime == "" {
 		return Result{}, validationErr("runtime is required")
 	}
@@ -696,7 +702,7 @@ var ToolDefs = []map[string]interface{}{
 		"inputSchema": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"agent_name":   map[string]interface{}{"type": "string"},
+				"agent_name":   map[string]interface{}{"type": "string", "description": "The agent's display name (e.g. '@store'). Empty string for the lead — do NOT pass the relationship value here."},
 				"runtime":      map[string]interface{}{"type": "string", "description": "claude_code or codex"},
 				"model":        map[string]interface{}{"type": "string"},
 				"host":         map[string]interface{}{"type": "string"},

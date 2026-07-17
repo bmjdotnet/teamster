@@ -1,0 +1,149 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "links": [],
+  "panels": [
+    {
+      "type": "text",
+      "title": "",
+      "gridPos": {
+        "h": 2,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 900,
+      "options": {
+        "mode": "html",
+        "content": "<div style=\"display:flex; gap:6px; align-items:center; flex-wrap:wrap; padding:2px 0; margin: -4px 0;\">\n  <a href=\"/d/landing-page?from=${__from}&to=${__to}\" style=\"padding:4px 12px; background:#1e1e2e; color:#8ab4f8; border-radius:4px; text-decoration:none; font-size:13px; font-weight:600; border:1px solid #333;\">Home</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/fleet-view?from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#2a2a4a; color:#8ab4f8; border-radius:4px; text-decoration:none; font-size:12px; font-weight:600; border:1px solid #4a4a6a;\">Fleet</a>\n  <a href=\"/d/fd-ai-spend-overview-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Spend</a>\n  <a href=\"/d/fd-cost-explorer-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Trace</a>\n  <a href=\"/d/fd-usage-effectiveness-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Usage</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/cost-by-tag-value?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Simple Cost</a>\n  <a href=\"/d/tag-stack-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Multidim</a>\n  <a href=\"/d/entity-cost-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Work</a>\n  <a href=\"/d/fd-outcome-accounting-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Outcomes</a>\n  <a href=\"/d/outcome-cost-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Outcome Cost</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/fd-data-quality-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Health</a>\n</div>",
+        "code": {
+          "language": "html",
+          "showLineNumbers": false,
+          "showMiniMap": false
+        }
+      },
+      "transparent": true,
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "teamster-events"
+      },
+      "description": "Combined fleet view + activity log. Fleet grid at top (dynamic height based on agent count), activity stream below.",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 28,
+        "w": 24,
+        "x": 0,
+        "y": 2
+      },
+      "id": 1,
+      "options": {
+        "baidu": {
+          "callback": "bmapReady",
+          "key": ""
+        },
+        "editor": {
+          "format": "auto"
+        },
+        "editorMode": "code",
+        "followTheme": true,
+        "gaode": {
+          "key": "",
+          "plugin": "AMap.Scale,AMap.ToolBar"
+        },
+        "getOption": "if (!document.getElementById('fleet-font')) {\n  const style = document.createElement('style');\n  style.id = 'fleet-font';\n  style.textContent = \"@font-face { font-family: 'GlassTTY'; src: url('/public/fonts/Glass_TTY_VT220.ttf') format('truetype'); }\";\n  document.head.appendChild(style);\n  document.fonts.load('18px GlassTTY').catch(() => {});\n}\nconst FONT = \"'GlassTTY', 'Roboto Mono', 'Consolas', monospace\";\nconst FS = 18;\nconst LINE_H = 21;\nconst PL = 8;\nconst PT = 6;\n\n// Blink toggle: flips every second, visible on each 5s data refresh\nconst _blink = Math.floor(Date.now() / 1000) % 2 === 0;\n\nconst _mc = document.createElement('canvas').getContext('2d');\n_mc.font = FS + 'px ' + FONT;\nconst CW = _mc.measureText('M').width;\n\n// Helpers\nfunction simpleHash(str) {\n  let h0=0x811c9dc5,h1=0x01000193,h2=0xdeadbeef;\n  for(let i=0;i<str.length;i++){const c=str.charCodeAt(i);h0=((h0^c)*0x01000193)>>>0;h1=((h1^c)*0x811c9dc5)>>>0;h2=((h2^c)*0x1b873593)>>>0;}\n  return[(h0>>>24)&0xff,(h1>>>24)&0xff,(h2>>>24)&0xff];\n}\nfunction entityColor(n,s){\n  const b=simpleHash((s||'')+(n||''));\n  let ch=[60+(b[0]*150/255),60+(b[1]*150/255),60+(b[2]*150/255)];\n  let mx=0,mn=0;for(let i=1;i<3;i++){if(ch[i]>ch[mx])mx=i;if(ch[i]<ch[mn])mn=i;}\n  ch[mx]=Math.min(ch[mx]+40,230);ch[mn]=Math.max(ch[mn]-30,40);\n  return ch.map(Math.round);\n}\nfunction rgbS(c){return'rgb('+c[0]+','+c[1]+','+c[2]+')';}\nfunction trunc(s,w){s=s||'';if(s.length<=w)return s;return w>2?s.substring(0,w-1)+'~':s.substring(0,w);}\nfunction humanTok(n){if(!n)return'0';if(n>=1e6)return(n/1e6).toFixed(1)+'M';if(n>=1e3)return(n/1e3).toFixed(0)+'k';return''+n;}\nfunction fmtCost(c){if(!c)return'$0';if(c<.5)return'<$1';return'$'+Math.round(c);}\nfunction modelAbbrev(m){if(!m)return'--';let b=m;const i=b.indexOf('[1m]');if(i>=0)b=b.substring(0,i);b=b.replace(/^claude-/,'');return b.length>10?b.substring(0,9)+'~':b;}\nfunction relTime(ts){if(!ts)return'\u2014';const d=new Date(ts);if(isNaN(d))return'\u2014';const s=Math.floor((Date.now()-d)/1000);if(s<60)return s+'s';if(s<3600)return Math.floor(s/60)+'m';if(s<86400)return Math.floor(s/3600)+'h';return Math.floor(s/86400)+'d';}\nfunction sp8(s){return(s||'').substring(0,8);}\nfunction dispName(an){return an===''?'@lead':(an.startsWith('@')?an:'@'+an);}\n\nconst CTX_A=[{p:0,c:[63,185,80]},{p:.45,c:[227,179,65]},{p:.7,c:[240,136,62]},{p:.9,c:[248,81,73]}];\nfunction ctxG(f){if(f<=CTX_A[0].p)return CTX_A[0].c;const L=CTX_A[CTX_A.length-1];if(f>=L.p)return L.c;for(let i=1;i<CTX_A.length;i++){const lo=CTX_A[i-1],hi=CTX_A[i];if(f>hi.p)continue;const t=(f-lo.p)/(hi.p-lo.p);return[Math.round(lo.c[0]+t*(hi.c[0]-lo.c[0])),Math.round(lo.c[1]+t*(hi.c[1]-lo.c[1])),Math.round(lo.c[2]+t*(hi.c[2]-lo.c[2]))];}return L.c;}\nfunction costG(c,mx){if(c<=0||mx<=0)return[31,92,40];const t=Math.min(Math.max(Math.log(c+1)/Math.log(mx+1),0),1);return[Math.round(31+t*79),Math.round(92+t*163),Math.round(40+t*90)];}\nfunction hDotC(l){if(l==='critical')return[248,81,73];if(l==='warning')return[227,179,65];return[63,185,80];}\n\nfunction buildTree(rows){\n  const bR={};rows.forEach((r,i)=>{if(r.rosterID)bR[r.rosterID]=i;});\n  const ch={},orph={},roots=[];\n  rows.forEach((r,i)=>{const pi=r.parentRef?bR[r.parentRef]:undefined;const wn=r.relationship==='subagent'||(pi!==undefined);if(!wn)roots.push(i);else if(pi===undefined){orph[i]=true;roots.push(i);}else{if(!ch[pi])ch[pi]=[];ch[pi].push(i);}});\n  const res=[],em={};\n  function walk(i,cont){if(em[i])return;em[i]=true;let pfx='';if(orph[i])pfx='\u21b3';else if(cont.length>0){let p='';for(let k=0;k<cont.length-1;k++)p+=cont[k]?'\u2502 ':'  ';p+=(cont[cont.length-1]?'\u251c':'\u2514')+(rows[i].relationship==='subagent'?'\u2500':'');pfx=p;}res.push({agent:rows[i],prefix:pfx});const kids=ch[i]||[];for(let k=0;k<kids.length;k++)walk(kids[k],cont.concat([k<kids.length-1]));}\n  for(const i of roots)walk(i,[]);for(let i=0;i<rows.length;i++){if(!em[i]){orph[i]=true;walk(i,[]);}}return res;\n}\n\n// Activity helpers\nconst TAG_C={'GOAL':[255,200,60],'THNK':[140,170,130],'DONE':[0,102,0],'READ':[0,0,255],'EDIT':[128,128,0],'GREP':[120,140,200],'ACT':[230,150,50],'EXEC':[180,160,60],'TEAM':[180,120,220],'COMM':[150,140,210],'TASK':[240,110,170],'WEB':[210,130,180],'ASK':[255,100,100],'PLAN':[160,160,220],'TOOL':[160,160,160],'WARN':[255,160,40]};\nfunction renderDisplay(display, tagColorStr, pfx) {\n  const line = (display||'').replace(/\\r?\\n/g,' ').replace(/[\\r\\x00-\\x1f]/g,'');\n  const parts = line.split(/__([^_]+)__/g);\n  const rich = {}; let text = '';\n  for (let j = 0; j < parts.length; j++) {\n    let part = parts[j]; const key = pfx + '_' + j;\n    if (j % 2 === 1) {\n      if (j > 0 && parts[j-1].endsWith(' ')) part = ' ' + part;\n      rich[key] = { fontFamily: FONT, fontSize: FS, fill: 'rgb(0,255,255)' };\n    } else {\n      if (j < parts.length - 1 && part.endsWith(' ')) part = part.slice(0, -1);\n      rich[key] = { fontFamily: FONT, fontSize: FS, fill: tagColorStr };\n    }\n    text += '{' + key + '|' + part + '}';\n  }\n  return { text, rich };\n}\nfunction tagC(t){return TAG_C[(t||'').trim()]||TAG_C['TOOL'];}\nfunction padTag(t){t=(t||'').trim();return t.length>=4?t.substring(0,4):' '.repeat(4-t.length)+t;}\n\nfunction fieldFrom(series,name){if(!series||!series.fields)return[];const f=series.fields.find(x=>x.name===name);if(!f)return[];return f.values.buffer||f.values;}\n\n// \u2550\u2550\u2550\u2550\u2550\u2550\u2550 DATA \u2550\u2550\u2550\u2550\u2550\u2550\u2550\nconst allS = context.panel.data.series || [];\nconst els = [];\nlet row = 0;\nfunction addCell(colChars, y, text, fill, opts) {\n  const o = opts || {};\n  const s = { text: text, fill: fill, fontFamily: FONT, fontSize: FS };\n  if (o.bold) s.fontWeight = 'bold';\n  els.push({ type: 'text', left: PL + colChars * CW, top: y, style: s });\n}\nfunction rowY() { return PT + row * LINE_H; }\n\n// \u2550\u2550\u2550\u2550\u2550\u2550\u2550 FLEET GRID \u2550\u2550\u2550\u2550\u2550\u2550\u2550\nconst agS = allS[0];\n// Fixed column widths (same as ctop)\nconst DOT_W = 2, AGE_W = 4, CTX_W = 4, BAR_W = 12, COST_W = 5, TOK_W = 5;\n\nif (agS && agS.fields && agS.fields.length > 0) {\n  const f=(n)=>fieldFrom(agS,n);\n  const sA=f('session_id'),nA=f('agent_name'),rtA=f('runtime'),mdA=f('model'),tnA=f('team_name');\n  const rlA=f('relationship'),prA=f('parent_ref'),riA=f('roster_id'),lvA=f('liveness');\n  const cfA=f('context_fill_pct'),csA=f('session_cost_usd'),tcA=f('session_total_cost_usd');\n  const plA=f('pressure_level'),clA=f('collector_status');\n  const tiA=f('tokens_in_total'),toA=f('tokens_out_total');\n  const ltA=f('last_activity_ts'),ldA=f('last_activity_display'),laA=f('last_activity_tag');\n  const fcA=f('current_focus'),hsA=f('host'),usA=f('username');\n\n  const agents=[];\n  for(let i=0;i<(sA.length||0);i++){\n    agents.push({sid:sA[i]||'',an:nA[i]||'',rt:rtA[i]||'',md:mdA[i]||'',tn:tnA[i]||'',\n      rel:rlA[i]||'',pr:prA[i]||'',rid:riA[i]||'',lv:lvA[i]||'',cf:cfA[i]||0,\n      cs:csA[i]||0,tc:tcA[i]||0,pl:plA[i]||'',cl:clA[i]||'',\n      ti:tiA[i]||0,to:toA[i]||0,lt:ltA[i]||'',ld:ldA[i]||'',la:laA[i]||'',\n      fc:fcA[i]||'',hs:hsA[i]||'',us:usA[i]||'',\n      rosterID:riA[i]||'',parentRef:prA[i]||'',relationship:rlA[i]||''});\n  }\n\n  const cut=Date.now()-3600000;\n  const fresh=agents.filter(a=>{\n    if(a.an==='@')return false;\n    if(!a.lt&&!a.ld)return false; // no activity ever \u2014 phantom roster entry\n    if(a.lv==='live'||a.lv==='idle')return true;\n    if(!a.lt)return false;\n    return new Date(a.lt).getTime()>cut;\n  });\n\n  const sOrd=[],bySes={};\n  for(const a of fresh){if(!bySes[a.sid]){sOrd.push(a.sid);bySes[a.sid]=[];}bySes[a.sid].push(a);}\n  function gRec(rows){let l=0;for(const r of rows){if(r.lt){const t=new Date(r.lt).getTime();if(t>l)l=t;}}return l;}\n  for(let i=sOrd.length-1;i>=0;i--){if(!bySes[sOrd[i]]||!bySes[sOrd[i]].length)sOrd.splice(i,1);}\n  sOrd.sort((a,b)=>gRec(bySes[b])-gRec(bySes[a]));\n  for(const sid of sOrd)bySes[sid].sort((a,b)=>(b.rel==='lead'||b.an===''?1:0)-(a.rel==='lead'||a.an===''?1:0));\n\n  // Build all tree rows FIRST to compute dynamic column widths\n  const allTreeRows = [];\n  for (const sid of sOrd) {\n    const gRows = bySes[sid];\n    if (!gRows || !gRows.length) continue;\n    const tree = buildTree(gRows);\n    allTreeRows.push({ sid: sid, rows: tree, agents: gRows });\n  }\n\n  // Dynamic MDL_W: widest model abbreviation, floor 5, cap 9\n  let MDL_W = 5;\n  for (const a of fresh) {\n    const w = modelAbbrev(a.md).length;\n    if (w > MDL_W) MDL_W = w;\n  }\n  if (MDL_W > 10) MDL_W = 10;\n\n  // Dynamic AGENT_W: widest prefix+name across all tree rows, default 11, greedy up to 24\n  // Grows only when data demands it \u2014 connectors (\u251c\u2500 = 3 chars per level) + names need room\n  let AGENT_W = 11;\n  for (const group of allTreeRows) {\n    for (const tr of group.rows) {\n      const dn = dispName(tr.agent.an);\n      const w = (tr.prefix || '').length + dn.length + 2; // +2 for team connector added later\n      if (w > AGENT_W) AGENT_W = w;\n    }\n  }\n  if (AGENT_W > 24) AGENT_W = 24;\n\n  // ACTIVITY width: remainder after all fixed columns\n  // Total layout width: estimate from panel container or use 130 columns\n  let TOTAL_W = 130;\n  try {\n    const panelEl = document.querySelector('.panel-content');\n    if (panelEl) TOTAL_W = Math.floor(panelEl.clientWidth / CW) - 2;\n  } catch(e) {}\n  if (TOTAL_W < 80) TOTAL_W = 80;\n  if (TOTAL_W > 200) TOTAL_W = 200;\n\n  // Fixed tail: CTX(4+1) + BAR(12+1) + COST(5+1) + IN(5+1) + OUT(5) = 35\n  // Fixed head: MDL(dyn+1) + DOT(2) + AGENT(dyn+1) + AGE(4+1) = MDL+AGENT+9\n  const FIXED = (MDL_W+1) + DOT_W + (AGENT_W+1) + (AGE_W+1) + 2 /*ACT gap*/ + (CTX_W+1) + (BAR_W+2) /*BAR gap*/ + (COST_W+1) + (TOK_W+1) + TOK_W;\n  let ACT_W = TOTAL_W - FIXED;\n  if (ACT_W < 20) ACT_W = 20;\n\n  // Compute column positions (in character units)\n  let cx = 0;\n  const C_MDL = cx; cx += MDL_W + 1;\n  const C_DOT = cx; cx += DOT_W;\n  const C_AGT = cx; cx += AGENT_W + 1;\n  const C_AGE = cx; cx += AGE_W + 1;\n  const C_ACT = cx; cx += ACT_W + 2;\n  const C_CTX = cx; cx += CTX_W + 1;\n  const C_BAR = cx; cx += BAR_W + 2;\n  const C_CST = cx; cx += COST_W + 1;\n  const C_IN  = cx; cx += TOK_W + 1;\n  const C_OUT = cx;\n\n  // Stats\n  let actCnt=0,totCnt=fresh.length,totCst=0,totIn=0,totOut=0;\n  for(const a of fresh){if(a.lv==='live'||a.lv==='idle')actCnt++;totCst+=a.cs;totIn+=a.ti;totOut+=a.to;}\n\n  // Header band\n  const hbR={};\n  hbR.f={fontFamily:FONT,fontSize:FS,fill:'#e3b341',fontWeight:'bold'};\n  hbR.s={fontFamily:FONT,fontSize:FS,fill:'#c9d1d9'};\n  hbR.c={fontFamily:FONT,fontSize:FS,fill:'#79c0ff'};\n  els.push({type:'text',left:PL,top:rowY(),style:{text:'{f|fleet}  {s|Agents: '+actCnt+' of '+totCnt+'}  {c|$'+Math.round(totCst)+' total}',rich:hbR}});\n  row++;\n\n  // Column headers \u2014 each at its computed position\n  const dim='#484f58';\n  addCell(C_MDL,rowY(),'MDL',dim,{bold:true});\n  addCell(C_DOT,rowY(),'\u25c9',dim,{bold:true});\n  addCell(C_AGT,rowY(),'AGENT',dim,{bold:true});\n  addCell(C_AGE,rowY(),'AGE',dim,{bold:true});\n  addCell(C_ACT,rowY(),'ACTIVITY',dim,{bold:true});\n  addCell(C_CTX,rowY(),'CTX',dim,{bold:true});\n  addCell(C_CST,rowY(),'$',dim,{bold:true});\n  addCell(C_IN,rowY(),'IN',dim,{bold:true});\n  addCell(C_OUT,rowY(),'OUT',dim,{bold:true});\n  row++;\n\n  // Render groups\n  for (const group of allTreeRows) {\n    const sid = group.sid;\n    const gRows = group.agents;\n    const lead = gRows[0];\n    const mxCst = Math.max(...gRows.map(r => r.cs));\n    const tn = lead.tn;\n    const label = tn ? '#'+tn : 'solo\u00b7'+sp8(sid);\n    const cSrc = tn || sid;\n    const lc = entityColor(cSrc, '');\n    const foc = (lead.fc||'').replace(/\\n/g,' ').replace(/\\*\\*/g,'').substring(0,40);\n    const sCst = lead.tc || gRows.reduce((s,r) => s+r.cs, 0);\n    const gIn = gRows.reduce((s,r) => s+r.ti, 0);\n    const gOut = gRows.reduce((s,r) => s+r.to, 0);\n\n    // Team header \u2014 label is free-flow rich text, economics are positioned cells\n    const ri='th'+row; const thR={};\n    thR['r'+ri]={fontFamily:FONT,fontSize:FS,fill:lead.rt==='codex'?'#79c0ff':'#3fb950'};\n    thR['l'+ri]={fontFamily:FONT,fontSize:FS,fill:rgbS(lc),fontWeight:'bold'};\n    thR['d'+ri]={fontFamily:FONT,fontSize:FS,fill:'#484f58'};\n    thR['f'+ri]={fontFamily:FONT,fontSize:FS,fill:'#e3b341'};\n    let hp='';if(lead.us&&lead.hs)hp=' ('+lead.us+'@'+lead.hs+')';else if(lead.hs)hp=' ('+lead.hs+')';\n    let tt='{r'+ri+'|'+(lead.rt==='codex'?'\u25b7':'\u25b6')+'} {l'+ri+'|'+label+'}{d'+ri+'|'+hp+' '+sp8(sid)+'}';\n    if(foc)tt+=' {f'+ri+'|['+foc+']}';\n    const tintC=entityColor(cSrc,'');\n    const bg='rgb('+Math.round(tintC[0]/6)+','+Math.round(tintC[1]/6)+','+Math.round(tintC[2]/6)+')';\n    els.push({type:'text',left:PL,top:rowY(),style:{text:tt,rich:thR,backgroundColor:bg,width:2000,padding:[1,4,1,0]}});\n    // Economics at grid-aligned positions\n    const ty=rowY();\n    addCell(C_CST,ty,fmtCost(sCst),'#79c0ff',{bold:true});\n    addCell(C_IN,ty,humanTok(gIn),'#79c0ff',{bold:true});\n    addCell(C_OUT,ty,humanTok(gOut),'#79c0ff',{bold:true});\n    row++;\n\n    // Add team-member connectors (ctop's fleetTeamMemberRows):\n    // Each top-level member gets \u251c or \u2514 under the team header,\n    // nested rows get an extra space indent + their tree prefix.\n    const tree = group.rows;\n    for (let ti = 0; ti < tree.length; ti++) {\n      const isTop = tree[ti].prefix === '' || tree[ti].prefix === '\u21b3';\n      if (isTop) {\n        const isLast = !tree.slice(ti+1).some(t => t.prefix === '' || t.prefix === '\u21b3');\n        const conn = isLast ? '\u2514' : '\u251c';\n        tree[ti].prefix = tree[ti].prefix === '\u21b3' ? conn + '\u21b3' : conn;\n      } else {\n        tree[ti].prefix = ' ' + tree[ti].prefix;\n      }\n    }\n\n    // Agent rows \u2014 per-column positioned elements\n    for (const tr of tree) {\n      const a = tr.agent; const y = rowY();\n      addCell(C_MDL, y, trunc(modelAbbrev(a.md), MDL_W), rgbS(entityColor(a.md,'')));\n\n      // Activity state dot \u2014 tag-driven, not time-driven:\n      //   terminal tag (DONE/COMP): turn ended \u2192 steady \u25c9 in tag color\n      //   any other tag: still processing \u2192 blink \u25c9/\u25cb in tag color\n      //   >15m since last activity: dim grey \u25c9\n      //   closed/stale: dim grey \u25cb\n      const elapsed = a.lt ? Date.now() - new Date(a.lt).getTime() : Infinity;\n      const closed = a.lv === 'closed' || a.lv === 'stale';\n      const terminal = a.la === 'DONE' || a.la === 'COMP';\n      const tc = TAG_C[a.la] || [110,118,129];\n      let dotC, dotG;\n      if (closed) {\n        dotC = '#484f58'; dotG = '\u25cb';\n      } else if (elapsed > 900000) {\n        dotC = '#484f58'; dotG = '\u25c9';\n      } else if (terminal) {\n        dotC = rgbS(tc); dotG = '\u25c9';\n      } else {\n        dotC = rgbS(tc);\n        dotG = _blink ? '\u25c9' : '\u25cb';\n      }\n      addCell(C_DOT, y, dotG, dotC);\n\n      const dn = dispName(a.an);\n      const saltId = a.sid.substring(0, 12);\n      addCell(C_AGT, y, trunc((tr.prefix||'')+dn, AGENT_W), rgbS(entityColor(dn, saltId)));\n\n      addCell(C_AGE, y, trunc(relTime(a.lt), AGE_W), '#8b5a2b');\n\n      const actTxt = (a.ld||'').replace(/\\n/g,' ').replace(/\\*\\*/g,'').replace(/__/g,'').substring(0, ACT_W) || '\u2014';\n      const actC = TAG_C[a.la] || [110,118,129];\n      addCell(C_ACT, y, trunc(actTxt, ACT_W), rgbS(actC));\n\n      const fill = Math.max(0, Math.min(a.cf, 1));\n      addCell(C_CTX, y, Math.round(fill*100)+'%', rgbS(ctxG(fill)));\n\n      // CTX bar \u2014 single rich-text element at bar column\n      const bF = Math.round(fill * BAR_W);\n      const bri = 'br'+row; const bR = {}; let bT = '';\n      for(let b=0;b<BAR_W;b++){\n        const bk=bri+'_'+b;\n        if(b<bF){bR[bk]={fontFamily:FONT,fontSize:FS,fill:rgbS(ctxG((b+.5)/BAR_W))};bT+='{'+bk+'|\u2588}';}\n        else{bR[bk]={fontFamily:FONT,fontSize:FS,fill:'#30363d'};bT+='{'+bk+'|\u2591}';}\n      }\n      els.push({type:'text',left:PL+C_BAR*CW,top:y,style:{text:bT,rich:bR}});\n\n      addCell(C_CST, y, trunc(fmtCost(a.cs), COST_W), rgbS(costG(a.cs, mxCst)));\n      addCell(C_IN, y, trunc(humanTok(a.ti), TOK_W), '#79c0ff');\n      addCell(C_OUT, y, trunc(humanTok(a.to), TOK_W), '#79c0ff');\n      row++;\n    }\n  }\n\n  // TOTAL\n  const y = rowY();\n  addCell(C_AGT, y, 'TOTAL', '#c9d1d9', {bold:true});\n  addCell(C_ACT, y, totCnt+' agents', '#c9d1d9', {bold:true});\n  addCell(C_CST, y, fmtCost(totCst), '#79c0ff', {bold:true});\n  addCell(C_IN, y, humanTok(totIn), '#79c0ff', {bold:true});\n  addCell(C_OUT, y, humanTok(totOut), '#79c0ff', {bold:true});\n  row++;\n}\n\nif(row===0){els.push({type:'text',left:'center',top:PT,style:{text:'No agents in scope',fill:'#888',fontFamily:FONT,fontSize:16}});row=2;}\n\n// \u2550\u2550\u2550\u2550\u2550\u2550\u2550 ACTIVITY LOG (series[1]) \u2550\u2550\u2550\u2550\u2550\u2550\u2550\nrow++;\nconst evS=allS[1];\nif(evS&&evS.fields&&evS.fields.length>0){\n  const ef=(n)=>fieldFrom(evS,n);\n  const eTs=ef('ts'),eSe=ef('session'),eAg=ef('agent_name'),eTg=ef('tag'),eDi=ef('display');\n  const eTm=ef('team'),eFc=ef('focus'),eBs=ef('bash_cmd'),eWn=ef('warn_msg');\n  const eLen=eTs.length||0;\n\n  els.push({type:'text',left:0,top:rowY(),style:{text:' activity',fill:'#8ab4f8',fontFamily:FONT,fontSize:FS,fontWeight:'bold',backgroundColor:'#0d2137',width:2000,padding:[2,PL,2,PL]}});\n  row++;\n\n  let mxSes=8,mxAg=5;\n  for(let i=0;i<eLen;i++){\n    const tm=(eTm.length>i?eTm[i]:'')||'';const ag=(eAg[i]||'')||'@lead';\n    const sl=tm?('#'+tm).length:8;const al=(ag.startsWith('@')?ag:'@'+ag).length;\n    if(sl>mxSes)mxSes=Math.min(sl,14);if(al>mxAg)mxAg=Math.min(al,12);\n  }\n\n  for(let i=0;i<eLen;i++){\n    const ts=eTs[i]||'',ses=eSe[i]||'',ag=eAg[i]||'@lead',tg=(eTg[i]||'').trim();\n    const di=eDi[i]||'',tm=(eTm.length>i?eTm[i]:'')||'';\n    const fc=(eFc.length>i?eFc[i]:'')||'',bs=(eBs.length>i?eBs[i]:'')||'';\n    const wn=(eWn.length>i?eWn[i]:'')||'';\n    if(!tg&&!fc&&!bs&&!wn)continue;\n\n    let tp='';try{const d=new Date(ts);tp=d.toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});}catch(e){tp='??:??:??';}\n    const sLbl=tm?'#'+tm:(ses.length>8?ses.substring(0,8):ses);\n    const sClr=entityColor(sLbl,ses);\n    const aLbl=ag.startsWith('@')?ag:'@'+ag;\n    const aClr=entityColor(aLbl,ses);\n    let tc=tagC(tg),td=tg,ld=di;\n    if(wn){td='WARN';ld=wn;tc=TAG_C['WARN'];}\n    if(fc&&!tg){td='GOAL';ld=fc;tc=TAG_C['GOAL'];}\n\n    const ri='e'+row;const rch={};\n    rch['t'+ri]={fontFamily:FONT,fontSize:FS,fill:'#666'};\n    rch['s'+ri]={fontFamily:FONT,fontSize:FS,fill:rgbS(sClr)};\n    rch['a'+ri]={fontFamily:FONT,fontSize:FS,fill:rgbS(aClr)};\n    rch['g'+ri]={fontFamily:FONT,fontSize:FS,fill:rgbS(tc)};\n    const dTxt=(ld||'').replace(/\\r?\\n/g,' ').replace(/[\\r\\x00-\\x1f]/g,'');\n    const dTrunc=dTxt.length>100?dTxt.substring(0,97)+'...':dTxt;\n    const disp=renderDisplay(dTrunc,rgbS(tc),'d'+ri);\n    Object.assign(rch,disp.rich);\n    const lt='{t'+ri+'|'+tp+' }{s'+ri+'|'+sLbl.padEnd(mxSes)+' }{a'+ri+'|'+aLbl.padEnd(mxAg)+' }{g'+ri+'|['+padTag(td)+'] }'+disp.text;\n    els.push({type:'text',left:PL,top:rowY(),style:{text:lt,rich:rch}});\n    row++;\n  }\n}\n\nif(!els.length)els.push({type:'text',left:'center',top:'center',style:{text:'No data',fill:'#888',fontFamily:FONT,fontSize:16}});\n\nreturn {\n  backgroundColor: '#181b1f',\n  animation: false,\n  graphic: [{ type: 'group', $action: 'replace', children: els }],\n  series: []\n};\n",
+        "google": {
+          "callback": "gmapReady",
+          "key": ""
+        },
+        "map": "none",
+        "renderer": "canvas",
+        "themeEditor": {
+          "config": "{}",
+          "name": "default"
+        },
+        "visualEditor": {
+          "code": "return {}",
+          "dataset": [],
+          "series": []
+        }
+      },
+      "pluginVersion": "7.2.2",
+      "targets": [
+        {
+          "columns": [],
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "teamster-events"
+          },
+          "filters": [],
+          "format": "table",
+          "global_query_id": "",
+          "parser": "backend",
+          "refId": "A",
+          "root_selector": "",
+          "source": "url",
+          "type": "json",
+          "url": "/health/api/agents?liveness=live&liveness=idle&liveness=stale&liveness=closed&max_age=1h",
+          "url_options": {
+            "data": "",
+            "method": "GET"
+          }
+        },
+        {
+          "columns": [],
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "teamster-events"
+          },
+          "filters": [],
+          "format": "table",
+          "global_query_id": "",
+          "parser": "backend",
+          "refId": "B",
+          "root_selector": "",
+          "source": "url",
+          "type": "json",
+          "url": "/api/events?limit=80",
+          "url_options": {
+            "data": "",
+            "method": "GET"
+          }
+        }
+      ],
+      "title": "",
+      "transparent": true,
+      "type": "volkovlabs-echarts-panel"
+    }
+  ],
+  "preload": false,
+  "refresh": "5s",
+  "schemaVersion": 41,
+  "tags": [
+    "teamster",
+    "overview"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "00 - Realtime Fleet View",
+  "uid": "fleet-view"
+}

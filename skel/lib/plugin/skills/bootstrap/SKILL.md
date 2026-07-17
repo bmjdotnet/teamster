@@ -108,6 +108,10 @@ creates a second unbound entry that ctop and health never see.
 Extract your session_id from the scratchpad path in your system prompt
 (the UUID segment, e.g. `.../6ebee3a6-.../scratchpad` → `6ebee3a6-...`).
 
+**`agent_name` must be empty string `""` for the lead** — it is the agent's
+display name, NOT the relationship. Passing `"lead"` creates a ghost roster
+entry that duplicates the lead row in ctop.
+
 ```
 registerPeer(
   agent_name: "",

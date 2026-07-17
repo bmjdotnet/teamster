@@ -33,7 +33,7 @@
       "id": 900,
       "options": {
         "mode": "html",
-        "content": "<div style=\"display:flex; gap:6px; align-items:center; flex-wrap:wrap; padding:2px 0; margin: -4px 0;\">\n  <a href=\"/d/landing-page?from=${__from}&to=${__to}\" style=\"padding:4px 12px; background:#1e1e2e; color:#8ab4f8; border-radius:4px; text-decoration:none; font-size:13px; font-weight:600; border:1px solid #333;\">Home</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/activity-feed?from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Activity</a>\n  <a href=\"/d/fd-ai-spend-overview-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Spend</a>\n  <a href=\"/d/fd-cost-explorer-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#2a2a4a; color:#8ab4f8; border-radius:4px; text-decoration:none; font-size:12px; font-weight:600; border:1px solid #4a4a6a;\">Trace</a>\n  <a href=\"/d/fd-usage-effectiveness-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Usage</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/cost-by-tag-value?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Simple Cost</a>\n  <a href=\"/d/tag-stack-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Multidim</a>\n  <a href=\"/d/entity-cost-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Work</a>\n  <a href=\"/d/fd-outcome-accounting-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Outcomes</a>\n  <a href=\"/d/outcome-cost-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Outcome Cost</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/fd-data-quality-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Health</a>\n</div>",
+        "content": "<div style=\"display:flex; gap:6px; align-items:center; flex-wrap:wrap; padding:2px 0; margin: -4px 0;\">\n  <a href=\"/d/landing-page?from=${__from}&to=${__to}\" style=\"padding:4px 12px; background:#1e1e2e; color:#8ab4f8; border-radius:4px; text-decoration:none; font-size:13px; font-weight:600; border:1px solid #333;\">Home</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/fleet-view?from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Fleet</a>\n  <a href=\"/d/fd-ai-spend-overview-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Spend</a>\n  <a href=\"/d/fd-cost-explorer-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#2a2a4a; color:#8ab4f8; border-radius:4px; text-decoration:none; font-size:12px; font-weight:600; border:1px solid #4a4a6a;\">Trace</a>\n  <a href=\"/d/fd-usage-effectiveness-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Usage</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/cost-by-tag-value?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Simple Cost</a>\n  <a href=\"/d/tag-stack-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Multidim</a>\n  <a href=\"/d/entity-cost-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Work</a>\n  <a href=\"/d/fd-outcome-accounting-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Outcomes</a>\n  <a href=\"/d/outcome-cost-explorer?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Outcome Cost</a>\n  <span style=\"color:#444; font-size:16px;\">|</span>\n  <a href=\"/d/fd-data-quality-v2?var-agg=$__auto&from=${__from}&to=${__to}\" style=\"padding:4px 10px; background:#1e1e2e; color:#b0b0c0; border-radius:4px; text-decoration:none; font-size:12px; border:1px solid #2a2a3a;\">Health</a>\n</div>",
         "code": {
           "language": "html",
           "showLineNumbers": false,
@@ -64,7 +64,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: all spend incl. unallocated — reads cost_facts (attribution lags rollup timer + sweep)",
+      "description": "scope: all spend incl. unallocated \u2014 reads cost_facts (attribution lags rollup timer + sweep)",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -426,7 +426,7 @@
       },
       "id": 20,
       "panels": [],
-      "title": "Cost Explorer: $facet1 → $facet2 → $facet3",
+      "title": "Cost Explorer: $facet1 \u2192 $facet2 \u2192 $facet3",
       "type": "row"
     },
     {
@@ -434,7 +434,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: all spend incl. unallocated. Conservation guaranteed — sum of first-stage outflows equals window total. Node labels prefixed with stage key to prevent DAG cycle errors when facets share values. Top 10 per stage + (other). Multi-valued keys split cost fractionally. (unallocated)=bright red; (untagged @key)=grey.",
+      "description": "scope: all spend incl. unallocated. Conservation guaranteed \u2014 sum of first-stage outflows equals window total. Node labels prefixed with stage key to prevent DAG cycle errors when facets share values. Top 10 per stage + (other). Multi-valued keys split cost fractionally. (unallocated)=bright red; (untagged @key)=grey.",
       "fieldConfig": {
         "defaults": {},
         "overrides": []
@@ -460,7 +460,7 @@
           "key": "",
           "plugin": "AMap.Scale,AMap.ToolBar"
         },
-        "getOption": "const allSeries = context.panel.data.series;\nif (!allSeries || allSeries.length < 1) return { series: [] };\n\nconst fld = (s, name) => {\n  const f = s.fields.find(x => x.name === name);\n  if (!f) return [];\n  const v = f.values;\n  return (v && v.buffer) ? v.buffer : (v || []);\n};\n\nconst links = [];\nconst nodeSet = new Set();\n\nfor (const s of allSeries) {\n  if (!s || !s.fields || s.fields.length < 3) continue;\n  const sources = fld(s, 'source');\n  const targets = fld(s, 'target');\n  const values  = fld(s, 'value');\n  for (let i = 0; i < sources.length; i++) {\n    const v = parseFloat(values[i]) || 0;\n    const src = String(sources[i]);\n    const tgt = String(targets[i]);\n    if (v > 0 && src !== tgt) {\n      links.push({ source: src, target: tgt, value: v });\n      nodeSet.add(src);\n      nodeSet.add(tgt);\n    }\n  }\n}\nif (!links.length) return { series: [] };\n\nconst phaseColors = { 'design':'#FADE2A','build':'#73BF69','test':'#73BF69','review':'#5794F2','rework':'#FF780A','admin':'#A9A9A9' };\nconst wtColors = { 'feature':'#FF780A','bug':'#FADE2A','research':'#B877D9','docs':'#5794F2','test':'#73BF69','infra':'#F2495C','refactor':'#64A0C8','admin':'#A9A9A9' };\nconst allColors = {...phaseColors, ...wtColors};\n\nconst nodes = Array.from(nodeSet).map(name => {\n  let color = null;\n  if (name.includes('(unallocated)')) color = '#F2495C';\n  else if (name.includes('(untagged')) color = '#808080';\n  else if (name.includes('(other)')) color = '#C0C0C0';\n  else {\n    const parts = name.split(': ');\n    const val = parts.length > 1 ? parts.slice(1).join(': ') : name;\n    if (allColors[val]) color = allColors[val];\n  }\n  return { name, itemStyle: color ? { color } : {} };\n});\n\nreturn {\n  tooltip: {\n    trigger: 'item',\n    formatter: p => {\n      const strip = s => { const ci = s.indexOf(': '); return ci >= 0 ? s.slice(ci + 2) : s; };\n      if (p.dataType === 'edge')\n        return strip(p.data.source) + ' \\u2192 ' + strip(p.data.target) + '<br/>$' + p.data.value.toFixed(2);\n      return strip(p.name) + '<br/>$' + ((p.value || 0).toFixed(2));\n    }\n  },\n  series: [{\n    type: 'sankey',\n    layout: 'none',\n    emphasis: { focus: 'adjacency' },\n    nodeAlign: 'left',\n    data: nodes,\n    links: links,\n    lineStyle: { color: 'gradient', opacity: 0.4 },\n    label: {\n      show: true, position: 'right', fontSize: 11,\n      formatter: p => { let lbl = p.name; const ci = lbl.indexOf(': '); if (ci >= 0) lbl = lbl.slice(ci + 2); if (lbl.length > 20) lbl = lbl.slice(0,18)+'…'; return lbl + '\\n$' + ((p.value || 0).toFixed(0)); }\n    },\n    nodeGap: 12,\n    nodeWidth: 20\n  }]\n};",
+        "getOption": "const allSeries = context.panel.data.series;\nif (!allSeries || allSeries.length < 1) return { series: [] };\n\nconst fld = (s, name) => {\n  const f = s.fields.find(x => x.name === name);\n  if (!f) return [];\n  const v = f.values;\n  return (v && v.buffer) ? v.buffer : (v || []);\n};\n\nconst links = [];\nconst nodeSet = new Set();\n\nfor (const s of allSeries) {\n  if (!s || !s.fields || s.fields.length < 3) continue;\n  const sources = fld(s, 'source');\n  const targets = fld(s, 'target');\n  const values  = fld(s, 'value');\n  for (let i = 0; i < sources.length; i++) {\n    const v = parseFloat(values[i]) || 0;\n    const src = String(sources[i]);\n    const tgt = String(targets[i]);\n    if (v > 0 && src !== tgt) {\n      links.push({ source: src, target: tgt, value: v });\n      nodeSet.add(src);\n      nodeSet.add(tgt);\n    }\n  }\n}\nif (!links.length) return { series: [] };\n\nconst phaseColors = { 'design':'#FADE2A','build':'#73BF69','test':'#73BF69','review':'#5794F2','rework':'#FF780A','admin':'#A9A9A9' };\nconst wtColors = { 'feature':'#FF780A','bug':'#FADE2A','research':'#B877D9','docs':'#5794F2','test':'#73BF69','infra':'#F2495C','refactor':'#64A0C8','admin':'#A9A9A9' };\nconst allColors = {...phaseColors, ...wtColors};\n\nconst nodes = Array.from(nodeSet).map(name => {\n  let color = null;\n  if (name.includes('(unallocated)')) color = '#F2495C';\n  else if (name.includes('(untagged')) color = '#808080';\n  else if (name.includes('(other)')) color = '#C0C0C0';\n  else {\n    const parts = name.split(': ');\n    const val = parts.length > 1 ? parts.slice(1).join(': ') : name;\n    if (allColors[val]) color = allColors[val];\n  }\n  return { name, itemStyle: color ? { color } : {} };\n});\n\nreturn {\n  tooltip: {\n    trigger: 'item',\n    formatter: p => {\n      const strip = s => { const ci = s.indexOf(': '); return ci >= 0 ? s.slice(ci + 2) : s; };\n      if (p.dataType === 'edge')\n        return strip(p.data.source) + ' \\u2192 ' + strip(p.data.target) + '<br/>$' + p.data.value.toFixed(2);\n      return strip(p.name) + '<br/>$' + ((p.value || 0).toFixed(2));\n    }\n  },\n  series: [{\n    type: 'sankey',\n    layout: 'none',\n    emphasis: { focus: 'adjacency' },\n    nodeAlign: 'left',\n    data: nodes,\n    links: links,\n    lineStyle: { color: 'gradient', opacity: 0.4 },\n    label: {\n      show: true, position: 'right', fontSize: 11,\n      formatter: p => { let lbl = p.name; const ci = lbl.indexOf(': '); if (ci >= 0) lbl = lbl.slice(ci + 2); if (lbl.length > 20) lbl = lbl.slice(0,18)+'\u2026'; return lbl + '\\n$' + ((p.value || 0).toFixed(0)); }\n    },\n    nodeGap: 12,\n    nodeWidth: 20\n  }]\n};",
         "google": {
           "callback": "gmapReady",
           "key": ""
@@ -498,7 +498,7 @@
           "refId": "B"
         }
       ],
-      "title": "Tag Flow: $facet1 → $facet2 → $facet3",
+      "title": "Tag Flow: $facet1 \u2192 $facet2 \u2192 $facet3",
       "type": "volkovlabs-echarts-panel"
     },
     {
@@ -837,7 +837,7 @@
       },
       "id": 10,
       "panels": [],
-      "title": "Cost Stack: $facet1 → $facet2",
+      "title": "Cost Stack: $facet1 \u2192 $facet2",
       "type": "row"
     },
     {
@@ -845,7 +845,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: all spend incl. unallocated. Fractional weights for multi-valued keys — totals reconcile with Total Spend above. (unallocated)=no entity; (untagged)=entity with no value for this key.",
+      "description": "scope: all spend incl. unallocated. Fractional weights for multi-valued keys \u2014 totals reconcile with Total Spend above. (unallocated)=no entity; (untagged)=entity with no value for this key.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1157,7 +1157,7 @@
           "refId": "A"
         }
       ],
-      "title": "Cost by $facet1 → $facet2",
+      "title": "Cost by $facet1 \u2192 $facet2",
       "transformations": [
         {
           "id": "groupingToMatrix",
@@ -1176,7 +1176,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: all spend incl. unallocated. Cell totals computed in SQL with fractional weights — no footer needed.",
+      "description": "scope: all spend incl. unallocated. Cell totals computed in SQL with fractional weights \u2014 no footer needed.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -1296,7 +1296,7 @@
           "refId": "A"
         }
       ],
-      "title": "Cost Matrix: $facet1 × $facet2",
+      "title": "Cost Matrix: $facet1 \u00d7 $facet2",
       "type": "table"
     },
     {
@@ -1414,7 +1414,7 @@
           "refId": "A"
         }
       ],
-      "title": "Drill Table: $facet1 → $facet2 → Cost  (filter: $filter1)",
+      "title": "Drill Table: $facet1 \u2192 $facet2 \u2192 Cost  (filter: $filter1)",
       "type": "table"
     },
     {
@@ -1507,7 +1507,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: all spend in cost_facts. Model cost share trend — watch for premium model growth.",
+      "description": "scope: all spend in cost_facts. Model cost share trend \u2014 watch for premium model growth.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1622,7 +1622,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: immediate token ledger — cache_read_tokens / (input_tokens + cache_read_tokens). High ratio means prompt caching is effective.",
+      "description": "scope: immediate token ledger \u2014 cache_read_tokens / (input_tokens + cache_read_tokens). High ratio means prompt caching is effective.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1697,7 +1697,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: immediate token ledger — estimated savings vs paying full input price for cache-read tokens. Per-model: cache_read_tokens × (input_price − cache_read_price). Rates per Mtok: opus-4-8 $5/$0.5, opus-4-5/6/7 $5/$0.5, sonnet-4-5/6 $3/$0.3, haiku-4-5 $0.8/$0.08, fable-5 $10/$1.0. List-price approximation.",
+      "description": "scope: immediate token ledger \u2014 estimated savings vs paying full input price for cache-read tokens. Per-model: cache_read_tokens \u00d7 (input_price \u2212 cache_read_price). Rates per Mtok: opus-4-8 $5/$0.5, opus-4-5/6/7 $5/$0.5, sonnet-4-5/6 $3/$0.3, haiku-4-5 $0.8/$0.08, fable-5 $10/$1.0. List-price approximation.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1762,7 +1762,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: immediate token ledger — average USD cost per message in the window",
+      "description": "scope: immediate token ledger \u2014 average USD cost per message in the window",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1827,7 +1827,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: immediate token ledger — message count in the window",
+      "description": "scope: immediate token ledger \u2014 message count in the window",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1892,7 +1892,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: immediate token ledger — per-token-class cost reconstruction. cacheRead cost is low (1/10th input price) — its dominance is the cache dividend, not a cost concern.",
+      "description": "scope: immediate token ledger \u2014 per-token-class cost reconstruction. cacheRead cost is low (1/10th input price) \u2014 its dominance is the cache dividend, not a cost concern.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -2053,7 +2053,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: immediate token ledger — rolling average cost per message. Rising trend may indicate model mix shift or context bloat.",
+      "description": "scope: immediate token ledger \u2014 rolling average cost per message. Rising trend may indicate model mix shift or context bloat.",
       "fieldConfig": {
         "defaults": {
           "color": {
