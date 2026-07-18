@@ -95,7 +95,7 @@ func (s *Server) handleContextReport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := context.Background()
-	key := gauge.GaugeKey{Host: req.Host, SessionID: req.SessionID, AgentName: req.AgentName}
+	key := gauge.GaugeKey{Host: shortHostname(req.Host), SessionID: req.SessionID, AgentName: req.AgentName}
 
 	row, found, err := s.gaugeStore.Get(ctx, key)
 	if err != nil {

@@ -497,6 +497,25 @@ func modelFromData(data map[string]interface{}) string {
 	return v
 }
 
+// hostFromData extracts the hook client's "_host" enrichment field so
+// observability writes attribute to the event's originating host (remote
+// client) rather than always the hub's own configured host. The value is
+// normalized to the short hostname (domain suffix stripped) so that
+// "studio" and "studio.bmj.net" resolve to the same identity.
+func hostFromData(data map[string]interface{}, fallback string) string {
+	if v, ok := data["_host"].(string); ok && v != "" {
+		return shortHostname(v)
+	}
+	return shortHostname(fallback)
+}
+
+func shortHostname(h string) string {
+	if i := strings.IndexByte(h, '.'); i > 0 {
+		return h[:i]
+	}
+	return h
+}
+
 // dispatchObservability runs the four observability branches from SPEC §6.4
 // and §7.1. Called after JSONL write so the write path is never blocked by
 // store calls. data is the full enriched event map (may contain _usage etc.).
@@ -558,7 +577,7 @@ func (s *Server) dispatchObservability(event hook.HookEvent, data map[string]int
 						sess := store.Session{
 							SessionID: event.SessionID,
 							AgentName: agent,
-							Host:      s.cfg.Host,
+							Host:      hostFromData(data, s.cfg.Host),
 							Username:  s.cfg.User,
 							Status:    store.SessionStatusActive,
 							Runtime:   "claude_code",
@@ -593,26 +612,36 @@ func (s *Server) dispatchObservability(event hook.HookEvent, data map[string]int
 							RosterID:     rosterID,
 							SessionID:    &sid,
 							AgentName:    agent,
-							Host:         s.cfg.Host,
+							Host:         hostFromData(data, s.cfg.Host),
 							Runtime:      "claude_code",
 							Relationship: rel,
 							CreatedAt:    now,
 							BoundAt:      &boundAt,
 						}
-						// Attempt to resolve the parent's roster_id as parent_ref —
-						// the spawning teammate for an Agent-tool sub-subagent,
-						// else the lead. Best-effort: if the parent hasn't
-						// registered yet (race), leave parent_ref nil. Also
-						// inherit the lead's team_name from the roster (not
-						// sessions — registerPeer writes team_name to
-						// agent_roster, not the sessions table).
-						if agentType != "" {
-							if parentID, err := s.obsStore.ResolveRosterID(ctx, event.SessionID, parentAgent); err == nil {
+						// Attempt to resolve the parent's roster_id as parent_ref.
+						// macOS separate-session teammates carry _parent_session_id
+						// (injected by teamster.py from the process's CLI args) —
+						// resolve the parent in THAT session. Hub/Linux teammates
+						// share the lead's session_id, so fall back to resolving
+						// within this event's own session.
+						// Also inherit team_name: prefer _team_name from the event
+						// (macOS), else the lead's roster entry.
+						parentSessionID := event.SessionID
+						if psid, _ := data["_parent_session_id"].(string); psid != "" {
+							parentSessionID = psid
+						}
+						if agentType != "" || parentSessionID != event.SessionID {
+							if parentID, err := s.obsStore.ResolveRosterID(ctx, parentSessionID, parentAgent); err == nil {
 								entry.ParentRef = &parentID
 							}
-							if leadRID, err := s.obsStore.ResolveRosterID(ctx, event.SessionID, ""); err == nil {
-								if leadRoster, err := s.obsStore.GetRosterEntry(ctx, leadRID); err == nil {
+							if leadRID, err := s.obsStore.ResolveRosterID(ctx, parentSessionID, ""); err == nil {
+								if leadRoster, err := s.obsStore.GetRosterEntry(ctx, leadRID); err == nil && leadRoster.TeamName != "" {
 									entry.TeamName = leadRoster.TeamName
+								}
+							}
+							if entry.TeamName == "" {
+								if tn, _ := data["_team_name"].(string); tn != "" {
+									entry.TeamName = tn
 								}
 							}
 						}
@@ -626,7 +655,7 @@ func (s *Server) dispatchObservability(event hook.HookEvent, data map[string]int
 						sess := store.Session{
 							SessionID: event.SessionID,
 							AgentName: agent,
-							Host:      s.cfg.Host,
+							Host:      hostFromData(data, s.cfg.Host),
 							Username:  s.cfg.User,
 							Status:    store.SessionStatusActive,
 						}
@@ -700,7 +729,7 @@ func (s *Server) dispatchObservability(event hook.HookEvent, data map[string]int
 	// completeActivity (which enrich to _thought/_done, not _tool_tag).
 	if s.gaugeStore != nil && event.SessionID != "" {
 		if tag, display := activityFromData(data); display != "" {
-			key := gauge.GaugeKey{Host: s.cfg.Host, SessionID: event.SessionID, AgentName: resolvedAgentName(data, agentType)}
+			key := gauge.GaugeKey{Host: hostFromData(data, s.cfg.Host), SessionID: event.SessionID, AgentName: resolvedAgentName(data, agentType)}
 			go func() {
 				if err := s.gaugeStore.UpdateActivity(ctx, key, display, tag, time.Now()); err != nil {
 					slog.Warn("gauge UpdateActivity", "session", key.SessionID, "agent", key.AgentName, "error", err)
@@ -959,7 +988,7 @@ func (s *Server) dispatchObservability(event hook.HookEvent, data map[string]int
 					_ = s.obsStore.UpsertSession(ctx, store.Session{
 						SessionID: k.SessionID,
 						AgentName: k.AgentName,
-						Host:      s.cfg.Host,
+						Host:      hostFromData(data, s.cfg.Host),
 						Username:  s.cfg.User,
 						Status:    store.SessionStatusClosed,
 						LastSeen:  closeTime,
@@ -1009,7 +1038,7 @@ func (s *Server) registerSubagentStart(ctx context.Context, event hook.HookEvent
 				_ = s.obsStore.UpsertSession(ctx, store.Session{
 					SessionID: event.SessionID,
 					AgentName: inst.name,
-					Host:      s.cfg.Host,
+					Host:      hostFromData(data, s.cfg.Host),
 					Username:  s.cfg.User,
 					Status:    store.SessionStatusActive,
 					// Model intentionally omitted — the store's COALESCE guard on
@@ -1150,7 +1179,7 @@ func (s *Server) registerNewSubagentInstance(ctx context.Context, event hook.Hoo
 		SessionID:    &sid,
 		AgentName:    unique,
 		AgentID:      event.AgentID,
-		Host:         s.cfg.Host,
+		Host:         hostFromData(data, s.cfg.Host),
 		Runtime:      "claude_code",
 		Relationship: rel,
 		CreatedAt:    now,
@@ -1194,7 +1223,7 @@ func (s *Server) registerNewSubagentInstance(ctx context.Context, event hook.Hoo
 		_ = s.obsStore.UpsertSession(ctx, store.Session{
 			SessionID: sessionID,
 			AgentName: unique,
-			Host:      s.cfg.Host,
+			Host:      hostFromData(data, s.cfg.Host),
 			Username:  s.cfg.User,
 			Status:    store.SessionStatusActive,
 			Runtime:   "claude_code",

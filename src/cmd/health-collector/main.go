@@ -238,7 +238,7 @@ func collectTick(ctx context.Context, st store.Store, gs gauge.GaugeStore, engin
 		if sk.AgentName != "" {
 			continue
 		}
-		existing, found, err := gs.Get(ctx, gauge.GaugeKey{Host: host, SessionID: sk.SessionID, AgentName: ""})
+		existing, found, err := gs.Get(ctx, gauge.GaugeKey{Host: gaugeHostFor(sk, host), SessionID: sk.SessionID, AgentName: ""})
 		if err == nil && found && existing.ContextSource == gauge.ContextSourceStatusline && existing.ContextWindowTokens > 0 {
 			leadWindows[sk.SessionID] = existing.ContextWindowTokens
 			leadModels[sk.SessionID] = existing.Model
@@ -302,7 +302,7 @@ func collectTick(ctx context.Context, st store.Store, gs gauge.GaugeStore, engin
 			// health API doesn't have to wait for token_ledger before
 			// reporting a model. Read-modify-write on the existing row only:
 			// there's no token_ledger data to recompute anything else from.
-			backfillModelFromSession(ctx, st, gs, host, sk.SessionID, sk.AgentName)
+			backfillModelFromSession(ctx, st, gs, gaugeHostFor(sk, host), sk.SessionID, sk.AgentName)
 			continue
 		}
 
@@ -316,7 +316,7 @@ func collectTick(ctx context.Context, st store.Store, gs gauge.GaugeStore, engin
 		costTotals[k] += costForRows(rows)
 		costUSD := costTotals[k]
 
-		existing, existingFound, getErr := gs.Get(ctx, gauge.GaugeKey{Host: host, SessionID: sk.SessionID, AgentName: sk.AgentName})
+		existing, existingFound, getErr := gs.Get(ctx, gauge.GaugeKey{Host: gaugeHostFor(sk, host), SessionID: sk.SessionID, AgentName: sk.AgentName})
 		if getErr != nil {
 			existingFound = false
 		}
@@ -330,7 +330,7 @@ func collectTick(ctx context.Context, st store.Store, gs gauge.GaugeStore, engin
 		var contextSource string
 		var sessionTotalCost float64
 		if sk.AgentName == "" {
-			window, contextUsed, longCtx, fillPct, contextSource = chooseContextWindow(existing, existingFound, time.Now(), latest.TotalInput)
+			window, contextUsed, longCtx, fillPct, contextSource = chooseContextWindow(existing, existingFound, time.Now(), latest.TotalInput, latest.Model)
 			// Computed once per session per tick (on the lead's row only,
 			// never per teammate) directly from token_ledger — the durable
 			// source of truth, unlike session_cost_usd/costTotals above
@@ -352,6 +352,9 @@ func collectTick(ctx context.Context, st store.Store, gs gauge.GaugeStore, engin
 		} else {
 			leadWindow, leadWindowOK := leadWindows[sk.SessionID]
 			result := teammateTracker.Update(sk.SessionID, sk.AgentName, leadModels[sk.SessionID], leadWindow, leadWindowOK)
+			if result.Source == gauge.ContextSourceUnavailable {
+				result = teammateContextFromLedger(latest.Model, latest.TotalInput, leadModels[sk.SessionID], leadWindow, leadWindowOK)
+			}
 			window, contextUsed, longCtx, fillPct, contextSource = result.Window, result.Used, result.LongCtx, result.FillPct, result.Source
 		}
 		free := window - contextUsed
@@ -367,7 +370,7 @@ func collectTick(ctx context.Context, st store.Store, gs gauge.GaugeStore, engin
 		lastActivityTs, lastActivityTool, lastActivityDisplay := chooseLastActivity(existing, existingFound, latest.Timestamp)
 
 		agentKey := notify.AgentKey{
-			Host:      host,
+			Host:      gaugeHostFor(sk, host),
 			SessionID: sk.SessionID,
 			AgentName: sk.AgentName,
 			RosterID:  rosterIDs[k],
@@ -376,7 +379,7 @@ func collectTick(ctx context.Context, st store.Store, gs gauge.GaugeStore, engin
 		pressureLevel, pressureLevelSince := engine.Evaluate(ctx, agentKey, fillPct)
 
 		row := gauge.GaugeRow{
-			Host:                  host,
+			Host:                  gaugeHostFor(sk, host),
 			SessionID:             sk.SessionID,
 			AgentName:             sk.AgentName,
 			Runtime:               "claude_code",
@@ -474,7 +477,7 @@ func discoverActiveSessions(ctx context.Context, rx store.RawExecutor) ([]store.
 	// grace window ensures they get at least one gauge write.
 	cutoff := time.Now().UTC().Add(-5 * time.Minute)
 	rows, err := rx.QueryRaw(ctx,
-		`SELECT DISTINCT session_id, agent_name FROM sessions
+		`SELECT DISTINCT session_id, agent_name, host FROM sessions
 		 WHERE status = 'active'
 		    OR (status = 'closed' AND last_seen > ?)`, cutoff)
 	if err != nil {
@@ -485,12 +488,23 @@ func discoverActiveSessions(ctx context.Context, rx store.RawExecutor) ([]store.
 	var result []store.SessionKey
 	for rows.Next() {
 		var sk store.SessionKey
-		if err := rows.Scan(&sk.SessionID, &sk.AgentName); err != nil {
+		if err := rows.Scan(&sk.SessionID, &sk.AgentName, &sk.Host); err != nil {
 			return nil, err
 		}
 		result = append(result, sk)
 	}
 	return result, rows.Err()
+}
+
+// gaugeHostFor picks the gauge row's host label: the session's own recorded
+// host when known, falling back to the collector's own host only for
+// sessions with no host on record yet (e.g. a pre-existing row created
+// before sessions.host was populated).
+func gaugeHostFor(sk store.SessionKey, collectorHost string) string {
+	if sk.Host != "" {
+		return sk.Host
+	}
+	return collectorHost
 }
 
 func queryTokenLedger(ctx context.Context, rx store.RawExecutor, sessionID, agentName string, since time.Time) ([]ledgerRow, error) {
@@ -585,24 +599,33 @@ func costForRows(rows []ledgerRow) float64 {
 // teammateContextTracker (teammate_context.go) instead, landing on
 // gauge.ContextSourceUnavailable rather than this flat default when their
 // own transcript-derived signal isn't available.
-var defaultContextWindow int64 = 200_000
+var defaultContextWindow int64 = 1_000_000
 
 // chooseContextWindow decides the LEAD's context window for one collectTick
 // pass: trust a fresh statusLine-reported window (POST /context,
-// gauge.ContextSourceStatusline) over the defaultContextWindow fallback.
+// gauge.ContextSourceStatusline) over the model-class fallback, over the
+// defaultContextWindow last resort.
 // Never called for a teammate (see collectTick's sk.AgentName branch) — a
 // pure function, no DB access, so the decision is unit-testable without
 // mocking token_ledger/sessions queries.
 //
 // Prefers the existing gauge row's statusLine-sourced values when they exist
-// and are younger than statuslineStaleAfter. Falls back to
-// defaultContextWindow whenever no such row exists, it isn't
-// statusLine-sourced, or it has gone stale — the lead's statusLine
-// stopping (disabled mid-session, or the process exited) must not serve a
-// frozen value forever.
-func chooseContextWindow(existing gauge.GaugeRow, existingFound bool, now time.Time, heuristicUsed int64) (window, contextUsed int64, longCtx bool, fillPct float64, source string) {
+// and are younger than statuslineStaleAfter. When statusLine is unavailable
+// (remote hosts, stale sessions), falls back to the model-class context
+// window map (contextWindowForModel in teammate_context.go) — the same map
+// teammates use, giving 1M for all known Claude model classes. Falls back
+// to defaultContextWindow only for unknown/empty models.
+func chooseContextWindow(existing gauge.GaugeRow, existingFound bool, now time.Time, heuristicUsed int64, model string) (window, contextUsed int64, longCtx bool, fillPct float64, source string) {
 	if existingFound && existing.ContextSource == gauge.ContextSourceStatusline && existing.ContextReportedAt != nil && now.Sub(*existing.ContextReportedAt) < statuslineStaleAfter {
 		return existing.ContextWindowTokens, existing.ContextTokensUsed, existing.LongContextActive, existing.ContextFillPct, gauge.ContextSourceStatusline
+	}
+
+	if w, ok := contextWindowForModel(model); ok {
+		contextUsed = heuristicUsed
+		if w > 0 {
+			fillPct = float64(contextUsed) / float64(w)
+		}
+		return w, contextUsed, w > longContextWindowThreshold, fillPct, gauge.ContextSourceHeuristic
 	}
 
 	window = defaultContextWindow
@@ -610,7 +633,7 @@ func chooseContextWindow(existing gauge.GaugeRow, existingFound bool, now time.T
 	if window > 0 {
 		fillPct = float64(contextUsed) / float64(window)
 	}
-	return window, contextUsed, false, fillPct, gauge.ContextSourceHeuristic
+	return window, contextUsed, window > longContextWindowThreshold, fillPct, gauge.ContextSourceHeuristic
 }
 
 // chooseLastActivity decides last_activity_ts/tool/display for one

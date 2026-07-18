@@ -86,6 +86,28 @@ for event in ("UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailu
     if not has_absolute:
         entries.append(dict(hook_entry))
 
+# --- statusLine + subagentStatusLine ---
+# Wire both slots to teamster-statusline.sh, chaining any pre-existing
+# command so the operator's own statusLine display is unaffected. Mirrors
+# the hub installer's applyStatusLine() in teamster-install/main.go.
+statusline_bin = os.path.expanduser("~/teamster/lib/scripts/teamster-statusline.sh")
+
+def _is_teamster_statusline(cmd):
+    return cmd == statusline_bin or cmd.endswith("/teamster-statusline.sh")
+
+for slot, chain_var in (("statusLine", "TEAMSTER_STATUSLINE_CHAIN"),
+                        ("subagentStatusLine", "TEAMSTER_SUBAGENT_STATUSLINE_CHAIN")):
+    existing_sl = settings.get(slot, {})
+    existing_cmd = existing_sl.get("command", "") if isinstance(existing_sl, dict) else ""
+    if existing_cmd and not _is_teamster_statusline(existing_cmd):
+        env_block = settings.setdefault("env", {})
+        env_block[chain_var] = existing_cmd
+    settings[slot] = {
+        "type": "command",
+        "command": statusline_bin,
+        "refreshInterval": 10,
+    }
+
 # --- env ---
 env = settings.setdefault("env", {})
 env["TEAMSTER_HOOK_SERVER_URL"] = f"http://{server}/event"
@@ -95,7 +117,7 @@ env["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"] = "1"
 # --- permissions ---
 perms = settings.setdefault("permissions", {})
 allow = perms.setdefault("allow", [])
-for pat in ("mcp__activity__*", "mcp__wms__*"):
+for pat in ("mcp__activity__*", "mcp__wms__*", "mcp__roster__*", "mcp__health__*"):
     if pat not in allow:
         allow.append(pat)
 
@@ -136,6 +158,16 @@ claude mcp remove wms 2>/dev/null || true
 claude mcp add --transport http --scope user wms "http://$SERVER/mcp/wms" \
     || die "step 2 failed: could not register wms MCP"
 echo "  registered wms MCP -> http://$SERVER/mcp/wms"
+
+claude mcp remove roster 2>/dev/null || true
+claude mcp add --transport http --scope user roster "http://$SERVER/mcp/roster" \
+    || die "step 2 failed: could not register roster MCP"
+echo "  registered roster MCP -> http://$SERVER/mcp/roster"
+
+claude mcp remove health 2>/dev/null || true
+claude mcp add --transport http --scope user health "http://$SERVER/mcp/health" \
+    || die "step 2 failed: could not register health MCP"
+echo "  registered health MCP -> http://$SERVER/mcp/health"
 
 # 3. Install plugin via direct cache population (bypasses broken `claude plugin install` for local dirs)
 echo "--> Step 3: Installing Teamster plugin (direct cache)..."

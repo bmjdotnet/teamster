@@ -29,9 +29,12 @@ const (
 
 // SessionKey is the composite primary key for sessions: one row per
 // (session_id, agent_name) pair. Non-empty AgentName carries the "@" prefix
-// (lead is the empty string).
+// (lead is the empty string). Host is populated by callers that read it back
+// from a session row (e.g. discoverActiveSessions) — it is not part of the
+// lookup key any backend uses to find a session.
 type SessionKey struct {
 	SessionID string
+	Host      string
 	AgentName string
 }
 

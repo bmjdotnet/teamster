@@ -93,9 +93,9 @@ if [ -n "$SESSION_ID" ] && [ "$have_jq" = "1" ] && [ "$have_curl" = "1" ]; then
         # which the /context handler uses to override token_ledger's
         # buggier per-teammate model attribution.
         echo "$INPUT" | jq -c --arg sid "$SESSION_ID" --arg host "$HOST" '
-            .tasks[]? | {
+            .tasks[]? | select((.name // "") != "") | {
                 session_id: $sid,
-                agent_name: ("@" + (.name // "")),
+                agent_name: ("@" + .name),
                 host: $host,
                 context_window_size: (.contextWindowSize // 0),
                 used_percentage: (if (.contextWindowSize // 0) > 0 then (100 * (.tokenCount // 0) / .contextWindowSize) else 0 end),

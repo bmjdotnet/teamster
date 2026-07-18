@@ -293,6 +293,12 @@ cp "$BASEDIR/lib/scripts/remote-codex-setup.py" "$STAGING/teamster/lib/scripts/r
 cp -r "$BASEDIR/lib/codex-plugin" "$STAGING/teamster/lib/" \
     || die "step 2 failed: cannot copy codex-plugin from $BASEDIR/lib/codex-plugin"
 
+# StatusLine script — forwards Claude Code's context_window data to hookd's
+# POST /context for deterministic context-window sizing on remotes.
+cp "$BASEDIR/lib/scripts/teamster-statusline.sh" "$STAGING/teamster/lib/scripts/teamster-statusline.sh" \
+    || die "step 2 failed: cannot copy teamster-statusline.sh from $BASEDIR/lib/scripts/teamster-statusline.sh"
+chmod +x "$STAGING/teamster/lib/scripts/teamster-statusline.sh"
+
 tar czf "$STAGING/teamster-remote.tar.gz" -C "$STAGING" teamster \
     || die "step 2 failed: tar could not create payload tarball"
 

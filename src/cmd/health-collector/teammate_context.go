@@ -268,6 +268,26 @@ func (t *teammateContextTracker) Update(sessionID, agentName, leadModel string, 
 	return teammateContextResult{Source: gauge.ContextSourceUnavailable}
 }
 
+// teammateContextFromLedger is the last-resort fallback for a teammate whose
+// own transcript sidecar was never found (teammateContextTracker.Update
+// returned ContextSourceUnavailable) — e.g. a remote teammate whose
+// transcript never lands on this collector's host. Resolves the same way
+// Update does (own model class, then same-model-as-lead), but against
+// token_ledger's model/total_input columns instead of a transcript's usage
+// row.
+func teammateContextFromLedger(model string, totalInput int64, leadModel string, leadWindow int64, leadWindowOK bool) teammateContextResult {
+	if model == "" {
+		return teammateContextResult{Source: gauge.ContextSourceUnavailable}
+	}
+	if window, ok := contextWindowForModel(model); ok {
+		return buildTeammateContextResult(window, totalInput, gauge.ContextSourceTokenLedger)
+	}
+	if leadWindowOK && model == leadModel {
+		return buildTeammateContextResult(leadWindow, totalInput, gauge.ContextSourceTokenLedger)
+	}
+	return teammateContextResult{Source: gauge.ContextSourceUnavailable}
+}
+
 func buildTeammateContextResult(window, used int64, source string) teammateContextResult {
 	var fillPct float64
 	if window > 0 {

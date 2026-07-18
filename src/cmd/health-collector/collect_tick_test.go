@@ -70,12 +70,19 @@ func newCollectTickHarness(t *testing.T) (store.Store, *memGaugeStore) {
 
 func insertSession(t *testing.T, st store.Store, sessionID, agentName string) {
 	t.Helper()
+	insertSessionWithHost(t, st, sessionID, agentName, "test-host")
+}
+
+// insertSessionWithHost is insertSession with an explicit host, for tests
+// exercising gaugeHostFor's session-host-vs-collector-host distinction.
+func insertSessionWithHost(t *testing.T, st store.Store, sessionID, agentName, host string) {
+	t.Helper()
 	rx := st.(store.RawExecutor)
 	now := time.Now().UTC()
 	_, err := rx.ExecRaw(context.Background(),
 		`INSERT INTO sessions (session_id, agent_name, host, first_seen, last_seen, status, model)
 		 VALUES (?, ?, ?, ?, ?, 'active', ?)`,
-		sessionID, agentName, "test-host", now, now, "claude-opus-4-6")
+		sessionID, agentName, host, now, now, "claude-opus-4-6")
 	if err != nil {
 		t.Fatalf("insert session: %v", err)
 	}
@@ -90,6 +97,21 @@ func insertLedgerRow(t *testing.T, st store.Store, sessionID, agentName, message
 		`INSERT INTO token_ledger (session_id, message_id, agent_name, model, input_tokens, output_tokens, timestamp, cost_usd)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		sessionID, messageID, agentName, "claude-opus-4-6", inputTokens, outputTokens, ts, 0.0)
+	if err != nil {
+		t.Fatalf("insert token_ledger row: %v", err)
+	}
+}
+
+// insertLedgerRowWithTotalInput is insertLedgerRow plus an explicit
+// total_input column, needed for tests exercising the token_ledger
+// context-occupancy fallback (teammateContextFromLedger reads TotalInput).
+func insertLedgerRowWithTotalInput(t *testing.T, st store.Store, sessionID, agentName, messageID, model string, inputTokens, outputTokens, totalInput int64, ts time.Time) {
+	t.Helper()
+	rx := st.(store.RawExecutor)
+	_, err := rx.ExecRaw(context.Background(),
+		`INSERT INTO token_ledger (session_id, message_id, agent_name, model, input_tokens, output_tokens, total_input, timestamp, cost_usd)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		sessionID, messageID, agentName, model, inputTokens, outputTokens, totalInput, ts, 0.0)
 	if err != nil {
 		t.Fatalf("insert token_ledger row: %v", err)
 	}
@@ -225,5 +247,88 @@ func TestCollectTick_AccumulatesAcrossTicksWithoutRestart(t *testing.T) {
 	row, _, _ = gs.Get(context.Background(), key)
 	if row.TokensInTotal != 1500 || row.TokensOutTotal != 300 {
 		t.Errorf("after second tick: in=%d out=%d, want 1500/300 (delta added once, not history re-summed)", row.TokensInTotal, row.TokensOutTotal)
+	}
+}
+
+// TestCollectTick_TeammateFallsBackToTokenLedgerWhenNoTranscript is the WP3
+// integration regression: a teammate with token_ledger rows but no local
+// transcript (e.g. a remote teammate whose transcript never lands on this
+// collector's host) must resolve context occupancy from token_ledger rather
+// than being left at ContextSourceUnavailable.
+func TestCollectTick_TeammateFallsBackToTokenLedgerWhenNoTranscript(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home) // no sidecar/transcript exists under this HOME
+
+	st, gs := newCollectTickHarness(t)
+	const sessionID = "sess-ledger-fallback"
+	insertSession(t, st, sessionID, "@collector")
+
+	base := time.Now().UTC().Add(-time.Hour)
+	insertLedgerRowWithTotalInput(t, st, sessionID, "@collector", "lf1", "claude-opus-4-6", 1000, 200, 45_000, base)
+
+	highWater := make(map[string]time.Time)
+	prevContext := make(map[string]int64)
+	costTotals := make(map[string]float64)
+	tokensInTotals := make(map[string]int64)
+	tokensOutTotals := make(map[string]int64)
+	rosterIDs := make(map[string]string)
+	teamNames := make(map[string]string)
+	engine, compTracker, teammateTracker, promWarned := newTickCollaborators()
+
+	collectTick(context.Background(), st, gs, engine, compTracker, teammateTracker, nil, promWarned, "test-host",
+		highWater, prevContext, costTotals, tokensInTotals, tokensOutTotals, rosterIDs, teamNames)
+
+	key := gauge.GaugeKey{Host: "test-host", SessionID: sessionID, AgentName: "@collector"}
+	row, found, err := gs.Get(context.Background(), key)
+	if err != nil || !found {
+		t.Fatalf("expected gauge row, found=%v err=%v", found, err)
+	}
+	if row.ContextSource != gauge.ContextSourceTokenLedger {
+		t.Fatalf("ContextSource = %q, want %q", row.ContextSource, gauge.ContextSourceTokenLedger)
+	}
+	if row.ContextWindowTokens == 0 || row.ContextTokensUsed == 0 || row.ContextFillPct == 0 {
+		t.Errorf("expected non-zero fill, got window=%d used=%d fillPct=%v",
+			row.ContextWindowTokens, row.ContextTokensUsed, row.ContextFillPct)
+	}
+}
+
+// TestCollectTick_TeammateWithTranscript_StillPrefersTranscript is the WP3
+// regression: a teammate WITH a resolvable transcript fixture must still
+// resolve via ContextSourceTranscript, never falling through to the
+// token_ledger fallback just because token_ledger rows also exist.
+func TestCollectTick_TeammateWithTranscript_StillPrefersTranscript(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	writeSidecarTranscript(t, home, "sess-transcript-priority", "acollector1",
+		agentSidecar{Name: "collector", TaskKind: taskKindTeammate, Model: "claude-sonnet-5"},
+		[]string{assistantLine(2, 117_000, 1_500, 300)})
+
+	st, gs := newCollectTickHarness(t)
+	const sessionID = "sess-transcript-priority"
+	insertSession(t, st, sessionID, "@collector")
+
+	base := time.Now().UTC().Add(-time.Hour)
+	insertLedgerRowWithTotalInput(t, st, sessionID, "@collector", "tp1", "claude-opus-4-6", 1000, 200, 45_000, base)
+
+	highWater := make(map[string]time.Time)
+	prevContext := make(map[string]int64)
+	costTotals := make(map[string]float64)
+	tokensInTotals := make(map[string]int64)
+	tokensOutTotals := make(map[string]int64)
+	rosterIDs := make(map[string]string)
+	teamNames := make(map[string]string)
+	engine, compTracker, teammateTracker, promWarned := newTickCollaborators()
+
+	collectTick(context.Background(), st, gs, engine, compTracker, teammateTracker, nil, promWarned, "test-host",
+		highWater, prevContext, costTotals, tokensInTotals, tokensOutTotals, rosterIDs, teamNames)
+
+	key := gauge.GaugeKey{Host: "test-host", SessionID: sessionID, AgentName: "@collector"}
+	row, found, err := gs.Get(context.Background(), key)
+	if err != nil || !found {
+		t.Fatalf("expected gauge row, found=%v err=%v", found, err)
+	}
+	if row.ContextSource != gauge.ContextSourceTranscript {
+		t.Fatalf("ContextSource = %q, want %q (transcript must win over token_ledger fallback)", row.ContextSource, gauge.ContextSourceTranscript)
 	}
 }

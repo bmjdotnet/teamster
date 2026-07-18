@@ -2,7 +2,7 @@
 """Teamster hook client (Python). Reads a Claude Code hook event from stdin,
 enriches with host identity, POSTs to the hub's hookd. Fire-and-forget."""
 from __future__ import annotations
-import json, os, re, socket, sys, urllib.request, urllib.error
+import json, os, re, socket, subprocess, sys, urllib.request, urllib.error
 from datetime import datetime, timezone
 
 # Bounded transcript scan for agentName — stop after this many bytes to keep
@@ -216,6 +216,38 @@ def _agent_name_from_transcript(path):
     return result
 
 
+def _parent_claude_args() -> dict:
+    """Read --parent-session-id and --agent-name from the parent process's
+    command line (macOS: separate-session teammates launched with these flags).
+    Returns a dict with keys present only when found. Best-effort, never raises."""
+    try:
+        ppid = os.getppid()
+        if sys.platform == "darwin":
+            out = subprocess.check_output(
+                ["ps", "-p", str(ppid), "-o", "args="],
+                timeout=1, stderr=subprocess.DEVNULL,
+            ).decode("utf-8", errors="replace")
+        else:
+            try:
+                with open(f"/proc/{ppid}/cmdline", "rb") as f:
+                    out = f.read().decode("utf-8", errors="replace").replace("\0", " ")
+            except OSError:
+                return {}
+        result = {}
+        m = re.search(r"--parent-session-id\s+(\S+)", out)
+        if m:
+            result["parent_session_id"] = m.group(1)
+        m = re.search(r"--agent-name\s+(\S+)", out)
+        if m:
+            result["agent_name"] = m.group(1)
+        m = re.search(r"--team-name\s+(\S+)", out)
+        if m:
+            result["team_name"] = m.group(1)
+        return result
+    except Exception:
+        return {}
+
+
 def main():
     host = os.environ.get("TEAMSTER_HOST", socket.gethostname().split('.')[0])
     url = os.environ.get("TEAMSTER_HOOK_SERVER_URL", "")
@@ -246,6 +278,19 @@ def main():
             name = _agent_name_from_transcript(transcript_path)
             if name:
                 event["agent_type"] = name
+
+    # macOS separate-session teammates: read --parent-session-id,
+    # --agent-name, and --team-name from the parent Claude Code process's
+    # command line. These flags are how CC launches each teammate, but they
+    # don't appear in hook payloads — inject them so hookd can establish
+    # parent linkage and use the real name (not generic "@Explore").
+    parent_args = _parent_claude_args()
+    if parent_args.get("parent_session_id"):
+        event.setdefault("_parent_session_id", parent_args["parent_session_id"])
+    if parent_args.get("agent_name"):
+        event["_agent_name"] = "@" + parent_args["agent_name"]
+    if parent_args.get("team_name"):
+        event.setdefault("_team_name", parent_args["team_name"])
 
     # Mask any credential inlined in a Bash command before it leaves this host.
     # Defense in depth: the hub redacts again at ingest, but scrubbing here means

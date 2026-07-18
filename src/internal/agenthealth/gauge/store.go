@@ -35,6 +35,13 @@ const (
 	// StatusLine-resolved window because the teammate is confirmed to be
 	// running the exact same model string as the lead.
 	ContextSourceFallback = "fallback"
+	// ContextSourceTokenLedger marks a teammate row resolved from
+	// token_ledger (model + total_input) when no local transcript signal
+	// was available at all (e.g. a remote teammate whose transcript never
+	// lands on this host) — the last-resort fallback below
+	// ContextSourceTranscript/ContextSourceFallback, above
+	// ContextSourceUnavailable.
+	ContextSourceTokenLedger = "token_ledger"
 	// ContextSourceUnavailable marks a teammate row with no derivable
 	// context signal yet (no transcript found, or no usage row seen in it)
 	// — every context field is left at its zero value rather than

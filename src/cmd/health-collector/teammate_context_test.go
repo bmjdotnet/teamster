@@ -275,6 +275,71 @@ func TestTeammateContextTracker_Update_SameModelLeadFallback(t *testing.T) {
 	}
 }
 
+func TestTeammateContextFromLedger(t *testing.T) {
+	cases := []struct {
+		name         string
+		model        string
+		totalInput   int64
+		leadModel    string
+		leadWindow   int64
+		leadWindowOK bool
+		wantSource   string
+		wantWindow   int64
+		wantUsed     int64
+	}{
+		{
+			name:       "known model class",
+			model:      "claude-sonnet-5",
+			totalInput: 50_000,
+			wantSource: gauge.ContextSourceTokenLedger,
+			wantWindow: 1_000_000,
+			wantUsed:   50_000,
+		},
+		{
+			name:         "unknown model, same as lead",
+			model:        "some-future-model",
+			totalInput:   30_000,
+			leadModel:    "some-future-model",
+			leadWindow:   900_000,
+			leadWindowOK: true,
+			wantSource:   gauge.ContextSourceTokenLedger,
+			wantWindow:   900_000,
+			wantUsed:     30_000,
+		},
+		{
+			name:         "unknown model, different from lead",
+			model:        "some-future-model",
+			totalInput:   30_000,
+			leadModel:    "claude-opus-4-6",
+			leadWindow:   1_000_000,
+			leadWindowOK: true,
+			wantSource:   gauge.ContextSourceUnavailable,
+		},
+		{
+			name:       "empty model",
+			model:      "",
+			totalInput: 30_000,
+			wantSource: gauge.ContextSourceUnavailable,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			result := teammateContextFromLedger(c.model, c.totalInput, c.leadModel, c.leadWindow, c.leadWindowOK)
+			if result.Source != c.wantSource {
+				t.Errorf("Source = %q, want %q", result.Source, c.wantSource)
+			}
+			if result.Source == gauge.ContextSourceTokenLedger {
+				if result.Window != c.wantWindow {
+					t.Errorf("Window = %d, want %d", result.Window, c.wantWindow)
+				}
+				if result.Used != c.wantUsed {
+					t.Errorf("Used = %d, want %d", result.Used, c.wantUsed)
+				}
+			}
+		})
+	}
+}
+
 func TestTeammateContextTracker_Update_DifferentModel_NoFallback(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

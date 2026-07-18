@@ -518,21 +518,45 @@ func pinLeadsFirst(rows []Agent) {
 	copy(rows[len(leads):], rest)
 }
 
-// groupBySession partitions rows into per-session groups, preserving the
-// first-seen order of session IDs — arbitrary, since sortGroupsByRecency
-// reorders groups immediately after.
+// groupBySession partitions rows into per-session groups, merging macOS
+// separate-session teammates into their parent's group when both share a
+// team_name. On macOS, each teammate runs as its own session (distinct
+// session_id) but carries the same team_name and a parent_ref pointing at
+// the lead — without merging, each appears as its own solo team in the
+// fleet tree. Hub/Linux teammates already share the lead's session_id, so
+// this is a no-op for them.
 func groupBySession(rows []Agent) []agentGroup {
 	order := make([]string, 0, len(rows))
-	byID := make(map[string][]Agent, len(rows))
+	byKey := make(map[string][]Agent, len(rows))
+	sessionToKey := make(map[string]string, len(rows))
+
 	for _, r := range rows {
-		if _, ok := byID[r.SessionID]; !ok {
-			order = append(order, r.SessionID)
+		key := r.SessionID
+		if r.TeamName != "" {
+			key = "team:" + r.TeamName
 		}
-		byID[r.SessionID] = append(byID[r.SessionID], r)
+		if existing, ok := sessionToKey[r.SessionID]; ok {
+			key = existing
+		} else {
+			sessionToKey[r.SessionID] = key
+		}
+		if _, ok := byKey[key]; !ok {
+			order = append(order, key)
+		}
+		byKey[key] = append(byKey[key], r)
 	}
+
 	groups := make([]agentGroup, 0, len(order))
-	for _, id := range order {
-		groups = append(groups, agentGroup{sessionID: id, rows: byID[id]})
+	for _, key := range order {
+		members := byKey[key]
+		sid := members[0].SessionID
+		for _, m := range members {
+			if m.ParentRef == nil || *m.ParentRef == "" {
+				sid = m.SessionID
+				break
+			}
+		}
+		groups = append(groups, agentGroup{sessionID: sid, rows: members})
 	}
 	return groups
 }
