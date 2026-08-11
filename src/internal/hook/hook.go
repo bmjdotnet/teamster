@@ -438,27 +438,18 @@ func ProcessEvent(event HookEvent, rawData map[string]interface{}, serverURL, de
 
 		} else if strings.HasPrefix(toolName, "mcp__wms__") {
 			if hookEvent == "PreToolUse" {
-				ti, _ := toolInput.(map[string]interface{})
-				strA := func(key string) string { return strField(ti, key, 0) }
-				suffix := strings.TrimPrefix(toolName, "mcp__wms__")
-				switch {
-				case strings.Contains(suffix, "updateStatus"):
-					rawData["_tool_tag"] = "TASK"
-					rawData["_tool_display"] = "Updating " + strA("entityType") + " __" + strA("entityID") + "__ → __" + strA("status") + "__"
-				case strings.Contains(suffix, "addDependency"):
-					rawData["_tool_tag"] = "TASK"
-					rawData["_tool_display"] = "Adding dependency: " + strA("blockerID") + " → " + strA("blockedID")
-				case strings.Contains(suffix, "removeDependency"):
-					rawData["_tool_tag"] = "TASK"
-					rawData["_tool_display"] = "Removing dependency: " + strA("blockerID") + " → " + strA("blockedID")
-				case strings.Contains(suffix, "setFocus"):
+				// setFocus writes _focus (a special field, not _tool_tag) —
+				// must stay client-side for the focus-nudge pipeline.
+				// All other WMS tools defer to hookd's interceptor registry
+				// for _tool_tag/_tool_display enrichment, same rationale as
+				// the generic MCP defer below.
+				if strings.Contains(toolName, "setFocus") {
+					ti, _ := toolInput.(map[string]interface{})
+					strA := func(key string) string { return strField(ti, key, 0) }
 					rawData["_focus"] = strA("entityType") + " " + strA("entityID") + ": " + strA("focus")
-				case strings.Contains(suffix, "getFocus"):
-					rawData["_tool_tag"] = "TASK"
-					rawData["_tool_display"] = "Querying focus: " + strA("entityType") + " " + strA("entityID")
 				}
 			}
-			// PostToolUse for WMS MCP tools: fall through to POST with no extra fields.
+			// All other WMS MCP tools: fall through to POST with no tool fields.
 
 		} else if toolName == "ToolSearch" {
 			// skip plumbing tool
@@ -495,6 +486,12 @@ func ProcessEvent(event HookEvent, rawData map[string]interface{}, serverURL, de
 				}
 				// PreToolUse for TaskCreate: suppress, wait for PostToolUse.
 
+			} else if toolName == "AskUserQuestion" && hookEvent == "PostToolUse" {
+				// Claude Code doesn't include tool_response in AskUserQuestion
+				// PostToolUse payloads — the user's answer is not available to
+				// the hook. Suppress to avoid duplicating the [ ASK] line.
+				break
+
 			} else {
 				shouldEmit := hookEvent == "PreToolUse" ||
 					(hookEvent == "PostToolUse" && toolName != "Bash" && !isTeammate)
@@ -523,6 +520,19 @@ func ProcessEvent(event HookEvent, rawData map[string]interface{}, serverURL, de
 					default:
 						target := result.Display
 						if target == "activity.txt" || target == "session-focus.txt" {
+							break
+						}
+						// MCP tools with no explicit TOOL_TAGS override are left
+						// for hookd's interceptor registry (internal/intercept)
+						// to enrich. Writing a "TOOL" fallback here unconditionally
+						// would win via EnrichRecord's alreadyEnriched guard and
+						// permanently shadow the registry for every hub-local
+						// session — confirmed live on chunk: mcp__roster__registerPeer
+						// stuck at [TOOL] because this client-side write pre-empted
+						// hookd before the registry ever got a chance. Built-in
+						// Claude Code tools (TOOL_TAGS never has mcp__ keys) are
+						// unaffected and still get their fallback tag below.
+						if strings.HasPrefix(toolName, "mcp__") && TOOL_TAGS[toolName] == "" {
 							break
 						}
 						tag := TOOL_TAGS[toolName]

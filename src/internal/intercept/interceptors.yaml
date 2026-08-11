@@ -1,0 +1,476 @@
+# Teamster interceptors — default config
+# Shipped with the product at skel/etc/interceptors.yaml
+# Installed to $BASEDIR/etc/interceptors.yaml
+# Edit the installed copy to customize; restart hookd to apply.
+#
+# ---------------------------------------------------------------------------
+# Field name verification log (wu-default-config, 2026-07-18)
+#
+# Every {{f "field"}} reference below was checked against the JSON parameter
+# key the corresponding MCP tool actually receives. Sources:
+#
+#   - wms:      src/internal/mcp/wms/wms.go        (HandleToolCall switch +
+#                                                     ToolDefs inputSchema)
+#   - activity: src/internal/mcp/activity/activity.go (HandleToolCall + ToolDefs)
+#   - roster:   src/internal/mcp/roster/roster.go   (HandleToolCall + ToolDefs)
+#   - health:   suppressed wholesale — no fields to verify
+#   - github, playwright, chrome-devtools, claude-in-chrome, Google Drive:
+#               live tool schemas loaded via ToolSearch (this session) —
+#               tools/list-equivalent authoritative parameter names.
+#
+# Mismatches found in the design doc's draft and corrected here:
+#
+#   wms.rollbackTags        doc used {{f "entityType"}}/{{f "entityID"}} —
+#                            the tool has NEITHER field, only `batchID`.
+#                            Fixed to display the batch ID.
+#   wms.snapshotEntityTags   doc used {{f "entityID"}} (singular) — the tool's
+#                            actual field is `entityIDs` (plural array, not
+#                            interpolable as a single string). Fixed to show
+#                            entityType + tagKey instead.
+#   wms.listRelated          doc used {{f "entityType"}}/{{f "entityID"}} —
+#                            the tool has NEITHER field (query, tagFilters,
+#                            includeTerminal, staleHours only). Fixed to show
+#                            the query string.
+#   playwright.browser_press_key   doc used {{f "tagKey"}} (WMS field name
+#                            leaked in by copy/paste) — actual field is `key`.
+#   chrome-devtools.click    doc used {{f "selector"}} — this server addresses
+#                            elements by `uid` (from a prior page snapshot),
+#                            not a CSS selector. Fixed to `uid`.
+#   chrome-devtools.fill     same `selector` → `uid` correction.
+#   claude-in-chrome.computer (scroll)  doc used {{f "direction"}} — actual
+#                            field is `scroll_direction`.
+#   claude-in-chrome.find     doc used {{f "text"}} — actual field is `query`.
+#   Google Drive.read_file_content    doc used {{f "file_id"}} (snake_case) —
+#                            actual field is `fileId` (camelCase).
+#   Google Drive.download_file_content   same file_id → fileId correction.
+#   Google Drive.copy_file    same file_id → fileId correction.
+#   Google Drive.create_file  doc used {{f "name"}} — actual field is `title`.
+#
+# Verified correct as originally drafted (no change needed): all wms fields
+# not listed above (id, title, status, entityType, entityID, agentID, tagKey,
+# tagValue, blockerID, blockedID, focus, query, phase, batchID where used
+# correctly); activity's `message`; roster's `team_name`, `roster_id`;
+# playwright's `url`, `element`, `text` (browser_find); chrome-devtools'
+# `url` (navigate_page); claude-in-chrome's `url` (navigate), `coordinate`
+# (computer/click — note: array field, not a string; the `f` accessor
+# fmt.Sprint-formats it), `action` (computer fallback); every github field
+# referenced (title, owner, repo, pullNumber, branch, path, query,
+# issueNumber, sha, name); Google Drive's `query` (search_files).
+#
+# Not independently verifiable at authoring time: none — all namespaces in
+# this config had either in-repo source (wms/activity/roster) or a live
+# loaded tool schema (github/playwright/chrome-devtools/claude-in-chrome/
+# Google Drive) available this session.
+# ---------------------------------------------------------------------------
+
+tags:
+  TASK:
+    color: [240, 110, 170]    # vivid pink
+    description: "Work management"
+  CHRM:
+    color: [80, 180, 220]     # bright cyan
+    description: "Browser automation"
+  " GIT":
+    color: [220, 130, 70]     # burnt orange
+    description: "GitHub operations"
+  TEAM:
+    color: [180, 120, 220]    # purple
+    description: "Agent lifecycle"
+  COMM:
+    color: [150, 140, 210]    # lavender
+    description: "Inter-agent messages"
+  READ:
+    color: [0, 0, 255]
+    description: "File read"
+  EDIT:
+    color: [128, 128, 0]
+    description: "File write"
+  " ACT":
+    color: [230, 150, 50]
+    description: "Bash intent"
+  EXEC:
+    color: [180, 160, 60]
+    description: "Bash command"
+  " WEB":
+    color: [210, 130, 180]
+    description: "External access"
+  " ASK":
+    color: [255, 100, 100]
+    description: "Human attention"
+  PLAN:
+    color: [160, 160, 220]
+    description: "Planning"
+  GREP:
+    color: [120, 140, 200]
+    description: "File search (Grep/Glob)"
+  TOOL:
+    color: [160, 160, 160]
+    description: "Generic tool (fallback)"
+  GOAL:
+    color: [255, 200, 60]
+    description: "Mission declaration"
+  THNK:
+    color: [140, 170, 130]
+    description: "Thought"
+  DONE:
+    color: [0, 102, 0]
+    description: "Completion"
+  RCAP:
+    color: [100, 160, 180]
+    description: "Idle recap"
+  WARN:
+    color: [255, 160, 40]
+    description: "Operator warning"
+  GDRV:
+    color: [60, 160, 100]
+    description: "Google Drive"
+
+interceptors:
+  # --- WMS ---
+  - match: { prefix: "mcp__wms__wms_" }
+    rules:
+      - match: { method: "createOutcome" }
+        tag: TASK
+        display: 'Created outcome __{{f "id"}}__: __{{f "title"}}__'
+
+      - match: { method: "getOutcome" }
+        tag: TASK
+        display: 'Querying outcome __{{f "id"}}__'
+
+      - match: { method: "listOutcomes" }
+        tag: TASK
+        display: 'Listing outcomes'
+
+      - match: { method: "createWorkUnit" }
+        tag: TASK
+        display: 'Created workunit __{{f "id"}}__: __{{f "title"}}__'
+
+      - match: { method: "getWorkUnit" }
+        tag: TASK
+        display: 'Querying workunit __{{f "id"}}__'
+
+      - match: { method: "listWorkUnits" }
+        tag: TASK
+        display: 'Listing workunits'
+
+      - match: { method: "assignWorkUnit" }
+        tag: TASK
+        display: 'Assigned workunit __{{f "id"}}__ → __{{f "agentID"}}__'
+
+      - match: { method: "claimWorkUnit" }
+        tag: TASK
+        display: 'Claimed workunit __{{f "id"}}__'
+
+      - match: { method: "classifyEntity" }
+        tag: TASK
+        display: 'Classifying __{{f "entityType"}}__ __{{f "entityID"}}__'
+
+      - match: { method: "updateOutcomeStatus" }
+        tag: TASK
+        display: 'Updated outcome __{{f "id"}}__ → __{{f "status"}}__'
+
+      - match: { method: "updateWorkUnitStatus" }
+        tag: TASK
+        display: 'Updated workunit __{{f "id"}}__ → __{{f "status"}}__'
+
+      - match: { method: "updateStatus" }
+        tag: TASK
+        display: 'Updating {{f "entityType"}} __{{f "entityID"}}__ → __{{f "status"}}__'
+
+      - match: { method: "addDependency" }
+        tag: TASK
+        display: 'Adding dependency: {{f "blockerID"}} → {{f "blockedID"}}'
+
+      - match: { method: "removeDependency" }
+        tag: TASK
+        display: 'Removing dependency: {{f "blockerID"}} → {{f "blockedID"}}'
+
+      - match: { method: "setFocus" }
+        fields:
+          _focus: '{{f "entityType"}} {{f "entityID"}}: {{f "focus"}}'
+
+      - match: { method: "getFocus" }
+        tag: TASK
+        display: 'Querying focus: {{f "entityType"}} {{f "entityID"}}'
+
+      # --- Previously unhandled WMS tools ---
+      - match: { method: "tagEntity" }
+        suppress: true
+
+      - match: { method: "untagEntity" }
+        suppress: true
+
+      - match: { method: "getEntityTags" }
+        tag: TASK
+        display: 'Getting tags for __{{f "entityType"}}__ __{{f "entityID"}}__'
+
+      - match: { method: "defineTag" }
+        tag: TASK
+        display: 'Defined tag key __{{f "tagKey"}}__'
+
+      - match: { method: "describeTag" }
+        tag: TASK
+        display: 'Describing tag __{{f "tagKey"}}__'
+
+      - match: { method: "retireTag" }
+        tag: TASK
+        display: 'Retired tag __{{f "tagKey"}}__'
+
+      - match: { method: "listTags" }
+        tag: TASK
+        display: 'Listing tags'
+
+      # CORRECTED (field-verification): the tool has no entityType/entityID —
+      # only batchID. See verification log above.
+      - match: { method: "rollbackTags" }
+        tag: TASK
+        display: 'Rolling back tag batch __{{f "batchID"}}__'
+
+      # CORRECTED (field-verification): the tool's ID field is `entityIDs`
+      # (plural array), not `entityID`. Substituted entityType + tagKey.
+      - match: { method: "snapshotEntityTags" }
+        tag: TASK
+        display: 'Snapshotting tags for __{{f "entityType"}}__: __{{f "tagKey"}}__'
+
+      - match: { method: "renameOutcome" }
+        tag: TASK
+        display: 'Renaming outcome __{{f "id"}}__: __{{f "title"}}__'
+
+      - match: { method: "renameWorkUnit" }
+        tag: TASK
+        display: 'Renaming workunit __{{f "id"}}__: __{{f "title"}}__'
+
+      - match: { method: "search" }
+        tag: TASK
+        display: 'Searching: __{{f "query"}}__'
+
+      - match: { method: "setPhase" }
+        tag: TASK
+        display: 'Setting phase for __{{f "entityType"}}__ __{{f "entityID"}}__ → __{{f "phase"}}__'
+
+      - match: { method: "getHistory" }
+        tag: TASK
+        display: 'Querying history for __{{f "entityType"}}__ __{{f "entityID"}}__'
+
+      - match: { method: "getTimeline" }
+        tag: TASK
+        display: 'Getting timeline for __{{f "entityID"}}__'
+
+      - match: { method: "listBlockers" }
+        tag: TASK
+        display: 'Listing blockers for __{{f "entityID"}}__'
+
+      - match: { method: "listDependents" }
+        tag: TASK
+        display: 'Listing dependents of __{{f "entityID"}}__'
+
+      # CORRECTED (field-verification): the tool has no entityType/entityID —
+      # only query, tagFilters, includeTerminal, staleHours.
+      - match: { method: "listRelated" }
+        tag: TASK
+        display: 'Finding related to: __{{f "query"}}__'
+
+  # --- Activity ---
+  - match: { prefix: "mcp__activity__" }
+    rules:
+      - match: { method: "setOverallIntent" }
+        fields:
+          _focus: '{{f "message"}}'
+
+      - match: { method: "reportActivity" }
+        fields:
+          _thought: '{{f "message"}}'
+
+      - match: { method: "completeActivity" }
+        fields:
+          _done: '{{f "message"}}'
+
+      - match: { method: "setMode" }
+        # No display — handled by special Go code (mode marker write).
+        # Interceptor explicitly matches to prevent fallback to generic [TOOL].
+        suppress: true
+
+  # --- Browser automation (3 servers → 1 tag) ---
+  - match: { prefix: "mcp__claude-in-chrome__" }
+    tag: CHRM
+    rules:
+      - match: { method: "navigate" }
+        display: 'Navigating to __{{f "url"}}__'
+      - match: { method: "read_page" }
+        display: 'Reading page'
+      - match: { method: "computer", params: { action: "left_click" } }
+        display: 'Clicking __{{f "coordinate"}}__'
+      - match: { method: "computer", params: { action: "screenshot" } }
+        display: 'Screenshot'
+      - match: { method: "computer", params: { action: "type" } }
+        display: 'Typing text'
+      # CORRECTED (field-verification): actual param is `scroll_direction`,
+      # not `direction`.
+      - match: { method: "computer", params: { action: "scroll" } }
+        display: 'Scrolling __{{f "scroll_direction"}}__'
+      - match: { method: "computer" }
+        display: 'Browser action: __{{f "action"}}__'
+      - match: { method: "tabs_create_mcp" }
+        display: 'Opening new tab'
+      - match: { method: "tabs_context_mcp" }
+        display: 'Getting tab context'
+      - match: { method: "form_input" }
+        display: 'Filling form'
+      - match: { method: "javascript_tool" }
+        display: 'Running JavaScript'
+      # CORRECTED (field-verification): actual param is `query`, not `text`.
+      - match: { method: "find" }
+        display: 'Finding element: __{{f "query"}}__'
+      - match: { method: "get_page_text" }
+        display: 'Getting page text'
+      - match: { method: "read_console_messages" }
+        display: 'Reading console'
+      - match: { method: "read_network_requests" }
+        display: 'Reading network requests'
+      - match: { method: "gif_creator" }
+        display: 'Creating GIF'
+
+  - match: { prefix: "mcp__playwright__" }
+    tag: CHRM
+    rules:
+      - match: { method: "browser_navigate" }
+        display: 'Navigating to __{{f "url"}}__'
+      - match: { method: "browser_click" }
+        display: 'Clicking __{{f "element"}}__'
+      - match: { method: "browser_fill_form" }
+        display: 'Filling form'
+      - match: { method: "browser_take_screenshot" }
+        display: 'Screenshot'
+      - match: { method: "browser_snapshot" }
+        display: 'Page snapshot'
+      - match: { method: "browser_evaluate" }
+        display: 'Running JavaScript'
+      - match: { method: "browser_find" }
+        display: 'Finding element: __{{f "text"}}__'
+      - match: { method: "browser_type" }
+        display: 'Typing text'
+      - match: { method: "browser_hover" }
+        display: 'Hovering __{{f "element"}}__'
+      # CORRECTED (field-verification): actual param is `key`, not `tagKey`
+      # (that name is a WMS-ism that leaked into the draft).
+      - match: { method: "browser_press_key" }
+        display: 'Pressing __{{f "key"}}__'
+      - match: { method: "browser_tabs" }
+        display: 'Listing tabs'
+      - match: { method: "browser_close" }
+        display: 'Closing browser'
+
+  - match: { prefix: "mcp__chrome-devtools__" }
+    tag: CHRM
+    rules:
+      - match: { method: "navigate_page" }
+        display: 'Navigating to __{{f "url"}}__'
+      - match: { method: "take_screenshot" }
+        display: 'Screenshot'
+      # CORRECTED (field-verification): chrome-devtools addresses elements
+      # by `uid` from a prior snapshot, not a CSS `selector`.
+      - match: { method: "click" }
+        display: 'Clicking __{{f "uid"}}__'
+      - match: { method: "evaluate_script" }
+        display: 'Running script'
+      # CORRECTED (field-verification): same uid vs selector fix as click.
+      - match: { method: "fill" }
+        display: 'Filling __{{f "uid"}}__'
+
+  # --- GitHub ---
+  - match: { prefix: "mcp__github__" }
+    tag: " GIT"
+    rules:
+      - match: { method: "create_pull_request" }
+        display: 'Creating PR: __{{f "title"}}__'
+      - match: { method: "list_pull_requests" }
+        display: 'Listing PRs in __{{f "owner"}}__/__{{f "repo"}}__'
+      - match: { method: "pull_request_read" }
+        display: 'Reading PR #__{{f "pullNumber"}}__'
+      - match: { method: "merge_pull_request" }
+        display: 'Merging PR #__{{f "pullNumber"}}__'
+      - match: { method: "update_pull_request" }
+        display: 'Updating PR #__{{f "pullNumber"}}__'
+      - match: { method: "create_branch" }
+        display: 'Creating branch __{{f "branch"}}__'
+      - match: { method: "list_branches" }
+        display: 'Listing branches in __{{f "owner"}}__/__{{f "repo"}}__'
+      - match: { method: "get_file_contents" }
+        display: 'Reading __{{f "path"}}__ from __{{f "repo"}}__'
+      - match: { method: "create_or_update_file" }
+        display: 'Writing __{{f "path"}}__ in __{{f "repo"}}__'
+      - match: { method: "search_code" }
+        display: 'Searching code: __{{f "query"}}__'
+      - match: { method: "search_issues" }
+        display: 'Searching issues: __{{f "query"}}__'
+      - match: { method: "search_pull_requests" }
+        display: 'Searching PRs: __{{f "query"}}__'
+      - match: { method: "issue_read" }
+        display: 'Reading issue'
+      - match: { method: "issue_write" }
+        display: 'Writing issue'
+      - match: { method: "list_issues" }
+        display: 'Listing issues'
+      - match: { method: "add_issue_comment" }
+        display: 'Commenting on issue #__{{f "issueNumber"}}__'
+      - match: { method: "get_me" }
+        display: 'Getting auth context'
+      - match: { method: "list_commits" }
+        display: 'Listing commits'
+      - match: { method: "get_commit" }
+        display: 'Getting commit __{{f "sha"}}__'
+      - match: { method: "create_repository" }
+        display: 'Creating repo __{{f "name"}}__'
+      - match: { method: "fork_repository" }
+        display: 'Forking __{{f "owner"}}__/__{{f "repo"}}__'
+      - match: { method: "pull_request_review_write" }
+        display: 'Reviewing PR'
+      - match: { method: "run_secret_scanning" }
+        display: 'Scanning for secrets'
+
+  # --- Roster → TEAM (team events, not implementation details) ---
+  # AMENDMENT: Roster and health are Teamster-internal. Roster tools
+  # represent *team events* (registering, listing agents) and share
+  # the TEAM tag with Agent/SendMessage. Health tools are internal
+  # telemetry — suppress them to reduce feed noise.
+  - match: { prefix: "mcp__roster__" }
+    tag: TEAM
+    rules:
+      - match: { method: "registerPeer" }
+        display: 'Registering __#{{f "team_name"}}__'
+      - match: { method: "roster_listAgents" }
+        display: 'Listing agents'
+      - match: { method: "roster_getAgent" }
+        display: 'Getting agent __{{f "roster_id"}}__'
+      - match: { method: "roster_resolveId" }
+        display: 'Resolving agent ID'
+      - match: { method: "roster_bindSession" }
+        display: 'Binding session'
+      - match: { method: "verifyToken" }
+        suppress: true
+      - match: { method: "getRosterEntry" }
+        display: 'Getting roster entry'
+
+  # --- Health → suppress (internal telemetry, not user-facing) ---
+  - match: { prefix: "mcp__health__" }
+    suppress: true
+
+  # --- Google Drive ---
+  - match: { prefix: "mcp__claude_ai_Google_Drive__" }
+    tag: GDRV
+    rules:
+      - match: { method: "search_files" }
+        display: 'Searching Drive: __{{f "query"}}__'
+      # CORRECTED (field-verification): actual param is `fileId` (camelCase),
+      # not `file_id`.
+      - match: { method: "read_file_content" }
+        display: 'Reading __{{f "fileId"}}__'
+      # CORRECTED (field-verification): actual param is `title`, not `name`.
+      - match: { method: "create_file" }
+        display: 'Creating __{{f "title"}}__'
+      - match: { method: "list_recent_files" }
+        display: 'Listing recent files'
+      - match: { method: "download_file_content" }
+        display: 'Downloading __{{f "fileId"}}__'
+      - match: { method: "copy_file" }
+        display: 'Copying __{{f "fileId"}}__'

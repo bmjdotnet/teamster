@@ -21,7 +21,7 @@ deterministic passes cannot attribute.
 | Item | Value |
 |------|-------|
 | Standing outcome | `sweep` (create if absent) |
-| Tags on that outcome | `product:Teamster`, `feature:rollup`, `work-type:admin`, `component:wms` |
+| Tags on that outcome | `product:Teamster`, `feature:rollup`, `work-type:processor`, `component:wms` |
 | Mapping file | `/tmp/sweep-llm-mapping-YYYY-MM-DD.json` |
 | Max sessions per run | 10 |
 | Method label | `synthesized_outcome` (reuses existing) |
@@ -61,7 +61,7 @@ wms_tagEntity(entityType="outcome", entityID="sweep",
 wms_tagEntity(entityType="outcome", entityID="sweep",
               tagKey="feature", tagValue="rollup", source="manual")
 wms_tagEntity(entityType="outcome", entityID="sweep",
-              tagKey="work-type", tagValue="admin", source="manual")
+              tagKey="work-type", tagValue="processor", source="manual")
 wms_tagEntity(entityType="outcome", entityID="sweep",
               tagKey="component", tagValue="wms", source="manual")
 wms_tagEntity(entityType="outcome", entityID="sweep",
@@ -217,6 +217,12 @@ with descriptions. Each tag value has a `description` field that tells you
 - `research` — investigation/audit whose output is knowledge, not code
 - `docs` — documentation as the deliverable
 - `test` — validation run producing a pass/fail verdict
+- `processor` — rote, rule-based or LLM-driven data processing run on a
+  schedule/queue/per-item basis, where the deliverable is processed or
+  classified data rather than a human-facing capability or a finding for a
+  human (this sweep's own synthesis pass is the canonical example — use this
+  for an orphan session that turns out to BE a sweep/ingest/scrape-style run,
+  not one that merely touches data as a means to some other end)
 
 **Work-scope slug** (context, single — pick ONE or omit):
 - All slug keys (`feature`, `bug`, `refactor`, `infra`, `docs`, `research`,

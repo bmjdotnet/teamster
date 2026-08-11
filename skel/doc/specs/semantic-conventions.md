@@ -101,7 +101,7 @@ enrichment), the hub does not overwrite it.
 | `_host` | string | Canonical hostname for the originating machine. Derived from `os.Hostname()` on the hub client; WSL hosts append `-wsl`. On remotes, copied from the `host` field. | hook client / EnrichRecord | stable |
 | `_session_id` | string | Copy of `session_id`, normalized to `"unknown"` if blank. Written to `~/.claude/current-session-id` so wms-mcp can read it. | Go hook client | stable |
 | `_model` | string | Model identifier read from `~/.claude/settings.json`, or extracted from the session transcript on `Stop`. | hook client / EnrichRecord | stable |
-| `_tool_tag` | string | Display category tag (4-char code). One of the 16 values in the tag taxonomy (section 3). | hook client / EnrichRecord | stable |
+| `_tool_tag` | string | Display category tag (4-char code). One of the 19 values in the tag taxonomy (section 3). | hook client / EnrichRecord | stable |
 | `_tool_display` | string | Human-readable description of the tool call. May contain `__param__` markers (rendered in cyan by feed) and entity references (`@agent`, `#team`, `<model>`). Max 256 chars. | hook client / EnrichRecord | stable |
 | `_bash_cmd` | string | Raw shell command for a Bash tool call. Set alongside `_tool_display` for `bash_split` results (where description differs from command), or alone for `bash_exec_only`. | hook client / EnrichRecord | stable |
 | `_thought` | string | Activity message from `reportActivity` MCP tool. Represents what the agent is doing right now. | hook client / EnrichRecord | stable |
@@ -147,14 +147,20 @@ Examples:
 
 ## 3. Tag Taxonomy
 
-The 17-tag taxonomy is the primary display-category system. Each JSONL record
+The 20-tag taxonomy is the primary display-category system. Each JSONL record
 carries exactly one `_tool_tag` value (or none, if the event is not a tool
 call). Tags are 4 characters wide (some have a leading space) so they align
 in monospace columns.
 
-Tags from MCP activity tools are set directly; all other tags are derived by
-the hook client from the tool name via the `TOOL_TAGS` map, with `TOOL` as the
-fallback.
+Tags from MCP activity tools are set directly; built-in Claude Code tool
+tags are derived by the hook client from the tool name via the `TOOL_TAGS`
+map, with `TOOL` as the fallback. **`mcp__*` tool tags (`TASK`, `CHRM`,
+` GIT`, `GDRV`, `TEAM`, and any suppressed tools) are not hardcoded** — they
+are defined in `$BASEDIR/etc/interceptors.yaml` (embedded default + file
+overlay), compiled by `internal/intercept/` into a `Registry` that
+`EnrichRecord` checks first for every `mcp__*` tool name, before falling
+back to the legacy hardcoded `mcp__activity__`/`mcp__wms__`/generic-MCP
+blocks. See `CLAUDE.md`'s Key Conventions for the full mechanism.
 
 | Tag | Width | Source tools / events | Description | Color (RGB) | Stability |
 |-----|-------|-----------------------|-------------|-------------|-----------|
@@ -173,6 +179,9 @@ fallback.
 | ` WEB` | 4 | `WebSearch`, `WebFetch` | External web access | 210,130,180 (dusty rose) | stable |
 | ` ASK` | 4 | `AskUserQuestion` | Human attention required | 255,100,100 (coral red) | stable |
 | `PLAN` | 4 | `EnterPlanMode`, `ExitPlanMode` | Plan mode entry/exit | 160,160,220 (cool lavender-grey) | stable |
+| `CHRM` | 4 | `mcp__claude-in-chrome__*`, `mcp__playwright__*`, `mcp__chrome-devtools__*` | Browser automation — three MCP servers unified under one namespace-level tag in `interceptors.yaml` | 80,180,220 (bright cyan) | stable |
+| ` GIT` | 4 | `mcp__github__*` | GitHub operations | 220,130,70 (burnt orange) | stable |
+| `GDRV` | 4 | `mcp__claude_ai_Google_Drive__*` | Google Drive operations | 60,160,100 (sea green) | stable |
 | `WARN` | 4 | `_warn_msg` field (server-side) | Operator warning — orphan dispatch or structural issue. Display-layer label (like `[EXEC]`), not a `_tool_tag` value. | 255,160,40 (orange) | stable |
 | `TOOL` | 4 | Any unrecognized tool name | Fallback for tools not in the taxonomy | 160,160,160 (neutral grey) | stable |
 
@@ -182,9 +191,19 @@ fallback.
   tag exists in the color table but is not currently assigned by any tool
   mapping. It is reserved for future use (e.g., if grep-family tools warrant
   distinct display).
-- ` ACT` and ` WEB` and ` ASK` each have a leading space in their 4-char
-  string. This is intentional: the space is part of the tag value used as a
-  map key in `TOOL_TAGS` and `tagColors`.
+- ` ACT`, ` WEB`, ` ASK`, and ` GIT` each have a leading space in their
+  4-char string. This is intentional: the space is part of the tag value
+  used as a map key (`TOOL_TAGS` for built-in tools, the `tags:` block of
+  `interceptors.yaml` for MCP-derived tags like ` GIT`).
+- `TASK` is also the fallback tag `interceptors.yaml`'s WMS namespace
+  (`mcp__wms__*`) assigns per-rule; `wms_tagEntity`/`wms_untagEntity` are the
+  exceptions — both are `suppress: true` in `interceptors.yaml`, so they
+  produce no feed line at all (noise reduction — tagging is frequent
+  bookkeeping, not an activity worth surfacing). `mcp__health__*` and
+  `mcp__roster__verifyToken` are suppressed the same way (internal
+  telemetry, not user-facing activity), and `mcp__activity__setMode` is
+  suppressed because its effect (the session mode marker) is handled by
+  dedicated Go code, not a display line.
 - `DONE` is emitted from five distinct sources: `completeActivity` MCP,
   `TaskUpdate` with `status=completed`, the `Stop` and `SubagentStop` (real,
   with `agent_type`) hook events (first sentence of the final assistant

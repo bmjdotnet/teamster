@@ -4,30 +4,51 @@ package display
 import (
 	"crypto/md5"
 	"fmt"
+	"log/slog"
 	"os"
 	"regexp"
 	"strings"
+	"sync"
+
+	"github.com/bmjdotnet/teamster/internal/intercept"
 )
 
-// Tag color constants (truecolor RGB).
-var tagColors = map[string][3]int{
-	"GOAL": {255, 200, 60},  // warm gold — mission declaration
-	"THNK": {140, 170, 130}, // sage — frequent, muted
-	"DONE": {0, 102, 0},     // deep green — conclusive (256#28)
-	"RCAP": {100, 160, 180}, // muted teal — idle recap context
-	"READ": {0, 0, 255},     // deep blue — passive file read (256#21)
-	"EDIT": {128, 128, 0},   // olive/dark yellow — active file write (256#3)
-	"GREP": {120, 140, 200}, // muted periwinkle — search variant
-	" ACT": {230, 150, 50},  // amber — bash intent
-	"EXEC": {180, 160, 60},  // olive dim — bash command detail
-	"TEAM": {180, 120, 220}, // purple — agent lifecycle
-	"COMM": {150, 140, 210}, // lavender — inter-agent messages
-	"TASK": {240, 110, 170}, // vivid pink — distinct from cyan params
-	" WEB": {210, 130, 180}, // dusty rose — external access
-	" ASK": {255, 100, 100}, // coral red — human attention
-	"PLAN": {160, 160, 220}, // cool lavender-grey — reflective
-	"TOOL": {160, 160, 160}, // neutral grey — fallback
-	"WARN": {255, 160, 40},  // orange — operator warning
+// tagColorsMu guards embeddedTagColors and overlayTagColors. TagColor is
+// called from every feed-rendering path (hookd, feed, ctop) and SetTagColors
+// is called once at hookd/feed startup after loading interceptors.yaml — an
+// RWMutex keeps the common read path cheap.
+var tagColorsMu sync.RWMutex
+
+// embeddedTagColors is populated at init from intercept.LoadDefault()'s Tags
+// map — the single source of truth for tag definitions (label, color,
+// description) now lives in interceptors.yaml, not a literal Go map here.
+// TestEmbeddedDefaultIsValid (internal/intercept) is the build-time gate
+// that guarantees LoadDefault never errors.
+var embeddedTagColors = map[string][3]int{}
+
+// overlayTagColors holds colors from a loaded interceptors.yaml, set via
+// SetTagColors. nil until a caller opts in.
+var overlayTagColors map[string][3]int
+
+func init() {
+	reg, err := intercept.LoadDefault()
+	if err != nil {
+		slog.Error("display: embedded interceptor default config failed to load — tag colors will fall back to grey", "error", err)
+		return
+	}
+	for label, def := range reg.Tags {
+		embeddedTagColors[label] = def.Color
+	}
+}
+
+// SetTagColors overlays colors loaded from interceptors.yaml on top of the
+// embedded defaults. Called once at startup by binaries that load the
+// config file (hookd, feed); binaries that don't still render correctly
+// from the embedded defaults alone (design doc §3.4/C6).
+func SetTagColors(colors map[string][3]int) {
+	tagColorsMu.Lock()
+	defer tagColorsMu.Unlock()
+	overlayTagColors = colors
 }
 
 // ANSI escape constants.
@@ -78,9 +99,18 @@ func EntityColor(name, salt string) [3]int {
 	return ch
 }
 
-// TagColor returns the fixed RGB color for a known tag, or grey for unknown.
+// TagColor returns the color for tag: the loaded-config overlay if
+// SetTagColors was called and defines it, else the embedded default, else
+// grey for a genuinely unknown tag.
 func TagColor(tag string) [3]int {
-	if c, ok := tagColors[tag]; ok {
+	tagColorsMu.RLock()
+	defer tagColorsMu.RUnlock()
+	if overlayTagColors != nil {
+		if c, ok := overlayTagColors[tag]; ok {
+			return c
+		}
+	}
+	if c, ok := embeddedTagColors[tag]; ok {
 		return c
 	}
 	return [3]int{180, 180, 180}

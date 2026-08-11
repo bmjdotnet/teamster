@@ -634,6 +634,124 @@ func TestRegisterPeerDedupsExistingSessionAgent(t *testing.T) {
 	}
 }
 
+// TestRegisterPeerAutoPopulatesSessionIDFromMeta confirms that when a caller
+// omits session_id from registerPeer's arguments (the normal case — the
+// agent shouldn't need to know it), the dispatch layer fills it in from the
+// already-resolved _meta.session_id, so the existing dedup logic finds and
+// updates the hookd-auto-registered entry instead of creating an orphan.
+func TestRegisterPeerAutoPopulatesSessionIDFromMeta(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	// Simulate hookd's auto-registration of the lead (empty agent_name) on
+	// the first hook event.
+	autoResult, callErr := call(t, s, "registerPeer", map[string]interface{}{
+		"agent_name":   "",
+		"runtime":      "claude_code",
+		"relationship": "lead",
+		"session_id":   "sess-autometa",
+	})
+	if callErr != nil {
+		t.Fatalf("registerPeer (auto): %v", callErr)
+	}
+	var autoReg struct {
+		RosterID string `json:"roster_id"`
+	}
+	parseResult(t, autoResult, &autoReg)
+
+	// Agent calls registerPeer WITHOUT session_id in arguments — only in
+	// _meta, as the MCP transport supplies it. Dispatch must fill it in so
+	// the dedup path fires.
+	bootResult, callErr := callAs(t, s, "sess-autometa", "", "registerPeer", map[string]interface{}{
+		"agent_name":   "",
+		"runtime":      "claude_code",
+		"relationship": "lead",
+		"team_name":    "meta-team",
+	})
+	if callErr != nil {
+		t.Fatalf("registerPeer (no explicit session_id): %v", callErr)
+	}
+	var bootReg struct {
+		RosterID string `json:"roster_id"`
+	}
+	parseResult(t, bootResult, &bootReg)
+
+	if bootReg.RosterID != autoReg.RosterID {
+		t.Fatalf("expected dedup via meta session_id to reuse roster_id %q, got new roster_id %q", autoReg.RosterID, bootReg.RosterID)
+	}
+
+	entries, err := s.ListRosterEntries(ctx, store.RosterFilter{})
+	if err != nil {
+		t.Fatalf("ListRosterEntries: %v", err)
+	}
+	var matches int
+	for _, e := range entries {
+		if e.SessionID != nil && *e.SessionID == "sess-autometa" && e.AgentName == "" {
+			matches++
+		}
+	}
+	if matches != 1 {
+		t.Fatalf("expected exactly 1 roster entry for (sess-autometa, \"\"), got %d — auto-fill did not prevent an orphan", matches)
+	}
+}
+
+// TestRegisterPeerExplicitSessionIDOverridesMeta confirms that when a caller
+// DOES pass session_id explicitly in arguments, it takes precedence over
+// _meta.session_id — preserving prior behavior for callers that already
+// supply it (or a caller whose meta session differs from the target).
+func TestRegisterPeerExplicitSessionIDOverridesMeta(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	autoResult, callErr := call(t, s, "registerPeer", map[string]interface{}{
+		"agent_name":   "@worker",
+		"runtime":      "codex",
+		"relationship": "peer",
+		"session_id":   "sess-real",
+	})
+	if callErr != nil {
+		t.Fatalf("registerPeer (auto): %v", callErr)
+	}
+	var autoReg struct {
+		RosterID string `json:"roster_id"`
+	}
+	parseResult(t, autoResult, &autoReg)
+
+	// _meta carries a DIFFERENT session_id, but arguments explicitly pass
+	// "sess-real" — the explicit argument must win.
+	result, callErr := callAs(t, s, "sess-other", "@worker", "registerPeer", map[string]interface{}{
+		"agent_name":   "@worker",
+		"runtime":      "codex",
+		"relationship": "peer",
+		"session_id":   "sess-real",
+	})
+	if callErr != nil {
+		t.Fatalf("registerPeer (explicit session_id): %v", callErr)
+	}
+	var reg struct {
+		RosterID string `json:"roster_id"`
+	}
+	parseResult(t, result, &reg)
+
+	if reg.RosterID != autoReg.RosterID {
+		t.Fatalf("expected explicit session_id to dedup against sess-real entry (roster_id %q), got new roster_id %q", autoReg.RosterID, reg.RosterID)
+	}
+
+	entries, err := s.ListRosterEntries(ctx, store.RosterFilter{})
+	if err != nil {
+		t.Fatalf("ListRosterEntries: %v", err)
+	}
+	var matches int
+	for _, e := range entries {
+		if e.AgentName == "@worker" {
+			matches++
+		}
+	}
+	if matches != 1 {
+		t.Fatalf("expected exactly 1 roster entry for @worker, got %d", matches)
+	}
+}
+
 // --- helpers ---
 
 func parseResult(t *testing.T, result mcproster.Result, dest interface{}) {

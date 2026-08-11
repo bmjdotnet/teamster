@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/bmjdotnet/teamster/internal/intercept"
 	"github.com/bmjdotnet/teamster/internal/redact"
 )
 
@@ -17,7 +18,15 @@ import (
 // ProcessEvent performs client-side. Moving enrichment here means the Python
 // hook client (and future thin clients) can forward the raw payload as-is and
 // still get full display fidelity in feed.
-func EnrichRecord(data map[string]interface{}) {
+//
+// registry is the config-driven interceptor registry (internal/intercept).
+// On PreToolUse, an mcp__ tool name is checked against it first; the
+// hardcoded mcp__activity__/mcp__wms__/generic-MCP blocks below only run
+// when the registry doesn't match (Phase 1 — see design doc §4, removed in
+// Phase 2 once golden-corpus validation lands). registry may be nil (e.g.
+// existing tests, or a caller that hasn't loaded one), in which case the
+// registry check is skipped entirely and behavior is unchanged.
+func EnrichRecord(data map[string]interface{}, registry *intercept.Registry) {
 	str := func(key string) string {
 		v, _ := data[key].(string)
 		return strings.TrimSpace(v)
@@ -62,6 +71,29 @@ func EnrichRecord(data map[string]interface{}) {
 			return
 		}
 		toolInput := normaliseToolInput(data["tool_input"])
+
+		// Config-driven MCP enrichment takes priority. Falls through to the
+		// hardcoded blocks below only when the registry has no match for
+		// this tool name (nil registry, unmatched namespace, or a rule that
+		// hit a template execution error).
+		if registry != nil && strings.HasPrefix(toolName, "mcp__") {
+			ti, _ := toolInput.(map[string]interface{})
+			if result := registry.Match(toolName, ti); result != nil {
+				if result.Suppress {
+					return
+				}
+				if result.Tag != "" {
+					set("_tool_tag", result.Tag)
+				}
+				if result.Display != "" {
+					set("_tool_display", result.Display)
+				}
+				for k, v := range result.Fields {
+					set(k, v)
+				}
+				return
+			}
+		}
 
 		if strings.HasPrefix(toolName, "mcp__activity__") {
 			ti, _ := toolInput.(map[string]interface{})

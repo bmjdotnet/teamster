@@ -475,14 +475,19 @@ func run() error {
 	}
 
 	// 3. Copy skel/ contents into basedir (lib/, doc/, etc/).
-	// Preserve user-customized CLAUDE.md across upgrades: save before the
+	// Preserve user-customized files across upgrades: save before the
 	// blanket skel copy, restore after. Fresh installs (no prior file) get
-	// the skel version.
+	// the skel version. Also write a .default alongside for diffing.
 	skelDir := filepath.Join(*repoDir, "skel")
 	claudeMDBasedir := filepath.Join(*basedir, "CLAUDE.md")
 	var priorClaudeMD []byte
 	if data, err := os.ReadFile(claudeMDBasedir); err == nil {
 		priorClaudeMD = data
+	}
+	interceptorsPath := filepath.Join(*basedir, "etc", "interceptors.yaml")
+	var priorInterceptors []byte
+	if data, err := os.ReadFile(interceptorsPath); err == nil {
+		priorInterceptors = data
 	}
 	dtrace("teamster-install.copytree", ">>", "skel")
 	if stats, err := copyTreeCounting(skelDir, *basedir); err != nil {
@@ -503,6 +508,18 @@ func run() error {
 			dlog("WARN", "teamster-install.copytree", "restore CLAUDE.md failed", "err", err.Error())
 		} else {
 			dlog("INFO", "teamster-install.copytree", "preserved existing CLAUDE.md")
+		}
+	}
+	if priorInterceptors != nil {
+		if err := os.WriteFile(interceptorsPath, priorInterceptors, 0o644); err != nil {
+			dlog("WARN", "teamster-install.copytree", "restore interceptors.yaml failed", "err", err.Error())
+		} else {
+			dlog("INFO", "teamster-install.copytree", "preserved existing interceptors.yaml")
+		}
+		if skelData, err := os.ReadFile(filepath.Join(skelDir, "etc", "interceptors.yaml")); err == nil {
+			if err := os.WriteFile(interceptorsPath+".default", skelData, 0o644); err != nil {
+				dlog("WARN", "teamster-install.copytree", "write interceptors.yaml.default failed", "err", err.Error())
+			}
 		}
 	}
 

@@ -3,7 +3,23 @@
 All notable changes to Teamster are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
-## v0.2.5 (unreleased)
+## v0.2.6 (2026-08-11)
+
+### Added
+- **MCP tool interceptor registry** — externalized `mcp__*` tool enrichment (tag, display text, suppress) from hardcoded Go into a YAML config (`interceptors.yaml`), operator-editable without recompiling
+- `teamster check-config` CLI verb — validates an edited `interceptors.yaml` without restarting hookd
+- Remote subagent health & token usage now visible in fleet view
+- Sweep skill prescribes `work-type:processor` for rote data-processing runs
+
+### Fixed
+- `registerPeer` auto-populates `session_id` from MCP call metadata when the caller omits it
+- Fleet-view dashboard column alignment
+- Sub-subagent spawn detection & visualization in activity log
+
+### Changed
+- Activity log upgraded to realtime fleet view
+
+## v0.2.5 (2026-07-16)
 
 ### Added
 - `wms_renameOutcome`/`wms_renameWorkUnit` MCP tools — rename an outcome or work unit's title directly, without state-machine validation
