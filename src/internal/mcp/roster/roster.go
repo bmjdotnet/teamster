@@ -194,6 +194,9 @@ func HandleToolCall(s store.Store, rawParams json.RawMessage) (Result, *CallErro
 	case "roster_resolveId":
 		return handleResolveID(ctx, s, strArg("session_id"), strArg("agent_name"))
 	case "registerPeer":
+		if v, _ := p.Arguments["session_id"].(string); v == "" && p.Meta.SessionID != "" {
+			p.Arguments["session_id"] = p.Meta.SessionID
+		}
 		return handleRegisterPeer(ctx, s, p.Arguments, strArg)
 	case "verifyToken":
 		return handleVerifyToken(ctx, s, strArg("token"))

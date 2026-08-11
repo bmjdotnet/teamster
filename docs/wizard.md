@@ -158,6 +158,14 @@ has a configured keyspace, and re-running the wizard mid-upgrade is
 disruptive. The wizard can still be run manually any time:
 `teamster setup tags` (editor) or `teamster setup tags --interview`.
 
+## Post-install: customizing the activity feed
+
+The installer writes `etc/interceptors.yaml` alongside `teamster.yaml`. This
+config controls how MCP tool calls appear in the activity feed — which tools
+show up, what tag they get (e.g. `[READ]`, `[ GIT]`, `[CHRM]`), and the
+display text. It's yours to edit after install. Validate an edit with
+`teamster check-config`, then restart `hookd` to apply it.
+
 ## Key invariant
 
 The interview phase of `install.sh` mutates NOTHING on the host. All changes

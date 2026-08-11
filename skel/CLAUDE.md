@@ -24,6 +24,7 @@ workflow enforcement, and work management for Claude Code Agent Teams.
 | Command | What it does |
 |---------|-------------|
 | `teamster status` | Show service health, ports, and store connectivity |
+| `teamster check-config` | Validate `etc/interceptors.yaml` without restarting hookd |
 | `teamster tags list` | Show the tag vocabulary |
 | `teamster sql` | Credential-safe database queries |
 | `teamster wms drain` | Close dangling focus intervals |
@@ -37,7 +38,7 @@ workflow enforcement, and work management for Claude Code Agent Teams.
 
 | Component | Role |
 |-----------|------|
-| `hookd` | HTTP event server + web dashboard. Receives POST `/event`, serves SSE at `/events/stream`. Also serves POST `/telemetry`, POST `/session`, POST `/mcp/roster` (agent roster, 7 tools), and POST `/mcp/health` (agent health, 4 tools). Auto-registers agents on roster from first hook event. Tracks per-agent turn state (processing/idle). |
+| `hookd` | HTTP event server + web dashboard. Receives POST `/event`, serves SSE at `/events/stream`. Also serves POST `/telemetry`, POST `/session`, POST `/mcp/roster` (agent roster, 7 tools), and POST `/mcp/health` (agent health, 4 tools). Auto-registers agents on roster from first hook event. Tracks per-agent turn state (processing/idle). Loads `etc/interceptors.yaml` at startup — the config that maps MCP tool calls to activity-feed tags and display text; a restart picks up edits. |
 | `activity-mcp` | MCP server: `reportActivity`, `setOverallIntent`, `completeActivity`, `setMode`. |
 | `wms-mcp` | MCP server: outcome/work-unit CRUD, rename, tags, focus, dependencies. |
 | `feed` | Terminal activity viewer (tails JSONL, colorizes). |
@@ -48,14 +49,16 @@ workflow enforcement, and work management for Claude Code Agent Teams.
 | `backup` | Backup engine. Snapshots MySQL, OTel config, and teamster state to timestamped directories. Runs on systemd timer. |
 | `teamster` | Hook client + CLI. Forked per hook event; also the CLI entry point for status/tags/wms/sql. |
 
-Configuration lives in `etc/teamster.yaml`. Systemd units and timers are in `etc/`.
+Configuration lives in `etc/teamster.yaml`. Activity-feed tags and display
+text are configured in `etc/interceptors.yaml`. Systemd units and timers are
+in `etc/`.
 
 ## Directory layout
 
 ```
 bin/          Compiled binaries (hookd, feed, teamster, MCPs, rollup, classify)
 doc/          Specs and architecture docs
-etc/          Config (teamster.yaml), systemd units, Grafana provisioning
+etc/          Config (teamster.yaml, interceptors.yaml), systemd units, Grafana provisioning
 lib/          Plugin, scripts, hook client
 var/          Runtime data (events.jsonl, Grafana data, Prometheus data)
 ```
@@ -78,6 +81,11 @@ Confirm the Grafana datasource points at the correct MySQL instance. Run
 Make sure you call `wms_setFocus` at the start of each work session. Without
 a focus interval, token spend lands in `unallocated`. Run `teamster wms drain`
 to close stale intervals.
+
+**Feed showing wrong tags or a generic `[TOOL]`?**
+The activity feed's tags and display text come from `etc/interceptors.yaml`.
+Edit it to add or change how a tool call is shown, then validate with
+`teamster check-config` before restarting `hookd` to apply the change.
 
 ## Further reading
 

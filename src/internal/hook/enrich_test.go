@@ -3,6 +3,8 @@ package hook
 import (
 	"strings"
 	"testing"
+
+	"github.com/bmjdotnet/teamster/internal/intercept"
 )
 
 // mkEvent builds a minimal PreToolUse event map with tool_name and tool_input.
@@ -315,7 +317,7 @@ func TestEnrichRecord_Tags(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			EnrichRecord(tt.data)
+			EnrichRecord(tt.data, nil)
 
 			got := func(key string) string {
 				v, _ := tt.data[key].(string)
@@ -391,7 +393,7 @@ func TestEnrichRecord_Identity(t *testing.T) {
 			"tool_input":      map[string]interface{}{"file_path": "/tmp/x"},
 			"agent_type":      "store",
 		}
-		EnrichRecord(data)
+		EnrichRecord(data, nil)
 		if v, _ := data["_agent_name"].(string); v != "@store" {
 			t.Errorf("_agent_name = %q, want %q", v, "@store")
 		}
@@ -404,7 +406,7 @@ func TestEnrichRecord_Identity(t *testing.T) {
 			"tool_input":      map[string]interface{}{"file_path": "/tmp/x"},
 			"host":            "host-a",
 		}
-		EnrichRecord(data)
+		EnrichRecord(data, nil)
 		if v, _ := data["_host"].(string); v != "host-a" {
 			t.Errorf("_host = %q, want %q", v, "host-a")
 		}
@@ -416,7 +418,7 @@ func TestEnrichRecord_Identity(t *testing.T) {
 			"tool_name":       "Read",
 			"tool_input":      map[string]interface{}{"file_path": "/tmp/x"},
 		}
-		EnrichRecord(data)
+		EnrichRecord(data, nil)
 		if _, exists := data["_agent_name"]; exists {
 			t.Errorf("_agent_name should not be set when agent_type is absent")
 		}
@@ -428,7 +430,7 @@ func TestEnrichRecord_Identity(t *testing.T) {
 			"teammate_name":   "store",
 			"team_name":       "myteam",
 		}
-		EnrichRecord(data)
+		EnrichRecord(data, nil)
 		if v, _ := data["_agent_name"].(string); v != "@store" {
 			t.Errorf("_agent_name = %q, want %q", v, "@store")
 		}
@@ -440,7 +442,7 @@ func TestEnrichRecord_Identity(t *testing.T) {
 			"agent_type":      "general-purpose",
 			"teammate_name":   "store",
 		}
-		EnrichRecord(data)
+		EnrichRecord(data, nil)
 		if v, _ := data["_agent_name"].(string); v != "@general-purpose" {
 			t.Errorf("_agent_name = %q, want %q", v, "@general-purpose")
 		}
@@ -459,7 +461,7 @@ func TestEnrichRecord_Idempotency(t *testing.T) {
 			"_host":           "host-b",
 			"_agent_name":     "@custom",
 		}
-		EnrichRecord(data)
+		EnrichRecord(data, nil)
 		if v, _ := data["_tool_tag"].(string); v != "CUSTOM" {
 			t.Errorf("_tool_tag changed: got %q, want %q", v, "CUSTOM")
 		}
@@ -482,7 +484,7 @@ func TestEnrichRecord_Idempotency(t *testing.T) {
 			"tool_input":      map[string]interface{}{"file_path": "/etc/hosts"},
 			"_thought":        "existing thought",
 		}
-		EnrichRecord(data)
+		EnrichRecord(data, nil)
 		if v, _ := data["_thought"].(string); v != "existing thought" {
 			t.Errorf("_thought changed: got %q, want %q", v, "existing thought")
 		}
@@ -502,7 +504,7 @@ func TestEnrichRecord_Idempotency(t *testing.T) {
 			"_tool_display":   "existing display",
 			"host":            "host-a",
 		}
-		EnrichRecord(data)
+		EnrichRecord(data, nil)
 		if v, _ := data["_host"].(string); v != "host-a" {
 			t.Errorf("_host = %q, want %q", v, "host-a")
 		}
@@ -520,7 +522,7 @@ func TestEnrichRecord_EdgeCases(t *testing.T) {
 				t.Errorf("EnrichRecord panicked on empty map: %v", r)
 			}
 		}()
-		EnrichRecord(map[string]interface{}{})
+		EnrichRecord(map[string]interface{}{}, nil)
 	})
 
 	t.Run("nil tool_input no panic", func(t *testing.T) {
@@ -533,7 +535,7 @@ func TestEnrichRecord_EdgeCases(t *testing.T) {
 			"hook_event_name": "PreToolUse",
 			"tool_name":       "Read",
 			"tool_input":      nil,
-		})
+		}, nil)
 	})
 
 	t.Run("PostToolUse TaskCreate captures task ID from response", func(t *testing.T) {
@@ -543,7 +545,7 @@ func TestEnrichRecord_EdgeCases(t *testing.T) {
 			"tool_input":      map[string]interface{}{"subject": "Write the handler"},
 			"tool_response":   "Created task #42",
 		}
-		EnrichRecord(data)
+		EnrichRecord(data, nil)
 		tag, _ := data["_tool_tag"].(string)
 		display, _ := data["_tool_display"].(string)
 		if tag != "TASK" {
@@ -563,7 +565,7 @@ func TestEnrichRecord_EdgeCases(t *testing.T) {
 			"tool_name":       "TaskCreate",
 			"tool_input":      map[string]interface{}{"subject": "Write the handler"},
 		}
-		EnrichRecord(data)
+		EnrichRecord(data, nil)
 		if tag, _ := data["_tool_tag"].(string); tag != "TASK" {
 			t.Errorf("_tool_tag = %q, want TASK", tag)
 		}
@@ -575,7 +577,7 @@ func TestEnrichRecord_EdgeCases(t *testing.T) {
 			"tool_name":       "ToolSearch",
 			"tool_input":      map[string]interface{}{"query": "select:Read"},
 		}
-		EnrichRecord(data)
+		EnrichRecord(data, nil)
 		if _, exists := data["_tool_tag"]; exists {
 			t.Errorf("_tool_tag should not be set for ToolSearch")
 		}
@@ -586,7 +588,7 @@ func TestEnrichRecord_EdgeCases(t *testing.T) {
 			"hook_event_name": "Stop",
 			"stop_response":   "Short sentence. This is a much longer sentence that would exceed the old limit if included.",
 		}
-		EnrichRecord(data)
+		EnrichRecord(data, nil)
 		display, _ := data["_tool_display"].(string)
 		if display != "Short sentence." {
 			t.Errorf("_tool_display = %q, want %q", display, "Short sentence.")
@@ -598,7 +600,7 @@ func TestEnrichRecord_EdgeCases(t *testing.T) {
 			"hook_event_name": "Stop",
 			"stop_response":   "the foo.md document has been updated. Check it now.",
 		}
-		EnrichRecord(data)
+		EnrichRecord(data, nil)
 		display, _ := data["_tool_display"].(string)
 		if display != "the foo.md document has been updated." {
 			t.Errorf("_tool_display = %q, want full first sentence (no mid-filename chop)", display)
@@ -613,7 +615,7 @@ func TestEnrichRecord_EdgeCases(t *testing.T) {
 			"hook_event_name": "Stop",
 			"stop_response":   prefix,
 		}
-		EnrichRecord(data)
+		EnrichRecord(data, nil)
 		display, _ := data["_tool_display"].(string)
 		want := strings.Repeat("a", 238) + "."
 		if display != want {
@@ -629,7 +631,7 @@ func TestEnrichRecord_EdgeCases(t *testing.T) {
 			"tool_input":      map[string]interface{}{"subject": longSubject},
 			"tool_response":   "Created task #7",
 		}
-		EnrichRecord(data)
+		EnrichRecord(data, nil)
 		display, _ := data["_tool_display"].(string)
 		if !strings.Contains(display, longSubject) {
 			t.Errorf("display %q does not contain full 150-char subject", display)
@@ -643,7 +645,7 @@ func TestEnrichRecord_EdgeCases(t *testing.T) {
 			"tool_name":       "Read",
 			"tool_input":      map[string]interface{}{"file_path": "/etc/hosts"},
 		}
-		EnrichRecord(data)
+		EnrichRecord(data, nil)
 		if _, exists := data["_tool_tag"]; exists {
 			t.Errorf("_tool_tag should not be set for PostToolUse Read")
 		}
@@ -676,6 +678,62 @@ func TestTrimLargeInput(t *testing.T) {
 		trimLargeInput(data)
 		if _, ok := data["tool_input"].(map[string]interface{}); !ok {
 			t.Error("map was replaced")
+		}
+	})
+}
+
+// TestEnrichRecord_WithRegistry exercises EnrichRecord with a real loaded
+// intercept.Registry (every other EnrichRecord test in this file passes nil,
+// which never touches the registry-first check at all).
+func TestEnrichRecord_WithRegistry(t *testing.T) {
+	reg, err := intercept.LoadDefault()
+	if err != nil {
+		t.Fatalf("intercept.LoadDefault: %v", err)
+	}
+
+	t.Run("MCP tool matched by registry", func(t *testing.T) {
+		data := mkEvent("PreToolUse", "mcp__roster__registerPeer", map[string]interface{}{
+			"team_name": "test-team",
+		})
+		EnrichRecord(data, reg)
+
+		if tag, _ := data["_tool_tag"].(string); tag != "TEAM" {
+			t.Errorf("_tool_tag = %q, want TEAM", tag)
+		}
+		display, _ := data["_tool_display"].(string)
+		if !strings.Contains(display, "test-team") {
+			t.Errorf("_tool_display = %q, want it to contain %q", display, "test-team")
+		}
+	})
+
+	t.Run("MCP tool suppressed by registry", func(t *testing.T) {
+		data := mkEvent("PreToolUse", "mcp__wms__wms_tagEntity", map[string]interface{}{
+			"entityType": "workunit",
+			"entityID":   "wu-1",
+			"tagKey":     "component",
+			"tagValue":   "muster",
+		})
+		EnrichRecord(data, reg)
+
+		if _, exists := data["_tool_tag"]; exists {
+			t.Errorf("_tool_tag should not be set for a suppressed rule, got %q", data["_tool_tag"])
+		}
+		if _, exists := data["_tool_display"]; exists {
+			t.Errorf("_tool_display should not be set for a suppressed rule, got %q", data["_tool_display"])
+		}
+	})
+
+	t.Run("MCP tool not matched by registry falls back to generic TOOL display", func(t *testing.T) {
+		data := mkEvent("PreToolUse", "mcp__echoprobe__echo_ping", map[string]interface{}{
+			"message": "ping",
+		})
+		EnrichRecord(data, reg)
+
+		if tag, _ := data["_tool_tag"].(string); tag != "TOOL" {
+			t.Errorf("_tool_tag = %q, want TOOL", tag)
+		}
+		if display, _ := data["_tool_display"].(string); display != "echoprobe(__echo_ping__)" {
+			t.Errorf("_tool_display = %q, want %q", display, "echoprobe(__echo_ping__)")
 		}
 	})
 }

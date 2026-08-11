@@ -54,29 +54,22 @@ func NewHookObserver(serverURL, host string) *HookObserver {
 	}
 }
 
-// OnStatusChange posts a TASK or DONE record for the status change.
+// OnStatusChange posts a metadata-only record for the status change.
+// Feed-visible display lines come from the interceptor registry on the
+// originating PreToolUse event; this event carries raw WMS fields for
+// auditing, rollup attribution, and rollup-driven auto-completions.
 func (h *HookObserver) OnStatusChange(change StatusChange) {
-	tag := "TASK"
-	if IsTerminal(change.EntityType, change.NewStatus) {
-		tag = "DONE"
-	}
-
-	display := fmt.Sprintf("%s %s: %s → %s", change.EntityType, change.EntityID, change.OldStatus, change.NewStatus)
-	if tag == "DONE" {
-		display = fmt.Sprintf("%s %s auto-completed (rollup)", change.EntityType, change.EntityID)
-		if change.OldStatus != "" {
-			display = fmt.Sprintf("%s %s: %s → %s", change.EntityType, change.EntityID, change.OldStatus, change.NewStatus)
-		}
-	}
-
 	sid := h.sessionID
 	if change.SessionID != "" {
 		sid = change.SessionID
 	}
 
+	// WMSStatusChange is now a metadata-only event — no _tool_tag or
+	// _tool_display. The PreToolUse event (enriched by the interceptor
+	// registry) produces the visible feed line with __param__ markers.
+	// This event still logs the raw WMS transition for auditing, rollup,
+	// and cases where no PreToolUse exists (rollup auto-completions).
 	record := map[string]interface{}{
-		"_tool_tag":       tag,
-		"_tool_display":   display,
 		"session_id":      sid,
 		"_host":           h.host,
 		"hook_event_name": "WMSStatusChange",

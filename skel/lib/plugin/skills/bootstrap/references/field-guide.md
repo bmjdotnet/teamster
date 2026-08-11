@@ -287,6 +287,12 @@ When adding a new display feature (like `__param__` markdown), both
 sides must be updated and deployed together. A new hook client writing
 `__param__` markers with an old feed shows raw underscores.
 
+For `mcp__*` tools specifically, `_tool_tag`/`_tool_display` are no longer
+hardcoded per-tool in Go — they come from `$BASEDIR/etc/interceptors.yaml`
+(`internal/intercept`), which `hookd` compiles at startup and `EnrichRecord`
+checks before any fallback. Adding or fixing an MCP tool's feed line is a
+YAML edit + `teamster check-config` + hookd restart, not a Go change.
+
 ## 19. The installer is the most fragile component
 
 The installer touches: settings.json (hooks, env, permissions), MCP

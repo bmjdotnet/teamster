@@ -101,6 +101,11 @@ src/                          Go source (go.mod: github.com/bmjdotnet/teamster)
                               AGENTS.md merge — all backup-then-doctor-gated
     display/                  Entity colors, tag colors, ANSI rendering
     hook/                     Tool extraction, tag taxonomy, enrichment
+    intercept/                YAML-driven MCP tool interceptor registry:
+                              loads/compiles/matches interceptors.yaml (tag +
+                              display + suppress rules per mcp__* tool name);
+                              EnrichRecord checks it before the hardcoded
+                              mcp__activity__/mcp__wms__/generic-MCP fallback
     llm/                      Anthropic API client (used by sweep-llm)
     logging/                  Structured slog setup (TEAMSTER_LOG_LEVEL)
     mcp/                      Shared MCP JSON-RPC plumbing
@@ -153,6 +158,13 @@ src/                          Go source (go.mod: github.com/bmjdotnet/teamster)
 skel/                         Assets copied to BASEDIR at install time
   doc/specs/                  architecture.md, wms-dashboard-spec.md, semantic-conventions.md
   etc/
+    interceptors.yaml                MCP tool interceptor config: tag colors
+                              + per-mcp__*-tool display/suppress rules.
+                              Embedded default (also compiled into
+                              src/internal/intercept/) + this file as the
+                              installed, operator-editable overlay.
+                              `teamster check-config` validates an edit
+                              without restarting hookd.
     teamster-hookd.service.tmpl      Systemd unit template (uses __BASEDIR__)
     teamster-rollup.service.tmpl     Rollup one-shot service
     teamster-rollup.timer.tmpl       Rollup timer
@@ -323,7 +335,7 @@ Agent-Teams teammates run as separate top-level sessions (see Pitfalls).
 |--------|---------|-------|
 | `teamster` (Go) | Hook client + CLI on the hub | Forked per hook event. Reads JSON from stdin, enriches, POSTs to hookd. Must exit 0 always. Also serves as the CLI: `start`/`stop`/`status`/`wms-reset`/`tags`/`setup tags`/`wms drain`/`wms list`/`wms close`/`install-remote`/`backup`/`restore`. |
 | `teamster.py` (Python) | Hook client on remotes | Pure stdlib, no third-party deps. Same wire contract as Go version. On macOS, derives teammate identity from the transcript's `agentName` (sets `agent_type` when the payload lacks one) and echoes hookd's `additionalContext` on PreToolUse **and** UserPromptSubmit. `TEAMSTER_DEBUG_RAW=1` dumps raw hook stdin to `var/raw-hook-debug.jsonl`. |
-| `hookd` | HTTP event server | POST `/event` → JSONL append. Serves dashboard at `/`, WMS at `/wms`, SSE at `/events/stream`. POST `/telemetry` (Claude Code + Codex ledger rows) and POST `/session` (Codex sessions-row upsert, `internal/server/session.go`, wraps `store.UpsertSession` via `store.ValidateSession`) are both hub-local- and remote-callable, and both rejected in read-only mode like `/mcp/*`. Muster surfaces: POST `/mcp/roster` (agent roster MCP — 7 tools), POST `/mcp/health` (agent health MCP — 4 tools), both rejected in read-only mode. Auto-registers agents on first hook event (`dispatchObservability` early-upsert creates `sessions` + `agent_roster` rows with `status: active`). Tracks per-agent turn state (processing/idle + in-flight activity) in memory. Focus-absent nudge on PreToolUse (max 1 per session+agent per turn). Returns activity + team-dispatch `additionalContext` on UserPromptSubmit so remote Python clients get the nudge (the hub Go client ignores it — no double-inject; hookd can't see a remote's solo/team marker, so it always sends team context). |
+| `hookd` | HTTP event server | Loads the interceptor registry at startup (`intercept.LoadWithOverlay`: embedded default compiled into the binary, overlaid with `$BASEDIR/etc/interceptors.yaml` if present and valid — a malformed or missing file falls back to the embedded default with a logged warning, never blocking ingest). Tag colors for `display` are also seeded from this registry. POST `/event` → JSONL append. Serves dashboard at `/`, WMS at `/wms`, SSE at `/events/stream`. POST `/telemetry` (Claude Code + Codex ledger rows) and POST `/session` (Codex sessions-row upsert, `internal/server/session.go`, wraps `store.UpsertSession` via `store.ValidateSession`) are both hub-local- and remote-callable, and both rejected in read-only mode like `/mcp/*`. Muster surfaces: POST `/mcp/roster` (agent roster MCP — 7 tools), POST `/mcp/health` (agent health MCP — 4 tools), both rejected in read-only mode. Auto-registers agents on first hook event (`dispatchObservability` early-upsert creates `sessions` + `agent_roster` rows with `status: active`). Tracks per-agent turn state (processing/idle + in-flight activity) in memory. Focus-absent nudge on PreToolUse (max 1 per session+agent per turn). Returns activity + team-dispatch `additionalContext` on UserPromptSubmit so remote Python clients get the nudge (the hub Go client ignores it — no double-inject; hookd can't see a remote's solo/team marker, so it always sends team context). |
 | `health-collector` | Muster: health gauge collector | Hub daemon, 15s poll interval. Polls `token_ledger` for per-agent token usage (recorded exception E2 — direct SQL read of another concern's table), computes context window usage, writes `agent_health_gauge` rows via GaugeStore. Resolves `roster_id` per agent via `ResolveRosterID`. Model sourced from `token_ledger.model` only (never hookd events — see `~/gh/teamster-context-bug.md`). Static context-window table: 200k default, 1M when model contains `[1m]`. Agent-Teams teammates get context occupancy from their own transcript + `.meta.json` sidecar (`teammate_context.go`), since the statusLine channel only ever fires for Agent-tool subagents (`gauge.ContextSourceTranscript`/`Fallback`/`Unavailable`). Per-agent cost sums each new `token_ledger` row's own component token columns (input/output/cache-read/cache-write, split by 5m/1h TTL tier) via `costForRows`; `session_total_cost_usd` (lead's row only) is a stored-value `SUM(cost_usd)` over the whole session, immune to a stale pricing table. |
 | `ctop` | Muster: terminal fleet dashboard | Bubbletea TUI, `cmd/ctop/`. Single view (fleet_view.go): a multi-team tree with hierarchy indentation, per-agent health/cost, and an activity log. Activity text/tag for a row is resolved by `resolvedActivity`: the health API poll is authoritative, the SSE tracker only overlays when its own timestamp is strictly newer — one rendering path regardless of source. |
 | `feed` | Terminal activity viewer | Tails JSONL, ANSI colorizes. Built from `cmd/feed/`. |
@@ -359,7 +371,24 @@ Agent-Teams teammates run as separate top-level sessions (see Pitfalls).
 - **Entity naming**: `@agent`, `#team`, `<model>` — colorized in the stream.
 - **Tag taxonomy** (see `skel/doc/specs/semantic-conventions.md` §3 for the
   full table): GOAL/THNK/DONE/RCAP come from MCP activity tools and Stop events; READ/EDIT/GREP/ACT/
-  EXEC/TEAM/COMM/TASK/WEB/ASK/PLAN come from tool names; TOOL is the fallback.
+  EXEC/TEAM/COMM/TASK/WEB/ASK/PLAN come from built-in Claude Code tool names
+  (`TOOL_TAGS` map in `internal/hook`); TOOL is the fallback. `mcp__*` tool
+  tags (TASK, CHRM, ` GIT`, GDRV, TEAM, and any suppressed tools) are no
+  longer hardcoded — see the next bullet.
+- **`interceptors.yaml` is the source of truth for `mcp__*` tool → tag/
+  display mapping.** `$BASEDIR/etc/interceptors.yaml` (embedded default +
+  file overlay; loads at hookd startup) defines tag labels/colors and
+  per-tool match rules, compiled by `internal/intercept/` into a `Registry`.
+  `hook.EnrichRecord` checks the registry first for every `mcp__*` tool name;
+  the remaining hardcoded `mcp__activity__`/`mcp__wms__`/generic-MCP blocks
+  in `enrich.go` only run when the registry has no match. The Go hook client
+  itself defers `_tool_tag`/`_tool_display` enrichment for non-built-in
+  (`mcp__*`) tool names to hookd — it still writes the special fields
+  (`_focus` from `setFocus`/`setOverallIntent`, `_thought`, `_done`, the
+  session mode marker from `setMode`) client-side, since those feed the
+  focus-nudge and solo/team gates independently of display. Validate an
+  edited `interceptors.yaml` with `teamster check-config` before restarting
+  hookd.
 - **MCP no-op + hook extraction**: MCP tools are callable surface area for
   the model only. The hook client pulls the actual args out of PreToolUse.
   This is how we attribute MCP calls to teammates (MCP servers can't see

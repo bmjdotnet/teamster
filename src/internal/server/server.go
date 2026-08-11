@@ -21,7 +21,9 @@ import (
 	"github.com/bmjdotnet/teamster/internal/agenthealth/gauge"
 	gaugemysql "github.com/bmjdotnet/teamster/internal/agenthealth/gauge/mysql"
 	"github.com/bmjdotnet/teamster/internal/config"
+	"github.com/bmjdotnet/teamster/internal/display"
 	"github.com/bmjdotnet/teamster/internal/hook"
+	"github.com/bmjdotnet/teamster/internal/intercept"
 	mcpactivity "github.com/bmjdotnet/teamster/internal/mcp/activity"
 	mcphealth "github.com/bmjdotnet/teamster/internal/mcp/health"
 	mcproster "github.com/bmjdotnet/teamster/internal/mcp/roster"
@@ -139,11 +141,25 @@ type Server struct {
 	pressureNudge    pressureNudgeCache
 	rosterLastSeen   lastSeenCache
 	turnStates       turnStateTracker
+	registry         *intercept.Registry
 }
 
 // storeOpenMaxAttempts bounds how many times NewServer retries store.Open
 // before giving up and starting with the /wms dashboard disabled.
 const storeOpenMaxAttempts = 10
+
+// tagColorsFromRegistry extracts the [3]int color for display.SetTagColors
+// from a loaded interceptor registry's tag definitions.
+func tagColorsFromRegistry(reg *intercept.Registry) map[string][3]int {
+	if reg == nil {
+		return nil
+	}
+	colors := make(map[string][3]int, len(reg.Tags))
+	for label, def := range reg.Tags {
+		colors[label] = def.Color
+	}
+	return colors
+}
 
 // NewServer opens (or creates) the JSONL log file in append mode and returns a ready Server.
 // If the store DSN is unset the /wms route will show an empty state.
@@ -179,6 +195,17 @@ func NewServer(cfg config.Config) (*Server, error) {
 	sweepStop := make(chan struct{})
 	sessions.StartSweeper(sweepStop)
 
+	// Interceptor registry: embedded defaults, overlaid with
+	// <basedir>/etc/interceptors.yaml if present and valid. A malformed or
+	// missing overlay file falls back to the embedded defaults — a cosmetic
+	// config file must never take down ingest (design doc C5).
+	basedir := filepath.Dir(cfg.DataDir)
+	interceptReg, regErr := intercept.LoadWithOverlay(filepath.Join(basedir, "etc", "interceptors.yaml"))
+	if regErr != nil {
+		slog.Warn("interceptors.yaml invalid, using shipped defaults", "error", regErr)
+	}
+	display.SetTagColors(tagColorsFromRegistry(interceptReg))
+
 	s := &Server{
 		cfg:              cfg,
 		logFile:          f,
@@ -188,6 +215,7 @@ func NewServer(cfg config.Config) (*Server, error) {
 		sweepStop:        sweepStop,
 		pendingMCPIdent:  make(map[string]mcpIdentity),
 		instanceRegistry: make(map[string]instanceEntry),
+		registry:         interceptReg,
 	}
 	s.bus.subscribers = make(map[uint64]chan ssePayload)
 
@@ -1824,7 +1852,7 @@ func (s *Server) resolveSubagentName(event hook.HookEvent, data map[string]inter
 func (s *Server) buildRecord(data map[string]interface{}) map[string]interface{} {
 	// Enrich display fields from raw hook payload. Idempotent: fields already
 	// set by the Go hook client are left unchanged.
-	hook.EnrichRecord(data)
+	hook.EnrichRecord(data, s.registry)
 
 	str := func(key string) string {
 		v, _ := data[key].(string)

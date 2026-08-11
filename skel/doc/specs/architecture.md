@@ -209,6 +209,11 @@ Claude Code session (remote)
   └─[MCP HTTP: WMS]       → POST http://<hub>:9125/mcp/wms       (JSON-RPC 2.0)
 
 ~/teamster/bin/hookd  (HTTP event server, always on hub)
+  ├─ startup: loads the interceptor registry (internal/intercept) —
+  │   embedded default + $BASEDIR/etc/interceptors.yaml overlay if present
+  │   and valid; a malformed/missing overlay logs a warning and falls back
+  │   to the embedded default (never blocks ingest). Also seeds tag display
+  │   colors (internal/display) from the same registry.
   ├─ POST /event           → enrich → append to ~/teamster/var/events.jsonl
   │                          → SSE publish to dashboard subscribers
   │                          → session tracker / entity count updates
@@ -284,9 +289,14 @@ supervisor process
 Claude Code hook fires
   → stdin JSON to ~/teamster/bin/teamster (Go)
   → ProcessEvent(): agent_type, tool_name, tool_input → tag + display text
+    for built-in tools; for mcp__* tools, only special fields (_focus,
+    _thought, _done, mode marker) are set client-side — _tool_tag/
+    _tool_display are left for hookd's interceptor registry
   → additionalContext injection (activity reminder)
   → POST http://localhost:9125/event  (enriched JSON)
-  → hookd enriches (if needed), appends JSONL line to var/events.jsonl
+  → hookd enriches (if needed): EnrichRecord checks the interceptor registry
+    first for any mcp__* tool name, falling back to legacy hardcoded blocks
+    only on no match; appends JSONL line to var/events.jsonl
   → hookd focus-nudge check: if PreToolUse + no focus interval (open or closed),
     injects additionalContext nudge (max 1 per session+agent per turn)
   → hookd SSE-pushes rendered HTML div to dashboard subscribers
@@ -655,7 +665,7 @@ Enriched fields added by the hook client (Go or Python) and by hookd:
 | `_host` | hook client | Short hostname (hub or remote) |
 | `_model` | hook client | Model identifier from the payload |
 
-### Tag taxonomy (17 tags)
+### Tag taxonomy (20 tags)
 
 | Tag | Source | Meaning |
 |-----|--------|---------|
@@ -668,14 +678,69 @@ Enriched fields added by the hook client (Go or Python) and by hookd:
 | `[GREP]` | Grep tool | File search |
 | `[ ACT]` | Bash tool with description field | Agent's intent for a command |
 | `[EXEC]` | `Monitor` tool; also display-layer label for `bash_cmd` field | Monitor tool tag; `[EXEC]` display line also renders for ALL Bash tool calls from `bash_cmd` field, independent of tag |
-| `[TEAM]` | Agent tool | Agent lifecycle: spawn teammates |
+| `[TEAM]` | Agent tool; `mcp__roster__*` (registerPeer, listAgents, ...) | Agent lifecycle: spawn teammates, roster events |
 | `[COMM]` | SendMessage tool | Inter-agent communication |
-| `[TASK]` | TaskCreate/TaskUpdate/TaskGet/TaskList tool | Task lifecycle |
+| `[TASK]` | TaskCreate/TaskUpdate/TaskGet/TaskList tool; `mcp__wms__*` | Task lifecycle |
 | `[ WEB]` | WebSearch/WebFetch tool | Web search or fetch |
 | `[ ASK]` | AskUserQuestion tool | Question to human operator |
 | `[PLAN]` | EnterPlanMode/ExitPlanMode tool | Plan mode entry/exit |
+| `[CHRM]` | `mcp__claude-in-chrome__*`, `mcp__playwright__*`, `mcp__chrome-devtools__*` | Browser automation (3 servers, 1 tag) |
+| `[ GIT]` | `mcp__github__*` | GitHub operations |
+| `[GDRV]` | `mcp__claude_ai_Google_Drive__*` | Google Drive operations |
 | `[WARN]` | `warn_msg` field (server-side) | Operator warning (orphan dispatch or structural issue) |
 | `[TOOL]` | Any unclassified tool | Fallback |
+
+`mcp__*` tool tags (`TASK`, `TEAM`, `CHRM`, `[ GIT]`, `GDRV`, and suppressed
+tools like `tagEntity`/`untagEntity`/`mcp__health__*`) are defined in
+`$BASEDIR/etc/interceptors.yaml`, not hardcoded — see "MCP tool interceptor
+registry" below and `semantic-conventions.md` §3.
+
+### MCP tool interceptor registry
+
+`internal/intercept` compiles `$BASEDIR/etc/interceptors.yaml` into a
+`Registry` that resolves `_tool_tag`/`_tool_display`/suppress-or-not for
+every `mcp__*` tool call — externalizing what used to be per-tool Go logic
+hardcoded across `hook.go`/`enrich.go`.
+
+- **Shape**: a `tags:` map (4-char label → RGB color + description) and an
+  `interceptors:` list of namespaces, each gated by a `match:` block
+  (typically a tool-name `prefix`, e.g. `mcp__wms__wms_`) containing an
+  ordered `rules:` list. A rule matches on `method` (the tool name remainder
+  after the namespace's prefix is stripped), `suffix`, `exact`, `regex`,
+  and/or `params` (tool_input field values), and produces a `tag`, a
+  Go-template `display` string (`{{f "field"}}` accessor; `__param__`-style
+  markers render cyan in feed), extra `fields` (e.g. `_focus`, `_thought`),
+  or `suppress: true` (no feed line emitted at all). A namespace with no
+  matching rule falls back to its own `tag`/`display`/`suppress`, or to
+  `TOOL` + a generic `server(__method__)` display if it defines neither.
+- **Loading**: `intercept.LoadDefault()` builds a Registry from the YAML
+  embedded into the `hookd`/`teamster` binaries at compile time
+  (`//go:embed interceptors.yaml` in `internal/intercept/config.go` — a
+  checked-in copy of `skel/etc/interceptors.yaml`; a test enforces the two
+  stay in sync). `intercept.LoadWithOverlay(path)` loads the embedded
+  default, then — if `$BASEDIR/etc/interceptors.yaml` exists and parses —
+  replaces it wholesale (the file is the full config, not a merge/patch). A
+  missing or malformed overlay is not fatal: hookd logs a warning and keeps
+  serving off the embedded default, since a cosmetic config file must never
+  take down ingest.
+- **Validation**: compiling a config hard-fails (surfaced as an `error`,
+  which `LoadWithOverlay` turns into "warn + fall back to defaults") on a bad
+  tag reference, malformed regex, an invalid RGB/label, or a missing `TOOL`
+  tag definition. Shadowed rules (a later rule that can never match because
+  an earlier one in the same namespace already covers its cases) are logged
+  as warnings only — the config still loads.
+- **`teamster check-config`** validates `$BASEDIR/etc/interceptors.yaml`
+  standalone (`intercept.Load`, no embedded fallback — a bad file is reported
+  as invalid, not silently swallowed) without requiring a hookd restart, so
+  an operator can check an edit before applying it.
+- **Consumers**: `hook.EnrichRecord` (`internal/hook/enrich.go`) calls
+  `Registry.Match(toolName, toolInput)` first for any `mcp__*` tool name; a
+  match's `Tag`/`Display`/`Fields`/`Suppress` short-circuits the legacy
+  hardcoded `mcp__activity__`/`mcp__wms__`/generic-MCP blocks (kept as a
+  Phase 1 fallback per the design doc, pending removal once golden-corpus
+  validation lands). `internal/display.SetTagColors` is seeded from the same
+  registry's `Tags` map at hookd startup, so a tag defined only in
+  `interceptors.yaml` still renders in its declared color.
 
 ---
 
@@ -823,6 +888,9 @@ Backup configuration lives in the `backup:` section of `teamster.yaml` (merged i
 │   ├── dedup/            (hook client dedup files + session mode markers)
 │   └── sessions/         (session tracker state)
 ├── etc/
+│   ├── interceptors.yaml         (MCP tool interceptor config: tag colors +
+│   │                              per-tool display/suppress rules; embedded
+│   │                              default + this file as operator overlay)
 │   ├── teamster-hookd.service    (systemd unit, materialized from template)
 │   ├── teamster-rollup.service   (rollup one-shot)
 │   ├── teamster-rollup.timer     (rollup timer)
@@ -864,7 +932,7 @@ the token scraper, and the plugin. MCP endpoints point at the hub over HTTP.
 
 | Binary | Language | Where | Purpose |
 |--------|----------|-------|---------|
-| `teamster` | Go | hub | Hook client. Forked per hook event. Reads stdin JSON, enriches, POSTs to hookd. Must exit 0 always. Also the CLI (`start`/`stop`/`status`/`wms-reset`/`tags`/`setup tags`/`wms drain`/`wms list`/`wms close`). |
+| `teamster` | Go | hub | Hook client. Forked per hook event. Reads stdin JSON, enriches, POSTs to hookd. Must exit 0 always. Also the CLI (`start`/`stop`/`status`/`wms-reset`/`tags`/`setup tags`/`wms drain`/`wms list`/`wms close`/`check-config`). |
 | `teamster.py` | Python | remote | Hook client on remotes. Pure stdlib. Same wire contract as Go version. |
 | `hookd` | Go | hub | HTTP event server. POST `/event` → JSONL. Dashboard, SSE, WMS page, metrics, MCP routes (`/mcp/activity`, `/mcp/wms`, `/mcp/roster`, `/mcp/health`). Focus-absent nudge on PreToolUse. Auto-registers agents on roster from first hook event. Tracks per-agent turn state (processing/idle). |
 | `feed` | Go | hub | Long-running terminal viewer. Tails events.jsonl, ANSI colorizes. |

@@ -176,6 +176,12 @@ is doing without reading the lead's token-expensive summaries.
 
 ![Terminal activity feed](img/activity_feed.png)
 
+How tool calls map to feed tags (`[READ]`, `[EXEC]`, `[ GIT]`, ...) and their
+display text is driven by `etc/interceptors.yaml` — an editable config file,
+not hardcoded. Customize which tools show up, what tag they get, and how
+they're described; validate an edit with `teamster check-config` before
+restarting `hookd` to apply it.
+
 ## Quick start
 
 ```bash
