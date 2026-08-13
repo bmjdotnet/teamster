@@ -434,7 +434,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: all spend incl. unallocated. Conservation guaranteed \u2014 sum of first-stage outflows equals window total. Node labels prefixed with stage key to prevent DAG cycle errors when facets share values. Top 10 per stage + (other). Multi-valued keys split cost fractionally. (unallocated)=bright red; (untagged @key)=grey.",
+      "description": "scope: all spend incl. unallocated. Conservation holds to within per-group cent rounding: sum of first-stage outflows equals window total at every N including All. No row cap is applied, and row inclusion is decided on the unrounded per-group sum (not the rounded-to-$0.00 display value), so a real nonzero flow is never silently dropped. Node labels prefixed with stage key to prevent DAG cycle errors when facets share values. Per-facet Count control (labeled 'Count:', paired immediately beside its 'Facet N:' selector; starts at 5 \u2014 raise per facet from the dropdown for more detail) ranks each facet's real tag values by total cost across the window; values ranked outside N collapse into a single '(other)' node per stage \u2014 their cost is retained, not dropped. Setting several facets to high-cardinality keys (e.g. outcome) with N=All simultaneously can render a very dense graph \u2014 that's a readability limit you control via N, not a data limit. (unallocated) and (untagged) are pinned: always their own node, never counted toward N or swept into (other). Within each column, nodes are ordered top-to-bottom by dollar value, descending \u2014 but (unallocated), (untagged), and (other) are always pinned below every real value regardless of their own dollars (sorted by value among themselves), so a large aggregate or diagnostic bucket never displaces a real category from the top of the ranking. facet2's ranking is computed identically for both the source side (facet1\u2192facet2) and target side (facet2\u2192facet3) so the two stages share one consistent node set. Multi-valued keys split cost fractionally. (unallocated)=bright red; (untagged @key)=grey; (other)=slate blue.",
       "fieldConfig": {
         "defaults": {},
         "overrides": []
@@ -460,7 +460,7 @@
           "key": "",
           "plugin": "AMap.Scale,AMap.ToolBar"
         },
-        "getOption": "const allSeries = context.panel.data.series;\nif (!allSeries || allSeries.length < 1) return { series: [] };\n\nconst fld = (s, name) => {\n  const f = s.fields.find(x => x.name === name);\n  if (!f) return [];\n  const v = f.values;\n  return (v && v.buffer) ? v.buffer : (v || []);\n};\n\nconst links = [];\nconst nodeSet = new Set();\n\nfor (const s of allSeries) {\n  if (!s || !s.fields || s.fields.length < 3) continue;\n  const sources = fld(s, 'source');\n  const targets = fld(s, 'target');\n  const values  = fld(s, 'value');\n  for (let i = 0; i < sources.length; i++) {\n    const v = parseFloat(values[i]) || 0;\n    const src = String(sources[i]);\n    const tgt = String(targets[i]);\n    if (v > 0 && src !== tgt) {\n      links.push({ source: src, target: tgt, value: v });\n      nodeSet.add(src);\n      nodeSet.add(tgt);\n    }\n  }\n}\nif (!links.length) return { series: [] };\n\nconst phaseColors = { 'design':'#FADE2A','build':'#73BF69','test':'#73BF69','review':'#5794F2','rework':'#FF780A','admin':'#A9A9A9' };\nconst wtColors = { 'feature':'#FF780A','bug':'#FADE2A','research':'#B877D9','docs':'#5794F2','test':'#73BF69','infra':'#F2495C','refactor':'#64A0C8','admin':'#A9A9A9' };\nconst allColors = {...phaseColors, ...wtColors};\n\nconst nodes = Array.from(nodeSet).map(name => {\n  let color = null;\n  if (name.includes('(unallocated)')) color = '#F2495C';\n  else if (name.includes('(untagged')) color = '#808080';\n  else if (name.includes('(other)')) color = '#C0C0C0';\n  else {\n    const parts = name.split(': ');\n    const val = parts.length > 1 ? parts.slice(1).join(': ') : name;\n    if (allColors[val]) color = allColors[val];\n  }\n  return { name, itemStyle: color ? { color } : {} };\n});\n\nreturn {\n  tooltip: {\n    trigger: 'item',\n    formatter: p => {\n      const strip = s => { const ci = s.indexOf(': '); return ci >= 0 ? s.slice(ci + 2) : s; };\n      if (p.dataType === 'edge')\n        return strip(p.data.source) + ' \\u2192 ' + strip(p.data.target) + '<br/>$' + p.data.value.toFixed(2);\n      return strip(p.name) + '<br/>$' + ((p.value || 0).toFixed(2));\n    }\n  },\n  series: [{\n    type: 'sankey',\n    layout: 'none',\n    emphasis: { focus: 'adjacency' },\n    nodeAlign: 'left',\n    data: nodes,\n    links: links,\n    lineStyle: { color: 'gradient', opacity: 0.4 },\n    label: {\n      show: true, position: 'right', fontSize: 11,\n      formatter: p => { let lbl = p.name; const ci = lbl.indexOf(': '); if (ci >= 0) lbl = lbl.slice(ci + 2); if (lbl.length > 20) lbl = lbl.slice(0,18)+'\u2026'; return lbl + '\\n$' + ((p.value || 0).toFixed(0)); }\n    },\n    nodeGap: 12,\n    nodeWidth: 20\n  }]\n};",
+        "getOption": "const allSeries = context.panel.data.series;\nif (!allSeries || allSeries.length < 1) return { series: [] };\n\nconst fld = (s, name) => {\n  const f = s.fields.find(x => x.name === name);\n  if (!f) return [];\n  const v = f.values;\n  return (v && v.buffer) ? v.buffer : (v || []);\n};\n\nconst links = [];\nconst nodeSet = new Set();\n\nfor (const s of allSeries) {\n  if (!s || !s.fields || s.fields.length < 3) continue;\n  const sources = fld(s, 'source');\n  const targets = fld(s, 'target');\n  const values  = fld(s, 'value');\n  for (let i = 0; i < sources.length; i++) {\n    const v = parseFloat(values[i]) || 0;\n    const src = String(sources[i]);\n    const tgt = String(targets[i]);\n    if (v > 0 && src !== tgt) {\n      links.push({ source: src, target: tgt, value: v });\n      nodeSet.add(src);\n      nodeSet.add(tgt);\n    }\n  }\n}\nif (!links.length) return { series: [] };\n\nconst phaseColors = { 'design':'#FADE2A','build':'#73BF69','test':'#73BF69','review':'#5794F2','rework':'#FF780A','admin':'#A9A9A9' };\nconst wtColors = { 'feature':'#FF780A','bug':'#FADE2A','research':'#B877D9','docs':'#5794F2','test':'#73BF69','infra':'#F2495C','refactor':'#64A0C8','admin':'#A9A9A9' };\nconst allColors = {...phaseColors, ...wtColors};\n\n// Per-node value for SORTING only (echarts computes its own displayed node\n// value from connected links independently -- this is a separate, sort-only\n// estimate, not wired into the chart's rendered dollar amounts). Prefer the\n// inbound sum (a node's \"size\" as the flow reaching it); nodes with no\n// inbound links (the first stage) fall back to their outbound sum.\nconst inSum = new Map();\nconst outSum = new Map();\nfor (const l of links) {\n  inSum.set(l.target, (inSum.get(l.target) || 0) + l.value);\n  outSum.set(l.source, (outSum.get(l.source) || 0) + l.value);\n}\nconst nodeValue = name => inSum.has(name) ? inSum.get(name) : (outSum.get(name) || 0);\nconst isSpecial = name => name.includes('(other)') || name.includes('(untagged') || name.includes('(unallocated)');\n\n// Sort each column top-to-bottom by $ value, descending. Real values first;\n// (other)/(untagged)/(unallocated) pinned below all real values regardless\n// of their own $ value -- an aggregate or diagnostic bucket outranking real\n// categories would invert what the ranking is meant to communicate. Within\n// each of those two groups, still sorted by value desc, alphabetical as a\n// final tiebreak for determinism. One flat sort produces correct per-column\n// order without grouping by stage explicitly: echarts assigns columns by\n// link topology, and filtering a sorted array to any subset preserves that\n// subset's relative order.\nconst sortedNames = Array.from(nodeSet).sort((a, b) => {\n  const specialA = isSpecial(a), specialB = isSpecial(b);\n  if (specialA !== specialB) return specialA ? 1 : -1;\n  const diff = nodeValue(b) - nodeValue(a);\n  return diff !== 0 ? diff : a.localeCompare(b);\n});\n\nconst nodes = sortedNames.map(name => {\n  let color = null;\n  if (name.includes('(unallocated)')) color = '#F2495C';\n  else if (name.includes('(untagged')) color = '#808080';\n  else if (name.includes('(other)')) color = '#4C6785';\n  else {\n    const parts = name.split(': ');\n    const val = parts.length > 1 ? parts.slice(1).join(': ') : name;\n    if (allColors[val]) color = allColors[val];\n  }\n  return { name, itemStyle: color ? { color } : {} };\n});\n\nreturn {\n  tooltip: {\n    trigger: 'item',\n    formatter: p => {\n      const strip = s => { const ci = s.indexOf(': '); return ci >= 0 ? s.slice(ci + 2) : s; };\n      if (p.dataType === 'edge')\n        return strip(p.data.source) + ' \u2192 ' + strip(p.data.target) + '<br/>$' + p.data.value.toFixed(2);\n      return strip(p.name) + '<br/>$' + ((p.value || 0).toFixed(2));\n    }\n  },\n  series: [{\n    type: 'sankey',\n    layout: 'none',\n    layoutIterations: 0,\n    emphasis: { focus: 'adjacency' },\n    nodeAlign: 'left',\n    data: nodes,\n    links: links,\n    lineStyle: { color: 'gradient', opacity: 0.4 },\n    label: {\n      show: true, position: 'right', fontSize: 11,\n      formatter: p => { let lbl = p.name; const ci = lbl.indexOf(': '); if (ci >= 0) lbl = lbl.slice(ci + 2); if (lbl.length > 20) lbl = lbl.slice(0,18)+'\u2026'; return lbl + '\\n$' + ((p.value || 0).toFixed(0)); }\n    },\n    nodeGap: 12,\n    nodeWidth: 20\n  }]\n};",
         "google": {
           "callback": "gmapReady",
           "key": ""
@@ -485,7 +485,7 @@
             "uid": "teamster-mysql"
           },
           "format": "table",
-          "rawSql": "SELECT source, target, ROUND(SUM(value), 2) AS value FROM (\n  SELECT\n    CASE WHEN cr.entity_type = '' THEN CONCAT('${facet1:raw}', ': (unallocated)')\n         ELSE CONCAT('${facet1:raw}', ': ', COALESCE(r1.tag_value, '(untagged)')) END AS source,\n    CASE WHEN cr.entity_type = '' THEN CONCAT('${facet2:raw}', ': (unallocated)')\n         ELSE CONCAT('${facet2:raw}', ': ', COALESCE(r2.tag_value, '(untagged)')) END AS target,\n    cr.cost_usd * COALESCE(r1.w, 1) * COALESCE(r2.w, 1) AS value\n  FROM cost_facts cr\n  LEFT JOIN (\n    SELECT er.entity_type, er.entity_id, t.tag_value,\n           1.0 / COUNT(*) OVER (PARTITION BY er.entity_type, er.entity_id) AS w\n    FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n    WHERE '${facet1:raw}' != 'outcome' AND t.tag_key = '${facet1:raw}'\n    UNION ALL\n    SELECT 'workunit', wu.id, COALESCE(o.title, wu.outcome_id), 1.0\n    FROM workunits wu JOIN outcomes o ON o.id = wu.outcome_id\n    WHERE '${facet1:raw}' = 'outcome'\n    UNION ALL\n    SELECT 'outcome', o.id, COALESCE(o.title, o.id), 1.0\n    FROM outcomes o\n    WHERE '${facet1:raw}' = 'outcome'\n  ) r1 ON r1.entity_type = cr.entity_type AND r1.entity_id = cr.entity_id\n  LEFT JOIN (\n    SELECT er.entity_type, er.entity_id, t.tag_value,\n           1.0 / COUNT(*) OVER (PARTITION BY er.entity_type, er.entity_id) AS w\n    FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n    WHERE '${facet2:raw}' != 'outcome' AND t.tag_key = '${facet2:raw}'\n    UNION ALL\n    SELECT 'workunit', wu.id, COALESCE(o.title, wu.outcome_id), 1.0\n    FROM workunits wu JOIN outcomes o ON o.id = wu.outcome_id\n    WHERE '${facet2:raw}' = 'outcome'\n    UNION ALL\n    SELECT 'outcome', o.id, COALESCE(o.title, o.id), 1.0\n    FROM outcomes o\n    WHERE '${facet2:raw}' = 'outcome'\n  ) r2 ON r2.entity_type = cr.entity_type AND r2.entity_id = cr.entity_id\n  WHERE $__timeFilter(cr.timestamp)\n    AND ('${filter1:raw}' = 'All' OR COALESCE(r1.tag_value, '(untagged)') = '${filter1:raw}' OR (cr.entity_type = '' AND '${filter1:raw}' = '(unallocated)'))\n) raw\nGROUP BY source, target\nHAVING value > 0\nORDER BY value DESC\nLIMIT 120",
+          "rawSql": "WITH r1_resolved AS (\n    SELECT er.entity_type, er.entity_id, t.tag_value,\n           1.0 / COUNT(*) OVER (PARTITION BY er.entity_type, er.entity_id) AS w\n    FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n    WHERE '${facet1:raw}' != 'outcome' AND t.tag_key = '${facet1:raw}'\n    UNION ALL\n    SELECT 'workunit', wu.id, COALESCE(o.title, wu.outcome_id), 1.0\n    FROM workunits wu JOIN outcomes o ON o.id = wu.outcome_id\n    WHERE '${facet1:raw}' = 'outcome'\n    UNION ALL\n    SELECT 'outcome', o.id, COALESCE(o.title, o.id), 1.0\n    FROM outcomes o\n    WHERE '${facet1:raw}' = 'outcome'\n  ),\n  r2_resolved AS (\n    SELECT er.entity_type, er.entity_id, t.tag_value,\n           1.0 / COUNT(*) OVER (PARTITION BY er.entity_type, er.entity_id) AS w\n    FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n    WHERE '${facet2:raw}' != 'outcome' AND t.tag_key = '${facet2:raw}'\n    UNION ALL\n    SELECT 'workunit', wu.id, COALESCE(o.title, wu.outcome_id), 1.0\n    FROM workunits wu JOIN outcomes o ON o.id = wu.outcome_id\n    WHERE '${facet2:raw}' = 'outcome'\n    UNION ALL\n    SELECT 'outcome', o.id, COALESCE(o.title, o.id), 1.0\n    FROM outcomes o\n    WHERE '${facet2:raw}' = 'outcome'\n  ),\n  f1_totals AS (\n    SELECT r.tag_value AS val, SUM(cr.cost_usd * r.w) AS total_cost\n    FROM cost_facts cr\n    JOIN r1_resolved r ON r.entity_type = cr.entity_type AND r.entity_id = cr.entity_id\n    WHERE $__timeFilter(cr.timestamp) AND cr.entity_type != ''\n      AND ('${filter1:raw}' = 'All' OR r.tag_value = '${filter1:raw}')\n    GROUP BY r.tag_value\n  ),\n  f1_rank AS (\n    SELECT val, ROW_NUMBER() OVER (ORDER BY total_cost DESC, val ASC) AS rnk FROM f1_totals\n  ),\n  -- NOTE: this ranking pool uses EXISTS-based facet1 filtering (an entity\n  -- counts in full once ANY of its facet1 tags matches filter1). Query A's\n  -- rendered edges instead admit only the matching r1 row at its fractional\n  -- weight (COALESCE(r1.tag_value,'(untagged)') = filter1). For a\n  -- multi-valued facet1 key with filter1 set to one of several values, this\n  -- ranking pool is therefore broader than what actually renders. Kept this\n  -- way (rather than duplicating r1_resolved into query B) because f2_totals\n  -- must stay textually identical between A and B for facet2's rank to agree\n  -- across both stages -- that property does not depend on this predicate\n  -- matching the outer query exactly, and conservation is unaffected either\n  -- way (every row still lands in some group regardless of rank).\n  f2_totals AS (\n    SELECT r.tag_value AS val, SUM(cr.cost_usd * r.w) AS total_cost\n    FROM cost_facts cr\n    JOIN r2_resolved r ON r.entity_type = cr.entity_type AND r.entity_id = cr.entity_id\n    WHERE $__timeFilter(cr.timestamp) AND cr.entity_type != ''\n      AND (\n        '${filter1:raw}' = 'All'\n        OR EXISTS (\n          SELECT 1 FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n          WHERE '${facet1:raw}' != 'outcome' AND t.tag_key = '${facet1:raw}' AND t.tag_value = '${filter1:raw}'\n            AND er.entity_type = cr.entity_type AND er.entity_id = cr.entity_id\n          UNION ALL\n          SELECT 1 FROM workunits wu JOIN outcomes o ON o.id = wu.outcome_id\n          WHERE '${facet1:raw}' = 'outcome' AND COALESCE(o.title, wu.outcome_id) = '${filter1:raw}'\n            AND cr.entity_type = 'workunit' AND wu.id = cr.entity_id\n          UNION ALL\n          SELECT 1 FROM outcomes o\n          WHERE '${facet1:raw}' = 'outcome' AND COALESCE(o.title, o.id) = '${filter1:raw}'\n            AND cr.entity_type = 'outcome' AND o.id = cr.entity_id\n        )\n        OR ('${filter1:raw}' = '(untagged)' AND cr.entity_type != '' AND NOT EXISTS (\n          SELECT 1 FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n          WHERE '${facet1:raw}' != 'outcome' AND t.tag_key = '${facet1:raw}'\n            AND er.entity_type = cr.entity_type AND er.entity_id = cr.entity_id\n          UNION ALL\n          SELECT 1 FROM workunits wu\n          WHERE '${facet1:raw}' = 'outcome' AND cr.entity_type = 'workunit' AND wu.id = cr.entity_id\n          UNION ALL\n          SELECT 1 FROM outcomes o\n          WHERE '${facet1:raw}' = 'outcome' AND cr.entity_type = 'outcome' AND o.id = cr.entity_id\n        ))\n      )\n    GROUP BY r.tag_value\n  ),\n  f2_rank AS (\n    SELECT val, ROW_NUMBER() OVER (ORDER BY total_cost DESC, val ASC) AS rnk FROM f2_totals\n  )\nSELECT source, target, ROUND(SUM(value), 2) AS value FROM (\n  SELECT\n    CASE WHEN cr.entity_type = '' THEN CONCAT('${facet1:raw}', ': (unallocated)')\n         WHEN r1.tag_value IS NULL THEN CONCAT('${facet1:raw}', ': (untagged)')\n         WHEN f1r.rnk <= ${topn1:raw} THEN CONCAT('${facet1:raw}', ': ', r1.tag_value)\n         ELSE CONCAT('${facet1:raw}', ': (other)') END AS source,\n    CASE WHEN cr.entity_type = '' THEN CONCAT('${facet2:raw}', ': (unallocated)')\n         WHEN r2.tag_value IS NULL THEN CONCAT('${facet2:raw}', ': (untagged)')\n         WHEN f2r.rnk <= ${topn2:raw} THEN CONCAT('${facet2:raw}', ': ', r2.tag_value)\n         ELSE CONCAT('${facet2:raw}', ': (other)') END AS target,\n    cr.cost_usd * COALESCE(r1.w, 1) * COALESCE(r2.w, 1) AS value\n  FROM cost_facts cr\n  LEFT JOIN r1_resolved r1 ON r1.entity_type = cr.entity_type AND r1.entity_id = cr.entity_id\n  LEFT JOIN r2_resolved r2 ON r2.entity_type = cr.entity_type AND r2.entity_id = cr.entity_id\n  LEFT JOIN f1_rank f1r ON f1r.val = r1.tag_value\n  LEFT JOIN f2_rank f2r ON f2r.val = r2.tag_value\n  WHERE $__timeFilter(cr.timestamp)\n    AND ('${filter1:raw}' = 'All' OR COALESCE(r1.tag_value, '(untagged)') = '${filter1:raw}' OR (cr.entity_type = '' AND '${filter1:raw}' = '(unallocated)'))\n) raw\nGROUP BY source, target\nHAVING SUM(value) > 0\nORDER BY value DESC",
           "refId": "A"
         },
         {
@@ -494,7 +494,7 @@
             "uid": "teamster-mysql"
           },
           "format": "table",
-          "rawSql": "SELECT source, target, ROUND(SUM(value), 2) AS value FROM (\n  SELECT\n    CASE WHEN cr.entity_type = '' THEN CONCAT('${facet2:raw}', ': (unallocated)')\n         ELSE CONCAT('${facet2:raw}', ': ', COALESCE(r2.tag_value, '(untagged)')) END AS source,\n    CASE WHEN cr.entity_type = '' THEN CONCAT('${facet3:raw}', ': (unallocated)')\n         ELSE CONCAT('${facet3:raw}', ': ', COALESCE(r3.tag_value, '(untagged)')) END AS target,\n    cr.cost_usd * COALESCE(r2.w, 1) * COALESCE(r3.w, 1) AS value\n  FROM cost_facts cr\n  LEFT JOIN (\n    SELECT er.entity_type, er.entity_id, t.tag_value,\n           1.0 / COUNT(*) OVER (PARTITION BY er.entity_type, er.entity_id) AS w\n    FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n    WHERE '${facet2:raw}' != 'outcome' AND t.tag_key = '${facet2:raw}'\n    UNION ALL\n    SELECT 'workunit', wu.id, COALESCE(o.title, wu.outcome_id), 1.0\n    FROM workunits wu JOIN outcomes o ON o.id = wu.outcome_id\n    WHERE '${facet2:raw}' = 'outcome'\n    UNION ALL\n    SELECT 'outcome', o.id, COALESCE(o.title, o.id), 1.0\n    FROM outcomes o\n    WHERE '${facet2:raw}' = 'outcome'\n  ) r2 ON r2.entity_type = cr.entity_type AND r2.entity_id = cr.entity_id\n  LEFT JOIN (\n    SELECT er.entity_type, er.entity_id, t.tag_value,\n           1.0 / COUNT(*) OVER (PARTITION BY er.entity_type, er.entity_id) AS w\n    FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n    WHERE '${facet3:raw}' != 'outcome' AND t.tag_key = '${facet3:raw}'\n    UNION ALL\n    SELECT 'workunit', wu.id, COALESCE(o.title, wu.outcome_id), 1.0\n    FROM workunits wu JOIN outcomes o ON o.id = wu.outcome_id\n    WHERE '${facet3:raw}' = 'outcome'\n    UNION ALL\n    SELECT 'outcome', o.id, COALESCE(o.title, o.id), 1.0\n    FROM outcomes o\n    WHERE '${facet3:raw}' = 'outcome'\n  ) r3 ON r3.entity_type = cr.entity_type AND r3.entity_id = cr.entity_id\n  WHERE $__timeFilter(cr.timestamp)\n    AND ('${filter1:raw}' = 'All'\n      OR (cr.entity_type = '' AND '${filter1:raw}' = '(unallocated)')\n      OR EXISTS (\n        SELECT 1 FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n        WHERE '${facet1:raw}' != 'outcome' AND t.tag_key = '${facet1:raw}' AND t.tag_value = '${filter1:raw}'\n          AND er.entity_type = cr.entity_type AND er.entity_id = cr.entity_id\n        UNION ALL\n        SELECT 1 FROM workunits wu JOIN outcomes o ON o.id = wu.outcome_id\n        WHERE '${facet1:raw}' = 'outcome' AND COALESCE(o.title, wu.outcome_id) = '${filter1:raw}'\n          AND cr.entity_type = 'workunit' AND wu.id = cr.entity_id\n        UNION ALL\n        SELECT 1 FROM outcomes o\n        WHERE '${facet1:raw}' = 'outcome' AND COALESCE(o.title, o.id) = '${filter1:raw}'\n          AND cr.entity_type = 'outcome' AND o.id = cr.entity_id\n      )\n      OR ('${filter1:raw}' = '(untagged)' AND cr.entity_type != '' AND NOT EXISTS (\n        SELECT 1 FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n        WHERE '${facet1:raw}' != 'outcome' AND t.tag_key = '${facet1:raw}'\n          AND er.entity_type = cr.entity_type AND er.entity_id = cr.entity_id\n        UNION ALL\n        SELECT 1 FROM workunits wu\n        WHERE '${facet1:raw}' = 'outcome' AND cr.entity_type = 'workunit' AND wu.id = cr.entity_id\n        UNION ALL\n        SELECT 1 FROM outcomes o\n        WHERE '${facet1:raw}' = 'outcome' AND cr.entity_type = 'outcome' AND o.id = cr.entity_id\n      ))\n    )\n) raw\nGROUP BY source, target\nHAVING value > 0\nORDER BY value DESC\nLIMIT 120",
+          "rawSql": "WITH r2_resolved AS (\n    SELECT er.entity_type, er.entity_id, t.tag_value,\n           1.0 / COUNT(*) OVER (PARTITION BY er.entity_type, er.entity_id) AS w\n    FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n    WHERE '${facet2:raw}' != 'outcome' AND t.tag_key = '${facet2:raw}'\n    UNION ALL\n    SELECT 'workunit', wu.id, COALESCE(o.title, wu.outcome_id), 1.0\n    FROM workunits wu JOIN outcomes o ON o.id = wu.outcome_id\n    WHERE '${facet2:raw}' = 'outcome'\n    UNION ALL\n    SELECT 'outcome', o.id, COALESCE(o.title, o.id), 1.0\n    FROM outcomes o\n    WHERE '${facet2:raw}' = 'outcome'\n  ),\n  r3_resolved AS (\n    SELECT er.entity_type, er.entity_id, t.tag_value,\n           1.0 / COUNT(*) OVER (PARTITION BY er.entity_type, er.entity_id) AS w\n    FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n    WHERE '${facet3:raw}' != 'outcome' AND t.tag_key = '${facet3:raw}'\n    UNION ALL\n    SELECT 'workunit', wu.id, COALESCE(o.title, wu.outcome_id), 1.0\n    FROM workunits wu JOIN outcomes o ON o.id = wu.outcome_id\n    WHERE '${facet3:raw}' = 'outcome'\n    UNION ALL\n    SELECT 'outcome', o.id, COALESCE(o.title, o.id), 1.0\n    FROM outcomes o\n    WHERE '${facet3:raw}' = 'outcome'\n  ),\n  -- NOTE: this ranking pool uses EXISTS-based facet1 filtering (an entity\n  -- counts in full once ANY of its facet1 tags matches filter1). Query A's\n  -- rendered edges instead admit only the matching r1 row at its fractional\n  -- weight (COALESCE(r1.tag_value,'(untagged)') = filter1). For a\n  -- multi-valued facet1 key with filter1 set to one of several values, this\n  -- ranking pool is therefore broader than what actually renders. Kept this\n  -- way (rather than duplicating r1_resolved into query B) because f2_totals\n  -- must stay textually identical between A and B for facet2's rank to agree\n  -- across both stages -- that property does not depend on this predicate\n  -- matching the outer query exactly, and conservation is unaffected either\n  -- way (every row still lands in some group regardless of rank).\n  f2_totals AS (\n    SELECT r.tag_value AS val, SUM(cr.cost_usd * r.w) AS total_cost\n    FROM cost_facts cr\n    JOIN r2_resolved r ON r.entity_type = cr.entity_type AND r.entity_id = cr.entity_id\n    WHERE $__timeFilter(cr.timestamp) AND cr.entity_type != ''\n      AND (\n        '${filter1:raw}' = 'All'\n        OR EXISTS (\n          SELECT 1 FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n          WHERE '${facet1:raw}' != 'outcome' AND t.tag_key = '${facet1:raw}' AND t.tag_value = '${filter1:raw}'\n            AND er.entity_type = cr.entity_type AND er.entity_id = cr.entity_id\n          UNION ALL\n          SELECT 1 FROM workunits wu JOIN outcomes o ON o.id = wu.outcome_id\n          WHERE '${facet1:raw}' = 'outcome' AND COALESCE(o.title, wu.outcome_id) = '${filter1:raw}'\n            AND cr.entity_type = 'workunit' AND wu.id = cr.entity_id\n          UNION ALL\n          SELECT 1 FROM outcomes o\n          WHERE '${facet1:raw}' = 'outcome' AND COALESCE(o.title, o.id) = '${filter1:raw}'\n            AND cr.entity_type = 'outcome' AND o.id = cr.entity_id\n        )\n        OR ('${filter1:raw}' = '(untagged)' AND cr.entity_type != '' AND NOT EXISTS (\n          SELECT 1 FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n          WHERE '${facet1:raw}' != 'outcome' AND t.tag_key = '${facet1:raw}'\n            AND er.entity_type = cr.entity_type AND er.entity_id = cr.entity_id\n          UNION ALL\n          SELECT 1 FROM workunits wu\n          WHERE '${facet1:raw}' = 'outcome' AND cr.entity_type = 'workunit' AND wu.id = cr.entity_id\n          UNION ALL\n          SELECT 1 FROM outcomes o\n          WHERE '${facet1:raw}' = 'outcome' AND cr.entity_type = 'outcome' AND o.id = cr.entity_id\n        ))\n      )\n    GROUP BY r.tag_value\n  ),\n  f2_rank AS (\n    SELECT val, ROW_NUMBER() OVER (ORDER BY total_cost DESC, val ASC) AS rnk FROM f2_totals\n  ),\n  f3_totals AS (\n    SELECT r.tag_value AS val, SUM(cr.cost_usd * r.w) AS total_cost\n    FROM cost_facts cr\n    JOIN r3_resolved r ON r.entity_type = cr.entity_type AND r.entity_id = cr.entity_id\n    WHERE $__timeFilter(cr.timestamp) AND cr.entity_type != ''\n      AND (\n        '${filter1:raw}' = 'All'\n        OR EXISTS (\n          SELECT 1 FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n          WHERE '${facet1:raw}' != 'outcome' AND t.tag_key = '${facet1:raw}' AND t.tag_value = '${filter1:raw}'\n            AND er.entity_type = cr.entity_type AND er.entity_id = cr.entity_id\n          UNION ALL\n          SELECT 1 FROM workunits wu JOIN outcomes o ON o.id = wu.outcome_id\n          WHERE '${facet1:raw}' = 'outcome' AND COALESCE(o.title, wu.outcome_id) = '${filter1:raw}'\n            AND cr.entity_type = 'workunit' AND wu.id = cr.entity_id\n          UNION ALL\n          SELECT 1 FROM outcomes o\n          WHERE '${facet1:raw}' = 'outcome' AND COALESCE(o.title, o.id) = '${filter1:raw}'\n            AND cr.entity_type = 'outcome' AND o.id = cr.entity_id\n        )\n        OR ('${filter1:raw}' = '(untagged)' AND cr.entity_type != '' AND NOT EXISTS (\n          SELECT 1 FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n          WHERE '${facet1:raw}' != 'outcome' AND t.tag_key = '${facet1:raw}'\n            AND er.entity_type = cr.entity_type AND er.entity_id = cr.entity_id\n          UNION ALL\n          SELECT 1 FROM workunits wu\n          WHERE '${facet1:raw}' = 'outcome' AND cr.entity_type = 'workunit' AND wu.id = cr.entity_id\n          UNION ALL\n          SELECT 1 FROM outcomes o\n          WHERE '${facet1:raw}' = 'outcome' AND cr.entity_type = 'outcome' AND o.id = cr.entity_id\n        ))\n      )\n    GROUP BY r.tag_value\n  ),\n  f3_rank AS (\n    SELECT val, ROW_NUMBER() OVER (ORDER BY total_cost DESC, val ASC) AS rnk FROM f3_totals\n  )\nSELECT source, target, ROUND(SUM(value), 2) AS value FROM (\n  SELECT\n    CASE WHEN cr.entity_type = '' THEN CONCAT('${facet2:raw}', ': (unallocated)')\n         WHEN r2.tag_value IS NULL THEN CONCAT('${facet2:raw}', ': (untagged)')\n         WHEN f2r.rnk <= ${topn2:raw} THEN CONCAT('${facet2:raw}', ': ', r2.tag_value)\n         ELSE CONCAT('${facet2:raw}', ': (other)') END AS source,\n    CASE WHEN cr.entity_type = '' THEN CONCAT('${facet3:raw}', ': (unallocated)')\n         WHEN r3.tag_value IS NULL THEN CONCAT('${facet3:raw}', ': (untagged)')\n         WHEN f3r.rnk <= ${topn3:raw} THEN CONCAT('${facet3:raw}', ': ', r3.tag_value)\n         ELSE CONCAT('${facet3:raw}', ': (other)') END AS target,\n    cr.cost_usd * COALESCE(r2.w, 1) * COALESCE(r3.w, 1) AS value\n  FROM cost_facts cr\n  LEFT JOIN r2_resolved r2 ON r2.entity_type = cr.entity_type AND r2.entity_id = cr.entity_id\n  LEFT JOIN r3_resolved r3 ON r3.entity_type = cr.entity_type AND r3.entity_id = cr.entity_id\n  LEFT JOIN f2_rank f2r ON f2r.val = r2.tag_value\n  LEFT JOIN f3_rank f3r ON f3r.val = r3.tag_value\n  WHERE $__timeFilter(cr.timestamp)\n    AND ('${filter1:raw}' = 'All'\n      OR (cr.entity_type = '' AND '${filter1:raw}' = '(unallocated)')\n      OR EXISTS (\n        SELECT 1 FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n        WHERE '${facet1:raw}' != 'outcome' AND t.tag_key = '${facet1:raw}' AND t.tag_value = '${filter1:raw}'\n          AND er.entity_type = cr.entity_type AND er.entity_id = cr.entity_id\n        UNION ALL\n        SELECT 1 FROM workunits wu JOIN outcomes o ON o.id = wu.outcome_id\n        WHERE '${facet1:raw}' = 'outcome' AND COALESCE(o.title, wu.outcome_id) = '${filter1:raw}'\n          AND cr.entity_type = 'workunit' AND wu.id = cr.entity_id\n        UNION ALL\n        SELECT 1 FROM outcomes o\n        WHERE '${facet1:raw}' = 'outcome' AND COALESCE(o.title, o.id) = '${filter1:raw}'\n          AND cr.entity_type = 'outcome' AND o.id = cr.entity_id\n      )\n      OR ('${filter1:raw}' = '(untagged)' AND cr.entity_type != '' AND NOT EXISTS (\n        SELECT 1 FROM entity_tags_resolved er JOIN tags t ON t.id = er.tag_id\n        WHERE '${facet1:raw}' != 'outcome' AND t.tag_key = '${facet1:raw}'\n          AND er.entity_type = cr.entity_type AND er.entity_id = cr.entity_id\n        UNION ALL\n        SELECT 1 FROM workunits wu\n        WHERE '${facet1:raw}' = 'outcome' AND cr.entity_type = 'workunit' AND wu.id = cr.entity_id\n        UNION ALL\n        SELECT 1 FROM outcomes o\n        WHERE '${facet1:raw}' = 'outcome' AND cr.entity_type = 'outcome' AND o.id = cr.entity_id\n      ))\n    )\n) raw\nGROUP BY source, target\nHAVING SUM(value) > 0\nORDER BY value DESC",
           "refId": "B"
         }
       ],
@@ -2169,13 +2169,71 @@
           "uid": "teamster-mysql"
         },
         "includeAll": false,
-        "label": "Facet 1",
+        "label": "Facet 1:",
         "name": "facet1",
         "options": [],
         "query": "SELECT 'outcome' AS tag_key UNION ALL SELECT DISTINCT tag_key FROM tags WHERE retired = 0 ORDER BY tag_key",
         "refresh": 2,
         "sort": 1,
         "type": "query"
+      },
+      {
+        "current": {
+          "text": "5",
+          "value": "5"
+        },
+        "includeAll": false,
+        "label": "Count:",
+        "name": "topn1",
+        "options": [
+          {
+            "selected": false,
+            "text": "3",
+            "value": "3"
+          },
+          {
+            "selected": false,
+            "text": "4",
+            "value": "4"
+          },
+          {
+            "selected": true,
+            "text": "5",
+            "value": "5"
+          },
+          {
+            "selected": false,
+            "text": "6",
+            "value": "6"
+          },
+          {
+            "selected": false,
+            "text": "8",
+            "value": "8"
+          },
+          {
+            "selected": false,
+            "text": "10",
+            "value": "10"
+          },
+          {
+            "selected": false,
+            "text": "15",
+            "value": "15"
+          },
+          {
+            "selected": false,
+            "text": "20",
+            "value": "20"
+          },
+          {
+            "selected": false,
+            "text": "All",
+            "value": "9999"
+          }
+        ],
+        "query": "3,4,5,6,8,10,15,20,All : 9999",
+        "type": "custom"
       },
       {
         "current": {
@@ -2187,13 +2245,71 @@
           "uid": "teamster-mysql"
         },
         "includeAll": false,
-        "label": "Facet 2",
+        "label": "Facet 2:",
         "name": "facet2",
         "options": [],
         "query": "SELECT 'outcome' AS tag_key UNION ALL SELECT DISTINCT tag_key FROM tags WHERE retired = 0 ORDER BY tag_key",
         "refresh": 2,
         "sort": 1,
         "type": "query"
+      },
+      {
+        "current": {
+          "text": "5",
+          "value": "5"
+        },
+        "includeAll": false,
+        "label": "Count:",
+        "name": "topn2",
+        "options": [
+          {
+            "selected": false,
+            "text": "3",
+            "value": "3"
+          },
+          {
+            "selected": false,
+            "text": "4",
+            "value": "4"
+          },
+          {
+            "selected": true,
+            "text": "5",
+            "value": "5"
+          },
+          {
+            "selected": false,
+            "text": "6",
+            "value": "6"
+          },
+          {
+            "selected": false,
+            "text": "8",
+            "value": "8"
+          },
+          {
+            "selected": false,
+            "text": "10",
+            "value": "10"
+          },
+          {
+            "selected": false,
+            "text": "15",
+            "value": "15"
+          },
+          {
+            "selected": false,
+            "text": "20",
+            "value": "20"
+          },
+          {
+            "selected": false,
+            "text": "All",
+            "value": "9999"
+          }
+        ],
+        "query": "3,4,5,6,8,10,15,20,All : 9999",
+        "type": "custom"
       },
       {
         "current": {
@@ -2205,13 +2321,71 @@
           "uid": "teamster-mysql"
         },
         "includeAll": false,
-        "label": "Facet 3",
+        "label": "Facet 3:",
         "name": "facet3",
         "options": [],
         "query": "SELECT 'outcome' AS tag_key UNION ALL SELECT DISTINCT tag_key FROM tags WHERE retired = 0 ORDER BY tag_key",
         "refresh": 2,
         "sort": 1,
         "type": "query"
+      },
+      {
+        "current": {
+          "text": "5",
+          "value": "5"
+        },
+        "includeAll": false,
+        "label": "Count:",
+        "name": "topn3",
+        "options": [
+          {
+            "selected": false,
+            "text": "3",
+            "value": "3"
+          },
+          {
+            "selected": false,
+            "text": "4",
+            "value": "4"
+          },
+          {
+            "selected": true,
+            "text": "5",
+            "value": "5"
+          },
+          {
+            "selected": false,
+            "text": "6",
+            "value": "6"
+          },
+          {
+            "selected": false,
+            "text": "8",
+            "value": "8"
+          },
+          {
+            "selected": false,
+            "text": "10",
+            "value": "10"
+          },
+          {
+            "selected": false,
+            "text": "15",
+            "value": "15"
+          },
+          {
+            "selected": false,
+            "text": "20",
+            "value": "20"
+          },
+          {
+            "selected": false,
+            "text": "All",
+            "value": "9999"
+          }
+        ],
+        "query": "3,4,5,6,8,10,15,20,All : 9999",
+        "type": "custom"
       },
       {
         "allValue": "All",

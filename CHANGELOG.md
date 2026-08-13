@@ -3,9 +3,10 @@
 All notable changes to Teamster are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
-## v0.2.6 (2026-08-11)
+## v0.2.6 (2026-08-13)
 
 ### Added
+- Added top-n limiter control to AI Spend Trace dashboard (reduces Sankey diagram complexity)
 - **MCP tool interceptor registry** — externalized `mcp__*` tool enrichment (tag, display text, suppress) from hardcoded Go into a YAML config (`interceptors.yaml`), operator-editable without recompiling
 - `teamster check-config` CLI verb — validates an edited `interceptors.yaml` without restarting hookd
 - Remote subagent health & token usage now visible in fleet view
