@@ -14,8 +14,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"net"
-	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -24,6 +22,7 @@ import (
 	"github.com/bmjdotnet/teamster/internal/store"
 	"github.com/bmjdotnet/teamster/internal/store/mysql"
 	"github.com/bmjdotnet/teamster/internal/store/sqlite"
+	"github.com/bmjdotnet/teamster/internal/store/testguard"
 	"github.com/bmjdotnet/teamster/internal/wms"
 )
 
@@ -39,24 +38,20 @@ type backend struct {
 // remain isolated within a single mysql container.
 var mysqlSchemaCounter int64
 
-// backends enumerates the conformance backends. mysql is skipped when
-// TEAMSTER_TEST_MYSQL_DSN is unset or the container is not reachable.
+// backends enumerates the conformance backends. mysql hard-fails (not a
+// silent skip) when TEAMSTER_TEST_MYSQL_DSN is unset or the container is not
+// reachable — see testguard.RequireDSN — and always refuses a server that
+// isn't a verified disposable test instance.
 func backends() []backend {
 	return []backend{
 		{
 			name: "mysql",
 			skip: func(t *testing.T) (string, bool) {
-				dsn := os.Getenv("TEAMSTER_TEST_MYSQL_DSN")
-				if dsn == "" {
-					return "TEAMSTER_TEST_MYSQL_DSN not set", true
-				}
-				if !mysqlReachable(dsn) {
-					return "mysql container not reachable", true
-				}
+				testguard.RequireDSN(t)
 				return "", false
 			},
 			open: func(t *testing.T) store.Store {
-				dsn := os.Getenv("TEAMSTER_TEST_MYSQL_DSN")
+				dsn := testguard.RequireDSN(t)
 				schema := fmt.Sprintf("teamster_test_%d_%d", time.Now().UnixNano(), atomic.AddInt64(&mysqlSchemaCounter, 1))
 				if err := mysqlEnsureSchema(dsn, schema); err != nil {
 					t.Fatalf("ensure schema %s: %v", schema, err)
@@ -92,24 +87,6 @@ func backends() []backend {
 			},
 		},
 	}
-}
-
-// mysqlReachable does a 200ms TCP dial to the DSN's host:port.
-func mysqlReachable(dsn string) bool {
-	// Strip the mysql:// scheme and credentials so net.Dial sees host:port.
-	rest := strings.TrimPrefix(dsn, "mysql://")
-	if i := strings.Index(rest, "@"); i >= 0 {
-		rest = rest[i+1:]
-	}
-	if i := strings.Index(rest, "/"); i >= 0 {
-		rest = rest[:i]
-	}
-	conn, err := net.DialTimeout("tcp", rest, 200*time.Millisecond)
-	if err != nil {
-		return false
-	}
-	_ = conn.Close()
-	return true
 }
 
 // mysqlEnsureSchema CREATEs the named database in the server pointed to by

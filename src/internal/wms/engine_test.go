@@ -4,8 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"net"
-	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -14,6 +12,7 @@ import (
 	mysqldriver "github.com/go-sql-driver/mysql"
 
 	"github.com/bmjdotnet/teamster/internal/store/mysql"
+	"github.com/bmjdotnet/teamster/internal/store/testguard"
 	"github.com/bmjdotnet/teamster/internal/wms"
 )
 
@@ -21,13 +20,7 @@ var mysqlSchemaCounter int64
 
 func testEngine(t *testing.T) (*wms.EngineImpl, wms.Store) {
 	t.Helper()
-	dsn := os.Getenv("TEAMSTER_TEST_MYSQL_DSN")
-	if dsn == "" {
-		t.Skip("TEAMSTER_TEST_MYSQL_DSN not set")
-	}
-	if !engineMySQLReachable(dsn) {
-		t.Skip("mysql container not reachable")
-	}
+	dsn := testguard.RequireDSN(t)
 	schema := fmt.Sprintf("teamster_engtest_%d_%d", time.Now().UnixNano(), atomic.AddInt64(&mysqlSchemaCounter, 1))
 	if err := engineMySQLEnsureSchema(dsn, schema); err != nil {
 		t.Fatalf("ensure schema: %v", err)
@@ -47,21 +40,6 @@ func testEngine(t *testing.T) (*wms.EngineImpl, wms.Store) {
 	return wms.NewEngine(s, nil), s
 }
 
-func engineMySQLReachable(dsn string) bool {
-	rest := strings.TrimPrefix(dsn, "mysql://")
-	if i := strings.Index(rest, "@"); i >= 0 {
-		rest = rest[i+1:]
-	}
-	if i := strings.Index(rest, "/"); i >= 0 {
-		rest = rest[:i]
-	}
-	conn, err := net.DialTimeout("tcp", rest, 200*time.Millisecond)
-	if err != nil {
-		return false
-	}
-	_ = conn.Close()
-	return true
-}
 
 func engineMySQLEnsureSchema(dsn, schema string) error {
 	serverDSN, err := engineMySQLRebindSchema(dsn, "")

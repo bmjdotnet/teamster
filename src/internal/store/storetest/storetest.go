@@ -16,8 +16,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"net"
-	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -25,22 +23,21 @@ import (
 
 	"github.com/bmjdotnet/teamster/internal/store"
 	"github.com/bmjdotnet/teamster/internal/store/mysql"
+	"github.com/bmjdotnet/teamster/internal/store/testguard"
 )
 
 var schemaCounter int64
 
-// RequireDSN returns TEAMSTER_TEST_MYSQL_DSN, skipping t when it is unset or
-// the server is unreachable.
+// RequireDSN returns a verified-safe TEAMSTER_TEST_MYSQL_DSN. See
+// testguard.RequireDSN for the exact policy: hard failure (not a silent
+// skip) when the DSN is unset or unreachable, an escape hatch
+// (TEAMSTER_TEST_ALLOW_SKIP=1) for that case only, and an unconditional,
+// non-bypassable refusal when the target server isn't a verified disposable
+// test instance (missing sentinel database, or carrying the live WMS
+// schema).
 func RequireDSN(t *testing.T) string {
 	t.Helper()
-	dsn := os.Getenv("TEAMSTER_TEST_MYSQL_DSN")
-	if dsn == "" {
-		t.Skip("TEAMSTER_TEST_MYSQL_DSN not set")
-	}
-	if !reachable(dsn) {
-		t.Skip("mysql not reachable")
-	}
-	return dsn
+	return testguard.RequireDSN(t)
 }
 
 // Open creates an isolated, fully-migrated MySQL-backed store.Store scoped to
@@ -152,22 +149,6 @@ func SeedLedger(t *testing.T, ctx context.Context, s store.Store, rows ...store.
 }
 
 // --- schema plumbing (one implementation, reused by every caller) ---
-
-func reachable(dsn string) bool {
-	rest := strings.TrimPrefix(dsn, "mysql://")
-	if i := strings.Index(rest, "@"); i >= 0 {
-		rest = rest[i+1:]
-	}
-	if i := strings.Index(rest, "/"); i >= 0 {
-		rest = rest[:i]
-	}
-	conn, err := net.DialTimeout("tcp", rest, 200*time.Millisecond)
-	if err != nil {
-		return false
-	}
-	_ = conn.Close()
-	return true
-}
 
 func ensureSchema(dsn, schema string) error {
 	serverDSN, err := rebindSchema(dsn, "")

@@ -4,13 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"net"
 	"net/url"
-	"os"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/bmjdotnet/teamster/internal/store/testguard"
 )
 
 var backfillSchemaCounter int64
@@ -71,16 +70,13 @@ func migrateUpTo(ctx context.Context, db *sql.DB, maxVersion int) error {
 }
 
 // freshBackfillDB opens a throwaway schema migrated only up to maxVersion.
-// Skips when TEAMSTER_TEST_MYSQL_DSN is unset or the host is not reachable.
+// Hard-fails when TEAMSTER_TEST_MYSQL_DSN is unset or the host is not
+// reachable (see testguard.RequireDSN) — this is the chokepoint for every
+// test in this package that needs a real database, including
+// golden_schema_test.go's byte-identical check.
 func freshBackfillDB(t *testing.T, maxVersion int) *sql.DB {
 	t.Helper()
-	dsn := os.Getenv("TEAMSTER_TEST_MYSQL_DSN")
-	if dsn == "" {
-		t.Skip("TEAMSTER_TEST_MYSQL_DSN not set")
-	}
-	if !bfMysqlReachable(dsn) {
-		t.Skip("mysql not reachable")
-	}
+	dsn := testguard.RequireDSN(t)
 	schema := fmt.Sprintf("teamster_bf_%d_%d",
 		time.Now().UnixNano(),
 		atomic.AddInt64(&backfillSchemaCounter, 1))
@@ -115,22 +111,6 @@ func freshBackfillDB(t *testing.T, maxVersion int) *sql.DB {
 		_ = bfDropSchema(dsn, schema)
 	})
 	return db
-}
-
-func bfMysqlReachable(dsn string) bool {
-	rest := strings.TrimPrefix(dsn, "mysql://")
-	if i := strings.Index(rest, "@"); i >= 0 {
-		rest = rest[i+1:]
-	}
-	if i := strings.Index(rest, "/"); i >= 0 {
-		rest = rest[:i]
-	}
-	conn, err := net.DialTimeout("tcp", rest, 200*time.Millisecond)
-	if err != nil {
-		return false
-	}
-	_ = conn.Close()
-	return true
 }
 
 func bfEnsureSchema(dsn, schema string) error {

@@ -4,11 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/bmjdotnet/teamster/internal/store/testguard"
 )
 
 // TestMigrateConcurrent_NoDuplicateColumnRace reproduces the fresh-install startup
@@ -24,16 +25,11 @@ import (
 // caller migrates and the rest block then no-op; all N New() calls must succeed
 // and schema_version must hold each version exactly once (no 1062 dup PK).
 //
-// Skips (like every store test) when TEAMSTER_TEST_MYSQL_DSN is unset. Run with
-// -p 1 so this doesn't contend with other schema-creating suites.
+// Hard-fails (like every store test) when TEAMSTER_TEST_MYSQL_DSN is unset —
+// see testguard.RequireDSN. Run with -p 1 so this doesn't contend with other
+// schema-creating suites.
 func TestMigrateConcurrent_NoDuplicateColumnRace(t *testing.T) {
-	dsn := os.Getenv("TEAMSTER_TEST_MYSQL_DSN")
-	if dsn == "" {
-		t.Skip("TEAMSTER_TEST_MYSQL_DSN not set")
-	}
-	if !bfMysqlReachable(dsn) {
-		t.Skip("mysql not reachable")
-	}
+	dsn := testguard.RequireDSN(t)
 
 	// A fresh, EMPTY schema — no migrations applied yet, so every concurrent
 	// caller sees v14 unapplied and would race without the lock.

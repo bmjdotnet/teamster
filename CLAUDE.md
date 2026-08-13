@@ -293,8 +293,11 @@ error sentinels (dim4), migration lifecycle, and cross-backend attribution
 equivalence (dim6). The `sqlite` entry always runs (in-memory, pure Go, no
 external server); only the `mysql` entry SKIPs (vacuous green) unless
 `TEAMSTER_TEST_MYSQL_DSN` is set. Dedicated test MySQL at `127.0.0.1:13306`
-(root/test). The DSN must point at a server-level connection (no database
-name) for the per-test-schema harness to work.
+(root/test) — deliberately non-durable (see `scripts/test-with-mysql.sh` for
+the tuning and why), so treat it as disposable: a corrupt instance gets
+`docker rm -f`'d and recreated via `scripts/test-with-mysql.sh --persistent`,
+never repaired in place. The DSN must point at a server-level connection (no
+database name) for the per-test-schema harness to work.
 
 Never present a change as done without running `go build ./...`,
 `go test ./...`, and (for anything touching the installer, hook client, or
@@ -494,6 +497,16 @@ Agent-Teams teammates run as separate top-level sessions (see Pitfalls).
   pre-existing base database hides bugs) before trusting a "tests pass"
   result that touches `internal/store`. Dedicated test MySQL instance:
   `127.0.0.1:13306` (root/test).
+- **The test MySQL instance is tuned for speed, not durability — it is
+  disposable by design.** `scripts/test-with-mysql.sh` (both its ephemeral
+  and `--persistent` modes) runs it with fsync/binlog/doublewrite disabled
+  and the datadir on tmpfs, because every test creates a schema and runs the
+  full migration chain, so DDL/fsync cost otherwise dominates wall-clock
+  time. This means the container's data does not survive a restart and a
+  crash mid-write can leave it corrupt — both are fine, since the fix is
+  always `docker rm -f teamster-test-mysql && scripts/test-with-mysql.sh
+  --persistent`, never manual repair. Never point `TEAMSTER_TEST_MYSQL_DSN`
+  at a database whose data needs to survive.
 - **Worktrees need `GOFLAGS=-buildvcs=false`.** A `tm wt` worktree's `.git` is
   a pointer file, not a real repository, so Go's default `-buildvcs=true`
   fails trying to stamp VCS info. Required for any ad-hoc `go build`/`go

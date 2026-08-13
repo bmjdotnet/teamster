@@ -4,8 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"net"
-	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -14,19 +12,14 @@ import (
 	"github.com/bmjdotnet/teamster/internal/agenthealth/gauge"
 	gaugemysql "github.com/bmjdotnet/teamster/internal/agenthealth/gauge/mysql"
 	storemysql "github.com/bmjdotnet/teamster/internal/store/mysql"
+	"github.com/bmjdotnet/teamster/internal/store/testguard"
 )
 
 var testSchemaCounter int64
 
 func openTestStore(t *testing.T) gauge.GaugeStore {
 	t.Helper()
-	dsn := os.Getenv("TEAMSTER_TEST_MYSQL_DSN")
-	if dsn == "" {
-		t.Skip("TEAMSTER_TEST_MYSQL_DSN not set")
-	}
-	if !reachable(dsn) {
-		t.Skip("mysql container not reachable")
-	}
+	dsn := testguard.RequireDSN(t)
 
 	schema := fmt.Sprintf("gauge_test_%d_%d", time.Now().UnixNano(), atomic.AddInt64(&testSchemaCounter, 1))
 
@@ -321,22 +314,6 @@ func TestGaugeSweepOffline(t *testing.T) {
 }
 
 // --- test helpers ---
-
-func reachable(dsn string) bool {
-	rest := strings.TrimPrefix(dsn, "mysql://")
-	if i := strings.Index(rest, "@"); i >= 0 {
-		rest = rest[i+1:]
-	}
-	if i := strings.Index(rest, "/"); i >= 0 {
-		rest = rest[:i]
-	}
-	conn, err := net.DialTimeout("tcp", rest, 200*time.Millisecond)
-	if err != nil {
-		return false
-	}
-	conn.Close()
-	return true
-}
 
 func rawConnect(t *testing.T, dsn, schema string) *sql.DB {
 	t.Helper()

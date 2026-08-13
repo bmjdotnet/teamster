@@ -637,7 +637,12 @@ never a re-implemented, backend-specific test suite. Six dimensions:
 
 The `sqlite` entry always runs (in-memory, no external server). The `mysql`
 entry SKIPs unless `TEAMSTER_TEST_MYSQL_DSN` is set and reachable — see
-Pitfalls in the repo's `CLAUDE.md`. `internal/store/storetest` is a shared
+Pitfalls in the repo's `CLAUDE.md`. The test MySQL instance itself is tuned
+for suite speed rather than durability (fsync/binlog/doublewrite disabled,
+tmpfs datadir — see `scripts/test-with-mysql.sh`) and is treated as fully
+disposable: `docker rm -f` and recreate via `--persistent` rather than repair
+in place; never point `TEAMSTER_TEST_MYSQL_DSN` at data that needs to
+survive. `internal/store/storetest` is a shared
 harness (per-test schema isolation, `RawExecutor`-based fixture helpers) that
 other packages (`internal/rollup`, `internal/server`, `internal/observability`)
 use instead of each hand-rolling MySQL setup/teardown.

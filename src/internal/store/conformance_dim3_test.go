@@ -21,7 +21,6 @@ import (
 	"errors"
 	"fmt"
 	mathrand "math/rand"
-	"os"
 	"sync"
 	"testing"
 	"time"
@@ -257,16 +256,9 @@ func TestConformanceDim3_ConcurrentMigrate(t *testing.T) {
 	}
 }
 
-// requireMySQLDSN mirrors backends()'s own skip condition for a test that
+// requireMySQLDSN mirrors backends()'s own guard condition for a test that
 // needs the raw DSN rather than an opened Store.
 func requireMySQLDSN(t *testing.T) string {
 	t.Helper()
-	dsn := os.Getenv("TEAMSTER_TEST_MYSQL_DSN")
-	if dsn == "" {
-		t.Skip("TEAMSTER_TEST_MYSQL_DSN not set")
-	}
-	if !mysqlReachable(dsn) {
-		t.Skip("mysql container not reachable")
-	}
-	return dsn
+	return storetest.RequireDSN(t)
 }

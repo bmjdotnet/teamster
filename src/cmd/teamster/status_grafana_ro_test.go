@@ -5,11 +5,12 @@ import (
 	"database/sql"
 	"fmt"
 	"net/url"
-	"os"
 	"testing"
 	"time"
 
 	mysqldriver "github.com/go-sql-driver/mysql"
+
+	"github.com/bmjdotnet/teamster/internal/store/testguard"
 )
 
 // TestCredentialProberAuthorizes proves the authoritative status check: it
@@ -18,12 +19,10 @@ import (
 // status` honest — a stale password file no longer reads as "Provisioned".
 //
 // Needs the dedicated test MySQL (TEAMSTER_TEST_MYSQL_DSN, e.g.
-// mysql://root:test@127.0.0.1:13306/); SKIPs otherwise, like the store tests.
+// mysql://root:test@127.0.0.1:13306/); hard-fails otherwise, like the store
+// tests (see testguard.RequireDSN).
 func TestCredentialProberAuthorizes(t *testing.T) {
-	rawDSN := os.Getenv("TEAMSTER_TEST_MYSQL_DSN")
-	if rawDSN == "" {
-		t.Skip("TEAMSTER_TEST_MYSQL_DSN not set")
-	}
+	rawDSN := testguard.RequireDSN(t)
 	u, err := url.Parse(rawDSN)
 	if err != nil {
 		t.Fatalf("parse test DSN: %v", err)
@@ -51,7 +50,7 @@ func TestCredentialProberAuthorizes(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := admin.PingContext(ctx); err != nil {
-		t.Skipf("test mysql not reachable: %v", err)
+		t.Fatalf("ping verified test server %s:%s: %v", host, port, err)
 	}
 
 	schema := fmt.Sprintf("teamster_ro_probe_%d", time.Now().UnixNano())

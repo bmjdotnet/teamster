@@ -19,6 +19,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - Sub-subagent spawn detection & visualization in activity log
 
 ### Changed
+- Hardened test harness to limit parallel store tests that degrade performance
 - Activity log upgraded to realtime fleet view
 
 ## v0.2.5 (2026-07-16)

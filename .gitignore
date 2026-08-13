@@ -48,6 +48,7 @@ __pycache__/
 .playwright-mcp/
 dev-chat/
 png/
+.pscratch/
 
 # Local secrets / settings — never commit. etc/teamster.yaml holds the DB DSN.
 .claude/settings.local.json

@@ -17,16 +17,18 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 
 	mysqlstore "github.com/bmjdotnet/teamster/internal/store/mysql"
+	"github.com/bmjdotnet/teamster/internal/store/storetest"
 	"github.com/bmjdotnet/teamster/internal/wms"
 )
 
 // These tests exercise the steward MCP surface end-to-end through HandleToolCall
 // against a real store: the W1 required flag on defineTag/listTags, the W3
 // dispatch-time warning on createWorkUnit, and the W5 snapshot→rollback roundtrip.
-// They SKIP when TEAMSTER_TEST_MYSQL_DSN is unset, like the store tests. The DSN
-// must be a server-level mysql:// URL with no database (a fresh per-test schema
-// is created so the suite stays isolated). The dedicated test MySQL is at
-// 127.0.0.1:13306 (root/test): TEAMSTER_TEST_MYSQL_DSN='mysql://root:test@127.0.0.1:13306/'.
+// They hard-fail when TEAMSTER_TEST_MYSQL_DSN is unset, like the store tests
+// (see storetest.RequireDSN). The DSN must be a server-level mysql:// URL with
+// no database (a fresh per-test schema is created so the suite stays
+// isolated). The dedicated test MySQL is at 127.0.0.1:13306 (root/test):
+// TEAMSTER_TEST_MYSQL_DSN='mysql://root:test@127.0.0.1:13306/'.
 
 // noopEngine satisfies wms.Engine; the steward tools under test do not depend on
 // status-change side effects.
@@ -70,10 +72,7 @@ func (f *failOnEntityGetEntityTags) GetEntityTags(ctx context.Context, entityTyp
 // at a temp dir so the snapshot tools have a writable var/tag-steward/.
 func newStewardStore(t *testing.T) (*mysqlstore.Store, string) {
 	t.Helper()
-	base := os.Getenv("TEAMSTER_TEST_MYSQL_DSN")
-	if strings.TrimSpace(base) == "" {
-		t.Skip("TEAMSTER_TEST_MYSQL_DSN not set")
-	}
+	base := storetest.RequireDSN(t)
 	// The base DSN must be server-level (no db name) so we can CREATE one.
 	if !strings.HasPrefix(base, "mysql://") {
 		t.Fatalf("TEAMSTER_TEST_MYSQL_DSN must be a mysql:// URL, got %q", base)
