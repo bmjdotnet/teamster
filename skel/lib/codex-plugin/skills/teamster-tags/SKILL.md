@@ -214,6 +214,10 @@ To change an **existing** value's description, use
 `mcp__wms__wms_describeTag(tagKey, tagValue, description)`. This is the one
 tool that refines a description in place. Refine until it classifies cleanly
 — a description sharp enough to classify against is the deliverable.
+Descriptions are capped at **1024 characters** — budget for it while
+drafting a rich rubric (prioritize indicators and NOT-this-value exclusions
+over exhaustive prose) rather than discovering the limit when
+`wms_describeTag` rejects it and truncating under pressure.
 
 Do not reach for the other two tools to refine — they can't:
 
@@ -252,16 +256,53 @@ pass.
 
 ### Stage 5 — Execute with rollback
 
-**Snapshot before you apply.** Rollback is a first-class operation, not an
-afterthought, so every applied batch is captured first.
+**Snapshot before you apply — one logical batch, one call.** Rollback is a
+first-class operation, not an afterthought, so every applied batch is
+captured first. `wms_snapshotEntityTags` writes `<batchID>.jsonl` fresh on
+every **successful** call — a second call reusing the same batch ID
+**replaces** the file, it does not append. That replace is success-gated:
+the tool builds the new snapshot in a private temp file and swaps it in only
+once every line is written without error, so a call that fails partway (a
+store error, a full disk) leaves whatever snapshot was already at that batch
+ID untouched — no corrupt half-written file, no lost prior snapshot. If a
+snapshot call errors, nothing changed at that batch ID; just retry the whole
+call. If a batch spans both outcomes and workunits, snapshot them **together
+in one call**, not as two calls sharing a batch ID — a *successful* second
+call still silently erases the first's rollback data, both calls report
+success, and you find out only when a rollback comes up short.
+
+That retry safety holds **only before you've applied anything.** Do not
+re-run `wms_snapshotEntityTags` under the same batch ID once an apply is
+already underway. A partial apply — say `wms_tagEntity` fails on entity 60 of
+149, e.g. an over-length description — leaves the first 59 entities already
+carrying the steward's new value with source `steward`. Re-snapshot now and
+that steward-applied value becomes the recorded "prior" state: `wms_rollbackTags`
+will find each steward-sourced binding, delete it, see a non-empty
+`old_value`, and restore it right back to the value it just deleted —
+reporting `reverted: 59` while having changed nothing. If an apply fails
+partway through a batch, do not restart Stage 5 from the snapshot step; work
+from the snapshot you already have.
+
+This is different from splitting a mixed batch across two **different** batch
+IDs (e.g. `...-outcomes` and `...-workunits`) — that pattern remains valid.
+Each file rolls back independently via its own batchID, so an existing
+`-out`/`-wu` pair on disk from before this fix is not corrupt; roll each one
+back separately if you ever need to. The bug was reusing one batch ID across
+two calls, not using two batch IDs.
 
 Choose a batch id in the format `steward-<key>-<YYYYMMDD-HHMMSS>` (e.g.
-`steward-component-20260610-2230`). Then snapshot the current state of the
-entities you're about to touch:
+`steward-component-20260610-2230`). Then snapshot the current state of every
+entity you're about to touch, regardless of type, in that one call:
 
 ```
-mcp__wms__wms_snapshotEntityTags(entityType, entityIDs[], tagKey, batchID)
+mcp__wms__wms_snapshotEntityTags(entities=[{entityType, entityID}, ...], tagKey, batchID)
 ```
+
+The `entities` array is the recommended shape for any batch — it's what lets
+outcomes and workunits go in together. A legacy single-type form
+(`entityType` + `entityIDs[]`) still works and is fine when a batch is
+entirely one entity type; send one form or the other, never both in the same
+call.
 
 It writes one JSONL line per entity to
 `$TEAMSTER_BASEDIR/var/tag-steward/<batch-id>.jsonl` and returns the path.
@@ -274,10 +315,30 @@ applied, so it never carries the new value:
 
 `old_value: ""` means the tag didn't exist before; `old_source` is whatever
 the prior tag's source was (empty when there was no prior tag). That stored
-shape is exactly what `wms_rollbackTags` reads back to restore. Apply the
-tags with `mcp__wms__wms_tagEntity` using **source `steward`** — that is what
-makes them distinguishable from `manual`, `classifier`, and `inherited`, and
-it is what rollback keys on.
+shape is exactly what `wms_rollbackTags` reads back to restore.
+
+**Verify before you apply.** `wc -l` the snapshot file and compare the count
+to the total number of entities you meant to include in this logical batch —
+not just what you passed to the most recent call, but the sum across every
+`snapshotEntityTags` call you made under this batch ID. Under the one-call
+rule above that's the same number either way, but the check is what catches
+you if you slip back into the old two-call habit: the P0 incident's snapshot
+also "matched" its own inputs at every step, 128 lines then 21, and still
+lost 128 rows.
+
+A matching total line count does not confirm every row is *correct*, though.
+The `entities` form scatters an independently-typable `entityType` across
+each row, and a mistyped one (`outcome` where you meant `workunit`) produces
+a normal-looking `old_value:""` line — the count still balances, and
+rollback would silently skip that entity later. For a mixed batch, also
+spot-check the per-type split, e.g. `grep -c '"entity_type":"outcome"'
+<path>` against how many outcomes you expected. Run both checks every time,
+not just when something feels off, and do not proceed to apply on any
+mismatch.
+
+Apply the tags with `mcp__wms__wms_tagEntity` using **source `steward`** —
+that is what makes them distinguishable from `manual`, `classifier`, and
+`inherited`, and it is what rollback keys on.
 
 ### Stage 6 — Persist
 

@@ -26,7 +26,13 @@
 #   wms.snapshotEntityTags   doc used {{f "entityID"}} (singular) — the tool's
 #                            actual field is `entityIDs` (plural array, not
 #                            interpolable as a single string). Fixed to show
-#                            entityType + tagKey instead.
+#                            entityType + tagKey instead. SUPERSEDED
+#                            (wu-steward-multitype-snapshot, 2026-08-12): the
+#                            tool grew a mixed-type `entities` form that omits
+#                            `entityType` entirely, which fieldAccessor renders
+#                            as "" — blanking the subject on the recommended
+#                            call shape. Now shows tagKey + batchID, which both
+#                            forms always carry. See the entry below.
 #   wms.listRelated          doc used {{f "entityType"}}/{{f "entityID"}} —
 #                            the tool has NEITHER field (query, tagFilters,
 #                            includeTerminal, staleHours only). Fixed to show
@@ -226,11 +232,17 @@ interceptors:
         tag: TASK
         display: 'Rolling back tag batch __{{f "batchID"}}__'
 
-      # CORRECTED (field-verification): the tool's ID field is `entityIDs`
-      # (plural array), not `entityID`. Substituted entityType + tagKey.
+      # CORRECTED (field-verification, then re-corrected wu-steward-multitype-
+      # snapshot 2026-08-12): the tool's ID field is `entityIDs` (plural
+      # array), not `entityID` — entityType + tagKey was substituted, but the
+      # tool's newer `entities` form (mixed outcome/workunit in one call, the
+      # form the tags skill now recommends) omits entityType at the top level
+      # entirely, so that display went blank ("Snapshotting tags for : foo").
+      # tagKey + batchID are the only fields both the legacy and `entities`
+      # forms always carry.
       - match: { method: "snapshotEntityTags" }
         tag: TASK
-        display: 'Snapshotting tags for __{{f "entityType"}}__: __{{f "tagKey"}}__'
+        display: 'Snapshotting tags for __{{f "tagKey"}}__ (batch __{{f "batchID"}}__)'
 
       - match: { method: "renameOutcome" }
         tag: TASK

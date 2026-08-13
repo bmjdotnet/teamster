@@ -13,6 +13,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - Sweep skill prescribes `work-type:processor` for rote data-processing runs
 
 ### Fixed
+- Hardened WMS tag handling
 - `registerPeer` auto-populates `session_id` from MCP call metadata when the caller omits it
 - Fleet-view dashboard column alignment
 - Sub-subagent spawn detection & visualization in activity log

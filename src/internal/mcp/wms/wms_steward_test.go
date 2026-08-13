@@ -35,6 +35,35 @@ type noopEngine struct{}
 func (noopEngine) OnStatusChange(context.Context, wms.StatusChange) error { return nil }
 func (noopEngine) EvaluateUnblock(context.Context, string, string) error  { return nil }
 
+// failOnEntityGetEntityTags wraps a real wms.Store and fails GetEntityTags for
+// exactly one entityID (whichever entityType it's called with), passing every
+// other call and every other method straight through via interface embedding.
+// Used to simulate a mid-batch snapshot failure (Bug 1 F4: the read loop can
+// fail partway through a batch) without reimplementing wms.Store's full
+// Reader+Writer surface.
+//
+// Deliberately keyed on entityID rather than a call ordinal ("fail on the Nth
+// call"): snapshotEntityTags today makes exactly one GetEntityTags call per
+// ref with no pre-flight read, so a positional injector and an entityID-keyed
+// one currently pick the same target. But a positional injector is a latent
+// trap — if the handler ever grows a pre-flight read (a duplicate-detection
+// pass, a validation lookup, anything), the call ordinal silently shifts to a
+// different entity while the test keeps passing, no longer testing a mid-
+// batch failure at all. That failure mode is invisible: green build, wrong
+// assertion. Keying on the entityID itself is immune to call-count changes
+// elsewhere in the function.
+type failOnEntityGetEntityTags struct {
+	wms.Store
+	failEntityID string
+}
+
+func (f *failOnEntityGetEntityTags) GetEntityTags(ctx context.Context, entityType, entityID string) ([]wms.EntityTag, error) {
+	if f.failEntityID != "" && entityID == f.failEntityID {
+		return nil, fmt.Errorf("injected failure on GetEntityTags for %s/%s", entityType, entityID)
+	}
+	return f.Store.GetEntityTags(ctx, entityType, entityID)
+}
+
 // newStewardStore creates a fresh per-test schema on the server named by
 // TEAMSTER_TEST_MYSQL_DSN, opens a migrated Store against it, seeds one outcome,
 // and returns the store plus the seeded outcome id. It also points TEAMSTER_BASEDIR
@@ -505,6 +534,310 @@ func TestSnapshotRollbackRoundtrip(t *testing.T) {
 	}
 }
 
+// TestStewardRollbackRestoresMultiCardinality covers F6: a multi-cardinality
+// key (work-type) can hold several values at once, and rollback must restore
+// ALL of them, not just the first. snapshotEntityTags now collects every
+// current binding into OldValues (see stewardSnapshotLine's doc comment) —
+// asserted here directly against the on-disk snapshot, not just the rollback
+// outcome — and rollbackTags restores every one of them via oldBindings().
+func TestStewardRollbackRestoresMultiCardinality(t *testing.T) {
+	store, oid := newStewardStore(t)
+	ctx := context.Background()
+	const wuID = "wu-multi"
+	if err := store.CreateWorkUnit(ctx, &wms.WorkUnit{ID: wuID, OutcomeID: oid, Title: wuID, Status: wms.StatusPending}); err != nil {
+		t.Fatalf("create wu: %v", err)
+	}
+	const key = "work-type"
+	// Two manual values bound at once — work-type is multi-cardinality.
+	if err := store.TagEntity(ctx, wms.EntityWorkUnit, wuID, key, "bug", "manual", ""); err != nil {
+		t.Fatalf("seed bug: %v", err)
+	}
+	if err := store.TagEntity(ctx, wms.EntityWorkUnit, wuID, key, "infra", "manual", ""); err != nil {
+		t.Fatalf("seed infra: %v", err)
+	}
+
+	const batchID = "steward-work-type-multi-20260812-000000"
+	r, ce := call(t, store, ToolSnapshotEntityTags, map[string]interface{}{
+		"entityType": wms.EntityWorkUnit, "entityIDs": []interface{}{wuID},
+		"tagKey": key, "batchID": batchID,
+	})
+	if ce != nil {
+		t.Fatalf("snapshot: %v", ce)
+	}
+	var snap struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal([]byte(resultText(t, r)), &snap); err != nil {
+		t.Fatalf("decode snapshot path: %v", err)
+	}
+
+	// The snapshot itself must have captured BOTH prior bindings, not just one.
+	f, err := os.Open(snap.Path)
+	if err != nil {
+		t.Fatalf("open snapshot: %v", err)
+	}
+	defer f.Close() //nolint:errcheck
+	sc := bufio.NewScanner(f)
+	if !sc.Scan() {
+		t.Fatal("snapshot has no lines")
+	}
+	var line struct {
+		OldValue  string `json:"old_value"`
+		OldValues []struct {
+			Value  string `json:"value"`
+			Source string `json:"source"`
+		} `json:"old_values"`
+	}
+	if err := json.Unmarshal(sc.Bytes(), &line); err != nil {
+		t.Fatalf("decode snapshot line: %v", err)
+	}
+	if len(line.OldValues) != 2 {
+		t.Fatalf("snapshot old_values = %v, want 2 entries (bug, infra)", line.OldValues)
+	}
+	gotValues := []string{line.OldValues[0].Value, line.OldValues[1].Value}
+	sort.Strings(gotValues)
+	if !reflect.DeepEqual(gotValues, []string{"bug", "infra"}) {
+		t.Errorf("snapshot old_values = %v, want [bug infra]", gotValues)
+	}
+	for _, ob := range line.OldValues {
+		if ob.Source != "manual" {
+			t.Errorf("old_values[%s].source = %q, want manual", ob.Value, ob.Source)
+		}
+	}
+	// Scalar old_value must be kept in sync with old_values[0], for a binary
+	// that doesn't know about old_values yet to still restore something
+	// correct (if partial) from a snapshot this binary wrote.
+	if line.OldValue == "" || line.OldValue != line.OldValues[0].Value {
+		t.Errorf("scalar old_value = %q, want it to match old_values[0] = %q", line.OldValue, line.OldValues[0].Value)
+	}
+
+	// Steward retags: delete both prior values, apply one steward value.
+	if err := store.DeleteEntityTag(ctx, wms.EntityWorkUnit, wuID, key, "bug"); err != nil {
+		t.Fatalf("delete bug: %v", err)
+	}
+	if err := store.DeleteEntityTag(ctx, wms.EntityWorkUnit, wuID, key, "infra"); err != nil {
+		t.Fatalf("delete infra: %v", err)
+	}
+	if err := store.TagEntity(ctx, wms.EntityWorkUnit, wuID, key, "refactor", "steward", ""); err != nil {
+		t.Fatalf("steward tag: %v", err)
+	}
+
+	r, ce = call(t, store, ToolRollbackTags, map[string]interface{}{"batchID": batchID})
+	if ce != nil {
+		t.Fatalf("rollback: %v", ce)
+	}
+	var counts struct {
+		Reverted int `json:"reverted"`
+		Skipped  int `json:"skipped"`
+		NotFound int `json:"notFound"`
+		Failed   int `json:"failed"`
+	}
+	if err := json.Unmarshal([]byte(resultText(t, r)), &counts); err != nil {
+		t.Fatalf("decode rollback counts: %v", err)
+	}
+	if counts.Reverted != 1 || counts.Skipped != 0 || counts.NotFound != 0 || counts.Failed != 0 {
+		t.Errorf("rollback counts = %+v, want {reverted:1 skipped:0 notFound:0 failed:0}", counts)
+	}
+
+	// BOTH prior values must be back, and the steward's value gone.
+	got := boundValues(t, store, wuID, key)
+	if !reflect.DeepEqual(got, []string{"bug", "infra"}) {
+		t.Errorf("%s after rollback = %v, want [bug infra] (both prior values restored)", key, got)
+	}
+}
+
+// TestStewardRollbackNotFoundVsSkipped covers the notFound/skipped split:
+// GetEntityTags alone can't tell "a human overrode the steward's tag since
+// the snapshot" (benign — skip) apart from "the entity itself no longer
+// exists" (worth surfacing distinctly), since it's a bare WHERE clause with
+// no existence check. rollbackTags now calls entityExists to tell them apart.
+func TestStewardRollbackNotFoundVsSkipped(t *testing.T) {
+	store, oid := newStewardStore(t)
+	ctx := context.Background()
+	const wuOverridden = "wu-notfound-overridden"
+	const wuGone = "wu-notfound-gone"
+	if err := store.CreateWorkUnit(ctx, &wms.WorkUnit{ID: wuOverridden, OutcomeID: oid, Title: wuOverridden, Status: wms.StatusPending}); err != nil {
+		t.Fatalf("create wu: %v", err)
+	}
+	// wuGone is deliberately never created — the snapshot still records a
+	// line for it (GetEntityTags succeeds with zero rows against any
+	// nonexistent entity, since it's a bare WHERE clause — see entityExists's
+	// doc comment), exactly reproducing a batch that named an entity that
+	// disappeared, or was mistyped, before the snapshot was even taken.
+	const key = "work-type"
+
+	const batchID = "steward-notfound-vs-skipped-20260812-000000"
+	_, ce := call(t, store, ToolSnapshotEntityTags, map[string]interface{}{
+		"entityType": wms.EntityWorkUnit, "entityIDs": []interface{}{wuOverridden, wuGone},
+		"tagKey": key, "batchID": batchID,
+	})
+	if ce != nil {
+		t.Fatalf("snapshot: %v", ce)
+	}
+
+	// Steward tags the real entity, then a human overrides it — no steward
+	// binding remains, but the entity is still very much there.
+	if err := store.TagEntity(ctx, wms.EntityWorkUnit, wuOverridden, key, "bug", "steward", ""); err != nil {
+		t.Fatalf("steward tag: %v", err)
+	}
+	if err := store.DeleteEntityTag(ctx, wms.EntityWorkUnit, wuOverridden, key, "bug"); err != nil {
+		t.Fatalf("human delete steward tag: %v", err)
+	}
+	if err := store.TagEntity(ctx, wms.EntityWorkUnit, wuOverridden, key, "feature", "manual", ""); err != nil {
+		t.Fatalf("human override: %v", err)
+	}
+
+	r, ce := call(t, store, ToolRollbackTags, map[string]interface{}{"batchID": batchID})
+	if ce != nil {
+		t.Fatalf("rollback: %v", ce)
+	}
+	var counts struct {
+		Reverted int `json:"reverted"`
+		Skipped  int `json:"skipped"`
+		NotFound int `json:"notFound"`
+		Failed   int `json:"failed"`
+	}
+	if err := json.Unmarshal([]byte(resultText(t, r)), &counts); err != nil {
+		t.Fatalf("decode rollback counts: %v", err)
+	}
+	if counts.Reverted != 0 || counts.Skipped != 1 || counts.NotFound != 1 || counts.Failed != 0 {
+		t.Errorf("rollback counts = %+v, want {reverted:0 skipped:1 notFound:1 failed:0}", counts)
+	}
+	// The human's override on the real entity must survive untouched.
+	if v := boundValue(t, store, wuOverridden, key); v != "feature" {
+		t.Errorf("%s %s=%q after rollback, want feature (human override preserved)", wuOverridden, key, v)
+	}
+}
+
+// TestStewardRollbackStructuralValidation covers F9's per-line check: a line
+// that doesn't have the shape of a genuine steward snapshot record (missing
+// or malformed entity_type/entity_id/tag_key) counts as failed — never
+// skipped, which would misleadingly suggest "nothing to do here" rather than
+// "this line is suspect" — while the OTHER, genuinely valid lines in the same
+// batch still process normally.
+func TestStewardRollbackStructuralValidation(t *testing.T) {
+	store, oid := newStewardStore(t)
+	ctx := context.Background()
+	const wuID = "wu-structural"
+	if err := store.CreateWorkUnit(ctx, &wms.WorkUnit{ID: wuID, OutcomeID: oid, Title: wuID, Status: wms.StatusPending}); err != nil {
+		t.Fatalf("create wu: %v", err)
+	}
+	const key = "work-type"
+
+	const batchID = "steward-structural-20260812-000000"
+	r, ce := call(t, store, ToolSnapshotEntityTags, map[string]interface{}{
+		"entityType": wms.EntityWorkUnit, "entityIDs": []interface{}{wuID},
+		"tagKey": key, "batchID": batchID,
+	})
+	if ce != nil {
+		t.Fatalf("snapshot: %v", ce)
+	}
+	var snap struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal([]byte(resultText(t, r)), &snap); err != nil {
+		t.Fatalf("decode snapshot path: %v", err)
+	}
+
+	// Append a structurally-invalid line — missing entity_type entirely, the
+	// shape a hand-corrupted line would take — alongside the one genuine
+	// line the tool itself wrote.
+	appendLine(t, snap.Path, `{"entity_id":"wu-structural","tag_key":"work-type","batch":"`+batchID+`"}`)
+
+	if err := store.TagEntity(ctx, wms.EntityWorkUnit, wuID, key, "bug", "steward", ""); err != nil {
+		t.Fatalf("steward tag: %v", err)
+	}
+
+	r, ce = call(t, store, ToolRollbackTags, map[string]interface{}{"batchID": batchID})
+	if ce != nil {
+		t.Fatalf("rollback: %v", ce)
+	}
+	var counts struct {
+		Reverted int `json:"reverted"`
+		Skipped  int `json:"skipped"`
+		NotFound int `json:"notFound"`
+		Failed   int `json:"failed"`
+	}
+	if err := json.Unmarshal([]byte(resultText(t, r)), &counts); err != nil {
+		t.Fatalf("decode rollback counts: %v", err)
+	}
+	// The genuine line still reverts; the malformed one counts as failed, not
+	// skipped (skipped would misleadingly read as "nothing to do here").
+	if counts.Reverted != 1 || counts.Skipped != 0 || counts.NotFound != 0 || counts.Failed != 1 {
+		t.Errorf("rollback counts = %+v, want {reverted:1 skipped:0 notFound:0 failed:1}", counts)
+	}
+	if v := boundValue(t, store, wuID, key); v != "" {
+		t.Errorf("%s %s=%q after rollback, want absent (key was absent before the steward touched it)", wuID, key, v)
+	}
+}
+
+// TestStewardRollbackRefusesNonSnapshotFile covers F9's whole-file refusal:
+// when NONE of a file's lines look like a genuine steward snapshot record,
+// rollbackTags refuses the whole batch with an error rather than reporting a
+// vacuous {reverted:0, skipped:0, ...} success — exactly the shape a caller
+// who pointed rollbackTags at the wrong file (e.g. a classifier plan file)
+// would otherwise see and mistake for "nothing needed reverting."
+func TestStewardRollbackRefusesNonSnapshotFile(t *testing.T) {
+	store, oid := newStewardStore(t)
+	ctx := context.Background()
+	const wuID = "wu-wrongfile"
+	if err := store.CreateWorkUnit(ctx, &wms.WorkUnit{ID: wuID, OutcomeID: oid, Title: wuID, Status: wms.StatusPending}); err != nil {
+		t.Fatalf("create wu: %v", err)
+	}
+
+	// A throwaway successful snapshot both learns the tag-steward dir and
+	// creates it, without hardcoding tagStewardDir's path-resolution rules.
+	r, ce := call(t, store, ToolSnapshotEntityTags, map[string]interface{}{
+		"entityType": wms.EntityWorkUnit, "entityIDs": []interface{}{wuID},
+		"tagKey": "component", "batchID": "steward-wrongfile-probe",
+	})
+	if ce != nil {
+		t.Fatalf("probe snapshot: %v", ce)
+	}
+	var probe struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal([]byte(resultText(t, r)), &probe); err != nil {
+		t.Fatalf("decode probe path: %v", err)
+	}
+	dir := filepath.Dir(probe.Path)
+
+	// The exact shape of a real classify/work-type plan file, NOT a steward
+	// snapshot — no entity_type/entity_id/tag_key keys at all, so every line
+	// decodes to an all-zero-value stewardSnapshotLine.
+	const batchID = "steward-wrongfile-20260812-000000"
+	wrongFile := filepath.Join(dir, batchID+".jsonl")
+	content := `{"id":"wu-x","work_type":"bug","confidence":"high","source":"classifier"}` + "\n" +
+		`{"id":"wu-y","work_type":"feature","confidence":"medium","source":"classifier"}` + "\n"
+	if err := os.WriteFile(wrongFile, []byte(content), 0o644); err != nil {
+		t.Fatalf("write wrong-shaped file: %v", err)
+	}
+
+	_, ce = call(t, store, ToolRollbackTags, map[string]interface{}{"batchID": batchID})
+	if ce == nil {
+		t.Fatal("rollback against a non-snapshot file succeeded; want a refusal")
+	}
+	if !strings.Contains(ce.Message, "2") {
+		t.Errorf("refusal message %q does not name the line count", ce.Message)
+	}
+	if !strings.Contains(ce.Message, "refusing") {
+		t.Errorf("refusal message %q does not read as a refusal", ce.Message)
+	}
+}
+
+// appendLine appends a raw line to an existing file, failing t on error.
+func appendLine(t *testing.T, path, line string) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("open %s for append: %v", path, err)
+	}
+	defer f.Close() //nolint:errcheck
+	if _, err := f.WriteString(line + "\n"); err != nil {
+		t.Fatalf("append to %s: %v", path, err)
+	}
+}
+
 // TestSnapshotDirResolution covers tagStewardDir's env precedence as seen
 // through the snapshot tool: TEAMSTER_DATA_DIR wins (the installed wms-mcp only
 // reliably has DATA_DIR), TEAMSTER_BASEDIR/var is the fallback, and with neither
@@ -634,6 +967,827 @@ func boundValues(t *testing.T, store wms.Store, id, key string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// boundEntityValue is boundValue generalized to any entity type — needed for
+// the mixed outcome+workunit snapshot/rollback tests below, where boundValue's
+// hardcoded EntityWorkUnit doesn't fit.
+func boundEntityValue(t *testing.T, store wms.Store, entityType, id, key string) string {
+	t.Helper()
+	tags, err := store.GetEntityTags(context.Background(), entityType, id)
+	if err != nil {
+		t.Fatalf("GetEntityTags %s/%s: %v", entityType, id, err)
+	}
+	for _, et := range tags {
+		if et.TagKey == key {
+			return et.TagValue
+		}
+	}
+	return ""
+}
+
+// TestStewardSnapshotEntitiesMixedTypes covers Bug 1 (P0) positively: a single
+// snapshotEntityTags call spanning BOTH entity types via the new `entities`
+// param ([]{entityType, entityID}) writes ONE snapshot file with a line for
+// every entity, each carrying its own entity_type and the correct pre-change
+// old_value/old_source — including the absent-key case, which must record an
+// empty old_value so rollback knows to DELETE rather than restore.
+//
+// Before the fix this required two calls (one per entityType) sharing a
+// batchID, and the second call silently truncated the first's rows via
+// os.Create — see tag-steward-bugreport.md Bug 1 (128 outcomes + 21 work
+// units under one batch produced a 21-line file).
+func TestStewardSnapshotEntitiesMixedTypes(t *testing.T) {
+	store, oid := newStewardStore(t)
+	ctx := context.Background()
+
+	const oid2 = "out-steward-mixed-2"
+	if err := store.CreateOutcome(ctx, &wms.Outcome{ID: oid2, Title: "second outcome", Status: wms.StatusPending}); err != nil {
+		t.Fatalf("create %s: %v", oid2, err)
+	}
+	if err := store.CreateWorkUnit(ctx, &wms.WorkUnit{ID: "wu-mixed", OutcomeID: oid, Title: "mixed", Status: wms.StatusPending}); err != nil {
+		t.Fatalf("create wu-mixed: %v", err)
+	}
+	const key = "component"
+	// oid carries a prior manual value the steward will overwrite; oid2 and
+	// wu-mixed start with no binding for the key (the absent-key case), one of
+	// each entity type.
+	if err := store.TagEntity(ctx, wms.EntityOutcome, oid, key, "ctop", "manual", ""); err != nil {
+		t.Fatalf("seed manual tag on %s: %v", oid, err)
+	}
+
+	const batchID = "steward-component-mixed-20260812-000000"
+	r, ce := call(t, store, ToolSnapshotEntityTags, map[string]interface{}{
+		"entities": []interface{}{
+			map[string]interface{}{"entityType": wms.EntityOutcome, "entityID": oid},
+			map[string]interface{}{"entityType": wms.EntityOutcome, "entityID": oid2},
+			map[string]interface{}{"entityType": wms.EntityWorkUnit, "entityID": "wu-mixed"},
+		},
+		"tagKey": key, "batchID": batchID,
+	})
+	if ce != nil {
+		t.Fatalf("snapshot (entities form): %v", ce)
+	}
+	var snap struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal([]byte(resultText(t, r)), &snap); err != nil {
+		t.Fatalf("decode snapshot path: %v", err)
+	}
+	if !strings.HasSuffix(snap.Path, batchID+".jsonl") {
+		t.Errorf("snapshot path %q does not end in %s.jsonl", snap.Path, batchID)
+	}
+
+	type snapLine struct {
+		EntityType string
+		OldValue   string
+		OldSource  string
+	}
+	got := map[string]snapLine{}
+	f, err := os.Open(snap.Path)
+	if err != nil {
+		t.Fatalf("open snapshot: %v", err)
+	}
+	defer f.Close() //nolint:errcheck
+	sc := bufio.NewScanner(f)
+	n := 0
+	for sc.Scan() {
+		if strings.TrimSpace(sc.Text()) == "" {
+			continue
+		}
+		n++
+		var line struct {
+			EntityType string `json:"entity_type"`
+			EntityID   string `json:"entity_id"`
+			OldValue   string `json:"old_value"`
+			OldSource  string `json:"old_source"`
+			Batch      string `json:"batch"`
+		}
+		if err := json.Unmarshal(sc.Bytes(), &line); err != nil {
+			t.Fatalf("decode snapshot line: %v", err)
+		}
+		if line.Batch != batchID {
+			t.Errorf("snapshot line batch %q != %q", line.Batch, batchID)
+		}
+		got[line.EntityID] = snapLine{line.EntityType, line.OldValue, line.OldSource}
+	}
+	// This is the exact shape of the P0 bug: fewer lines than entities means an
+	// earlier entity type's rows were silently truncated away.
+	if n != 3 {
+		t.Fatalf("snapshot has %d lines, want 3 (one per entity across both types — Bug 1 regression if fewer)", n)
+	}
+	if l := got[oid]; l.EntityType != wms.EntityOutcome || l.OldValue != "ctop" || l.OldSource != "manual" {
+		t.Errorf("%s snapshot line = %+v, want {%s ctop manual}", oid, l, wms.EntityOutcome)
+	}
+	if l := got[oid2]; l.EntityType != wms.EntityOutcome || l.OldValue != "" {
+		t.Errorf("%s snapshot line = %+v, want {%s \"\" _} (absent key)", oid2, l, wms.EntityOutcome)
+	}
+	if l := got["wu-mixed"]; l.EntityType != wms.EntityWorkUnit || l.OldValue != "" {
+		t.Errorf("wu-mixed snapshot line = %+v, want {%s \"\" _} (absent key)", l, wms.EntityWorkUnit)
+	}
+}
+
+// TestStewardRollbackRoundtripMixedTypes proves wms_rollbackTags needs NO
+// change to handle a mixed-type snapshot, per the pinned contract: each
+// stewardSnapshotLine already carries its own entity_type, and rollbackTags
+// already reads line.EntityType per line (not a single entityType for the
+// whole batch) — see rollbackTags in wms.go. So a single `entities` snapshot
+// spanning outcomes AND work units rolls back correctly in one batch: deleted
+// where the key was absent before, restored to the prior value+source where
+// it was not, and skipped where a human overrode the steward's value after
+// the snapshot.
+func TestStewardRollbackRoundtripMixedTypes(t *testing.T) {
+	store, oid := newStewardStore(t)
+	ctx := context.Background()
+
+	const oid2 = "out-steward-rb-2"
+	if err := store.CreateOutcome(ctx, &wms.Outcome{ID: oid2, Title: "second outcome", Status: wms.StatusPending}); err != nil {
+		t.Fatalf("create %s: %v", oid2, err)
+	}
+	for _, id := range []string{"wu-rb-absent", "wu-rb-overridden"} {
+		if err := store.CreateWorkUnit(ctx, &wms.WorkUnit{ID: id, OutcomeID: oid, Title: id, Status: wms.StatusPending}); err != nil {
+			t.Fatalf("create %s: %v", id, err)
+		}
+	}
+	const key = "component"
+	// oid: prior manual value the steward will overwrite (outcome type).
+	if err := store.TagEntity(ctx, wms.EntityOutcome, oid, key, "ctop", "manual", ""); err != nil {
+		t.Fatalf("seed manual tag on %s: %v", oid, err)
+	}
+	// oid2 and wu-rb-absent start with no binding (absent case, one per type).
+	// wu-rb-overridden also starts absent, but a human overrides the steward's
+	// value after the snapshot is taken.
+
+	const batchID = "steward-component-rb-mixed-20260812-000000"
+	_, ce := call(t, store, ToolSnapshotEntityTags, map[string]interface{}{
+		"entities": []interface{}{
+			map[string]interface{}{"entityType": wms.EntityOutcome, "entityID": oid},
+			map[string]interface{}{"entityType": wms.EntityOutcome, "entityID": oid2},
+			map[string]interface{}{"entityType": wms.EntityWorkUnit, "entityID": "wu-rb-absent"},
+			map[string]interface{}{"entityType": wms.EntityWorkUnit, "entityID": "wu-rb-overridden"},
+		},
+		"tagKey": key, "batchID": batchID,
+	})
+	if ce != nil {
+		t.Fatalf("snapshot: %v", ce)
+	}
+
+	// Apply steward tags to all four, across both types.
+	for _, e := range []struct{ typ, id string }{
+		{wms.EntityOutcome, oid}, {wms.EntityOutcome, oid2},
+		{wms.EntityWorkUnit, "wu-rb-absent"}, {wms.EntityWorkUnit, "wu-rb-overridden"},
+	} {
+		if err := store.TagEntity(ctx, e.typ, e.id, key, "steward-value", "steward", ""); err != nil {
+			t.Fatalf("steward tag %s/%s: %v", e.typ, e.id, err)
+		}
+	}
+	// A human overrides wu-rb-overridden after the steward ran: delete the
+	// steward value and set their own (mirrors TestSnapshotRollbackRoundtrip's
+	// override pattern). With no steward binding left, rollback must skip this
+	// entity rather than clobber the human's choice.
+	if err := store.DeleteEntityTag(ctx, wms.EntityWorkUnit, "wu-rb-overridden", key, "steward-value"); err != nil {
+		t.Fatalf("human delete steward tag: %v", err)
+	}
+	if err := store.TagEntity(ctx, wms.EntityWorkUnit, "wu-rb-overridden", key, "human-value", "manual", ""); err != nil {
+		t.Fatalf("human override: %v", err)
+	}
+
+	r, ce := call(t, store, ToolRollbackTags, map[string]interface{}{"batchID": batchID})
+	if ce != nil {
+		t.Fatalf("rollback: %v", ce)
+	}
+	var counts struct {
+		Reverted int `json:"reverted"`
+		Skipped  int `json:"skipped"`
+		Failed   int `json:"failed"`
+	}
+	if err := json.Unmarshal([]byte(resultText(t, r)), &counts); err != nil {
+		t.Fatalf("decode rollback counts: %v", err)
+	}
+	if counts.Reverted != 3 || counts.Skipped != 1 || counts.Failed != 0 {
+		t.Errorf("rollback counts = {reverted:%d skipped:%d failed:%d}, want {3 1 0}",
+			counts.Reverted, counts.Skipped, counts.Failed)
+	}
+
+	// oid: restored to the prior manual value (outcome type).
+	if v := boundEntityValue(t, store, wms.EntityOutcome, oid, key); v != "ctop" {
+		t.Errorf("%s %s=%q after rollback, want ctop (prior manual value)", oid, key, v)
+	}
+	// oid2: steward tag deleted → key now absent (outcome type).
+	if v := boundEntityValue(t, store, wms.EntityOutcome, oid2, key); v != "" {
+		t.Errorf("%s %s=%q after rollback, want absent", oid2, key, v)
+	}
+	// wu-rb-absent: steward tag deleted → key now absent (workunit type).
+	if v := boundValue(t, store, "wu-rb-absent", key); v != "" {
+		t.Errorf("wu-rb-absent %s=%q after rollback, want absent", key, v)
+	}
+	// wu-rb-overridden: human override preserved, not clobbered (workunit type).
+	if v := boundValue(t, store, "wu-rb-overridden", key); v != "human-value" {
+		t.Errorf("wu-rb-overridden %s=%q after rollback, want human-value (human override preserved)", key, v)
+	}
+}
+
+// TestStewardSnapshotSameBatchIDReplaces pins the OPERATOR'S RULING on batchID
+// reuse (tag-steward-bugreport.md Bug 1): the fix is Option 3 — accept
+// multiple entity types in one call via `entities` — NOT Option 2, reject a
+// colliding batchID. A second snapshotEntityTags call that reuses a batchID
+// still replaces the file outright. This is documented, INTENDED behaviour
+// (the mitigation is "one logical batch, one call", now possible via
+// `entities`), not an oversight, so this test pins it rather than demanding
+// an error. If the residual silent-replace path ever looks more dangerous
+// than this, that is a call for the operator to make explicitly, not a guard
+// a test (or its author) adds unilaterally.
+// Covers all three ways two calls can reuse a batchID: legacy-then-legacy
+// (the original case), entities-then-entities (the new form replacing
+// itself), and entities-then-legacy (replace holds across a form switch,
+// since both forms write the same file under the same batchID). Extended
+// once F4 (tmp-file+rename) landed — a successful-then-successful replace is
+// exactly the case F4's fix must still allow; only the FAILED second call
+// changes behaviour (see TestStewardSnapshotMidBatchFailurePreservesOriginal).
+func TestStewardSnapshotSameBatchIDReplaces(t *testing.T) {
+	t.Run("legacy_then_legacy", func(t *testing.T) {
+		store, oid := newStewardStore(t)
+		ctx := context.Background()
+		if err := store.CreateWorkUnit(ctx, &wms.WorkUnit{ID: "wu-replace-ll", OutcomeID: oid, Title: "x", Status: wms.StatusPending}); err != nil {
+			t.Fatalf("create wu: %v", err)
+		}
+		const batchID = "steward-component-reuse-legacy-20260812-000000"
+
+		r1, ce := call(t, store, ToolSnapshotEntityTags, map[string]interface{}{
+			"entityType": wms.EntityOutcome, "entityIDs": []interface{}{oid},
+			"tagKey": "component", "batchID": batchID,
+		})
+		if ce != nil {
+			t.Fatalf("first (legacy) snapshot: %v", ce)
+		}
+		r2, ce := call(t, store, ToolSnapshotEntityTags, map[string]interface{}{
+			"entityType": wms.EntityWorkUnit, "entityIDs": []interface{}{"wu-replace-ll"},
+			"tagKey": "component", "batchID": batchID,
+		})
+		if ce != nil {
+			t.Fatalf("second (legacy) snapshot: %v", ce)
+		}
+		assertSnapshotReplaced(t, r1, r2, []string{"wu-replace-ll"})
+	})
+
+	t.Run("entities_then_entities", func(t *testing.T) {
+		store, oid := newStewardStore(t)
+		ctx := context.Background()
+		const oid2 = "out-replace-ee"
+		if err := store.CreateOutcome(ctx, &wms.Outcome{ID: oid2, Title: "x", Status: wms.StatusPending}); err != nil {
+			t.Fatalf("create %s: %v", oid2, err)
+		}
+		for _, id := range []string{"wu-replace-ee-1", "wu-replace-ee-2"} {
+			if err := store.CreateWorkUnit(ctx, &wms.WorkUnit{ID: id, OutcomeID: oid, Title: id, Status: wms.StatusPending}); err != nil {
+				t.Fatalf("create %s: %v", id, err)
+			}
+		}
+		const batchID = "steward-component-reuse-entities-20260812-000000"
+
+		r1, ce := call(t, store, ToolSnapshotEntityTags, map[string]interface{}{
+			"entities": []interface{}{
+				map[string]interface{}{"entityType": wms.EntityOutcome, "entityID": oid2},
+				map[string]interface{}{"entityType": wms.EntityWorkUnit, "entityID": "wu-replace-ee-1"},
+			},
+			"tagKey": "component", "batchID": batchID,
+		})
+		if ce != nil {
+			t.Fatalf("first (entities) snapshot: %v", ce)
+		}
+		r2, ce := call(t, store, ToolSnapshotEntityTags, map[string]interface{}{
+			"entities": []interface{}{
+				map[string]interface{}{"entityType": wms.EntityWorkUnit, "entityID": "wu-replace-ee-2"},
+			},
+			"tagKey": "component", "batchID": batchID,
+		})
+		if ce != nil {
+			t.Fatalf("second (entities) snapshot: %v", ce)
+		}
+		assertSnapshotReplaced(t, r1, r2, []string{"wu-replace-ee-2"})
+	})
+
+	t.Run("entities_then_legacy", func(t *testing.T) {
+		store, oid := newStewardStore(t)
+		ctx := context.Background()
+		const oid3 = "out-replace-el"
+		if err := store.CreateOutcome(ctx, &wms.Outcome{ID: oid3, Title: "x", Status: wms.StatusPending}); err != nil {
+			t.Fatalf("create %s: %v", oid3, err)
+		}
+		for _, id := range []string{"wu-replace-el-p", "wu-replace-el-q"} {
+			if err := store.CreateWorkUnit(ctx, &wms.WorkUnit{ID: id, OutcomeID: oid, Title: id, Status: wms.StatusPending}); err != nil {
+				t.Fatalf("create %s: %v", id, err)
+			}
+		}
+		const batchID = "steward-component-reuse-mixed-form-20260812-000000"
+
+		r1, ce := call(t, store, ToolSnapshotEntityTags, map[string]interface{}{
+			"entities": []interface{}{
+				map[string]interface{}{"entityType": wms.EntityOutcome, "entityID": oid3},
+				map[string]interface{}{"entityType": wms.EntityWorkUnit, "entityID": "wu-replace-el-p"},
+			},
+			"tagKey": "component", "batchID": batchID,
+		})
+		if ce != nil {
+			t.Fatalf("first (entities) snapshot: %v", ce)
+		}
+		// Second call switches to the LEGACY form under the same batchID —
+		// replace must hold across a form switch, since both write the same file.
+		r2, ce := call(t, store, ToolSnapshotEntityTags, map[string]interface{}{
+			"entityType": wms.EntityWorkUnit, "entityIDs": []interface{}{"wu-replace-el-p", "wu-replace-el-q"},
+			"tagKey": "component", "batchID": batchID,
+		})
+		if ce != nil {
+			t.Fatalf("second (legacy) snapshot: %v", ce)
+		}
+		assertSnapshotReplaced(t, r1, r2, []string{"wu-replace-el-p", "wu-replace-el-q"})
+	})
+}
+
+// assertSnapshotReplaced verifies two already-executed snapshotEntityTags
+// calls resolved to the SAME file (same batchID → same path regardless of
+// which input form each call used), and that the file now holds EXACTLY the
+// second call's entities — not a merge with the first, not a subset. This is
+// the ruled-in behaviour: reuse a batchID across separate calls and you lose
+// the earlier call's rollback data unless the whole batch was one call
+// (`entities` or legacy) to begin with.
+func assertSnapshotReplaced(t *testing.T, firstResult, secondResult Result, wantIDs []string) {
+	t.Helper()
+	var first, second struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal([]byte(resultText(t, firstResult)), &first); err != nil {
+		t.Fatalf("decode first snapshot path: %v", err)
+	}
+	if err := json.Unmarshal([]byte(resultText(t, secondResult)), &second); err != nil {
+		t.Fatalf("decode second snapshot path: %v", err)
+	}
+	if second.Path != first.Path {
+		t.Fatalf("second snapshot path %q != first %q; same batchID must resolve to the same file", second.Path, first.Path)
+	}
+	lines := readSnapshotLines(t, second.Path)
+	var gotIDs []string
+	for _, l := range lines {
+		gotIDs = append(gotIDs, l.EntityID)
+	}
+	sort.Strings(gotIDs)
+	want := append([]string(nil), wantIDs...)
+	sort.Strings(want)
+	if !reflect.DeepEqual(gotIDs, want) {
+		t.Errorf("snapshot after batchID reuse holds entities %v, want exactly %v (replace, not merge)", gotIDs, want)
+	}
+}
+
+// TestStewardSnapshotEntityTagsArgValidation covers the entities/legacy
+// mutual-exclusion contract: exactly one of `entities` or `entityType`+
+// `entityIDs` must be supplied. Both, neither, or an empty `entities` array
+// are all -32602 argument errors. The both/neither messages must name both
+// accepted forms so a caller can self-correct without reading source.
+//
+// Also covers a real behaviour change that rode along with the fix (flagged
+// by @snapshot-api, not in the original bug report): a bad entityType on the
+// LEGACY form now fails fast with "entityType must be outcome or workunit".
+// Pre-fix this was NOT caught at the store layer either — GetEntityTags
+// (store/mysql/store.go:1217) is a bare `WHERE entity_type = ?` with no
+// validation, so entityType="widget" matched zero rows and returned a clean
+// nil error. The pre-fix failure mode was strictly worse than "an error
+// surfaces late": a fully successful, full-length snapshot of all-empty
+// old_values, indistinguishable from "every entity legitimately had no prior
+// tag" — a plausible-looking snapshot that rolls back nothing. Confirmed by
+// mutation: see TestStewardSnapshotEntityTagsArgValidation's own run against
+// pre-fix wms.go. Same validation gap, same fix, applies per-item inside
+// `entities`.
+func TestStewardSnapshotEntityTagsArgValidation(t *testing.T) {
+	store, oid := newStewardStore(t)
+	ctx := context.Background()
+	if err := store.CreateWorkUnit(ctx, &wms.WorkUnit{ID: "wu-argcheck", OutcomeID: oid, Title: "x", Status: wms.StatusPending}); err != nil {
+		t.Fatalf("create wu: %v", err)
+	}
+
+	assertNamesBothForms := func(t *testing.T, ce *CallError) {
+		t.Helper()
+		if ce == nil {
+			t.Fatal("expected an argument error, got none")
+		}
+		if !strings.Contains(ce.Message, "entities") || !strings.Contains(ce.Message, "entityType") {
+			t.Errorf("error %q does not name both accepted forms (entities, entityType+entityIDs)", ce.Message)
+		}
+	}
+
+	// Both forms supplied.
+	_, ce := call(t, store, ToolSnapshotEntityTags, map[string]interface{}{
+		"entityType": wms.EntityWorkUnit, "entityIDs": []interface{}{"wu-argcheck"},
+		"entities": []interface{}{
+			map[string]interface{}{"entityType": wms.EntityWorkUnit, "entityID": "wu-argcheck"},
+		},
+		"tagKey": "component", "batchID": "steward-argcheck-both-forms",
+	})
+	assertNamesBothForms(t, ce)
+
+	// Neither form supplied.
+	_, ce = call(t, store, ToolSnapshotEntityTags, map[string]interface{}{
+		"tagKey": "component", "batchID": "steward-argcheck-neither-form",
+	})
+	assertNamesBothForms(t, ce)
+
+	// Empty entities array.
+	_, ce = call(t, store, ToolSnapshotEntityTags, map[string]interface{}{
+		"entities": []interface{}{},
+		"tagKey":   "component", "batchID": "steward-argcheck-empty-entities",
+	})
+	if ce == nil {
+		t.Fatal("empty entities array was accepted; want an argument error")
+	}
+
+	// Legacy form, bad entityType: fails fast with a clear message. Pre-fix
+	// this was not an error at all — see the doc comment above — so this now
+	// converts a silent, wrong-looking-right snapshot into a loud, correct one.
+	_, ce = call(t, store, ToolSnapshotEntityTags, map[string]interface{}{
+		"entityType": "widget", "entityIDs": []interface{}{"wu-argcheck"},
+		"tagKey": "component", "batchID": "steward-argcheck-bad-legacy-type",
+	})
+	if ce == nil {
+		t.Fatal("legacy entityType=widget was accepted; want an argument error")
+	}
+	if !strings.Contains(ce.Message, "outcome or workunit") {
+		t.Errorf("bad-entityType error %q does not name the valid values (outcome or workunit)", ce.Message)
+	}
+
+	// entities[] form, bad entityType inside an item: same guard, per-item.
+	_, ce = call(t, store, ToolSnapshotEntityTags, map[string]interface{}{
+		"entities": []interface{}{
+			map[string]interface{}{"entityType": "widget", "entityID": "wu-argcheck"},
+		},
+		"tagKey": "component", "batchID": "steward-argcheck-bad-entities-type",
+	})
+	if ce == nil {
+		t.Fatal("entities[0].entityType=widget was accepted; want an argument error")
+	}
+	if !strings.Contains(ce.Message, "outcome or workunit") {
+		t.Errorf("bad entities[].entityType error %q does not name the valid values (outcome or workunit)", ce.Message)
+	}
+
+	// F8: legacy form, entityIDs with a non-string entry (e.g. JSON null).
+	// Pre-fix this silently dropped the bad entry and wrote 2 lines,
+	// indistinguishable from a caller who genuinely meant only 2 entities —
+	// same class of bug as the entities[] item validation above, same fix.
+	_, ce = call(t, store, ToolSnapshotEntityTags, map[string]interface{}{
+		"entityType": wms.EntityWorkUnit, "entityIDs": []interface{}{"wu-argcheck", nil, "wu-argcheck"},
+		"tagKey": "component", "batchID": "steward-argcheck-null-entityid",
+	})
+	if ce == nil {
+		t.Fatal("entityIDs with a null entry was accepted; want an argument error")
+	}
+	if !strings.Contains(ce.Message, "entityIDs[1]") {
+		t.Errorf("null-entityIDs error %q does not name the bad index", ce.Message)
+	}
+
+	// F8: legacy form, entityIDs with a blank (whitespace-only) entry.
+	_, ce = call(t, store, ToolSnapshotEntityTags, map[string]interface{}{
+		"entityType": wms.EntityWorkUnit, "entityIDs": []interface{}{"wu-argcheck", "   "},
+		"tagKey": "component", "batchID": "steward-argcheck-blank-entityid",
+	})
+	if ce == nil {
+		t.Fatal("entityIDs with a blank entry was accepted; want an argument error")
+	}
+	if !strings.Contains(ce.Message, "entityIDs[1]") || !strings.Contains(ce.Message, "blank") {
+		t.Errorf("blank-entityIDs error %q does not name the bad index/reason", ce.Message)
+	}
+}
+
+// readSnapshotLines reads a steward snapshot JSONL file into a slice of
+// (entity_id, old_value) pairs, in file order — used to compare a snapshot's
+// content across two points in time without depending on byte-for-byte file
+// identity (trailing newline, etc).
+func readSnapshotLines(t *testing.T, path string) []struct{ EntityID, OldValue string } {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open snapshot %s: %v", path, err)
+	}
+	defer f.Close() //nolint:errcheck
+	var out []struct{ EntityID, OldValue string }
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		if strings.TrimSpace(sc.Text()) == "" {
+			continue
+		}
+		var line struct {
+			EntityID string `json:"entity_id"`
+			OldValue string `json:"old_value"`
+		}
+		if err := json.Unmarshal(sc.Bytes(), &line); err != nil {
+			t.Fatalf("decode snapshot line: %v", err)
+		}
+		out = append(out, struct{ EntityID, OldValue string }{line.EntityID, line.OldValue})
+	}
+	return out
+}
+
+// TestStewardSnapshotMidBatchFailurePreservesOriginal covers Bug 1 F4: the
+// read loop inside snapshotEntityTags can fail partway through a batch (a
+// transient store error on entity N of M, e.g. a flaky connection during a
+// large retag). Before the fix, the output file is opened with a truncating
+// os.Create at the top of the function and lines are written as each entity
+// is read, so a partial failure leaves a truncated, PARTIAL file on disk — a
+// caller that reuses a batchID to retry after a transient failure destroys
+// the PRIOR GOOD snapshot even though the retry itself also failed and
+// reported an error. The fix must not let a failed call touch the file that
+// was already on disk: assert end-state integrity (byte-for-byte-equivalent
+// content), not any particular implementation mechanism (tmp-file+rename is
+// one way to get there, not the thing being tested). Also asserts the private
+// temp file the fix writes to is cleaned up on failure, not leaked — the
+// implementation removes it on every abort path, but nothing enforced that
+// before this assertion; a regression that dropped the os.Remove calls would
+// have passed the rest of this test (and the whole suite) undetected.
+func TestStewardSnapshotMidBatchFailurePreservesOriginal(t *testing.T) {
+	store, oid := newStewardStore(t)
+	ctx := context.Background()
+	for _, id := range []string{"wu-mbf-1", "wu-mbf-2", "wu-mbf-3"} {
+		if err := store.CreateWorkUnit(ctx, &wms.WorkUnit{ID: id, OutcomeID: oid, Title: id, Status: wms.StatusPending}); err != nil {
+			t.Fatalf("create %s: %v", id, err)
+		}
+	}
+	const key = "component"
+	if err := store.TagEntity(ctx, wms.EntityWorkUnit, "wu-mbf-1", key, "ctop", "manual", ""); err != nil {
+		t.Fatalf("seed tag: %v", err)
+	}
+
+	const batchID = "steward-component-midbatch-20260812-000000"
+	// First call: clean success across three entities.
+	r, ce := call(t, store, ToolSnapshotEntityTags, map[string]interface{}{
+		"entityType": wms.EntityWorkUnit,
+		"entityIDs":  []interface{}{"wu-mbf-1", "wu-mbf-2", "wu-mbf-3"},
+		"tagKey":     key, "batchID": batchID,
+	})
+	if ce != nil {
+		t.Fatalf("first (good) snapshot: %v", ce)
+	}
+	var first struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal([]byte(resultText(t, r)), &first); err != nil {
+		t.Fatalf("decode first snapshot path: %v", err)
+	}
+	original := readSnapshotLines(t, first.Path)
+	if len(original) != 3 {
+		t.Fatalf("first snapshot has %d lines, want 3", len(original))
+	}
+
+	// Second call, SAME batchID, same entities — but the store injects a
+	// failure reading wu-mbf-2's tags specifically, simulating a transient
+	// error partway through the batch.
+	failing := &failOnEntityGetEntityTags{Store: store, failEntityID: "wu-mbf-2"}
+	_, ce = call(t, failing, ToolSnapshotEntityTags, map[string]interface{}{
+		"entityType": wms.EntityWorkUnit,
+		"entityIDs":  []interface{}{"wu-mbf-1", "wu-mbf-2", "wu-mbf-3"},
+		"tagKey":     key, "batchID": batchID,
+	})
+	if ce == nil {
+		t.Fatal("mid-batch failure was swallowed; want an error from the second call")
+	}
+
+	// The file at the SAME path must still hold exactly the first call's
+	// content — not truncated to zero, not partially overwritten with the
+	// second (failed) call's incomplete data.
+	after := readSnapshotLines(t, first.Path)
+	if !reflect.DeepEqual(original, after) {
+		t.Errorf("snapshot after a failed mid-batch retry = %v, want unchanged original %v", after, original)
+	}
+
+	// N5: the private temp file the fix wrote to (and should have removed on
+	// this abort path) must not be left behind in the snapshot dir.
+	dir := filepath.Dir(first.Path)
+	leftover, err := filepath.Glob(filepath.Join(dir, "*.jsonl.tmp-*"))
+	if err != nil {
+		t.Fatalf("glob for leftover tmp files: %v", err)
+	}
+	if len(leftover) != 0 {
+		t.Errorf("temp file(s) left behind after a failed mid-batch snapshot: %v", leftover)
+	}
+}
+
+// TestStewardSnapshotMalformedEntitiesArg covers Bug 1 F7: `entities` present
+// but not a JSON array (e.g. a caller accidentally passes an object or a
+// string) must be reported explicitly — "entities must be an array of
+// {entityType, entityID} objects" — rather than silently misdetected as
+// "entities not given". Before the fix, a non-array `entities` fails the Go
+// type assertion silently: with no legacy args present this degrades to the
+// generic mutual-exclusion error (wrong reason, right error, still caught);
+// with legacy args ALSO present it is worse — the malformed `entities` is
+// silently ignored and the call proceeds on the legacy path as if `entities`
+// had never been passed at all (ce == nil, the call just succeeds).
+func TestStewardSnapshotMalformedEntitiesArg(t *testing.T) {
+	store, oid := newStewardStore(t)
+	ctx := context.Background()
+	if err := store.CreateWorkUnit(ctx, &wms.WorkUnit{ID: "wu-malformed", OutcomeID: oid, Title: "x", Status: wms.StatusPending}); err != nil {
+		t.Fatalf("create wu: %v", err)
+	}
+
+	assertMalformedEntitiesError := func(t *testing.T, ce *CallError) {
+		t.Helper()
+		if ce == nil {
+			t.Fatal("malformed entities was accepted; want an argument error")
+		}
+		if !strings.Contains(ce.Message, "entities must be an array of") {
+			t.Errorf("error %q does not report entities as malformed (want: entities must be an array of {entityType, entityID} objects)", ce.Message)
+		}
+	}
+
+	// Malformed entities alone (a string, not an array).
+	_, ce := call(t, store, ToolSnapshotEntityTags, map[string]interface{}{
+		"entities": "not-an-array",
+		"tagKey":   "component", "batchID": "steward-malformed-entities-alone",
+	})
+	assertMalformedEntitiesError(t, ce)
+
+	// Malformed entities alongside legacy args: must still be caught, NOT
+	// silently ignored in favor of the legacy path taking over.
+	_, ce = call(t, store, ToolSnapshotEntityTags, map[string]interface{}{
+		"entities":   "not-an-array",
+		"entityType": wms.EntityWorkUnit, "entityIDs": []interface{}{"wu-malformed"},
+		"tagKey": "component", "batchID": "steward-malformed-entities-with-legacy",
+	})
+	assertMalformedEntitiesError(t, ce)
+}
+
+// TestStewardSnapshotUnwritableDirFailsCleanly covers one of F4's five new
+// failure branches: os.CreateTemp itself fails (here, because the snapshot
+// dir has no write permission — the same shape as a read-only mount or a
+// permissions misconfiguration). No store-level failure injection is needed;
+// this exercises the earliest possible failure point, before any entity is
+// read. Asserts a clean, dir-naming error and that the target path was never
+// touched — CreateTemp failing means there is nothing to rename in the first
+// place, so this is really "the batch never started," the simplest of the
+// five branches to reason about.
+func TestStewardSnapshotUnwritableDirFailsCleanly(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root; directory permission bits don't block root")
+	}
+	store, oid := newStewardStore(t)
+	ctx := context.Background()
+	if err := store.CreateWorkUnit(ctx, &wms.WorkUnit{ID: "wu-unwritable", OutcomeID: oid, Title: "x", Status: wms.StatusPending}); err != nil {
+		t.Fatalf("create wu: %v", err)
+	}
+
+	// A throwaway successful call both learns the snapshot dir (without
+	// hardcoding tagStewardDir's path-resolution rules here) and creates it.
+	r, ce := call(t, store, ToolSnapshotEntityTags, map[string]interface{}{
+		"entityType": wms.EntityWorkUnit, "entityIDs": []interface{}{"wu-unwritable"},
+		"tagKey": "component", "batchID": "steward-unwritable-probe",
+	})
+	if ce != nil {
+		t.Fatalf("probe snapshot: %v", ce)
+	}
+	var probe struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal([]byte(resultText(t, r)), &probe); err != nil {
+		t.Fatalf("decode probe path: %v", err)
+	}
+	dir := filepath.Dir(probe.Path)
+
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("chmod snapshot dir read-only: %v", err)
+	}
+	// Restore write permission so t.TempDir()'s own cleanup can remove the
+	// directory afterward — t.Cleanup runs LIFO, so this (registered after
+	// newStewardStore's cleanups) runs before TempDir's removal.
+	t.Cleanup(func() { os.Chmod(dir, 0o755) }) //nolint:errcheck
+
+	const batchID = "steward-unwritable-20260812-000000"
+	target := filepath.Join(dir, batchID+".jsonl")
+	_, ce = call(t, store, ToolSnapshotEntityTags, map[string]interface{}{
+		"entityType": wms.EntityWorkUnit, "entityIDs": []interface{}{"wu-unwritable"},
+		"tagKey": "component", "batchID": batchID,
+	})
+	if ce == nil {
+		t.Fatal("snapshot succeeded despite an unwritable snapshot dir; want a clean CreateTemp error")
+	}
+	if !strings.Contains(ce.Message, dir) {
+		t.Errorf("unwritable-dir error %q does not name the directory %q", ce.Message, dir)
+	}
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Errorf("target path %s exists after a CreateTemp failure; want untouched/absent (stat err=%v)", target, err)
+	}
+}
+
+// TestStewardSnapshotRenameFailsLeavesCleanState covers a second of F4's five
+// new failure branches: os.Rename fails because the target path is already
+// occupied by something rename can't replace — here, a pre-existing empty
+// directory at <batchID>.jsonl (a real, if unusual, way for that path to be
+// occupied; renaming a regular file onto an existing directory is EISDIR on
+// Linux regardless of a prior snapshot at that batchID). This is the last
+// step of the happy path, so it also proves the fix's cleanup runs at the
+// END of the pipeline, not just on the early GetEntityTags-failure path
+// TestStewardSnapshotMidBatchFailurePreservesOriginal covers — folding in the
+// N5 temp-cleanup assertion for this branch too.
+func TestStewardSnapshotRenameFailsLeavesCleanState(t *testing.T) {
+	store, oid := newStewardStore(t)
+	ctx := context.Background()
+	if err := store.CreateWorkUnit(ctx, &wms.WorkUnit{ID: "wu-rename-fail", OutcomeID: oid, Title: "x", Status: wms.StatusPending}); err != nil {
+		t.Fatalf("create wu: %v", err)
+	}
+
+	// A throwaway successful call learns the snapshot dir the same way as
+	// TestStewardSnapshotUnwritableDirFailsCleanly.
+	r, ce := call(t, store, ToolSnapshotEntityTags, map[string]interface{}{
+		"entityType": wms.EntityWorkUnit, "entityIDs": []interface{}{"wu-rename-fail"},
+		"tagKey": "component", "batchID": "steward-rename-fail-probe",
+	})
+	if ce != nil {
+		t.Fatalf("probe snapshot: %v", ce)
+	}
+	var probe struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal([]byte(resultText(t, r)), &probe); err != nil {
+		t.Fatalf("decode probe path: %v", err)
+	}
+	dir := filepath.Dir(probe.Path)
+
+	const batchID = "steward-rename-fail-20260812-000000"
+	target := filepath.Join(dir, batchID+".jsonl")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatalf("pre-create colliding directory at %s: %v", target, err)
+	}
+
+	_, ce = call(t, store, ToolSnapshotEntityTags, map[string]interface{}{
+		"entityType": wms.EntityWorkUnit, "entityIDs": []interface{}{"wu-rename-fail"},
+		"tagKey": "component", "batchID": batchID,
+	})
+	if ce == nil {
+		t.Fatal("snapshot succeeded despite the target path being a pre-existing directory; want a clean rename error")
+	}
+	if !strings.Contains(ce.Message, target) {
+		t.Errorf("rename-failure error %q does not name the target path %q", ce.Message, target)
+	}
+
+	// The colliding directory must survive untouched — a failed rename must
+	// not damage whatever was already occupying the target path.
+	info, err := os.Stat(target)
+	if err != nil || !info.IsDir() {
+		t.Errorf("target path %s is no longer an intact directory after the failed rename (stat err=%v)", target, err)
+	}
+
+	// N5, folded into this branch: the abandoned temp file must be cleaned
+	// up, not leaked.
+	leftover, err := filepath.Glob(filepath.Join(dir, "*.jsonl.tmp-*"))
+	if err != nil {
+		t.Fatalf("glob for leftover tmp files: %v", err)
+	}
+	if len(leftover) != 0 {
+		t.Errorf("temp file(s) left behind after a failed rename: %v", leftover)
+	}
+}
+
+// TestStewardDescriptionSchemaMaxLength covers Bug 2: wms_describeTag,
+// wms_defineTag, and wms_tagEntity all accept a `description` that the store
+// caps at 1024 runes (checkTagDescriptionLen in store/mysql/store.go and
+// store/sqlite/store.go), but none of the three tool schemas advertised that
+// cap — a caller only discovered it by failing mid-rubric (see
+// tag-steward-bugreport.md Bug 2, two failed calls writing component:store's
+// description). Assert each schema's description property carries
+// "maxLength": 1024, so a client-side validator (or a careful caller reading
+// the schema) catches this before the round trip.
+func TestStewardDescriptionSchemaMaxLength(t *testing.T) {
+	for _, name := range []string{ToolDescribeTag, ToolDefineTag, ToolTagEntity} {
+		t.Run(name, func(t *testing.T) {
+			got := fmt.Sprint(descriptionSchemaMaxLength(t, name))
+			if got != "1024" {
+				t.Errorf("%s inputSchema.properties.description.maxLength = %v, want 1024", name, got)
+			}
+		})
+	}
+}
+
+// descriptionSchemaMaxLength drills into the package-level ToolDefs for the
+// named tool and returns whatever is set at
+// inputSchema.properties.description.maxLength (nil if the property or the
+// constraint is missing). Compared via fmt.Sprint in the caller rather than a
+// typed equality check, since a JSON-Schema-shaped Go literal may hold the
+// number as int or float64 depending on how it was written.
+func descriptionSchemaMaxLength(t *testing.T, toolName string) interface{} {
+	t.Helper()
+	for _, def := range ToolDefs {
+		if def["name"] != toolName {
+			continue
+		}
+		schema, ok := def["inputSchema"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("%s: inputSchema is not a map[string]interface{}", toolName)
+		}
+		props, ok := schema["properties"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("%s: inputSchema.properties is not a map[string]interface{}", toolName)
+		}
+		desc, ok := props["description"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("%s: inputSchema.properties.description is not a map[string]interface{} (missing?)", toolName)
+		}
+		return desc["maxLength"]
+	}
+	t.Fatalf("ToolDefs has no entry named %s", toolName)
+	return nil
 }
 
 // TestUntagEntityReversible covers wms_untagEntity: a single-value removal

@@ -895,24 +895,99 @@ func HandleToolCall(store wms.Store, eng wms.Engine, rawParams json.RawMessage) 
 		return JSONResult(hits), nil
 
 	case ToolSnapshotEntityTags, "wms.snapshotEntityTags":
-		entityType := strArg("entityType")
 		tagKey := strArg("tagKey")
 		batchID := strArg("batchID")
-		if entityType == "" || tagKey == "" || batchID == "" {
-			return Result{}, &CallError{Code: -32602, Message: "entityType, tagKey, and batchID are required"}
+		if tagKey == "" || batchID == "" {
+			return Result{}, &CallError{Code: -32602, Message: "tagKey and batchID are required"}
 		}
-		var entityIDs []string
-		if ids, ok := p.Arguments["entityIDs"].([]interface{}); ok {
-			for _, v := range ids {
-				if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
-					entityIDs = append(entityIDs, strings.TrimSpace(s))
+
+		// Exactly one of the two input forms is accepted: the new `entities`
+		// array (mixed entity types in one call — the fix for the truncation
+		// footgun, see snapshotEntityTags's doc comment), or the original
+		// entityType + entityIDs pair (single type, kept for backward
+		// compatibility with existing callers). Presence, not non-emptiness,
+		// decides which form the caller picked — an empty `entities` array
+		// still selects that form and is rejected below, same as an empty
+		// entityIDs is under the legacy form. Presence is checked separately
+		// from the type assertion: a caller who supplies `entities` with the
+		// wrong JSON type (e.g. a string) must get a "wrong shape" error, not
+		// silently fall through to the legacy branch and see the misleading
+		// "supply exactly one of..." message when they did supply exactly one,
+		// just malformed.
+		rawEntities, entitiesGiven := p.Arguments["entities"]
+		if entitiesGiven && rawEntities == nil {
+			// JSON `null` decodes into map[string]interface{} as a PRESENT key
+			// with a nil value — so a caller (or a client library) that pads an
+			// unused optional with an explicit null must be treated the same as
+			// omitting it entirely, matching entityIDs' tolerant null handling
+			// below (`p.Arguments["entityIDs"].([]interface{})` fails cleanly to
+			// "absent" for a nil value). Without this, "entities": null would
+			// wrongly reject an otherwise-valid legacy entityType+entityIDs call.
+			entitiesGiven = false
+		}
+		entitiesArg, entitiesOK := rawEntities.([]interface{})
+		if entitiesGiven && !entitiesOK {
+			return Result{}, &CallError{Code: -32602, Message: "entities must be an array of {entityType, entityID} objects"}
+		}
+		entityType := strArg("entityType")
+		entityIDsArg, entityIDsGiven := p.Arguments["entityIDs"].([]interface{})
+		legacyGiven := entityType != "" || entityIDsGiven
+		if entitiesGiven == legacyGiven {
+			return Result{}, &CallError{Code: -32602, Message: "supply exactly one of: entities ([{entityType, entityID}, ...]), or entityType + entityIDs"}
+		}
+
+		var refs []stewardEntityRef
+		if entitiesGiven {
+			if len(entitiesArg) == 0 {
+				return Result{}, &CallError{Code: -32602, Message: "entities must be a non-empty array"}
+			}
+			for i, raw := range entitiesArg {
+				obj, ok := raw.(map[string]interface{})
+				if !ok {
+					return Result{}, &CallError{Code: -32602, Message: fmt.Sprintf("entities[%d] must be an object with entityType and entityID", i)}
 				}
+				et, _ := obj["entityType"].(string)
+				et = strings.TrimSpace(et)
+				if et != wms.EntityOutcome && et != wms.EntityWorkUnit {
+					return Result{}, &CallError{Code: -32602, Message: fmt.Sprintf("entities[%d].entityType must be outcome or workunit", i)}
+				}
+				eid, _ := obj["entityID"].(string)
+				eid = strings.TrimSpace(eid)
+				if eid == "" {
+					return Result{}, &CallError{Code: -32602, Message: fmt.Sprintf("entities[%d].entityID is required", i)}
+				}
+				refs = append(refs, stewardEntityRef{EntityType: et, EntityID: eid})
+			}
+		} else {
+			if entityType != wms.EntityOutcome && entityType != wms.EntityWorkUnit {
+				return Result{}, &CallError{Code: -32602, Message: "entityType must be outcome or workunit"}
+			}
+			// Validate every entry rather than silently dropping the bad ones —
+			// entityIDs: ["wu-1", null, "wu-3"] used to write 2 lines and report
+			// success, indistinguishable from a caller who genuinely meant only
+			// 2 entities. Same class of bug as a malformed `entities` item
+			// (above), same fix: name the bad index and refuse the call.
+			var entityIDs []string
+			for i, v := range entityIDsArg {
+				s, ok := v.(string)
+				if !ok {
+					return Result{}, &CallError{Code: -32602, Message: fmt.Sprintf("entityIDs[%d] must be a string", i)}
+				}
+				s = strings.TrimSpace(s)
+				if s == "" {
+					return Result{}, &CallError{Code: -32602, Message: fmt.Sprintf("entityIDs[%d] must not be blank", i)}
+				}
+				entityIDs = append(entityIDs, s)
+			}
+			if len(entityIDs) == 0 {
+				return Result{}, &CallError{Code: -32602, Message: "entityIDs must be a non-empty array"}
+			}
+			for _, id := range entityIDs {
+				refs = append(refs, stewardEntityRef{EntityType: entityType, EntityID: id})
 			}
 		}
-		if len(entityIDs) == 0 {
-			return Result{}, &CallError{Code: -32602, Message: "entityIDs must be a non-empty array"}
-		}
-		path, err := snapshotEntityTags(ctx, store, entityType, entityIDs, tagKey, batchID)
+
+		path, err := snapshotEntityTags(ctx, store, refs, tagKey, batchID)
 		if err != nil {
 			return Result{}, &CallError{Code: -32000, Message: err.Error()}
 		}
@@ -923,12 +998,12 @@ func HandleToolCall(store wms.Store, eng wms.Engine, rawParams json.RawMessage) 
 		if batchID == "" {
 			return Result{}, &CallError{Code: -32602, Message: "batchID is required"}
 		}
-		reverted, skipped, failed, err := rollbackTags(ctx, store, batchID)
+		reverted, skipped, notFound, failed, err := rollbackTags(ctx, store, batchID)
 		if err != nil {
 			return Result{}, &CallError{Code: -32000, Message: err.Error()}
 		}
 		return JSONResult(map[string]interface{}{
-			"reverted": reverted, "skipped": skipped, "failed": failed,
+			"reverted": reverted, "skipped": skipped, "notFound": notFound, "failed": failed,
 		}), nil
 
 	default:
@@ -1011,59 +1086,208 @@ func tagStewardDir() (string, error) {
 	return dir, nil
 }
 
-// stewardSnapshotLine is one JSONL record in a steward batch snapshot. It
-// captures enough of the pre-change binding to restore it: an empty old_value
-// (and old_source) means the tag key was absent before the steward applied it.
-// new_value is left empty at snapshot time — the apply has not happened yet.
-type stewardSnapshotLine struct {
-	EntityType string `json:"entity_type"`
-	EntityID   string `json:"entity_id"`
-	TagKey     string `json:"tag_key"`
-	OldValue   string `json:"old_value"`
-	OldSource  string `json:"old_source"`
-	NewValue   string `json:"new_value,omitempty"`
-	Batch      string `json:"batch"`
+// stewardOldBinding is one prior (value, source) pair a multi-cardinality tag
+// key held at snapshot time. A key like work-type may hold several values at
+// once (e.g. {bug, infra}); rollback must restore ALL of them, not just one.
+type stewardOldBinding struct {
+	Value  string `json:"value"`
+	Source string `json:"source"`
 }
 
-// snapshotEntityTags records the current binding for tagKey on each entity to
+// stewardSnapshotKind marks a snapshot line as written by this schema
+// version, for FUTURE validation to key off exactly rather than structurally
+// (see validateSnapshotLine). Omitted (empty) on every snapshot written
+// before this field existed — those must keep validating and rolling back
+// correctly via structural checks alone, so nothing here may require it yet.
+const stewardSnapshotKind = "steward-snapshot-v1"
+
+// stewardSnapshotLine is one JSONL record in a steward batch snapshot. It
+// captures enough of the pre-change binding to restore it: an empty old_value
+// (and no OldValues) means the tag key was absent before the steward applied
+// it. new_value is left empty at snapshot time — the apply has not happened
+// yet.
+//
+// OldValues carries every prior binding for a multi-cardinality key;
+// OldValue/OldSource are kept in sync with OldValues[0] (when non-empty) so
+// a snapshot THIS binary writes can still be read by an OLDER one (it would
+// only restore the first binding, exactly its pre-existing behavior, rather
+// than choking on or misreading an unrecognized field). Real snapshots
+// written before OldValues existed carry only the scalar pair — see
+// oldBindings for the dual-read that keeps those files rolling back
+// correctly forever, not just until the next fold.
+type stewardSnapshotLine struct {
+	EntityType string              `json:"entity_type"`
+	EntityID   string              `json:"entity_id"`
+	TagKey     string              `json:"tag_key"`
+	OldValue   string              `json:"old_value"`
+	OldSource  string              `json:"old_source"`
+	OldValues  []stewardOldBinding `json:"old_values,omitempty"`
+	NewValue   string              `json:"new_value,omitempty"`
+	Batch      string              `json:"batch"`
+	Kind       string              `json:"kind,omitempty"`
+}
+
+// oldBindings returns every prior (value, source) pair line records,
+// preferring OldValues and falling back to the legacy scalar OldValue/
+// OldSource for a snapshot written before multi-cardinality support existed.
+// A nil result means the key was absent before the steward touched it.
+func (l stewardSnapshotLine) oldBindings() []stewardOldBinding {
+	if len(l.OldValues) > 0 {
+		return l.OldValues
+	}
+	if l.OldValue == "" {
+		return nil
+	}
+	return []stewardOldBinding{{Value: l.OldValue, Source: l.OldSource}}
+}
+
+// validateSnapshotLine reports whether line has the shape of a genuine
+// steward snapshot record, structurally — not by Kind (most real snapshots
+// on disk predate that field) but by the fields every steward snapshot has
+// always carried. A file that isn't a steward snapshot at all (e.g. a
+// hand-rolled plan/review document that happens to be valid JSONL) decodes
+// into an all-zero-value stewardSnapshotLine — no error from json.Unmarshal,
+// since unknown fields are ignored and missing ones zero — so this is the
+// check that catches it instead: entity_type must actually be outcome or
+// workunit, and entity_id/tag_key must actually be present. Called per line
+// by rollbackTags, which counts a violation as failed (never skipped) and
+// refuses the whole batch if every line fails it.
+func validateSnapshotLine(line stewardSnapshotLine) error {
+	if line.EntityType != wms.EntityOutcome && line.EntityType != wms.EntityWorkUnit {
+		return fmt.Errorf("entity_type must be %q or %q, got %q", wms.EntityOutcome, wms.EntityWorkUnit, line.EntityType)
+	}
+	if strings.TrimSpace(line.EntityID) == "" {
+		return fmt.Errorf("entity_id is required")
+	}
+	if strings.TrimSpace(line.TagKey) == "" {
+		return fmt.Errorf("tag_key is required")
+	}
+	return nil
+}
+
+// entityExists reports whether entityID exists as entityType. Used only to
+// tell apart two very different reasons no CURRENT steward-sourced binding
+// remains for a rollback line: a human or the classifier legitimately
+// overrode it since (benign, entity still there — skip), versus the entity
+// itself no longer exists at all (the steward tag, and everything else on
+// it, is simply gone). GetEntityTags alone can't distinguish these — it is a
+// bare WHERE entity_type=? AND entity_id=? with no existence check, so it
+// returns zero rows with a nil error for a nonexistent entity exactly as it
+// would for one that legitimately carries no tags for the key.
+func entityExists(ctx context.Context, store wms.Store, entityType, entityID string) bool {
+	var err error
+	if entityType == wms.EntityWorkUnit {
+		_, err = store.GetWorkUnit(ctx, entityID)
+	} else {
+		_, err = store.GetOutcome(ctx, entityID)
+	}
+	return err == nil
+}
+
+// stewardEntityRef names one entity (of either type) to snapshot. Letting a
+// single snapshotEntityTags call carry a mix of outcome and workunit refs is
+// what makes one logical steward batch — however many entity types it spans —
+// a single call: see the ToolSnapshotEntityTags handler.
+type stewardEntityRef struct {
+	EntityType string
+	EntityID   string
+}
+
+// snapshotEntityTags records the current binding for tagKey on each ref to
 // <batchID>.jsonl in the tag-steward dir (see tagStewardDir), one line per
 // entity, and returns the absolute file path. Entities with no current binding
 // for the key are recorded with empty old_value/old_source so rollback knows to
 // DELETE the steward tag rather than restore a prior value.
-func snapshotEntityTags(ctx context.Context, store wms.Store, entityType string, entityIDs []string, tagKey, batchID string) (string, error) {
+//
+// A second call reusing a batchID intentionally REPLACES the prior snapshot
+// rather than appending to it (see the tool description) — the
+// ToolSnapshotEntityTags handler guarantees one call per logical batch (refs
+// may span both outcomes and workunits in a single call), so there is never a
+// need for a caller to split one batch across multiple calls under the same
+// batchID. But that replace must only happen on SUCCESS: writing straight to
+// <batchID>.jsonl would let a failure partway through (a GetEntityTags error
+// on entity N, a full disk) truncate a prior good snapshot and leave a short,
+// useless one in its place while the caller sees an error and reasonably
+// assumes nothing happened. So the whole snapshot is built in a private
+// temp file (os.CreateTemp, unique per call — also what keeps two concurrent
+// calls sharing a batchID from interleaving writes into one file; each writes
+// its own, and whichever os.Rename below lands last simply wins, cleanly) and
+// only renamed onto <batchID>.jsonl — an atomic replace on the same
+// filesystem — once every line is written and the file is closed without
+// error. Any failure along the way removes the temp file and leaves whatever
+// was already at <batchID>.jsonl (if anything) untouched.
+func snapshotEntityTags(ctx context.Context, store wms.Store, refs []stewardEntityRef, tagKey, batchID string) (string, error) {
 	dir, err := tagStewardDir()
 	if err != nil {
 		return "", err
 	}
 	path := filepath.Join(dir, batchID+".jsonl")
-	f, err := os.Create(path)
+
+	tmp, err := os.CreateTemp(dir, batchID+".jsonl.tmp-*")
 	if err != nil {
-		return "", fmt.Errorf("creating snapshot %s: %w", path, err)
+		return "", fmt.Errorf("creating snapshot tmp file in %s: %w", dir, err)
 	}
-	defer f.Close() //nolint:errcheck
-	enc := json.NewEncoder(f)
-	for _, id := range entityIDs {
-		tags, err := store.GetEntityTags(ctx, entityType, id)
+	tmpPath := tmp.Name()
+	abort := func(cause error) (string, error) {
+		tmp.Close()        //nolint:errcheck // best-effort; we're already failing
+		os.Remove(tmpPath) //nolint:errcheck // best-effort cleanup of the partial temp file
+		return "", cause
+	}
+	// os.CreateTemp defaults to 0600; widen to a deliberate, fixed 0644 so the
+	// rollback snapshot isn't less readable than any other file this package
+	// writes to the same directory. NOTE this is Chmod (fchmod(2) on the open
+	// fd), which is NOT filtered by umask the way os.Create's open(2) is — on
+	// a host with a stricter umask (e.g. 0077), this file ends up 0644 while
+	// sibling untagEntity's os.Create-written snapshots in the same directory
+	// end up 0600. Content here is entity IDs and tag values, not secrets, so
+	// that widening is low severity, but it's real: this is an owned choice
+	// of a fixed mode, not umask-equivalent behavior.
+	if err := tmp.Chmod(0o644); err != nil {
+		return abort(fmt.Errorf("setting permissions on snapshot tmp file %s: %w", tmpPath, err))
+	}
+
+	enc := json.NewEncoder(tmp)
+	for _, ref := range refs {
+		tags, err := store.GetEntityTags(ctx, ref.EntityType, ref.EntityID)
 		if err != nil {
-			return "", fmt.Errorf("reading tags for %s %s: %w", entityType, id, err)
+			return abort(fmt.Errorf("reading tags for %s %s: %w", ref.EntityType, ref.EntityID, err))
 		}
 		line := stewardSnapshotLine{
-			EntityType: entityType,
-			EntityID:   id,
+			EntityType: ref.EntityType,
+			EntityID:   ref.EntityID,
 			TagKey:     tagKey,
 			Batch:      batchID,
+			Kind:       stewardSnapshotKind,
 		}
+		// Collect EVERY current binding for tagKey, not just the first — a
+		// multi-cardinality key (e.g. work-type) may hold several at once,
+		// and a snapshot that only remembers one of them loses the rest on
+		// rollback. See stewardSnapshotLine's OldValues doc comment.
 		for _, t := range tags {
 			if t.TagKey == tagKey {
-				line.OldValue = t.TagValue
-				line.OldSource = t.Source
-				break
+				line.OldValues = append(line.OldValues, stewardOldBinding{Value: t.TagValue, Source: t.Source})
 			}
 		}
+		if len(line.OldValues) > 0 {
+			line.OldValue = line.OldValues[0].Value
+			line.OldSource = line.OldValues[0].Source
+		}
 		if err := enc.Encode(&line); err != nil {
-			return "", fmt.Errorf("writing snapshot line for %s: %w", id, err)
+			return abort(fmt.Errorf("writing snapshot line for %s: %w", ref.EntityID, err))
 		}
 	}
+	// Close (not deferred-and-discarded) so a delayed flush error — full disk,
+	// an NFS mount going away — surfaces as a failure instead of silently
+	// returning success with a short or empty file on disk.
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath) //nolint:errcheck // best-effort cleanup of the partial temp file
+		return "", fmt.Errorf("closing snapshot tmp file %s: %w", tmpPath, err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		os.Remove(tmpPath) //nolint:errcheck // best-effort cleanup; path (if it existed) is untouched
+		return "", fmt.Errorf("finalizing snapshot %s: %w", path, err)
+	}
+
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return path, nil //nolint:nilerr // path is usable even if Abs fails
@@ -1214,41 +1438,69 @@ func untagEntity(ctx context.Context, store wms.Store, entityType, entityID, tag
 // rollbackTags reverts the steward-applied changes recorded in a batch snapshot.
 // For each entity it looks at the CURRENT steward-sourced bindings of the
 // snapshot's tag key (a multi-cardinality key may have several):
-//   - if none remain, a human or the classifier has since removed or overridden
-//     the steward's value — SKIP (never clobber a non-steward tag).
-//   - otherwise delete the steward-applied value(s), then, when the key held a
-//     prior value before the steward touched it (old_value non-empty), restore
-//     that value with its prior source.
+//   - if none remain AND the entity still exists, a human or the classifier
+//     has since removed or overridden the steward's value — SKIP (never
+//     clobber a non-steward tag). Benign, logged at Info.
+//   - if none remain because the entity no longer exists at all, that is a
+//     different, more alarming case — counted as notFound, not skipped, so
+//     it can't hide in a bucket meant for "someone made a deliberate call."
+//   - otherwise delete the steward-applied value(s), then restore EVERY
+//     prior value the snapshot recorded (a multi-cardinality key may have
+//     held several at once — see stewardSnapshotLine.oldBindings), each
+//     with its own recorded source.
+//
+// Every line is validated structurally first (validateSnapshotLine) — a
+// violation counts as failed, is logged with the file and line number, and
+// is never treated as skipped, since "this line doesn't look like a
+// snapshot record" and "a human overrode this" are not the same finding. If
+// EVERY line in the file fails that check, the whole rollback is refused
+// with an error instead of returning a confident-looking all-zero-or-all-
+// skipped result for what is very likely the wrong file entirely (a plan or
+// review document, not a steward snapshot).
 //
 // One failing entity does not abort the batch — failures are counted and the
-// rest proceed. Returns (reverted, skipped, failed).
-func rollbackTags(ctx context.Context, store wms.Store, batchID string) (reverted, skipped, failed int, err error) {
+// rest proceed. Returns (reverted, skipped, notFound, failed). This grew a
+// field (notFound) beyond the tool's original {reverted, skipped, failed}
+// shape — additive, so an existing caller reading only the fields it already
+// knows about is unaffected.
+func rollbackTags(ctx context.Context, store wms.Store, batchID string) (reverted, skipped, notFound, failed int, err error) {
 	dir, err := tagStewardDir()
 	if err != nil {
-		return 0, 0, 0, err
+		return 0, 0, 0, 0, err
 	}
 	path := filepath.Join(dir, batchID+".jsonl")
 	f, err := os.Open(path)
 	if err != nil {
-		return 0, 0, 0, fmt.Errorf("opening snapshot %s: %w", path, err)
+		return 0, 0, 0, 0, fmt.Errorf("opening snapshot %s: %w", path, err)
 	}
 	defer f.Close() //nolint:errcheck
 
 	scanner := bufio.NewScanner(f)
 	// Snapshot lines are short, but allow generous room for long entity IDs.
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	lineNum := 0
+	totalLines, validLines := 0, 0
 	for scanner.Scan() {
+		lineNum++
 		raw := strings.TrimSpace(scanner.Text())
 		if raw == "" {
 			continue
 		}
+		totalLines++
 		var line stewardSnapshotLine
 		if jerr := json.Unmarshal([]byte(raw), &line); jerr != nil {
 			failed++
 			slog.Warn("wms-mcp: rollback skipping malformed snapshot line",
-				"batch", batchID, "err", jerr)
+				"batch", batchID, "file", path, "line", lineNum, "err", jerr)
 			continue
 		}
+		if verr := validateSnapshotLine(line); verr != nil {
+			failed++
+			slog.Warn("wms-mcp: rollback skipping structurally invalid snapshot line — this file may not be a steward snapshot",
+				"batch", batchID, "file", path, "line", lineNum, "err", verr)
+			continue
+		}
+		validLines++
 
 		// Find the steward-sourced value(s) currently bound for the key. A key may
 		// be multi-cardinality (e.g. work-type), so there can be more than one
@@ -1268,10 +1520,22 @@ func rollbackTags(ctx context.Context, store wms.Store, batchID string) (reverte
 			}
 		}
 
-		// Nothing of ours remains: either the steward value was already removed, or
-		// a human/classifier has overridden it since. Respect that — skip.
+		// Nothing of ours remains: either the steward value was already removed or
+		// overridden (benign — a deliberate human/classifier call, skip), or the
+		// entity itself no longer exists (worth surfacing on its own, not the
+		// same finding). GetEntityTags can't tell these apart by itself.
 		if len(stewardValues) == 0 {
+			if !entityExists(ctx, store, line.EntityType, line.EntityID) {
+				notFound++
+				slog.Warn("wms-mcp: rollback found no such entity",
+					"entity_type", line.EntityType, "entity_id", line.EntityID,
+					"tag_key", line.TagKey, "batch", batchID)
+				continue
+			}
 			skipped++
+			slog.Info("wms-mcp: rollback skipped — no steward-sourced binding remains (human or classifier override since the snapshot)",
+				"entity_type", line.EntityType, "entity_id", line.EntityID,
+				"tag_key", line.TagKey, "batch", batchID)
 			continue
 		}
 
@@ -1283,16 +1547,23 @@ func rollbackTags(ctx context.Context, store wms.Store, batchID string) (reverte
 				break
 			}
 		}
-		// If the steward had overwritten a prior value, restore it. (When old_value
-		// is empty the tag was absent before — the delete above is the whole
-		// revert.) The prior source is restored from the snapshot; default to
-		// "manual" when the snapshot did not record one.
-		if aerr == nil && line.OldValue != "" {
-			oldSource := line.OldSource
-			if oldSource == "" {
-				oldSource = "manual"
+		// Restore EVERY prior binding the snapshot recorded — a multi-cardinality
+		// key may have held several at once, and restoring only one would lose
+		// the rest permanently. (An empty result means the key was absent before
+		// the steward touched it — the delete above is the whole revert.) Each
+		// binding's own recorded source is restored; default to "manual" when the
+		// snapshot did not record one.
+		if aerr == nil {
+			for _, ob := range line.oldBindings() {
+				oldSource := ob.Source
+				if oldSource == "" {
+					oldSource = "manual"
+				}
+				if e := store.TagEntity(ctx, line.EntityType, line.EntityID, line.TagKey, ob.Value, oldSource, ""); e != nil {
+					aerr = e
+					break
+				}
 			}
-			aerr = store.TagEntity(ctx, line.EntityType, line.EntityID, line.TagKey, line.OldValue, oldSource, "")
 		}
 		if aerr != nil {
 			failed++
@@ -1304,9 +1575,15 @@ func rollbackTags(ctx context.Context, store wms.Store, batchID string) (reverte
 		reverted++
 	}
 	if serr := scanner.Err(); serr != nil {
-		return reverted, skipped, failed, fmt.Errorf("reading snapshot %s: %w", path, serr)
+		return reverted, skipped, notFound, failed, fmt.Errorf("reading snapshot %s: %w", path, serr)
 	}
-	return reverted, skipped, failed, nil
+	if totalLines > 0 && validLines == 0 {
+		return 0, 0, 0, totalLines, fmt.Errorf(
+			"refusing to roll back %s: none of its %d line(s) look like a steward snapshot "+
+				"(entity_type/entity_id/tag_key missing or malformed) — this is very likely the wrong file",
+			path, totalLines)
+	}
+	return reverted, skipped, notFound, failed, nil
 }
 
 func buildTagManifest(tags []wms.Tag) wms.TagManifest {
@@ -1516,7 +1793,7 @@ var ToolDefs = []map[string]interface{}{
 	},
 	{
 		"name":        ToolTagEntity,
-		"description": "Apply a key:value classifier tag to an entity (outcome or workunit). FIRST call wms_listTags to see the key manifest; for the key you intend to tag, call wms_listTags(tagKey=<key>) to see existing values (unless the manifest already includes them). Reuse an existing (tagKey, tagValue) rather than inventing near-duplicates. The vocabulary is dynamic: applying a NEW (tagKey, tagValue) creates it — pass `description` to record what it means and when to apply it, so the next caller's wms_listTags sees it. An existing tag's description is never overwritten.",
+		"description": "Apply a key:value classifier tag to an entity (outcome or workunit). FIRST call wms_listTags to see the key manifest; for the key you intend to tag, call wms_listTags(tagKey=<key>) to see existing values (unless the manifest already includes them). Reuse an existing (tagKey, tagValue) rather than inventing near-duplicates. The vocabulary is dynamic: applying a NEW (tagKey, tagValue) creates it — pass `description` (max 1024 chars) to record what it means and when to apply it, so the next caller's wms_listTags sees it. An existing tag's description is never overwritten.",
 		"inputSchema": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -1525,7 +1802,7 @@ var ToolDefs = []map[string]interface{}{
 				"tagKey":      map[string]interface{}{"type": "string", "description": "e.g. phase, work-type, project, priority"},
 				"tagValue":    map[string]interface{}{"type": "string", "description": "e.g. build, feature, v0.1, p1"},
 				"source":      map[string]interface{}{"type": "string", "description": "manual | classifier | inherited (default manual)"},
-				"description": map[string]interface{}{"type": "string", "description": "Semantics — what this tag means and when to apply it. Stored only when introducing a NEW (tagKey, tagValue); ignored for existing tags."},
+				"description": map[string]interface{}{"type": "string", "maxLength": 1024, "description": "Semantics — what this tag means and when to apply it. Stored only when introducing a NEW (tagKey, tagValue); ignored for existing tags. Max 1024 characters."},
 			},
 			"required": []string{"entityType", "entityID", "tagKey", "tagValue"},
 		},
@@ -1549,15 +1826,15 @@ var ToolDefs = []map[string]interface{}{
 	},
 	{
 		"name":        ToolDefineTag,
-		"description": "Seed a key into the declared tag vocabulary (is_seed=1) — the runtime equivalent of a yaml `tags:` entry, used during the bootstrap interview to capture vocabulary from the user. Idempotent: re-defining a key converges (category/cardinality refreshed; an existing description is preserved). Omit `values` for create-on-apply keys (e.g. project) whose values are minted on first tag; pass `values` to pre-seed an enumerated set (e.g. priority p0..p3).",
+		"description": "Seed a key into the declared tag vocabulary (is_seed=1) — the runtime equivalent of a yaml `tags:` entry, used during the bootstrap interview to capture vocabulary from the user. Idempotent: re-defining a key converges (category/cardinality refreshed; an existing description is preserved). Omit `values` for create-on-apply keys (e.g. project) whose values are minted on first tag; pass `values` to pre-seed an enumerated set (e.g. priority p0..p3). `description` is capped at 1024 characters.",
 		"inputSchema": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"tagKey":      map[string]interface{}{"type": "string", "description": "The vocabulary key, e.g. project, priority."},
-				"category":    map[string]interface{}{"type": "string", "description": "'context' (durable metadata, inherited down the DAG) or 'lifecycle' (execution tracking). Defaults to context."},
-				"cardinality": map[string]interface{}{"type": "string", "description": "'single' (key holds at most one value per entity; a new value replaces the old) or 'multi' (values accumulate). Defaults to multi."},
-				"values":      map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Optional enumerated values to pre-seed (e.g. p0, p1, p2, p3). Omit for create-on-apply keys whose values are minted on first use."},
-				"description":    map[string]interface{}{"type": "string", "description": "Semantics — what this key means and when to apply it."},
+				"tagKey":         map[string]interface{}{"type": "string", "description": "The vocabulary key, e.g. project, priority."},
+				"category":       map[string]interface{}{"type": "string", "description": "'context' (durable metadata, inherited down the DAG) or 'lifecycle' (execution tracking). Defaults to context."},
+				"cardinality":    map[string]interface{}{"type": "string", "description": "'single' (key holds at most one value per entity; a new value replaces the old) or 'multi' (values accumulate). Defaults to multi."},
+				"values":         map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Optional enumerated values to pre-seed (e.g. p0, p1, p2, p3). Omit for create-on-apply keys whose values are minted on first use."},
+				"description":    map[string]interface{}{"type": "string", "maxLength": 1024, "description": "Semantics — what this key means and when to apply it. Max 1024 characters."},
 				"required":       map[string]interface{}{"type": "boolean", "description": "Optional. When true, marks this key as required on every workunit (set across all the key's values). When false, clears the required flag. Omit to leave the key's required flag unchanged."},
 				"scope":          map[string]interface{}{"type": "string", "description": "'outcome' | 'workunit' | '' — where this key should be applied."},
 				"exclusionGroup": map[string]interface{}{"type": "string", "description": "Mutual exclusion group slug. Keys sharing a group are exclusive on an entity."},
@@ -1581,13 +1858,13 @@ var ToolDefs = []map[string]interface{}{
 	},
 	{
 		"name":        ToolDescribeTag,
-		"description": "Refine the description of an EXISTING tag value, overwriting it in place. The description is the classification rubric — the 'when to apply' guidance the steward and classifier read. Works for ANY key, INCLUDING system-managed lifecycle keys (work-type, phase, resolution, lifecycle) that wms_defineTag refuses to touch. Contrast: wms_tagEntity only records a description when a (tagKey, tagValue) is first created (never overwrites); wms_defineTag manages vocabulary/required at the KEY level and rejects lifecycle keys. Use this to sharpen an ambiguous value description so classification becomes obvious. Errors if the (tagKey, tagValue) does not already exist.",
+		"description": "Refine the description of an EXISTING tag value, overwriting it in place. The description is the classification rubric — the 'when to apply' guidance the steward and classifier read. Works for ANY key, INCLUDING system-managed lifecycle keys (work-type, phase, resolution, lifecycle) that wms_defineTag refuses to touch. Contrast: wms_tagEntity only records a description when a (tagKey, tagValue) is first created (never overwrites); wms_defineTag manages vocabulary/required at the KEY level and rejects lifecycle keys. Use this to sharpen an ambiguous value description so classification becomes obvious. Errors if the (tagKey, tagValue) does not already exist. `description` is capped at 1024 characters.",
 		"inputSchema": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"tagKey":      map[string]interface{}{"type": "string", "description": "The existing tag's key, e.g. work-type."},
 				"tagValue":    map[string]interface{}{"type": "string", "description": "The existing tag's value, e.g. bug."},
-				"description": map[string]interface{}{"type": "string", "description": "The new description — the classification rubric for this value. Replaces the prior description in place."},
+				"description": map[string]interface{}{"type": "string", "maxLength": 1024, "description": "The new description — the classification rubric for this value. Replaces the prior description in place. Max 1024 characters."},
 			},
 			"required": []string{"tagKey", "tagValue", "description"},
 		},
@@ -1836,21 +2113,26 @@ var ToolDefs = []map[string]interface{}{
 	},
 	{
 		"name":        ToolSnapshotEntityTags,
-		"description": "Tag steward rollback plumbing: capture the current binding of one tag key across a set of entities to a JSONL snapshot (<batchID>.jsonl in the tag-steward snapshot directory under the install's var dir), BEFORE applying steward tag changes. Records each entity's pre-change value (or empty if the key was absent) so wms_rollbackTags can later revert. Returns the absolute snapshot path. Batch ID convention: steward-<key>-<YYYYMMDD-HHMMSS>.",
+		"description": "Tag steward rollback plumbing: capture the current binding(s) of one tag key across a set of entities to a JSONL snapshot (<batchID>.jsonl in the tag-steward snapshot directory under the install's var dir), BEFORE applying steward tag changes. Records each entity's pre-change value(s) (or none if the key was absent — a multi-cardinality key like work-type may have held several at once, and ALL of them are recorded, not just one) so wms_rollbackTags can later restore all of them. Returns the absolute snapshot path. ONE LOGICAL BATCH IS ONE CALL: if the batch spans both outcomes and workunits, use `entities` (mixed types in one call) instead of calling this twice with the same batchID — a second call reusing a batchID REPLACES the snapshot file rather than adding to it, silently discarding the first call's rollback data. Batch ID convention: steward-<key>-<YYYYMMDD-HHMMSS>.",
 		"inputSchema": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"entityType": map[string]interface{}{"type": "string", "description": "outcome or workunit"},
-				"entityIDs":  map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Entity IDs whose current binding for tagKey is snapshotted."},
+				"entities": map[string]interface{}{
+					"type":        "array",
+					"items":       map[string]interface{}{"type": "object", "properties": map[string]interface{}{"entityType": map[string]interface{}{"type": "string", "description": "outcome or workunit"}, "entityID": map[string]interface{}{"type": "string"}}, "required": []string{"entityType", "entityID"}},
+					"description": "Entities to snapshot, spanning any mix of outcomes and workunits — use this when the batch is not all one entity type. Mutually exclusive with entityType + entityIDs; supply one or the other, never both.",
+				},
+				"entityType": map[string]interface{}{"type": "string", "description": "outcome or workunit. Use with entityIDs when the batch is entirely one entity type; for a mixed-type batch use `entities` instead."},
+				"entityIDs":  map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Entity IDs (all of entityType), each a non-blank string, whose current binding(s) for tagKey are snapshotted. Mutually exclusive with entities."},
 				"tagKey":     map[string]interface{}{"type": "string", "description": "The single tag key being changed (one snapshot per key)."},
-				"batchID":    map[string]interface{}{"type": "string", "description": "Batch identifier; the snapshot file is <batchID>.jsonl. Convention: steward-<key>-<YYYYMMDD-HHMMSS>."},
+				"batchID":    map[string]interface{}{"type": "string", "description": "Batch identifier; the snapshot file is <batchID>.jsonl. Convention: steward-<key>-<YYYYMMDD-HHMMSS>. Reusing a batchID across calls REPLACES the prior snapshot — one logical batch must be one call (use `entities` for a mixed-type batch)."},
 			},
-			"required": []string{"entityType", "entityIDs", "tagKey", "batchID"},
+			"required": []string{"tagKey", "batchID"},
 		},
 	},
 	{
 		"name":        ToolRollbackTags,
-		"description": "Tag steward rollback: revert the steward-applied tag changes recorded in a batch snapshot (<batchID>.jsonl in the tag-steward snapshot directory under the install's var dir). For each entity, if the current binding's source is still 'steward' it is reverted (deleted if the key was absent before, or restored to its prior value); if a human or the classifier has since overridden it (source != 'steward'), it is skipped. Returns {reverted, skipped, failed} counts.",
+		"description": "Tag steward rollback: revert the steward-applied tag changes recorded in a batch snapshot (<batchID>.jsonl in the tag-steward snapshot directory under the install's var dir). For each entity, every current binding whose source is still 'steward' is deleted, and every prior binding the snapshot recorded is restored (a multi-cardinality key like work-type may have held several at once — all of them are restored, not just one). If no steward-sourced binding remains AND the entity still exists, a human or the classifier has since overridden it — skipped, never clobbered. If the entity named in a line no longer exists at all, that is reported separately as notFound rather than folded into skipped. Each line is validated structurally before being processed (entity_type must be outcome or workunit; entity_id and tag_key non-empty) — a line that fails this is counted as failed, not skipped, and if EVERY line in the file fails it the whole rollback is refused with an error (this is very likely the wrong file, e.g. a plan/review document rather than a steward snapshot) instead of returning a confident-looking result. Returns {reverted, skipped, notFound, failed} counts.",
 		"inputSchema": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
