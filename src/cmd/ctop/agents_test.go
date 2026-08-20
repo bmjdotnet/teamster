@@ -1324,6 +1324,77 @@ func TestTeamTintRGBUsesTeamNameThenSessionIDFallback(t *testing.T) {
 	}
 }
 
+func TestRenderRowAgentColorSessionSalted(t *testing.T) {
+	// Regression guard for agents.go:1384 — verify that renderRow colors agent names
+	// with session-salt (their own SessionID). This ensures the same agent in different
+	// sessions gets different colors per instance, and catches if someone reverts the
+	// line back to EntityColor(r.AgentName, "").
+	m := &agentsModel{}
+	cs := columnsForWidth(160, false)
+	const agentName = "@colorhash"
+	const sessionID = "sess-abc-123"
+
+	row := Agent{AgentName: agentName, SessionID: sessionID, Liveness: "live"}
+	sessionSaltedColor := display.EntityColor(agentName, sessionID)
+	sessionSaltedRGB := display.RGB(sessionSaltedColor[0], sessionSaltedColor[1], sessionSaltedColor[2])
+	out := m.renderRow(row, false, cs, 16, nil, " ", false, 160)
+
+	// Output must contain the session-salted color (agents.go:1384).
+	if !strings.Contains(out, sessionSaltedRGB) {
+		t.Errorf("renderRow with SessionID %q does not render session-salted color %q", sessionID, sessionSaltedRGB)
+	}
+
+	// Output must NOT contain empty-salt if they differ — a regression would be reverting
+	// the salt parameter back to "".
+	emptySaltedColor := display.EntityColor(agentName, "")
+	emptySaltedRGB := display.RGB(emptySaltedColor[0], emptySaltedColor[1], emptySaltedColor[2])
+	if sessionSaltedRGB != emptySaltedRGB && strings.Contains(out, emptySaltedRGB) {
+		t.Errorf("renderRow output contains empty-salt color %q but should use session-salt %q", emptySaltedRGB, sessionSaltedRGB)
+	}
+}
+
+func TestRenderRowTeamAliasColorStaysEmptySaltedAcrossSessions(t *testing.T) {
+	// Regression guard for agents.go:1393-1394 — the "#team" branch must color by
+	// the un-prefixed team name with empty salt (matching teamTintRGB's own
+	// EntityColor(team, "")), not by the "#"-prefixed string and not session-salted.
+	// A team spans multiple sessions, so session-salting here would desync a team's
+	// text color from its own row background tint across sessions. Proof: two rows
+	// for the SAME team but DIFFERENT SessionIDs must render the SAME color.
+	m := &agentsModel{}
+	cs := columnsForWidth(160, false)
+	const teamAlias = "#wms-build"
+
+	rowA := Agent{AgentName: teamAlias, SessionID: "session-a", Liveness: "live"}
+	rowB := Agent{AgentName: teamAlias, SessionID: "session-b", Liveness: "live"}
+	outA := m.renderRow(rowA, false, cs, 16, nil, " ", false, 160)
+	outB := m.renderRow(rowB, false, cs, 16, nil, " ", false, 160)
+
+	wantColor := display.EntityColor("wms-build", "")
+	wantRGB := display.RGB(wantColor[0], wantColor[1], wantColor[2])
+	if !strings.Contains(outA, wantRGB) {
+		t.Errorf("renderRow(%q, session-a) does not render empty-salt, un-prefixed team color %q", teamAlias, wantRGB)
+	}
+	if !strings.Contains(outB, wantRGB) {
+		t.Errorf("renderRow(%q, session-b) does not render empty-salt, un-prefixed team color %q", teamAlias, wantRGB)
+	}
+
+	// Fixture sanity: session-salting "wms-build" with these two session ids must
+	// actually differ, or the test above would pass vacuously even with a
+	// session-salted implementation.
+	saltedA := display.EntityColor("wms-build", "session-a")
+	saltedB := display.EntityColor("wms-build", "session-b")
+	if saltedA == saltedB {
+		t.Fatal("test fixture invalid: session-a and session-b must hash wms-build to different colors")
+	}
+
+	// Must NOT use the "#"-prefixed string as the hash input.
+	prefixedColor := display.EntityColor(teamAlias, "")
+	prefixedRGB := display.RGB(prefixedColor[0], prefixedColor[1], prefixedColor[2])
+	if prefixedRGB != wantRGB && (strings.Contains(outA, prefixedRGB) || strings.Contains(outB, prefixedRGB)) {
+		t.Errorf("renderRow(%q) uses the \"#\"-prefixed string as hash input (color %q)", teamAlias, prefixedRGB)
+	}
+}
+
 func TestBlendBGMovesTowardTintAtGivenOpacity(t *testing.T) {
 	tint := [3]int{200, 100, 50}
 	resting := blendBG(tint, 0.12)

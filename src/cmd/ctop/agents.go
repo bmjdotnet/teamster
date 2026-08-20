@@ -1076,13 +1076,13 @@ func (m *agentsModel) visibleAgentCounts() (visible, active, closed int) {
 // is).
 var tintBaseRGB = [3]int{13, 17, 23}
 
-// teamTintRGB returns a session group's background-tint source color:
-// EntityColor of its team_name (matching this file's existing,
-// session-independent convention for coloring team/agent names — see
-// renderRow's own `EntityColor(r.AgentName, "")` call), or of the sessionID
-// when no team_name is set, so a teamless session still gets a stable,
-// distinguishable tint instead of every teamless session blending into one
-// color.
+// teamTintRGB returns a session group's background-tint source color.
+// Teams use empty salt (team name alone) so team identity is stable and
+// recognizable across all sessions and views — a team's membership spans
+// multiple sessions, so no single session_id is stable (groupBySession picks
+// a representative member's session_id, which can shift if that member's
+// ParentRef status changes). Sessionless groups use their sessionID with
+// empty salt for a stable, session-bound tint.
 func teamTintRGB(g agentGroup) [3]int {
 	team := ""
 	if len(g.rows) > 0 {
@@ -1382,12 +1382,15 @@ func (m *agentsModel) renderRow(r Agent, selected bool, cs colSet, agentW int, c
 	midTurn := m.midTurnFor(r, now)
 	dim := rowDimLevel(r.Liveness, inactive)
 
-	ac := display.EntityColor(r.AgentName, "")
+	// Dual-salt convention for entity identity coloring:
+	// - Agent name (non-team): salt by own session_id (r.SessionID) to match
+	//   fleet_view.go:1068 and render.go:131. Ensures one agent renders the
+	//   same color across fleet tree, activity grid, and feed.
+	// - Team name (prefixed with "#"): salt by empty string (""), un-prefixed name.
+	//   A team spans multiple sessions by construction, so session-salting or
+	//   using the "#"-prefixed form would break cross-view consistency.
+	ac := display.EntityColor(r.AgentName, r.SessionID)
 	if strings.HasPrefix(r.AgentName, "#") {
-		// Color the "#team_name" alias by the raw team name, matching
-		// teamTintRGB's own EntityColor(team, "") — not by the "#"-prefixed
-		// string, which would hash to an unrelated color and desync the text
-		// from the row's own background tint.
 		ac = display.EntityColor(strings.TrimPrefix(r.AgentName, "#"), "")
 	}
 	if dim == dimHalve {
