@@ -11,7 +11,9 @@ package mysql
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -583,17 +585,40 @@ func closeOpenStateIntervals(ctx context.Context, tx *sql.Tx, entityType, entity
 //   - a 'classifier' write (B4) applies only when the row is not already
 //     declared (`phase_source <> 'declared'`).
 //
-// It writes the wms_intervals column directly — NOT the tag vocabulary —
-// so it never touches the systemManagedKeys deny-list. A no-op (0 rows) when a
-// classifier write is blocked by an existing declared phase; that is expected,
-// not an error.
+// The column is the generative source of truth; every successful write here
+// is mirrored to the entity's `phase` tag in entity_tags (single-cardinality
+// replace, same source), so wms_setPhase and the classifier's interval pass
+// both keep entity_tags in sync automatically — no caller needs a second,
+// forgettable TagEntity call. A no-op (0 rows) when a classifier write is
+// blocked by an existing declared phase, or the row doesn't exist; nothing
+// is mirrored in that case. Callers that write phase via a raw INSERT
+// instead of this function (e.g. recovery.go's synthetic warmup-recovery
+// rows) intentionally bypass the mirror — those rows are synthetic
+// accounting, not observed WorkUnit activity.
 func (s *Store) UpdateEventRecordPhase(ctx context.Context, id int64, phase, source string) error {
-	_, err := s.db.ExecContext(ctx, `
+	res, err := s.db.ExecContext(ctx, `
 		UPDATE wms_intervals
 		SET phase = ?, phase_source = ?, phase_assembled_at = ?
 		WHERE id = ? AND kind = 'state' AND (phase_source <> 'declared' OR ? = 'declared')`,
 		phase, source, nowUTC(), id, source)
-	return err
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return nil
+	}
+
+	var entityType, entityID string
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT entity_type, entity_id FROM wms_intervals WHERE id = ?`, id,
+	).Scan(&entityType, &entityID); err != nil {
+		return err
+	}
+	return s.TagEntity(ctx, entityType, entityID, "phase", phase, source, "")
 }
 
 // MarkIntervalAssembled stamps phase_assembled_at on an interval WITHOUT setting
@@ -721,13 +746,13 @@ func (s *Store) ClearClassifierPhases(ctx context.Context) (int64, error) {
 // i.e. the first time it fully left a closed lifecycle state. The result is keyed
 // by a [entity_type, entity_id] array. Entities with no closed review/done
 // interval are omitted (they have no closure, so no later active can be a
-// re-entry). This lets the forward phase pass detect cross-batch rework: an
+// re-entry). This lets the forward phase pass detect cross-batch iterate: an
 // active interval whose started_at is AFTER its entity's earliest closure end is
 // a re-entry regardless of whether the closing interval is in the same batch.
 //
 // Using ended_at (not started_at) matches the "a review/done interval that ENDED
 // before this active interval STARTED" semantics, so an active interval that
-// merely overlaps an in-progress review is not falsely flagged rework.
+// merely overlaps an in-progress review is not falsely flagged iterate.
 //
 // keys is the batch's distinct entities as [entity_type, entity_id] pairs; an
 // empty keys returns an empty map. The signature uses primitive pairs so the
@@ -1098,10 +1123,8 @@ func (s *Store) SearchTags(ctx context.Context, tagKey, query string) ([]wms.Tag
 		q += ` AND tag_key = ?`
 		args = append(args, tagKey)
 	}
-	if query != "" {
+	if pattern, ok := searchLikePattern(query); ok {
 		q += ` AND (tag_value LIKE ? OR description LIKE ?)`
-		esc := strings.NewReplacer("%", `\%`, "_", `\_`)
-		pattern := "%" + esc.Replace(query) + "%"
 		args = append(args, pattern, pattern)
 	}
 	q += ` ORDER BY tag_key, tag_value`
@@ -1171,7 +1194,7 @@ func (s *Store) RetireTagValue(ctx context.Context, tagKey, tagValue string) err
 // wrong-category bug), not descriptions. It MUST work for the lifecycle keys
 // (work-type/phase/resolution/lifecycle) — refining those descriptions is the
 // whole point of the tag steward's "the description IS the rule" pillar, and
-// TagEntity's create-only description write (WHERE description IS NULL OR '')
+// TagEntity's create-only description write (WHERE description IS NULL OR ”)
 // cannot update an existing one.
 //
 // Not-found correctness: MySQL's RowsAffected counts CHANGED rows, so writing
@@ -1685,7 +1708,7 @@ const focusLockTimeout = 10 * time.Second
 // connection separate from the transaction it protects, so it adds no risk
 // of self-deadlock.
 func (s *Store) withFocusLock(ctx context.Context, sessionID, agentName string, fn func() error) error {
-	return s.withNamedLock(ctx, "teamster_focus:"+sessionID+":"+agentName, fn)
+	return s.withNamedLock(ctx, namedLockID("teamster_focus", sessionID, agentName), fn)
 }
 
 // withStateLock is withFocusLock's kind='state' counterpart, serializing
@@ -1696,8 +1719,72 @@ func (s *Store) withFocusLock(ctx context.Context, sessionID, agentName string, 
 // empirically the same class of race can surface as a transient double-open
 // under enough concurrent TransitionEventRecord callers on one entity even
 // when a row DOES exist to lock. The advisory lock removes the ambiguity.
+// entity_id is VARCHAR(128) with no length cap enforced above the store, so
+// this goes through namedLockID the same as withFocusLock.
 func (s *Store) withStateLock(ctx context.Context, entityType, entityID string, fn func() error) error {
-	return s.withNamedLock(ctx, "teamster_state:"+entityType+":"+entityID, fn)
+	return s.withNamedLock(ctx, namedLockID("teamster_state", entityType, entityID), fn)
+}
+
+// maxLockNameLen is MySQL's hard cap on GET_LOCK/RELEASE_LOCK name length.
+// Exceeding it doesn't truncate the name — the server rejects the acquire
+// outright ("User-level lock name ... should not exceed 64 characters",
+// error 4163). withFocusLock built its name by raw concatenation
+// ("teamster_focus:"+sessionID+":"+agentName) for six weeks before this was
+// caught: every long-enough agent name made OpenFocusInterval fail, and the
+// fire-and-forget call site discarded the error, so the loss was silent —
+// see the parent-ref-fifo-fix WU writeup for the cost.
+const maxLockNameLen = 64
+
+// lockDigestLen is the hex length of the digest namedLockID mixes into every
+// lock name: 16 hex chars = 64 bits. This isn't an adversarial namespace —
+// cardinality is bounded by live session/agent/entity counts — so 64 bits is
+// far past any realistic birthday-collision risk for this use.
+const lockDigestLen = 16
+
+// namedLockID builds a MySQL advisory-lock name bounded to maxLockNameLen
+// for a short constant kind (e.g. "teamster_focus") plus one or more
+// variable-length identifying parts (session ID, agent name, entity ID...).
+//
+// Truncating the joined string to fit is the wrong fix: two different part
+// sets that happen to share a truncated prefix would silently collide on the
+// same lock and serialize against each other with no error — the same class
+// of invisible failure as the discarded error that hid this bug for six
+// weeks. Instead, uniqueness is carried entirely by a SHA-256 digest of every
+// part (NUL-separated, so parts ("ab","c") and ("a","bc") never hash the
+// same) rather than however much raw text happens to fit, so the name stays
+// bounded and collision-resistant no matter how long any part grows in the
+// future. kind survives in full as a plain-text prefix for readability in
+// logs and SHOW PROCESSLIST; only the digest carries correctness.
+//
+// Mixed-binary upgrade hazard: this changes the lock name for every
+// (kind, parts) pair, so a binary still running the old raw-concatenation
+// scheme and one running this scheme will NOT mutually exclude on the same
+// resource — each computes a different GET_LOCK name for the same logical
+// lock. hookd, rollup, and classify all reach the store, and rollup/classify
+// fire on systemd timers every 10 minutes, so an upgrade has a real (if
+// short) window where a timer-launched old binary can overlap a
+// freshly-restarted new hookd. The consequence is a momentary loss of
+// mutual exclusion on that (session, agent) or (entity_type, entity_id)
+// pair, not data corruption — but it is invisible, so: `install.sh` rebuilds
+// and restages every binary together, keeping the window to a single
+// install run, and a partial upgrade of only one binary is NOT safe for
+// this change.
+func namedLockID(kind string, parts ...string) string {
+	h := sha256.New()
+	h.Write([]byte(kind))
+	for _, p := range parts {
+		h.Write([]byte{0})
+		h.Write([]byte(p))
+	}
+	digest := hex.EncodeToString(h.Sum(nil))[:lockDigestLen]
+	name := kind + ":" + digest
+	if len(name) > maxLockNameLen {
+		// Defensive only: kind is always one of our own short literals
+		// today, so this is unreachable, but it keeps the bound an
+		// invariant rather than an assumption.
+		name = name[:maxLockNameLen]
+	}
+	return name
 }
 
 // withNamedLock serializes fn against every other caller using the same

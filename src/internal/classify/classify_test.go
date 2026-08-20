@@ -81,7 +81,7 @@ func (f *fakeBatchSignalReader) ReadSignalsBatch(_ context.Context, windows []wm
 // #13 perf-fix regression: a batch of intervals must produce exactly ONE
 // ReadSignalsBatch call (not one per interval — the bug), the request must
 // exclude intervals whose phase is already determined without signals
-// (rework via reEntry, review via state) and sessionless intervals (which
+// (iterate via reEntry, review via state) and sessionless intervals (which
 // never queried the log even pre-fix), and the lower/upper bound must be the
 // min/max Start/End of exactly the windows actually sent.
 func TestBatchReadSignals_ScansOnceAndScopesToSignalNeedingIntervals(t *testing.T) {
@@ -95,14 +95,14 @@ func TestBatchReadSignals_ScansOnceAndScopesToSignalNeedingIntervals(t *testing.
 		}
 	}
 
-	reworkRec := mk(1, "active", "sessrework0001", "ag", 0, 5)     // excluded: reEntry
+	iterateRec := mk(1, "active", "sessiterate0001", "ag", 0, 5)     // excluded: reEntry
 	reviewRec := mk(2, "review", "sessreview0001", "ag", 10, 15)   // excluded: review state
 	sessionless := mk(3, "active", "", "", 20, 25)                 // excluded: no session
 	active1 := mk(4, "active", "sessactive00001", "ag", 30, 35)     // included
 	active2 := mk(5, "active", "sessactive00002", "ag", 100, 105)   // included, widest window
 
-	intervals := []wms.EventRecord{reworkRec, reviewRec, sessionless, active1, active2}
-	reEntry := map[int64]bool{reworkRec.ID: true}
+	intervals := []wms.EventRecord{iterateRec, reviewRec, sessionless, active1, active2}
+	reEntry := map[int64]bool{iterateRec.ID: true}
 
 	fake := &fakeBatchSignalReader{}
 	r := New(nil, fake, "unused.jsonl", nil)
@@ -118,13 +118,13 @@ func TestBatchReadSignals_ScansOnceAndScopesToSignalNeedingIntervals(t *testing.
 		t.Fatalf("ReadSignals (per-window) was called — batched path should never fall back to it when available")
 	}
 	if len(fake.lastWindows) != 2 {
-		t.Fatalf("windows sent = %d, want 2 (only active1, active2 — rework/review/sessionless excluded)", len(fake.lastWindows))
+		t.Fatalf("windows sent = %d, want 2 (only active1, active2 — iterate/review/sessionless excluded)", len(fake.lastWindows))
 	}
 	if len(sigs) != 2 {
 		t.Fatalf("result map has %d entries, want 2", len(sigs))
 	}
-	if _, ok := sigs[reworkRec.ID]; ok {
-		t.Error("rework interval should not be in the signals map (never queried)")
+	if _, ok := sigs[iterateRec.ID]; ok {
+		t.Error("iterate interval should not be in the signals map (never queried)")
 	}
 	if _, ok := sigs[reviewRec.ID]; ok {
 		t.Error("review interval should not be in the signals map (never queried)")
@@ -176,8 +176,8 @@ func TestDerivePhase_Rules(t *testing.T) {
 		wantNil bool // expect errNoSignal (phase left NULL)
 	}{
 		{
-			name: "rework wins over everything", state: "active", reEntry: true,
-			sig: tags(map[string]int{"EDIT": 10}, 10), want: "rework",
+			name: "iterate wins over everything", state: "active", reEntry: true,
+			sig: tags(map[string]int{"EDIT": 10}, 10), want: "iterate",
 		},
 		{
 			name: "review from interval state", state: "review",
@@ -273,8 +273,8 @@ func TestMarkReEntry(t *testing.T) {
 	}
 
 	// wu-x's first review/done ENDS at minute 10. Active at 0 (before closure end
-	// → NOT rework), active at 20 and 40 (after closure end → rework). wu-y never
-	// closes (absent from the map) → its active is not rework.
+	// → NOT iterate), active at 20 and 40 (after closure end → iterate). wu-y never
+	// closes (absent from the map) → its active is not iterate.
 	intervals := []wms.EventRecord{
 		mk(1, "wu-x", "active", 0),  // first-pass active, before closure end
 		mk(3, "wu-x", "active", 20), // re-entry
@@ -290,16 +290,16 @@ func TestMarkReEntry(t *testing.T) {
 
 	got := markReEntry(intervals, firstClosure)
 	if !got[3] {
-		t.Error("interval 3 should be rework (active at 20, after wu-x closure end at 10)")
+		t.Error("interval 3 should be iterate (active at 20, after wu-x closure end at 10)")
 	}
 	if !got[6] {
-		t.Error("interval 6 should be rework (active at 40, after wu-x closure end at 10)")
+		t.Error("interval 6 should be iterate (active at 40, after wu-x closure end at 10)")
 	}
 	if got[1] {
-		t.Error("interval 1 (active at 0, before closure end) is first-pass — not rework")
+		t.Error("interval 1 (active at 0, before closure end) is first-pass — not iterate")
 	}
 	if got[4] {
-		t.Error("interval 4 (wu-y, never closed) is not rework")
+		t.Error("interval 4 (wu-y, never closed) is not iterate")
 	}
 	if len(got) != 2 {
 		t.Errorf("re-entry set size = %d, want 2", len(got))

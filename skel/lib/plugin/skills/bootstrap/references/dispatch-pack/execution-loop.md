@@ -19,10 +19,11 @@ IMPLEMENT → VALIDATE → ADVERSARIAL REVIEW → COMMIT
 Each phase has a different agent. Fresh context is structural, not optional.
 
 **The loop maps to the `phase` tag.** As the task moves through the loop, the lead
-updates its `phase` tag via `wms_tagEntity` so spend is faceable by phase:
+calls `wms_setPhase` so spend is faceable by phase — one call writes both the
+tag and the interval, keeping them in sync:
 IMPLEMENT → `phase=build`, VALIDATE → `phase=test`, ADVERSARIAL REVIEW →
 `phase=review` (and `phase=design` before IMPLEMENT for design-heavy tasks). A
-send-back from review or validate is `phase=rework`.
+send-back from review or validate is `phase=iterate`.
 
 ---
 
@@ -33,15 +34,18 @@ send-back from review or validate is `phase=rework`.
 **What:** Build the change. Run the build. Fix compilation errors. This phase is
 complete when the code compiles and the implementer believes it is correct.
 
-**First action — set focus.** Before touching code, the implementer calls
-`wms_setFocus(entityType=task, entityID=<its task id>, focus=<short what>)`.
-This is what attributes the agent's token cost to the task; without it the cost
-can only land in the "unallocated" bucket.
+**First action — claim the work unit.** Before touching code, the implementer
+calls `wms_claimWorkUnit('<work unit id>')` — this returns the assignment
+brief, opens a focus interval, and transitions the WU to active, all in one
+call. This is what attributes the agent's token cost to the task; without it
+the cost can only land in the "unallocated" bucket. `wms_setFocus` remains a
+valid fallback for non-WU-scoped work.
 
 **Done when:**
 - `go build ./...` passes (or project-equivalent)
 - Implementer has read back the diff and caught obvious mistakes
 - Implementer sends "ready for validation" to the validator via SendMessage
+- Implementer calls `wms_deliverResult` with a summary and the full result
 
 **The implementer does NOT run the full test suite as a substitute for VALIDATE.**
 Their context is contaminated by the implementation. Validation requires fresh eyes.

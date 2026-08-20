@@ -20,6 +20,7 @@ import (
 	"github.com/bmjdotnet/teamster/internal/config"
 	"github.com/bmjdotnet/teamster/internal/installbackup"
 	"github.com/bmjdotnet/teamster/internal/redact"
+	"github.com/bmjdotnet/teamster/internal/version"
 	"gopkg.in/yaml.v3"
 )
 
@@ -475,9 +476,11 @@ func run() error {
 	}
 
 	// 3. Copy skel/ contents into basedir (lib/, doc/, etc/).
-	// Preserve user-customized files across upgrades: save before the
-	// blanket skel copy, restore after. Fresh installs (no prior file) get
-	// the skel version. Also write a .default alongside for diffing.
+	// CLAUDE.md is preserved across upgrades (save before the blanket skel
+	// copy, restore after); interceptors.yaml is NOT — it always takes the
+	// shipped default (see below), since a preserved copy silently falls
+	// behind newly-added MCP tool rules with no warning. Fresh installs (no
+	// prior file) get the skel version either way.
 	skelDir := filepath.Join(*repoDir, "skel")
 	claudeMDBasedir := filepath.Join(*basedir, "CLAUDE.md")
 	var priorClaudeMD []byte
@@ -510,18 +513,29 @@ func run() error {
 			dlog("INFO", "teamster-install.copytree", "preserved existing CLAUDE.md")
 		}
 	}
+	// copyTreeCounting already overwrote interceptorsPath with the shipped
+	// default — that's the desired end state, so it is NOT restored here.
+	// A prior file is instead backed up under a version-stamped name so an
+	// operator can recover any customizations.
 	if priorInterceptors != nil {
-		if err := os.WriteFile(interceptorsPath, priorInterceptors, 0o644); err != nil {
-			dlog("WARN", "teamster-install.copytree", "restore interceptors.yaml failed", "err", err.Error())
-		} else {
-			dlog("INFO", "teamster-install.copytree", "preserved existing interceptors.yaml")
+		// Worktree git-describe tags contain "/" which breaks the filename.
+		backupVersion := version.Version
+		if strings.Contains(backupVersion, "/") {
+			backupVersion = "v" + version.Commit
 		}
-		if skelData, err := os.ReadFile(filepath.Join(skelDir, "etc", "interceptors.yaml")); err == nil {
-			if err := os.WriteFile(interceptorsPath+".default", skelData, 0o644); err != nil {
-				dlog("WARN", "teamster-install.copytree", "write interceptors.yaml.default failed", "err", err.Error())
-			}
+		backupPath := filepath.Join(*basedir, "etc", fmt.Sprintf("interceptors-%s.yaml.bak", backupVersion))
+		if err := os.WriteFile(backupPath, priorInterceptors, 0o644); err != nil {
+			dlog("WARN", "teamster-install.copytree", "backup interceptors.yaml failed", "err", err.Error())
+		} else {
+			dlog("INFO", "teamster-install.copytree", fmt.Sprintf("backed up existing interceptors.yaml to %s", filepath.Base(backupPath)))
 		}
 	}
+	if skelData, err := os.ReadFile(filepath.Join(skelDir, "etc", "interceptors.yaml")); err == nil {
+		if err := os.WriteFile(interceptorsPath+".default", skelData, 0o644); err != nil {
+			dlog("WARN", "teamster-install.copytree", "write interceptors.yaml.default failed", "err", err.Error())
+		}
+	}
+	dlog("INFO", "teamster-install.copytree", "interceptors.yaml updated to shipped default")
 
 	// 3b. Prune orphan dashboard JSONs. copyTreeCounting copies skel over the top
 	// of BASEDIR but never removes BASEDIR files that skel no longer ships, so a

@@ -29,19 +29,29 @@ func scanOutcome(sc interface {
 const outcomeColumns = `id, title, description, status, prior_status,
 	focus, origin_host, origin_session, origin_agent, created_at, updated_at`
 
-// scanWorkUnit scans a single WorkUnit row from the given scanner.
+// scanWorkUnit scans a single WorkUnit row from the given scanner. It never
+// reads brief — GetWorkUnit uses its own scan with an extra column, keeping
+// list-path scans free of a potentially large text value.
 func scanWorkUnit(sc interface {
 	Scan(...any) error
 }, wu *wms.WorkUnit) error {
-	return sc.Scan(
+	var claimedAt sql.NullTime
+	if err := sc.Scan(
 		&wu.ID, &wu.OutcomeID, &wu.Title, &wu.Description, &wu.Status, &wu.PriorStatus,
 		&wu.AgentID, &wu.Focus, &wu.OriginHost, &wu.OriginSession, &wu.OriginAgent,
-		&wu.CreatedAt, &wu.UpdatedAt,
-	)
+		&wu.CreatedAt, &wu.UpdatedAt, &claimedAt,
+	); err != nil {
+		return err
+	}
+	if claimedAt.Valid {
+		t := claimedAt.Time
+		wu.ClaimedAt = &t
+	}
+	return nil
 }
 
 const workUnitColumns = `id, outcome_id, title, description, status, prior_status,
-	agent_id, focus, origin_host, origin_session, origin_agent, created_at, updated_at`
+	agent_id, focus, origin_host, origin_session, origin_agent, created_at, updated_at, claimed_at`
 
 // --- Outcome Reader ---
 
@@ -164,17 +174,31 @@ func (s *Store) GetOutcomeChildren(ctx context.Context, outcomeID string) ([]str
 
 // --- WorkUnit Reader ---
 
+// GetWorkUnit is the one WorkUnit read path that also returns brief — the
+// full dispatch brief text. ListWorkUnits/ListReadyWorkUnits deliberately
+// omit it (see workUnitColumns).
 func (s *Store) GetWorkUnit(ctx context.Context, id string) (*wms.WorkUnit, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT `+workUnitColumns+`
+		SELECT `+workUnitColumns+`, brief
 		FROM workunits WHERE id = ?`, id)
 	var wu wms.WorkUnit
-	if err := scanWorkUnit(row, &wu); err != nil {
+	var claimedAt sql.NullTime
+	var brief sql.NullString
+	if err := row.Scan(
+		&wu.ID, &wu.OutcomeID, &wu.Title, &wu.Description, &wu.Status, &wu.PriorStatus,
+		&wu.AgentID, &wu.Focus, &wu.OriginHost, &wu.OriginSession, &wu.OriginAgent,
+		&wu.CreatedAt, &wu.UpdatedAt, &claimedAt, &brief,
+	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, store.NotFound("GetWorkUnit", "workunit", id)
 		}
 		return nil, err
 	}
+	if claimedAt.Valid {
+		t := claimedAt.Time
+		wu.ClaimedAt = &t
+	}
+	wu.Brief = brief.String
 	return &wu, nil
 }
 
@@ -354,10 +378,10 @@ func (s *Store) CreateWorkUnit(ctx context.Context, wu *wms.WorkUnit) error {
 	now := nowUTC()
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO workunits (id, outcome_id, title, description, status, prior_status,
-			agent_id, focus, origin_host, origin_session, origin_agent, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			agent_id, focus, brief, origin_host, origin_session, origin_agent, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		wu.ID, wu.OutcomeID, wu.Title, wu.Description, wu.Status, wu.PriorStatus,
-		wu.AgentID, wu.Focus, wu.OriginHost, wu.OriginSession, wu.OriginAgent, now, now,
+		wu.AgentID, wu.Focus, wu.Brief, wu.OriginHost, wu.OriginSession, wu.OriginAgent, now, now,
 	)
 	return err
 }
@@ -438,6 +462,15 @@ func (s *Store) UpdateWorkUnitTitle(ctx context.Context, id, title string) error
 	return requireOneRow(res, "UpdateWorkUnitTitle", "workunit", id)
 }
 
+func (s *Store) UpdateWorkUnitBrief(ctx context.Context, id, brief string) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE workunits SET brief = ?, updated_at = ? WHERE id = ?`, brief, nowUTC(), id)
+	if err != nil {
+		return err
+	}
+	return requireOneRow(res, "UpdateWorkUnitBrief", "workunit", id)
+}
+
 func (s *Store) AssignWorkUnit(ctx context.Context, id, agentID string) error {
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE workunits SET agent_id = ?, updated_at = ? WHERE id = ?`, agentID, nowUTC(), id)
@@ -447,24 +480,51 @@ func (s *Store) AssignWorkUnit(ctx context.Context, id, agentID string) error {
 	return requireOneRow(res, "AssignWorkUnit", "workunit", id)
 }
 
-// ClaimWorkUnit is a CAS-style guarded update (WHERE status = 'pending'): a
-// zero-row result means the unit was gone or already claimed by a concurrent
-// writer, not that it never existed — ErrPrecondition, not ErrNotFound.
-func (s *Store) ClaimWorkUnit(ctx context.Context, id, agentID string) error {
-	res, err := s.db.ExecContext(ctx,
-		`UPDATE workunits SET agent_id = ?, status = 'active', updated_at = ?
-		 WHERE id = ? AND status = 'pending'`, agentID, nowUTC(), id)
+// ClaimWorkUnit reads the pre-claim (status, agent_id), then runs a single
+// CAS-guarded UPDATE implementing the full claim-state matrix in one round
+// trip after that read (mirrors internal/store/mysql/store_v2.go's
+// ClaimWorkUnit — see that copy's comment for the full matrix, the TOCTOU
+// rationale for reusing the pre-claim read as both success metadata and
+// failure classification, and the SET-ordering rationale for MySQL's
+// left-to-right evaluation; SQLite always evaluates every SET expression
+// against pre-statement row values regardless of clause order, so the same
+// statement text is correct here unchanged).
+func (s *Store) ClaimWorkUnit(ctx context.Context, id, agentID string) (string, error) {
+	var oldStatus, oldOwner string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT status, agent_id FROM workunits WHERE id = ?`, id).Scan(&oldStatus, &oldOwner)
 	if err != nil {
-		return err
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", store.NotFound("ClaimWorkUnit", "workunit", id)
+		}
+		return "", err
+	}
+
+	now := nowUTC()
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE workunits
+		SET claimed_at = CASE WHEN status = 'pending' OR agent_id = '' THEN ? ELSE claimed_at END,
+		    status     = CASE WHEN status = 'pending' THEN 'active' ELSE status END,
+		    updated_at = ?,
+		    agent_id   = ?
+		WHERE id = ?
+		  AND (status = 'pending' OR (status = 'active' AND (agent_id = '' OR agent_id = ?)))`,
+		now, now, agentID, id, agentID)
+	if err != nil {
+		return "", err
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return err
+		return "", err
 	}
-	if n == 0 {
-		return store.Precondition("ClaimWorkUnit", "workunit", id)
+	if n > 0 {
+		return oldStatus, nil
 	}
-	return nil
+
+	if oldStatus != wms.StatusActive {
+		return "", store.NotClaimable("ClaimWorkUnit", "workunit", id, oldStatus)
+	}
+	return "", store.AlreadyClaimed("ClaimWorkUnit", "workunit", id, oldOwner)
 }
 
 // --- EntityDependency Writer ---

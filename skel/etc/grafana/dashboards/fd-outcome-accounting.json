@@ -450,12 +450,211 @@
       "type": "piechart"
     },
     {
+      "datasource": {
+        "type": "mysql",
+        "uid": "teamster-mysql"
+      },
+      "description": "scope: outcome_true_cost_rollup, source_type='rework' \u2014 total cost of post-delivery corrections (remediates/reverts/addresses-limitation/fulfills-realization edges) attributed back to the original outcome, for the period.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "red",
+            "mode": "fixed"
+          },
+          "decimals": 2,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 0,
+        "y": 8
+      },
+      "id": 40,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [],
+          "fields": "",
+          "values": true
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "teamster-mysql"
+          },
+          "format": "table",
+          "rawSql": "SELECT ROUND(SUM(cost_usd), 2) AS value\nFROM outcome_true_cost_rollup\nWHERE source_type = 'rework'\n  AND bucket_hour BETWEEN $__timeFrom() AND $__timeTo()",
+          "refId": "A"
+        }
+      ],
+      "title": "Rework Tax ($)",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "teamster-mysql"
+      },
+      "description": "Rework Tax \u00f7 Total Attributed Spend (cost_facts, incl. unallocated \u2014 same denominator as the Total Attributed Spend panel above).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 2,
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "yellow",
+                "value": 5
+              },
+              {
+                "color": "red",
+                "value": 15
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 8,
+        "y": 8
+      },
+      "id": 41,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [],
+          "fields": "",
+          "values": true
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "teamster-mysql"
+          },
+          "format": "table",
+          "rawSql": "SELECT ROUND(100.0 * rework.c / NULLIF(tot.c, 0), 2) AS value\nFROM (\n  SELECT COALESCE(SUM(cost_usd), 0) AS c\n  FROM outcome_true_cost_rollup\n  WHERE source_type = 'rework'\n    AND bucket_hour BETWEEN $__timeFrom() AND $__timeTo()\n) rework,\n(\n  SELECT COALESCE(SUM(cost_usd), 0) AS c\n  FROM cost_facts\n  WHERE timestamp BETWEEN $__timeFrom() AND $__timeTo()\n) tot",
+          "refId": "A"
+        }
+      ],
+      "title": "Rework Tax (%)",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "teamster-mysql"
+      },
+      "description": "scope: COUNT(DISTINCT outcome_id) from outcome_true_cost_rollup where source_type='rework' \u2014 outcomes that carried post-delivery correction cost in the period.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 16,
+        "y": 8
+      },
+      "id": 42,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [],
+          "fields": "",
+          "values": true
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "teamster-mysql"
+          },
+          "format": "table",
+          "rawSql": "SELECT COUNT(DISTINCT outcome_id) AS value\nFROM outcome_true_cost_rollup\nWHERE source_type = 'rework'\n  AND bucket_hour BETWEEN $__timeFrom() AND $__timeTo()",
+          "refId": "A"
+        }
+      ],
+      "title": "Outcomes with Rework",
+      "type": "stat"
+    },
+    {
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 8
+        "y": 13
       },
       "id": 30,
       "panels": [],
@@ -668,7 +867,7 @@
         "h": 9,
         "w": 8,
         "x": 0,
-        "y": 9
+        "y": 14
       },
       "id": 31,
       "options": {
@@ -853,7 +1052,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "rework"
+              "options": "iterate"
             },
             "properties": [
               {
@@ -886,7 +1085,7 @@
         "h": 9,
         "w": 8,
         "x": 8,
-        "y": 9
+        "y": 14
       },
       "id": 32,
       "options": {
@@ -1034,7 +1233,7 @@
         "h": 9,
         "w": 8,
         "x": 16,
-        "y": 9
+        "y": 14
       },
       "id": 33,
       "options": {
@@ -1071,24 +1270,11 @@
       "type": "table"
     },
     {
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 18
-      },
-      "id": 20,
-      "panels": [],
-      "title": "Workunit Drill \u2014 $outcome",
-      "type": "row"
-    },
-    {
       "datasource": {
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: attributed cost_facts for outcomes, day-bucketed. Top 12 + (other) when $outcome=All.",
+      "description": "scope: outcome_true_cost_rollup, source_type='rework' \u2014 rework cost grouped by miss_class (code=shipped-to-bug, design=addresses-limitation, spec=fulfills-realization). Answers: where do post-delivery mistakes originate?",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1100,33 +1286,22 @@
             "axisColorMode": "text",
             "axisLabel": "",
             "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.9,
-            "drawStyle": "bars",
-            "fillOpacity": 100,
-            "gradientMode": "opacity",
+            "fillOpacity": 80,
+            "gradientMode": "none",
             "hideFrom": {
               "legend": false,
               "tooltip": false,
               "viz": false
             },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
             "lineWidth": 1,
-            "pointSize": 5,
             "scaleDistribution": {
               "type": "linear"
-            },
-            "showPoints": "auto",
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "normal"
             },
             "thresholdsStyle": {
               "mode": "off"
             }
           },
+          "decimals": 2,
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
@@ -1134,178 +1309,89 @@
               {
                 "color": "green",
                 "value": 0
-              },
-              {
-                "color": "red",
-                "value": 80
               }
             ]
           },
           "unit": "currencyUSD"
         },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 11,
-        "w": 24,
-        "x": 0,
-        "y": 19
-      },
-      "id": 22,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "right",
-          "showLegend": true
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "single",
-          "sort": "none"
-        }
-      },
-      "pluginVersion": "12.1.1",
-      "targets": [
-        {
-          "datasource": {
-            "type": "mysql",
-            "uid": "teamster-mysql"
-          },
-          "format": "time_series",
-          "rawSql": "SELECT\n  $__timeGroupAlias(cf.timestamp, $agg),\n  CASE\n    WHEN '$outcome' != 'All' THEN COALESCE(o.title, cf.entity_id)\n    WHEN rnk.rn <= 12 THEN COALESCE(o.title, cf.entity_id)\n    ELSE '(other)'\n  END AS metric,\n  ROUND(SUM(cf.cost_usd), 4) AS cost_usd\nFROM cost_facts cf\nJOIN outcomes o ON o.id = cf.entity_id AND cf.entity_type = 'outcome'\nLEFT JOIN (\n  SELECT entity_id, ROW_NUMBER() OVER (ORDER BY SUM(cost_usd) DESC) AS rn\n  FROM cost_facts\n  WHERE timestamp BETWEEN $__timeFrom() AND $__timeTo()\n    AND entity_type = 'outcome'\n  GROUP BY entity_id\n) rnk ON rnk.entity_id = cf.entity_id\nWHERE cf.timestamp BETWEEN $__timeFrom() AND $__timeTo()\n  AND cf.entity_type = 'outcome'\n  AND ('$outcome' = 'All' OR cf.entity_id = '$outcome')\nGROUP BY 1, metric\nORDER BY 1",
-          "refId": "A"
-        }
-      ],
-      "title": "Outcome Cost Over Time \u2014 $outcome",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "mysql",
-        "uid": "teamster-mysql"
-      },
-      "description": "scope: attributed cost_facts for workunits of the selected outcome. Shows engineer (from token_ledger.username), agent, phase mix and duration from wms_intervals.",
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "align": "left",
-            "cellOptions": {
-              "type": "auto"
-            },
-            "inspect": false
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          },
-          "unit": "string"
-        },
         "overrides": [
           {
             "matcher": {
               "id": "byName",
-              "options": "cost_usd"
+              "options": "code"
             },
             "properties": [
               {
-                "id": "unit",
-                "value": "currencyUSD"
-              },
-              {
-                "id": "decimals",
-                "value": 2
-              },
-              {
-                "id": "custom.align",
-                "value": "right"
-              },
-              {
-                "id": "displayName",
-                "value": "Cost"
+                "id": "color",
+                "value": {
+                  "fixedColor": "#F2495C",
+                  "mode": "fixed"
+                }
               }
             ]
           },
           {
             "matcher": {
               "id": "byName",
-              "options": "duration_hrs"
+              "options": "design"
             },
             "properties": [
               {
-                "id": "unit",
-                "value": "h"
-              },
-              {
-                "id": "decimals",
-                "value": 1
-              },
-              {
-                "id": "custom.align",
-                "value": "right"
-              },
-              {
-                "id": "displayName",
-                "value": "Duration (h)"
+                "id": "color",
+                "value": {
+                  "fixedColor": "#FF9830",
+                  "mode": "fixed"
+                }
               }
             ]
           },
           {
             "matcher": {
               "id": "byName",
-              "options": "messages"
+              "options": "spec"
             },
             "properties": [
               {
-                "id": "unit",
-                "value": "short"
-              },
-              {
-                "id": "decimals",
-                "value": 0
-              },
-              {
-                "id": "custom.align",
-                "value": "right"
+                "id": "color",
+                "value": {
+                  "fixedColor": "#B877D9",
+                  "mode": "fixed"
+                }
               }
             ]
           }
         ]
       },
       "gridPos": {
-        "h": 8,
-        "w": 24,
+        "h": 9,
+        "w": 12,
         "x": 0,
-        "y": 30
+        "y": 23
       },
-      "id": 21,
+      "id": 43,
       "options": {
-        "cellHeight": "sm",
-        "footer": {
-          "countRows": false,
-          "fields": "",
-          "reducer": [
+        "barRadius": 0,
+        "barWidth": 0.6,
+        "fullHighlight": false,
+        "groupWidth": 0.7,
+        "legend": {
+          "calcs": [
             "sum"
           ],
-          "show": false
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
         },
-        "showHeader": true,
-        "sortBy": [
-          {
-            "desc": true,
-            "displayName": "Cost"
-          }
-        ]
+        "orientation": "horizontal",
+        "showValue": "always",
+        "stacking": "none",
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 100
       },
       "pluginVersion": "12.1.1",
       "targets": [
@@ -1315,12 +1401,166 @@
             "uid": "teamster-mysql"
           },
           "format": "table",
-          "rawSql": "WITH wu_cost AS (\n  SELECT\n    cf.entity_id,\n    COUNT(DISTINCT cf.message_id) AS messages,\n    ROUND(SUM(cf.cost_usd), 4) AS cost_usd\n  FROM cost_facts cf\n  JOIN workunits wu ON wu.id = cf.entity_id AND cf.entity_type = 'workunit'\n  WHERE cf.timestamp BETWEEN $__timeFrom() AND $__timeTo()\n    AND ('$outcome' = 'All' OR wu.outcome_id = '$outcome')\n  GROUP BY cf.entity_id\n),\nwu_intervals AS (\n  SELECT entity_id,\n    GROUP_CONCAT(DISTINCT phase ORDER BY phase SEPARATOR '/') AS phase_str,\n    ROUND(SUM(duration_ms) / 3600000.0, 1) AS duration_hrs\n  FROM wms_intervals\n  WHERE entity_type = 'workunit' AND assembled_at IS NOT NULL\n  GROUP BY entity_id\n),\nwu_engineer AS (\n  SELECT cf.entity_id,\n    GROUP_CONCAT(DISTINCT CASE WHEN tl.username = '' THEN '(unstamped)' ELSE tl.username END SEPARATOR ', ') AS engineer\n  FROM cost_facts cf\n  JOIN token_ledger tl ON tl.message_id = cf.message_id\n  WHERE cf.entity_type = 'workunit'\n    AND cf.timestamp BETWEEN $__timeFrom() AND $__timeTo()\n  GROUP BY cf.entity_id\n)\nSELECT\n  COALESCE(wu.title, wc.entity_id) AS work_unit,\n  COALESCE(we.engineer, '(unstamped)') AS engineer,\n  CASE WHEN wu.agent_id = '' THEN '(lead)' ELSE wu.agent_id END AS agent,\n  wu.status,\n  COALESCE(wi.phase_str, '') AS phase_mix,\n  COALESCE(wi.duration_hrs, 0) AS duration_hrs,\n  wc.messages,\n  wc.cost_usd\nFROM wu_cost wc\nJOIN workunits wu ON wu.id = wc.entity_id\nLEFT JOIN wu_intervals wi ON wi.entity_id = wc.entity_id\nLEFT JOIN wu_engineer we ON we.entity_id = wc.entity_id\nORDER BY wc.cost_usd DESC\nLIMIT 50",
+          "rawSql": "SELECT\n  miss_class,\n  ROUND(SUM(cost_usd), 2) AS cost_usd\nFROM outcome_true_cost_rollup\nWHERE source_type = 'rework'\n  AND bucket_hour BETWEEN $__timeFrom() AND $__timeTo()\nGROUP BY miss_class\nORDER BY cost_usd DESC",
           "refId": "A"
         }
       ],
-      "title": "Workunit Line Items for $outcome",
-      "type": "table"
+      "title": "Rework by Miss Class",
+      "type": "barchart"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "teamster-mysql"
+      },
+      "description": "scope: outcome_true_cost_rollup, source_type='rework' \u2014 rework cost grouped by relation_kind (only taxable kinds ever appear here: remediates, reverts, addresses-limitation, fulfills-realization).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineWidth": 1,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "decimals": 2,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "remediates"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#F2495C",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "reverts"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#C4162A",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "addresses-limitation"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#FF9830",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "fulfills-realization"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#B877D9",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 23
+      },
+      "id": 44,
+      "options": {
+        "barRadius": 0,
+        "barWidth": 0.6,
+        "fullHighlight": false,
+        "groupWidth": 0.7,
+        "legend": {
+          "calcs": [
+            "sum"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "orientation": "horizontal",
+        "showValue": "always",
+        "stacking": "none",
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 100
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "teamster-mysql"
+          },
+          "format": "table",
+          "rawSql": "SELECT\n  relation_kind,\n  ROUND(SUM(cost_usd), 2) AS cost_usd\nFROM outcome_true_cost_rollup\nWHERE source_type = 'rework'\n  AND bucket_hour BETWEEN $__timeFrom() AND $__timeTo()\nGROUP BY relation_kind\nORDER BY cost_usd DESC",
+          "refId": "A"
+        }
+      ],
+      "title": "Rework by Relation Kind",
+      "type": "barchart"
     },
     {
       "collapsed": false,
@@ -1328,7 +1568,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 38
+        "y": 32
       },
       "id": 10,
       "panels": [],
@@ -1340,7 +1580,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: attributed only \u2014 one row per outcome with cost activity in the window. CTE-based aggregate-first query (<1s for 30d). Confidence % = (direct + inferred) share of messages. Designed for invoice/budget review export.",
+      "description": "scope: rolled-up cost (outcome_true_cost_rollup: direct + workunit + child_outcome + rework), not flat cost_facts \u2014 one row per outcome with cost activity in the window, including outcomes whose only activity was rework or child-outcome rollup. Rework Cost column isolates the source_type='rework' share. Confidence % = (direct + inferred) share of messages, from cost_facts/usage_attribution. Designed for invoice/budget review export.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -1388,6 +1628,37 @@
               {
                 "id": "displayName",
                 "value": "Cost"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "rework_cost_usd"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              },
+              {
+                "id": "custom.align",
+                "value": "right"
+              },
+              {
+                "id": "displayName",
+                "value": "Rework Cost"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
               }
             ]
           },
@@ -1488,7 +1759,7 @@
         "h": 16,
         "w": 24,
         "x": 0,
-        "y": 39
+        "y": 33
       },
       "id": 11,
       "options": {
@@ -1517,11 +1788,11 @@
             "uid": "teamster-mysql"
           },
           "format": "table",
-          "rawSql": "WITH cost_agg AS (\n  SELECT\n    cf.entity_id,\n    COUNT(DISTINCT cf.message_id) AS messages,\n    SUM(cf.tokens) AS tokens,\n    ROUND(SUM(cf.cost_usd), 4) AS cost_usd,\n    MIN(DATE(cf.timestamp)) AS first_activity,\n    MAX(DATE(cf.timestamp)) AS last_activity\n  FROM cost_facts cf\n  WHERE cf.timestamp BETWEEN $__timeFrom() AND $__timeTo()\n    AND cf.entity_type = 'outcome'\n  GROUP BY cf.entity_id\n),\nconf AS (\n  SELECT\n    ua.entity_id,\n    ROUND(100.0 * SUM(CASE WHEN ua.method LIKE 'temporal_join%' THEN 1 ELSE 0 END) / COUNT(*), 1) AS confidence_pct\n  FROM usage_attribution ua\n  JOIN token_ledger tl ON tl.message_id = ua.message_id\n  WHERE tl.timestamp BETWEEN $__timeFrom() AND $__timeTo()\n    AND ua.entity_type = 'outcome'\n  GROUP BY ua.entity_id\n),\nprod AS (\n  SELECT etr.entity_id, MAX(t.tag_value) AS product\n  FROM entity_tags_resolved etr\n  JOIN tags t ON t.id = etr.tag_id AND t.tag_key = 'product'\n  WHERE etr.entity_type = 'outcome'\n  GROUP BY etr.entity_id\n),\nres AS (\n  SELECT etr.entity_id, MAX(t.tag_value) AS resolution\n  FROM entity_tags_resolved etr\n  JOIN tags t ON t.id = etr.tag_id AND t.tag_key = 'resolution'\n  WHERE etr.entity_type = 'outcome'\n  GROUP BY etr.entity_id\n)\nSELECT\n  COALESCE(o.title, ca.entity_id) AS outcome,\n  COALESCE(p.product, '(untagged)') AS product,\n  o.status,\n  COALESCE(r.resolution, '') AS resolution,\n  ca.first_activity,\n  ca.last_activity,\n  ca.messages,\n  ca.tokens,\n  ca.cost_usd,\n  COALESCE(c.confidence_pct, 0) AS confidence_pct\nFROM cost_agg ca\nJOIN outcomes o ON o.id = ca.entity_id\nLEFT JOIN prod p ON p.entity_id = ca.entity_id\nLEFT JOIN res r ON r.entity_id = ca.entity_id\nLEFT JOIN conf c ON c.entity_id = ca.entity_id\nWHERE COALESCE(p.product, '(untagged)') IN (${product:sqlstring})\n  AND o.status IN (${status:sqlstring})\nORDER BY ca.cost_usd DESC\nLIMIT 200",
+          "rawSql": "WITH true_cost AS (\n  SELECT\n    outcome_id,\n    ROUND(SUM(cost_usd), 4) AS cost_usd\n  FROM outcome_true_cost_rollup\n  WHERE bucket_hour BETWEEN $__timeFrom() AND $__timeTo()\n  GROUP BY outcome_id\n),\nrework_cost AS (\n  SELECT\n    outcome_id,\n    ROUND(SUM(cost_usd), 4) AS rework_cost_usd\n  FROM outcome_true_cost_rollup\n  WHERE source_type = 'rework'\n    AND bucket_hour BETWEEN $__timeFrom() AND $__timeTo()\n  GROUP BY outcome_id\n),\nmsg_agg AS (\n  SELECT\n    cf.entity_id,\n    COUNT(DISTINCT cf.message_id) AS messages,\n    SUM(cf.tokens) AS tokens,\n    MIN(DATE(cf.timestamp)) AS first_activity,\n    MAX(DATE(cf.timestamp)) AS last_activity\n  FROM cost_facts cf\n  WHERE cf.timestamp BETWEEN $__timeFrom() AND $__timeTo()\n    AND cf.entity_type = 'outcome'\n  GROUP BY cf.entity_id\n),\nconf AS (\n  SELECT\n    ua.entity_id,\n    ROUND(100.0 * SUM(CASE WHEN ua.method LIKE 'temporal_join%' THEN 1 ELSE 0 END) / COUNT(*), 1) AS confidence_pct\n  FROM usage_attribution ua\n  JOIN token_ledger tl ON tl.message_id = ua.message_id\n  WHERE tl.timestamp BETWEEN $__timeFrom() AND $__timeTo()\n    AND ua.entity_type = 'outcome'\n  GROUP BY ua.entity_id\n),\nprod AS (\n  SELECT etr.entity_id, MAX(t.tag_value) AS product\n  FROM entity_tags_resolved etr\n  JOIN tags t ON t.id = etr.tag_id AND t.tag_key = 'product'\n  WHERE etr.entity_type = 'outcome'\n  GROUP BY etr.entity_id\n),\nres AS (\n  SELECT etr.entity_id, MAX(t.tag_value) AS resolution\n  FROM entity_tags_resolved etr\n  JOIN tags t ON t.id = etr.tag_id AND t.tag_key = 'resolution'\n  WHERE etr.entity_type = 'outcome'\n  GROUP BY etr.entity_id\n)\nSELECT\n  COALESCE(o.title, tc.outcome_id) AS outcome,\n  COALESCE(p.product, '(untagged)') AS product,\n  o.status,\n  COALESCE(r.resolution, '') AS resolution,\n  ma.first_activity,\n  ma.last_activity,\n  COALESCE(ma.messages, 0) AS messages,\n  COALESCE(ma.tokens, 0) AS tokens,\n  tc.cost_usd,\n  COALESCE(rw.rework_cost_usd, 0) AS rework_cost_usd,\n  COALESCE(c.confidence_pct, 0) AS confidence_pct\nFROM true_cost tc\nJOIN outcomes o ON o.id = tc.outcome_id\nLEFT JOIN rework_cost rw ON rw.outcome_id = tc.outcome_id\nLEFT JOIN msg_agg ma ON ma.entity_id = tc.outcome_id\nLEFT JOIN prod p ON p.entity_id = tc.outcome_id\nLEFT JOIN res r ON r.entity_id = tc.outcome_id\nLEFT JOIN conf c ON c.entity_id = tc.outcome_id\nWHERE COALESCE(p.product, '(untagged)') IN (${product:sqlstring})\n  AND o.status IN (${status:sqlstring})\nORDER BY tc.cost_usd DESC\nLIMIT 200",
           "refId": "A"
         }
       ],
-      "title": "Outcome Ledger (attributed spend, sorted by cost)",
+      "title": "Outcome Ledger (sorted by cost)",
       "type": "table"
     }
   ],
@@ -1625,23 +1896,6 @@
         "query": "SELECT DISTINCT status FROM outcomes ORDER BY status",
         "refresh": 2,
         "sort": 1,
-        "type": "query"
-      },
-      {
-        "allValue": "All",
-        "current": {
-          "text": "All",
-          "value": "All"
-        },
-        "datasource": {
-          "type": "mysql",
-          "uid": "teamster-mysql"
-        },
-        "includeAll": true,
-        "label": "Outcome (drill)",
-        "name": "outcome",
-        "query": "SELECT CONCAT(o.id, ' \u2014 ', o.title) AS __text, o.id AS __value FROM outcomes o ORDER BY o.created_at DESC LIMIT 200",
-        "refresh": 2,
         "type": "query"
       }
     ]

@@ -55,23 +55,49 @@ tools" for the full guidance.
 
 ## Step 3 — Create (or resume) the strategic Outcome
 
-Before creating a new Outcome, search for existing open outcomes that match
-the focus slug: extract 2-3 keywords from the slug (e.g., "fix the auth
-timeout bug" → `"auth timeout"`) and call
-`wms_listOutcomes(status="open", query="<keywords>")`.
+Before creating a new Outcome, search **all** outcomes matching the focus
+slug, not just open ones — a match on a `done` outcome is exactly the
+rework-detection signal this step needs. Extract 2-3 keywords from the slug
+(e.g., "fix the auth timeout bug" → `"auth timeout"`) and call
+`wms_listOutcomes(query="<keywords>")` (omit `status` so both open and
+`done` outcomes surface).
 
-If matches are found, present them in plain conversation ("Found these open
-outcomes matching your focus — resume one, or start new?", listing each
-candidate's id, title, and status, plus "start a new outcome" as an option)
-and let the operator pick. Show the 3 most recently updated if more match,
-and mention there are more.
+If matches are found, present them in plain conversation ("Found these
+outcomes matching your focus — continue existing work, rework something
+closed, or start new?", listing each candidate's id, title, and status, plus
+"start a new outcome" as an option) and let the operator pick. Show the 3
+most recently updated if more match, and mention there are more. The status
+in each candidate (`active`, `done`, etc.) tells you which branch below
+applies.
 
-**If the operator picks an existing outcome:**
-- Skip creation — use the selected outcome as the strategic Outcome.
-- If its status is `done`, reactivate to `active`
-  (`mcp__wms__wms_updateOutcomeStatus`).
+**If the operator picks an existing outcome whose status is NOT `done`**
+(`pending`, `active`, `review`, or `blocked`) — continuation:
+- Skip creation — use the selected outcome as-is as the strategic Outcome.
+  Do not change its status.
 - Proceed to Step 4 (tags) — skip tags already present on the outcome.
 - Then Step 5 (focus).
+
+**If the operator picks an existing outcome whose status IS `done`** —
+rework. **Never reactivate a done Outcome.** Flipping `done` → `active`
+erases the fact that the prior work actually shipped. Instead:
+1. Create a **new** Outcome (id based on the focus slug, as in the "new
+   outcome" case below) — this is the strategic Outcome for this session,
+   not the done one. Set status to `active`
+   (`mcp__wms__wms_updateOutcomeStatus`).
+2. Record why with a typed relation: call `mcp__wms__wms_listRelationKinds`
+   and then `mcp__wms__wms_addRelation` with `fromType="outcome"`,
+   `fromID=<the new outcome>`, `toType="outcome"`, `toID=<the done
+   outcome>`, and the `kind` that matches why this work exists —
+   `remediates` (the delivered outcome had a defect), `addresses-limitation`
+   (it did what was asked but the result can't be used as needed now),
+   `fulfills-realization` (a requirement nobody identified at the time), or
+   `supersedes` (requirements, scale, or environment changed; the prior work
+   was right for its time — not taxed). If it's not obvious from the
+   operator's framing, ask in one line ("is this fixing something that
+   shipped broken, or building on something that's since changed?") rather
+   than defaulting to a taxable kind.
+3. Proceed to Step 4 (tags) as a **new** Outcome — run the tag interview
+   fresh. Context tags do not carry over from the closed prior outcome.
 
 **If the operator picks "new outcome" or no matches were found:**
 Call `mcp__wms__wms_createOutcome` with an id based on the focus slug. A root
@@ -101,7 +127,7 @@ response groups keys by role — no interpretation needed:
 - **`autoExtract`** — extract silently from the environment (git, env).
 - **`requiredLifecycle`** — lifecycle keys you MUST apply to every WorkUnit
   before starting it. Values are included (e.g. `phase`:
-  design/build/test/review/rework; `work-type`: feature/bug/refactor/…).
+  design/build/test/review/iterate; `work-type`: feature/bug/refactor/…).
   Do NOT propose these at the Outcome interview — apply them per-WorkUnit.
 - **`required`** — non-lifecycle keys required on every WorkUnit before
   close-out.
@@ -216,21 +242,23 @@ Before you begin a WorkUnit (or spawn a subagent for it):
 
 1. **Create it** — `mcp__wms__wms_createWorkUnit(outcomeID=<outcome>, ...)` if
    it doesn't exist yet (decompose, per above).
-2. **Advance status to `active`** — `mcp__wms__wms_updateWorkUnitStatus(...
-   active)`. Move it off `pending`; don't leave it parked.
-3. **Move the WMS focus to it** — `mcp__wms__wms_setFocus(entityType="workunit",
-   entityID=<this WU>, focus=<short what>)`. This is the **cost-bearing**
-   focus (Step 5's table) — not just a `reportActivity` narration. Until you
-   do this, your spend still attributes to the previous entity (or to the
-   Outcome, or to nothing).
-4. **Tag the `requiredLifecycle` keys for THIS WorkUnit BEFORE you start it**
+2. **Claim it** — `mcp__wms__wms_claimWorkUnit('<this WU id>')`. This is the
+   **preferred** path: in one call it sets status to `active` AND opens the
+   **cost-bearing** focus interval (Step 5's table) — not just a
+   `reportActivity` narration. Until you do this, your spend still
+   attributes to the previous entity (or to the Outcome, or to nothing).
+   Fall back to manual `mcp__wms__wms_updateWorkUnitStatus(... active)` +
+   `mcp__wms__wms_setFocus(entityType="workunit", entityID=<this WU>,
+   focus=<short what>)` only if claiming isn't appropriate — e.g. resuming a
+   WU that's already `active` and owned by you.
+3. **Tag the `requiredLifecycle` keys for THIS WorkUnit BEFORE you start it**
    — `mcp__wms__wms_tagEntity` with `work-type` (e.g. `feature`/`docs`/`test`)
    and `phase` (`build`). Check the `requiredLifecycle` map in the manifest
    for valid values — no extra lookup needed. Tag the WorkUnit you're on, not
    a stale one. (Context tags from the Outcome are inherited automatically by
    the engine — you only need to set lifecycle tags per WorkUnit.) The engine
    lets you flip a WorkUnit to `active` (step 2) while it is still untagged and
-   only *warns* afterward — so treat steps 2–4 as one atomic startup beat and
+   only *warns* afterward — so treat steps 2–3 as one atomic startup beat and
    apply the tags as you activate, never deferring them, or the warning is the
    first you'll hear of a protocol miss.
 
@@ -247,6 +275,10 @@ you're actually doing — `build` → `test` → `review` — with `wms_tagEntit
 
 When the piece is **finished**:
 
+4. **Deliver the result** — `mcp__wms__wms_deliverResult(id=<this WU>,
+   summary=<headline>, result=<full write-up>)`. This stores the deliverable
+   durably in WMS and transitions the WorkUnit `active` -> `review`
+   automatically.
 5. **Advance status to `done`** — `mcp__wms__wms_updateWorkUnitStatus(...
    done)`. This closes its focus + state intervals. A WorkUnit left at
    `active` (or worse, `pending`) reads as work that never happened.

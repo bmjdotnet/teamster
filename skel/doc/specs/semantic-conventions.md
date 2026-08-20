@@ -128,8 +128,20 @@ same field:
 
 Both calls write to `_focus` in the JSONL record, so the activity stream
 cannot distinguish them. The critical operating point: **only `wms_setFocus`
-affects cost attribution**. In a solo session, the primary agent must call
-`wms_setFocus` for its work to appear in the Sankey and entity cost tables.
+and a successful `wms_claimWorkUnit` affect cost attribution**. In a solo
+session, the primary agent must call `wms_setFocus` for its work to appear in
+the Sankey and entity cost tables.
+
+**Write-time attribution via claim.** For WU-scoped work, `wms_claimWorkUnit`
+(§4.7) is now the preferred cost-bearing path: on a successful claim that
+performs a real `pending`→`active` transition, hookd auto-opens a focus
+interval off the resulting `WMSStatusChange` event — the agent never needs a
+separate `wms_setFocus` call to attribute its own assignment. This is
+success-gated: a claim that returns `ErrAlreadyClaimed`/`ErrNotClaimable`
+(the loser of a claim race) fires no status-change event and opens no
+interval. `wms_setFocus` remains the fallback for non-WU-scoped work — the
+lead's own focus on the strategic Outcome between dispatches, or an
+ephemeral subagent with no WorkUnit of its own.
 
 ### Notes on `_tool_display` markers
 
@@ -211,8 +223,12 @@ blocks. See `CLAUDE.md`'s Key Conventions for the full mechanism.
   <task_subject>`).
 - `RCAP` is emitted from phantom `SubagentStop` events: Claude Code fires
   `SubagentStop` with no `agent_type` for suggested next prompts (suppressed)
-  and idle recaps (tagged `RCAP`). The heuristic: text starting with an
-  uppercase letter and containing a space is classified as a recap.
+  and idle recaps (tagged `RCAP`). The heuristic (`isRecapText` in
+  `internal/hook/hook.go`): text is classified as a recap only if it starts
+  with an uppercase letter, contains a space, is at least 24 runes long, and
+  ends in terminal punctuation (`.`/`!`/`?`) — a plain uppercase-plus-space
+  check alone matched most well-formed English, including short suggested
+  prompts like "Go ahead".
 - `SubagentStart`/`SubagentStop` fire for Agent-tool (Task tool) subagent
   spawns — Agent Teams teammates do not fire these (see the main repo's
   CLAUDE.md Pitfalls section). `TeammateIdle` (teammate idle transition) and
@@ -279,6 +295,13 @@ WorkUnit completion cascades: when all WorkUnits under an Outcome reach `done`,
 the engine automatically transitions the Outcome to `done`. Outcome-to-Outcome
 parent-child relationships (via dependencies) also cascade upward.
 
+Parentage can also be set or changed after creation with
+`mcp__wms__wms_addOutcomeParent` (parentID, childID) and
+`mcp__wms__wms_removeOutcomeParent` — used to reparent an Outcome under a
+larger initiative once one is recognized (rather than only at creation via
+`parentOutcomeIDs`), and for error recovery when an Outcome was created
+with the wrong parent or as an accidental duplicate.
+
 ### 4.4 WMS Synthetic Event Fields
 
 These fields appear only on `WMSStatusChange` and `WMSFocusChange` records.
@@ -301,6 +324,116 @@ of `TASK` for a status change event.
 |--------|-------------------|
 | outcome | `done` |
 | workunit | `done` |
+
+### 4.6 Typed Relations (`outcome_relations`)
+
+Distinct from the Outcome-DAG parent/child edges in §4.3: a **relation**
+records *why* new work exists relative to **prior delivered work** — not a
+decomposition edge, a correction edge. Every relation carries a `kind` drawn
+from `relation_kinds`, a seeded (not code-enum) vocabulary, so a new kind is
+a migration, not a schema change.
+
+**The vocabulary split this closes.** "Rework" now means exactly one thing
+system-wide:
+
+| Term | Means | Axis | Taxed? |
+|---|---|---|---|
+| **Iteration** | Correction *before* delivery — the build→test→fix loop within a WorkUnit | `phase` (interval column, value `iterate`) | No — the ordinary cost of doing the work |
+| **Rework** | Correction *after* delivery — a new effort because shipped work was wrong | `outcome_relations` (this section) | Yes, for taxable kinds |
+
+**The eight relation kinds** (`relation_kinds` table — `taxable`, `miss_class`,
+and `lineage` are per-kind properties read by the cost-rollup build pass, not
+per-edge choices):
+
+| Kind | Taxable | `miss_class` | Lineage | Meaning |
+|---|---|---|---|---|
+| `remediates` | yes | `code` | yes | Fixes a defect in delivered work — it did not do what it was specified to do. |
+| `addresses-limitation` | yes | `design` | yes | Removes an unintended functional constraint — the work did what was asked, but the result couldn't be used as needed. |
+| `fulfills-realization` | yes | `spec` | yes | Supplies a requirement the delivered work should have had but nobody identified at the time. |
+| `reverts` | yes | `code` | yes | Undoes delivered work because shipping it was itself the error. |
+| `supersedes` | no | — | yes | Replaces delivered work because requirements, scale, or environment changed — the prior work was right for its time. |
+| `follows-up-on` | no | — | yes | A planned continuation of delivered work that was complete and correct. |
+| `discovered-during` | no | — | no | Work surfaced while doing the target, but not a correction of it — provenance only. |
+| `duplicate-of` | no | — | no | The same work tracked twice — an intake error; flags a merge candidate. |
+
+The **taxed set** is `remediates`, `addresses-limitation`,
+`fulfills-realization`, `reverts` — everything else records a relationship
+without charging for it. `lineage=0` kinds (`discovered-during`,
+`duplicate-of`) are excluded from cycle checking and transitive closure —
+they describe circumstance, not derivation.
+
+**Direction.** `from` is the new work, `to` is the prior work — read as a
+sentence: "`from` **remediates** `to`." `to_type='external'` marks an
+antecedent not tracked in WMS (pre-WMS code, work never given its own
+Outcome); `to_id` is then free text rather than an entity ID.
+
+**MCP surface** (`internal/mcp/wms/`): `wms_addRelation` (record an edge at
+intake — `kind`, `fromType`/`fromID`, `toType`/`toID`, optional `note`),
+`wms_removeRelation` (hard delete by identity), `wms_listRelations`
+(`entityType`, `entityID`, optional `direction` — `from`/`to`/`both` — and
+`kind`), `wms_listRelationKinds` (no args — returns `kind`, `taxable`,
+`miss_class`, `description`; call this before picking a kind rather than
+guessing).
+
+### 4.7 Dispatch Package: WorkUnit Claim and Delivery
+
+The dispatch package adds two `WorkUnit` fields, one new table, and two MCP
+tools (`wms_claimWorkUnit`, `wms_deliverResult`) that give an agent a durable,
+atomic claim-and-deliver cycle in place of the voluntary `wms_setFocus` +
+manual status-update pattern.
+
+**New `WorkUnit` fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `brief` | MEDIUMTEXT, nullable | The full dispatch assignment text. Set via `wms_createWorkUnit(brief=...)` at creation, or `UpdateWorkUnitBrief` afterward. Returned only by `wms_claimWorkUnit` and `wms_getWorkUnit` — list tools (`wms_listWorkUnits`, ready-filtered included) omit it to avoid pulling a potentially large value into every list row. |
+| `claimed_at` | DATETIME(6), nullable | Timestamp of the WorkUnit's first successful claim. Set atomically by `wms_claimWorkUnit`; `NULL` until claimed. |
+
+**`wms_claimWorkUnit(id)`.** Agent self-assigns a WorkUnit. The claim and any
+resulting `pending`→`active` transition happen atomically in one store call.
+On success, returns JSON with `brief`, `tags`, `claimed_by`, `claimed_at`, and
+`focus_interval` status — the agent's full assignment payload, not just a
+confirmation string. The claim state matrix:
+
+| WU state | Claim result |
+|---|---|
+| `pending` | claim: set owner + `claimed_at`, → `active` |
+| `active`, `agent_id` empty | adopt: set owner + `claimed_at`, no status change |
+| `active`, owned by caller | idempotent success (safe re-claim after a crash) |
+| `active`, owned by another agent | `ErrAlreadyClaimed{Owner}` |
+| `review`/`done`/`blocked` | `ErrNotClaimable{Status}` |
+| no such id | `ErrNotFound` |
+
+Only the first row is a real status transition — see §2's "write-time
+attribution via claim" for why the other four rows fire no `WMSStatusChange`
+event and open no focus interval.
+
+**`wms_deliverResult(id, summary, result, artifact_paths?)`.** Agent submits
+a deliverable. Inserts an append-only row into `wms_deliverables` (redelivery
+is allowed — a reclaimed WorkUnit can deliver again) and transitions the
+WorkUnit `active`→`review`. Validates ownership: the caller must be the
+WorkUnit's `agent_id`, unless the caller is the lead (no `agent_type`).
+
+**`wms_createWorkUnit`** now accepts an optional `brief` argument, stored at
+creation time alongside `title`/`description`/`outcomeID`.
+
+**`wms_deliverables` table.** Append-only deliverable storage — one row per
+delivery, not per WorkUnit; redelivery adds a new row rather than overwriting
+the prior one.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | PK | Auto-increment row id |
+| `entity_type` | string | Currently always `workunit` |
+| `entity_id` | string | The WorkUnit's ID |
+| `agent_id` | string | Caller's `agent_type` (empty for the lead) |
+| `session_id` | string | Caller's session id |
+| `summary` | TEXT | Headline summary of the result |
+| `result` | MEDIUMTEXT | Full deliverable text |
+| `artifact_paths` | TEXT, nullable | Newline-separated file paths, if any |
+| `created_at` | DATETIME(6) | Row insertion time |
+
+Indexed on `(entity_type, entity_id)` for the `ListDeliverables` read path.
 
 ---
 
@@ -604,6 +737,7 @@ sweep catches and classifies anything the classifier can still derive.
 | `feature` | context | single | no | The specific feature being built. Facet of `work-type`; exclusion group `work-scope`. |
 | `bug` | context | single | no | The specific bug being fixed. Facet of `work-type`; exclusion group `work-scope`. |
 | `refactor` | context | single | no | The specific refactoring purpose. Facet of `work-type`; exclusion group `work-scope`. |
+| `polish` | context | single | no | The specific polish/refinement effort. Facet of `work-type`; exclusion group `work-scope`. |
 | `infra` | context | single | no | The specific infrastructure work. Facet of `work-type`; exclusion group `work-scope`. |
 | `docs` | context | single | no | The specific documentation effort. Facet of `work-type`; exclusion group `work-scope`. |
 | `research` | context | single | no | The specific investigation or exploration. Facet of `work-type`; exclusion group `work-scope`. |
@@ -629,8 +763,8 @@ they agree across WMS entities and telemetry rows.
 
 | Key | Category | Cardinality | Required | Description |
 |-----|----------|-------------|----------|-------------|
-| `work-type` | lifecycle | multi | **yes** | Kind of work being done (feature, bug, refactor, infra, research, docs, test). The primary work classification — set at dispatch time by the lead. |
-| `phase` | lifecycle | single | **yes** | Current execution phase (design, build, test, review, rework, admin). `admin` is the warmup/orientation phase before the session's first `wms_setFocus` — seeded in v37, assigned by `--recover-warmup` via synthetic state-intervals. |
+| `work-type` | lifecycle | single | **yes** | Kind of work being done (feature, bug, refactor, polish, investigation, research, test, docs, infra, admin, processor). The primary work classification — set at dispatch time by the lead. Fixed to single cardinality in migration v64 (`worktype-cardinality-fix`); had silently been `multi` since v27, letting entities accumulate contradictory work-type values. |
+| `phase` | lifecycle | single | **yes** | Current execution phase (design, build, test, review, iterate, admin). `admin` is the warmup/orientation phase before the session's first `wms_setFocus` — seeded in v37, assigned by `--recover-warmup` via synthetic state-intervals. |
 | `resolution` | lifecycle | single | no | How work concluded (achieved, abandoned). Applied at close-out. |
 | `priority` | lifecycle | single | no | Urgency level (p0, p1, p2, p3). |
 

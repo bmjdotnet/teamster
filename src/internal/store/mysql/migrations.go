@@ -1535,6 +1535,457 @@ WHERE NOT EXISTS (
 			`CREATE INDEX idx_roster_agent_id ON agent_roster (session_id, agent_id)`,
 		},
 	},
+	{
+		// worktype-cardinality-fix: v27 ("project-to-product") forced phase,
+		// resolution, and lifecycle to single cardinality but omitted work-type,
+		// leaving it at the multi default alongside the other three lifecycle
+		// keys. TagEntity's single-cardinality guard reads cardinality off the
+		// tags row, so work-type never got the replace-not-accumulate guard —
+		// entities could (and did) accumulate multiple work-type values.
+		// This only fixes the KEY's cardinality going forward; it does not
+		// touch existing entity_tags rows, so already-double-tagged entities
+		// are untouched by this migration (separate cleanup).
+		Version: 64,
+		Name:    "worktype-cardinality-fix",
+		Stmts: []string{
+			`UPDATE tags SET cardinality = 'single'
+				WHERE tag_key = 'work-type' AND cardinality != 'single'`,
+		},
+	},
+	{
+		// outcome-true-cost-rollup (WP3 stage 1): a new derived fact table
+		// answering "what did Outcome X really cost, including its child
+		// outcomes" — built alongside outcome_cost_rollup but never modifying
+		// it (see WP3-relations-reporting.md §5.1: 6 of 8 existing panels do
+		// bare SUM()/COUNT() over outcome_cost_rollup and would silently
+		// change meaning if a new source_type appeared there).
+		//
+		// relation_kind/miss_class/depth are populated by WP3 stage 2 (rework,
+		// via outcome_relations); stage 1's build pass writes '' into both and
+		// 0..N into depth for the child_outcome DAG legs only. Columns land
+		// now so stage 2 is a query change with no further migration.
+		//
+		// DECIMAL(14,6) (not outcome_cost_rollup's (12,6)) — matches
+		// cost_rollup's width; a deep closure's aggregated row can exceed
+		// (12,6)'s $999,999.999999 cap. VARCHAR(128) for model/agent_name
+		// (not outcome_cost_rollup's 64) — matches cost_rollup; narrowing
+		// either is a silent truncating row-merge waiting to happen.
+		//
+		// 7-column PK mirrors outcome_cost_rollup's PK shape plus
+		// relation_kind (kind must be in the key or a taxable and a
+		// non-taxable edge between the same pair collide) — bucket_day and
+		// miss_class are deliberately NOT in the PK, same as
+		// outcome_cost_rollup's bucket_day.
+		Version: 65,
+		Name:    "outcome-true-cost-rollup",
+		Stmts: []string{
+			`CREATE TABLE IF NOT EXISTS outcome_true_cost_rollup (
+				bucket_day    DATE         NOT NULL,
+				bucket_hour   DATETIME     NOT NULL,
+				outcome_id    VARCHAR(64)  NOT NULL,
+				source_type   VARCHAR(32)  NOT NULL,
+				source_id     VARCHAR(128) NOT NULL DEFAULT '',
+				relation_kind VARCHAR(32)  NOT NULL DEFAULT '',
+				miss_class    VARCHAR(16)  NOT NULL DEFAULT '',
+				depth         SMALLINT     NOT NULL DEFAULT 0,
+				model         VARCHAR(128) NOT NULL DEFAULT '',
+				agent_name    VARCHAR(128) NOT NULL DEFAULT '',
+				tokens        BIGINT UNSIGNED NOT NULL DEFAULT 0,
+				cost_usd      DECIMAL(14,6)   NOT NULL DEFAULT 0,
+				PRIMARY KEY (bucket_hour, outcome_id, source_type, source_id, relation_kind, model, agent_name),
+				INDEX idx_tcr_outcome (outcome_id),
+				INDEX idx_tcr_day (bucket_day),
+				INDEX idx_tcr_kind (relation_kind)
+			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+		},
+	},
+	{
+		// wp2-phase-worktype-weed: two independent vocabulary cleanups landing in
+		// one migration, per WP2-phase-reconciliation.md and TAXONOMY.md.
+		//
+		// PART 1 (phase): the operator ruling is backfill, not grandfather (§3):
+		// every historical phase='rework' row becomes 'iterate' in the SAME pass
+		// that seeds the new value, so there is no dual-vocabulary window to design
+		// around. warmup_recovery rows are excluded on principle (defense in depth
+		// — they are hardcoded phase='admin' already, per recovery.go, so the
+		// exclusion is currently a no-op but must stay explicit per the ruling: a
+		// synthetic pre-focus accounting row must never silently pick up a real
+		// phase value). Off-vocabulary phase tag values (agent free-typed, e.g.
+		// phase:exec) are retired dynamically — NOT IN the legal set — rather
+		// than a hardcoded list, so this migration retires whatever garbage exists
+		// at run time, not just what was observed when this file was written.
+		//
+		// PART 2 (work-type): TAXONOMY.md §5/§6's ruled 18→11 vocabulary weed.
+		// Kills 7 values (bugfix, build, design, review, rework, ops, security),
+		// reclassifies their 16 live bindings to a safe default (antecedents are
+		// not recoverable inside a migration — this is explicitly a coarse
+		// first-pass reclassification, not an attempt to reconstruct history),
+		// promotes 4 values to seeds (polish, investigation, admin, processor),
+		// and bakes all 11 surviving descriptions from TAXONOMY.md §3.
+		//
+		// Audit trail: entity_tags' single-cardinality write is a bare
+		// DELETE+INSERT with no snapshot (store.go), and this migration is pure
+		// SQL — no Go-level file I/O is available to it the way
+		// wms_snapshotEntityTags' JSONL snapshot works. wp2_migration_audit is the
+		// durable, portable, pure-SQL answer: every (entity, old_value, new_value)
+		// triple this migration rewrites is INSERTed here BEFORE the corresponding
+		// UPDATE/DELETE runs, so the audit row exists before the mutation it
+		// documents, never after. This table is permanent, not a scratch table —
+		// it is the only record of what this migration changed on a hub with no
+		// other snapshot mechanism for these entity_tags mutations.
+		//
+		// Reclassification collision safety: work-type's cardinality flag was
+		// fixed to 'single' going forward by v64, but v64 explicitly did NOT touch
+		// pre-existing entity_tags rows — an entity already double-tagged (e.g.
+		// work-type:rework AND work-type:bug both bound, part of the D3 rider's 47
+		// known double-tagged entities, NOT touched by this migration) would hit a
+		// duplicate-PK error on a bare tag_id remap. Each of the three reclassify
+		// targets therefore runs a delete-conflicting-row pass BEFORE the remap:
+		// an entity that already carries the target value has its now-redundant
+		// source binding deleted outright (the target binding already carries the
+		// correct classification); every other entity gets its tag_id remapped in
+		// place. phase's rename (rework→iterate) needs no such guard — 'iterate'
+		// is a brand-new value with zero pre-existing bindings by construction, so
+		// no entity can already hold both.
+		//
+		// D3 rider (cardinality=single + dedupe the 47 double-tagged entities) is
+		// explicitly OUT of scope for this migration — needs its own operator
+		// approval, per the kit.
+		Version: 66,
+		Name:    "wp2-phase-worktype-weed",
+		Stmts: []string{
+			// Durable audit trail for every entity_tags remap this migration performs.
+			`CREATE TABLE IF NOT EXISTS wp2_migration_audit (
+				id           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+				entity_type  VARCHAR(32)  NOT NULL,
+				entity_id    VARCHAR(128) NOT NULL,
+				tag_key      VARCHAR(64)  NOT NULL,
+				old_value    VARCHAR(128) NOT NULL,
+				new_value    VARCHAR(128) NOT NULL,
+				migrated_at  DATETIME(6)  NOT NULL,
+				PRIMARY KEY (id),
+				INDEX idx_wp2audit_entity (entity_type, entity_id)
+			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+
+			// --- PART 1: phase reconciliation + rename -------------------------
+
+			// 1. Seed the new value. required=1: v40 (required-phase-product)
+			// requires EVERY row of the phase key, not just the key overall —
+			// ListTags/wms.Tag.Required reads the per-row column directly, no
+			// key-level derivation in Go.
+			`INSERT IGNORE INTO tags (tag_key, tag_value, is_seed, category, cardinality, required, description) VALUES
+				('phase','iterate',1,'lifecycle','single',1,'Correction made BEFORE delivery — the build→test→iterate loop within a WorkUnit, re-entering an earlier phase to fix problems found before the work is accepted. NOT taxed: it is the cost of doing the work, not a penalty. Distinct from post-delivery rework, which is recorded as a typed relation edge to prior DELIVERED work, never as a phase value. Apply when an entity re-enters design/build/test after review sends it back, before acceptance.')`,
+
+			// 2. Backfill: every historical rework interval becomes iterate. The
+			// phase_source != 'warmup_recovery' guard is defense in depth (see
+			// comment above the migration) — warmup rows are hardcoded 'admin' and
+			// never 'rework', so this exclusion does not change today's row count,
+			// only what happens if that ever stops being true.
+			`UPDATE wms_intervals SET phase = 'iterate'
+				WHERE phase = 'rework' AND phase_source != 'warmup_recovery'`,
+
+			// 3. Audit, THEN remap: every entity_tags row currently pointing at
+			// phase:rework's tag_id gets re-pointed at phase:iterate's tag_id.
+			// 'iterate' has zero pre-existing bindings (it was just created above in
+			// this same migration), so no entity can already hold both — a plain
+			// remap is collision-free by construction, unlike the work-type
+			// reclassifications in Part 2 below.
+			`INSERT INTO wp2_migration_audit (entity_type, entity_id, tag_key, old_value, new_value, migrated_at)
+				SELECT et.entity_type, et.entity_id, 'phase', 'rework', 'iterate', UTC_TIMESTAMP(6)
+				FROM entity_tags et JOIN tags t ON t.id = et.tag_id
+				WHERE t.tag_key = 'phase' AND t.tag_value = 'rework'`,
+			`UPDATE entity_tags
+				SET tag_id = (SELECT id FROM tags WHERE tag_key = 'phase' AND tag_value = 'iterate')
+				WHERE tag_id = (SELECT id FROM tags WHERE tag_key = 'phase' AND tag_value = 'rework')`,
+
+			// 4. Retire off-vocabulary phase tag values (phase:exec and any other
+			// agent-typed value outside the legal set) — dynamic NOT IN, not a
+			// hardcoded list, and excluding 'rework' here since it gets its own
+			// explicit retirement in step 5 below, after the backfill/remap above
+			// has run.
+			`UPDATE tags SET retired = 1
+				WHERE tag_key = 'phase'
+				  AND tag_value NOT IN ('design','build','test','review','rework','iterate','admin')
+				  AND retired = 0`,
+
+			// 5. Retire the old seed row itself. Safe unconditionally at this point:
+			// steps 2-3 have already moved every wms_intervals and entity_tags
+			// reference off of it.
+			`UPDATE tags SET retired = 1 WHERE tag_key = 'phase' AND tag_value = 'rework'`,
+
+			// --- PART 2: work-type vocabulary weed (TAXONOMY.md § 18→11) -------
+
+			// Ensure the 4 promoted values' rows exist before the reclassify step
+			// below looks them up (mirrors v49's insert-if-missing-then-heal idiom
+			// for facet keys) — INSERT IGNORE is a no-op for any of the four that
+			// already exist as live create-on-apply rows.
+			`INSERT IGNORE INTO tags (tag_key, tag_value, is_seed, category, cardinality, description) VALUES
+				('work-type','polish',0,'lifecycle','single',''),
+				('work-type','investigation',0,'lifecycle','single',''),
+				('work-type','admin',0,'lifecycle','single',''),
+				('work-type','processor',0,'lifecycle','single','')`,
+			// required=1: v30 requires EVERY row of the work-type key, not just
+			// the key overall (same reasoning as the phase:iterate seed above) —
+			// heals both the freshly-inserted rows and any pre-existing
+			// create-on-apply row that predates v30.
+			`UPDATE tags SET is_seed = 1, category = 'lifecycle', cardinality = 'single', required = 1
+				WHERE tag_key = 'work-type' AND tag_value IN ('polish','investigation','admin','processor')`,
+
+			// Reclassify the 16 live bindings against the seven killed values.
+			// Antecedents are not recoverable inside a migration, so every target is
+			// a ruled safe default, not a reconstruction of history:
+			//   rework (10)   -> bug           (default; a refactor split needs the
+			//                                   antecedent this migration cannot see)
+			//   review (5)    -> admin         (safe default for a reviewed
+			//                                   deliverable's own work-type)
+			//   security (1)  -> investigation (closed-ended: matches the live
+			//                                   entity's shape per TAXONOMY.md §5)
+			// Each target: audit every affected row, delete the source binding for
+			// any entity that ALREADY carries the target value too (avoids a
+			// duplicate-PK collision on the remap — see the migration-level comment
+			// above), then remap every remaining source binding's tag_id in place.
+
+			`INSERT INTO wp2_migration_audit (entity_type, entity_id, tag_key, old_value, new_value, migrated_at)
+				SELECT et.entity_type, et.entity_id, 'work-type', 'rework', 'bug', UTC_TIMESTAMP(6)
+				FROM entity_tags et JOIN tags t ON t.id = et.tag_id
+				WHERE t.tag_key = 'work-type' AND t.tag_value = 'rework'`,
+			`DELETE et FROM entity_tags et
+				JOIN tags old_t ON old_t.id = et.tag_id AND old_t.tag_key = 'work-type' AND old_t.tag_value = 'rework'
+				JOIN tags new_t ON new_t.tag_key = 'work-type' AND new_t.tag_value = 'bug'
+				JOIN entity_tags et2 ON et2.entity_type = et.entity_type AND et2.entity_id = et.entity_id AND et2.tag_id = new_t.id`,
+			`UPDATE entity_tags
+				SET tag_id = (SELECT id FROM tags WHERE tag_key = 'work-type' AND tag_value = 'bug')
+				WHERE tag_id = (SELECT id FROM tags WHERE tag_key = 'work-type' AND tag_value = 'rework')`,
+
+			`INSERT INTO wp2_migration_audit (entity_type, entity_id, tag_key, old_value, new_value, migrated_at)
+				SELECT et.entity_type, et.entity_id, 'work-type', 'review', 'admin', UTC_TIMESTAMP(6)
+				FROM entity_tags et JOIN tags t ON t.id = et.tag_id
+				WHERE t.tag_key = 'work-type' AND t.tag_value = 'review'`,
+			`DELETE et FROM entity_tags et
+				JOIN tags old_t ON old_t.id = et.tag_id AND old_t.tag_key = 'work-type' AND old_t.tag_value = 'review'
+				JOIN tags new_t ON new_t.tag_key = 'work-type' AND new_t.tag_value = 'admin'
+				JOIN entity_tags et2 ON et2.entity_type = et.entity_type AND et2.entity_id = et.entity_id AND et2.tag_id = new_t.id`,
+			`UPDATE entity_tags
+				SET tag_id = (SELECT id FROM tags WHERE tag_key = 'work-type' AND tag_value = 'admin')
+				WHERE tag_id = (SELECT id FROM tags WHERE tag_key = 'work-type' AND tag_value = 'review')`,
+
+			`INSERT INTO wp2_migration_audit (entity_type, entity_id, tag_key, old_value, new_value, migrated_at)
+				SELECT et.entity_type, et.entity_id, 'work-type', 'security', 'investigation', UTC_TIMESTAMP(6)
+				FROM entity_tags et JOIN tags t ON t.id = et.tag_id
+				WHERE t.tag_key = 'work-type' AND t.tag_value = 'security'`,
+			`DELETE et FROM entity_tags et
+				JOIN tags old_t ON old_t.id = et.tag_id AND old_t.tag_key = 'work-type' AND old_t.tag_value = 'security'
+				JOIN tags new_t ON new_t.tag_key = 'work-type' AND new_t.tag_value = 'investigation'
+				JOIN entity_tags et2 ON et2.entity_type = et.entity_type AND et2.entity_id = et.entity_id AND et2.tag_id = new_t.id`,
+			`UPDATE entity_tags
+				SET tag_id = (SELECT id FROM tags WHERE tag_key = 'work-type' AND tag_value = 'investigation')
+				WHERE tag_id = (SELECT id FROM tags WHERE tag_key = 'work-type' AND tag_value = 'security')`,
+
+			// Retire the 7 killed values. Non-destructive (retired=1, never
+			// deleted) — entity_tags rows referencing them (now none, after the
+			// reclassification above) would survive regardless.
+			`UPDATE tags SET retired = 1
+				WHERE tag_key = 'work-type' AND tag_value IN ('bugfix','build','design','review','rework','ops','security')`,
+
+			// Bake the eleven ruled descriptions (TAXONOMY.md §3) into every
+			// surviving value, superseding whatever text each row carried before —
+			// including the four already-seeded values whose old descriptions
+			// predate the ruling (verbatim per the operator's own instruction for
+			// polish; the other ten are TAXONOMY.md §3's definitions condensed to
+			// this codebase's existing one-paragraph description style).
+			`UPDATE tags SET description = 'Delivers a capability the system did not have before — a new endpoint, panel, column, command, or integration. Titles typically start Add/Implement/Build/Create/Support. NOT restoring broken behavior (bug). NOT improving how an existing capability looks or feels (polish). NOT tooling nobody invokes as a product capability (infra).'
+				WHERE tag_key = 'work-type' AND tag_value = 'feature'`,
+			`UPDATE tags SET description = 'Restores intended behavior that the system currently gets wrong — a defined correct behavior with an observable deviation from it. Titles typically start Fix/Repair/Correct/Resolve. NOT works-as-intended-but-rough (polish: would a user file it as broken? bug. As could-be-nicer? polish). NOT diagnosing why it is wrong (investigation). NOT fixing tooling rather than product behavior (infra).'
+				WHERE tag_key = 'work-type' AND tag_value = 'bug'`,
+			`UPDATE tags SET description = 'Restructures existing code without changing its external behavior — extraction, renaming, decomposition, API-boundary cleanup. Done means the same observable behavior with better internals. NOT any behavior change, however small (feature/bug/polish). NOT repo or process housekeeping (admin).'
+				WHERE tag_key = 'work-type' AND tag_value = 'refactor'`,
+			`UPDATE tags SET description = 'Improves the look or experience of a delivered capability, without adding capability or fixing a defect — expected follow-up, because polish details aren’t discoverable until the function exists.'
+				WHERE tag_key = 'work-type' AND tag_value = 'polish'`,
+			`UPDATE tags SET description = 'Produces documentation as the deliverable — the prose itself: README, architecture doc, spec, guide, comments. Title names a doc file or says write/rewrite/document. NOT investigation or research that feeds a doc — synthesis is research even under a docs outcome.'
+				WHERE tag_key = 'work-type' AND tag_value = 'docs'`,
+			`UPDATE tags SET description = 'Executes a predefined check to produce a pass/fail verdict on something already built — acceptance runs, smoke tests, cleanroom installs, live validation of a shipped fix. NOT testing while building (phase:test inside the deliverable’s own WorkUnit). NOT working out why something fails (investigation). Tiebreaker: if the next step depends on what you find, you are investigating; if you could hand the procedure to a checklist, it is test.'
+				WHERE tag_key = 'work-type' AND tag_value = 'test'`,
+			`UPDATE tags SET description = 'Answers one specific closed-ended question: does X work? what caused Y? A symptom, claim, or doubt is in hand; the output is a yes/no/root-cause answer. Titles typically start Verify/Determine/Diagnose/Triage. NOT open-ended exploration of an option space (research). NOT running a predefined check whose question is already settled (test).'
+				WHERE tag_key = 'work-type' AND tag_value = 'investigation'`,
+			`UPDATE tags SET description = 'Explores an open problem space to produce knowledge, a design, or a recommendation — option surveys, synthesis of scattered knowledge into a design for a human. Titles typically start Explore/Design/Evaluate/Synthesize/Recon. NOT settling one specific existing question (investigation). NOT authoring the document that presents finished knowledge (docs).'
+				WHERE tag_key = 'work-type' AND tag_value = 'research'`,
+			`UPDATE tags SET description = 'Builds, changes, or operates the tooling, hosts, CI, deploy, and data substrate the product runs on — provisioning, install/systemd work, schema scaffolding, exporter wiring, test harnesses, dev tooling, and operating live systems (deploys, upgrades, service surgery). NOT a product capability users invoke (feature). NOT a fix to product behavior (bug). NOT project records and process (admin).'
+				WHERE tag_key = 'work-type' AND tag_value = 'infra'`,
+			`UPDATE tags SET description = 'Maintains the project’s process and records rather than its code or machinery — release prep, branch consolidation, repo hygiene, WMS and tag stewardship, data cleanup, bootstrap ceremony. NOT anything users or machines consume (feature/infra). NOT code restructuring (refactor).'
+				WHERE tag_key = 'work-type' AND tag_value = 'admin'`,
+			`UPDATE tags SET description = 'Unattended, per-item pipeline work whose deliverable is processed or classified data — schedule-, queue-, or per-item-driven runs: the slug processor, the sweep’s synthesis pass, ingest jobs. NOT human-directed work of any kind. NOT infra (the substrate the job runs ON, not the job itself). NOT research (research yields a finding for a human).'
+				WHERE tag_key = 'work-type' AND tag_value = 'processor'`,
+
+			// --- PART 3: slug key changes ---------------------------------------
+
+			// Add the polish slug key, mirroring v49's exact facet-key pattern.
+			`INSERT IGNORE INTO tags (tag_key, tag_value, is_seed, category, cardinality, description, scope, exclusion_group, interview, facet_source)
+				VALUES ('polish', '', 1, 'context', 'single', 'Polish slug — identifies the specific polish/experience-refinement effort', 'outcome', 'work-scope', 'propose', 'work-type')`,
+			`UPDATE tags SET facet_source = 'work-type', scope = 'outcome', exclusion_group = 'work-scope', interview = 'propose', cardinality = 'single'
+				WHERE tag_key = 'polish' AND facet_source = ''`,
+
+			// Retire the rework slug key entirely (the key-metadata row plus every
+			// value under it, e.g. rework:agent-naming) — non-destructive, per
+			// TAXONOMY.md §6.2: typed relations (outcome_relations, WP3 stage 2)
+			// are its replacement. Existing entity_tags bindings on these rows are
+			// left untouched, same as any other retire.
+			`UPDATE tags SET retired = 1 WHERE tag_key = 'rework'`,
+
+			// Belt-and-suspenders: both phase and work-type are already-required
+			// keys (v40/v30), so every row of either must carry required=1. Steps
+			// 1 and the is_seed promotion above already set it on the exact 5 new
+			// rows this migration adds; this catch-all also heals any row that
+			// somehow drifted or was inserted through a path this migration
+			// didn't anticipate, rather than depending solely on each earlier
+			// statement having remembered the column.
+			`UPDATE tags SET required = 1 WHERE tag_key IN ('phase', 'work-type') AND required != 1`,
+
+			// Belt-and-suspenders, is_seed: v15's INSERT IGNORE seed for
+			// work-type:test/docs (and the equivalent early seeds for
+			// feature/bug/refactor/infra/research) is a no-op if the row
+			// already existed — e.g. an entity was tagged work-type:test via
+			// create-on-apply before v15 ever ran, leaving is_seed=0 on that
+			// row FOREVER, since IGNORE only applies the VALUES on first
+			// insert and no later migration re-asserts is_seed for it. Found
+			// live: work-type:test carries is_seed=0 on the hub despite v15
+			// intending 1. Rather than patch that one value, this closes the
+			// whole class for every one of the 11 surviving work-type values
+			// by name — idempotent and harmless for any that are already
+			// correct, and closes the door on the same race recurring for any
+			// of them without needing to first prove which ones are affected.
+			`UPDATE tags SET is_seed = 1
+				WHERE tag_key = 'work-type'
+				  AND tag_value IN ('feature','bug','refactor','polish','docs','test','investigation','research','infra','admin','processor')
+				  AND is_seed != 1`,
+		},
+	},
+	{
+		// relation-kinds (WP3 stage 2, first of two migrations — see
+		// WP3-relations-reporting.md §3.2/§3.3 for the numbering rule: this
+		// must be the LOWER of the pair, or a lower-numbered later step is
+		// silently skipped by migrate()'s cur-version guard).
+		//
+		// Seeds the kind vocabulary as DATA, not a Go enum, so adding a kind
+		// later is a migration rather than a query rewrite. taxable/miss_class
+		// drive the true-cost rollup's rework leg (allocation.go); lineage
+		// gates cycle-checking and transitive closure in relations.go — the
+		// two circumstance-only kinds (discovered-during, duplicate-of) opt
+		// out of both, since a chain of them carries no cost or derivation
+		// meaning.
+		Version: 67,
+		Name:    "relation-kinds",
+		Stmts: []string{
+			`CREATE TABLE IF NOT EXISTS relation_kinds (
+				kind        VARCHAR(32)  NOT NULL,
+				taxable     TINYINT(1)   NOT NULL DEFAULT 0,
+				miss_class  VARCHAR(16)  NOT NULL DEFAULT '',
+				lineage     TINYINT(1)   NOT NULL DEFAULT 1,
+				is_seed     TINYINT(1)   NOT NULL DEFAULT 1,
+				description VARCHAR(255) NOT NULL DEFAULT '',
+				PRIMARY KEY (kind)
+			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+			`INSERT IGNORE INTO relation_kinds (kind, taxable, miss_class, lineage, description) VALUES
+				('remediates',           1, 'code',   1, 'Fixes a defect in delivered work: it did not do what it was specified to do. Operator category 2 (shipped-to-bug). Counts as rework tax.'),
+				('addresses-limitation', 1, 'design', 1, 'Removes an unintended functional constraint in delivered work: it did what was asked, but the result could not be used as needed. Operator category 3. Counts as rework tax.'),
+				('fulfills-realization', 1, 'spec',   1, 'Supplies a requirement the delivered work should have had but nobody identified at the time. Operator category 4 (specification miss, not a code miss). Counts as rework tax.'),
+				('reverts',              1, 'code',   1, 'Undoes delivered work because shipping it was itself the error. Counts as rework tax.'),
+				('supersedes',           0, '',       1, 'Replaces delivered work because requirements, scale, or environment changed. The prior work was right for its time. Records lineage; NOT taxed.'),
+				('follows-up-on',        0, '',       1, 'A planned continuation of delivered work that was complete and correct. Records lineage; NOT taxed.'),
+				('discovered-during',    0, '',       0, 'This work was surfaced while doing the target, but is not a correction of it. Records provenance only; NOT taxed and NOT lineage.'),
+				('duplicate-of',         0, '',       0, 'The same work tracked twice — an intake error. Flags a merge candidate; NOT taxed.')`,
+		},
+	},
+	{
+		// outcome-relations (WP3 stage 2, second of two — must be numbered
+		// above relation-kinds; see that step's comment). A typed edge
+		// between two work items: "from <kind> to", read as a sentence ("A
+		// remediates B"). New table rather than a kind column on
+		// entity_dependencies — three live readers (evaluateUnblock,
+		// ListReadyWorkUnits, the DependencyCounts gauge) scan that table
+		// with zero kind-filtering, so a rework edge landing there would
+		// silently participate in blocker-cascade logic (§3.1).
+		//
+		// to_id is VARCHAR(191), wider than from_id's 64, because it doubles
+		// as free text when to_type='external' — 191 is the utf8mb4
+		// index-safe limit. kind is IN the unique key (not just a column) so
+		// a taxable and a non-taxable edge between the same pair can
+		// coexist. No FK constraints: the table is polymorphic across
+		// from_type/to_type and admits external targets, so a single-column
+		// FK is impossible — same reasoning as entity_dependencies.
+		// Referential integrity is enforced in the writer (relations.go),
+		// not the schema.
+		Version: 68,
+		Name:    "outcome-relations",
+		Stmts: []string{
+			`CREATE TABLE IF NOT EXISTS outcome_relations (
+				id          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+				kind        VARCHAR(32)  NOT NULL,
+				from_type   VARCHAR(32)  NOT NULL,
+				from_id     VARCHAR(64)  NOT NULL,
+				to_type     VARCHAR(32)  NOT NULL,
+				to_id       VARCHAR(191) NOT NULL,
+				created_at  DATETIME(6)  NOT NULL,
+				created_by  VARCHAR(64)  NOT NULL DEFAULT '',
+				source      VARCHAR(16)  NOT NULL DEFAULT 'manual',
+				note        VARCHAR(255) NOT NULL DEFAULT '',
+				PRIMARY KEY (id),
+				UNIQUE KEY uq_rel (kind, from_type, from_id, to_type, to_id),
+				INDEX idx_rel_to   (kind, to_type, to_id),
+				INDEX idx_rel_from (kind, from_type, from_id),
+				INDEX idx_rel_created (created_at)
+			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+		},
+	},
+	{
+		// dispatch-package (wu-schema-v69): adds per-workunit dispatch
+		// metadata — brief (the full dispatch brief text; returned only by
+		// GetWorkUnit/ClaimWorkUnit, never by ListWorkUnits/
+		// ListReadyWorkUnits, so a list scan never pulls a potentially large
+		// MEDIUMTEXT value) and claimed_at (stamped the moment an agent
+		// claims or adopts the unit via ClaimWorkUnit's claim-state matrix)
+		// — plus an append-only wms_deliverables table an agent writes its
+		// closeout report to. Redelivery is allowed (a reopened/reclaimed
+		// workunit can deliver again), so a consumer reading this table
+		// takes the LAST row per entity, never assumes exactly one.
+		Version: 69,
+		Name:    "dispatch-package",
+		Stmts: []string{
+			`ALTER TABLE workunits
+				ADD COLUMN brief MEDIUMTEXT NULL,
+				ADD COLUMN claimed_at DATETIME(6) NULL`,
+			`CREATE TABLE IF NOT EXISTS wms_deliverables (
+				id             BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+				entity_type    VARCHAR(32)  NOT NULL,
+				entity_id      VARCHAR(128) NOT NULL,
+				agent_id       VARCHAR(128) NOT NULL,
+				session_id     VARCHAR(128) NOT NULL,
+				summary        TEXT         NOT NULL,
+				result         MEDIUMTEXT   NOT NULL,
+				artifact_paths TEXT,
+				created_at     DATETIME(6)  NOT NULL,
+				PRIMARY KEY (id)
+			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+			`CREATE INDEX idx_deliverables_entity ON wms_deliverables(entity_type, entity_id)`,
+		},
+	},
+	{
+		// roster-lifecycle: agent_roster had no way to tell a dead session's
+		// entry apart from a live one, so handleListAgents' roster-fallback
+		// pass kept re-offering ghosts forever (any session that ever ran
+		// under a team name permanently re-qualified via the team-name
+		// match). updated_at is stamped explicitly by the store on every
+		// Create/Upsert/Bind — the app layer sets it, not MySQL — mirroring
+		// agent_health_gauge's own updated_at contract. DEFAULT/ON UPDATE
+		// CURRENT_TIMESTAMP(6) exist only to backfill existing rows at ALTER
+		// time and as a safety net; the Go code never relies on them.
+		Version: 70,
+		Name:    "roster-lifecycle",
+		Stmts: []string{
+			`ALTER TABLE agent_roster
+				ADD COLUMN updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6)`,
+			`CREATE INDEX idx_roster_updated ON agent_roster (updated_at)`,
+		},
+	},
 }
 
 // mergeProjectToProduct renames `project` tag rows to `product`, handling the

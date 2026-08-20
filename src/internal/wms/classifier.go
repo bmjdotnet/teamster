@@ -83,14 +83,12 @@ func (c *RuleClassifier) Classify(ctx context.Context, entityType, entityID stri
 		return result, nil
 	}
 
-	// 2. Derive session windows and detect re-entry (Rule 2 / phase=rework).
+	// 2. Derive session windows.
 	var (
 		sessions    []SessionWindow
-		reEntry     bool
 		windowStart = time.Now()
 		windowEnd   time.Time
 	)
-	seenDoneOrReview := false
 
 	for i := len(records) - 1; i >= 0; i-- {
 		rec := records[i]
@@ -104,14 +102,6 @@ func (c *RuleClassifier) Classify(ctx context.Context, entityType, entityID stri
 		}
 		if endT.After(windowEnd) {
 			windowEnd = endT
-		}
-
-		// Re-entry: transition from done/review back to active
-		if seenDoneOrReview && rec.State == StatusActive {
-			reEntry = true
-		}
-		if rec.State == StatusDone || rec.State == StatusReview {
-			seenDoneOrReview = true
 		}
 
 		// Build session window from this record. The window owner may be the lead,
@@ -143,13 +133,6 @@ func (c *RuleClassifier) Classify(ctx context.Context, entityType, entityID stri
 
 	if windowEnd.IsZero() {
 		windowEnd = time.Now().UTC()
-	}
-
-	// 3. Apply Rule 2 (phase=rework) independently — binary signal from event records.
-	if reEntry {
-		if err := c.applyTag(ctx, result, manualKeys, entityType, entityID, "phase", "rework", 1.0); err != nil {
-			slog.Warn("classifier: apply phase=rework tag", "entity", entityID, "err", err)
-		}
 	}
 
 	// 4. Collect JSONL signals for work-type rules.

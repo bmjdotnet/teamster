@@ -30,4 +30,4 @@ claude plugin marketplace add ~/teamster/lib/plugin
 
 ## The Eight Rules
 
-See `skills/bootstrap/references/eight-rules.md` for the full protocol.
+See `skills/bootstrap/references/dispatch-pack/eight-rules.md` for the full protocol.

@@ -22,7 +22,7 @@ See the creator's personal Teamster dashboard at **[teamster.bmj.net](https://te
 1. **Where is the AI spend going?** — by product, work type, component, phase
 2. **Who is spending it?** — engineers, and the agents they run
 3. **What outcomes is it producing?** — cost per delivered unit of work
-4. **Is it being used effectively?** — model fit, rework share, cache
+4. **Is it being used effectively?** — model fit, iteration rate, cache
    economics, healthy team patterns
 
 ## What makes it useful
@@ -34,10 +34,16 @@ tags automatically. Change the tags later and the numbers update retroactively.
 
 **Ask questions like:**
 - "How much did we spend on feature X across all engineers?"
-- "Which models produce the least rework per dollar?"
+- "Which models produce the least iteration per dollar?"
 - "What share of our Opus spend goes to routine docs and tests?"
-- "How much of this outcome's cost was design vs build vs rework?"
+- "How much of this outcome's cost was design vs build vs iterate?"
 - "Which agents are bloating context and burning cache tokens?"
+
+**Know why work came back.**
+Typed relations record *why* post-delivery work exists — a bug, a design
+limitation, a spec gap, or a revert — each tagged with a `miss_class` (code,
+design, or spec) so you can see where rework is actually coming from, not
+just that it happened.
 
 **See everything happening, live.**
 A real-time activity stream — in your terminal or a web panel — shows what
@@ -63,8 +69,8 @@ orchestration benefits without memorizing the playbook.
 
 ## The dashboards
 
-Eleven Grafana dashboards ship with Teamster. The first five are the ones you'll
-use daily; the rest are specialized explorers and system health.
+Fourteen Grafana dashboards ship with Teamster. The first five are the ones
+you'll use daily; the rest are specialized explorers and system health.
 
 ### AI Spend Explorer
 
@@ -106,8 +112,10 @@ The efficiency dashboard. Answers "are we using AI well?"
   active agents per day, sessions per day
 - **Flow**: status transitions, workunit cycle time, outcomes completed,
   stall table for stuck work
-- **Rework tax**: rework + review share of attributed cost over time (rising =
-  quality or coordination problems), phase cost breakdown table
+- **Iteration rate**: iteration + review share of attributed cost over time
+  (not a quality penalty by itself — rising iteration can mean either
+  coordination friction or healthy pre-delivery correction; read alongside
+  cycle time), phase cost breakdown table
 - **Agent economics**: top agents by cost with context-bloat signals
   (high cache-read-per-message = agent is carrying too much context)
 
@@ -124,8 +132,8 @@ A composable OLAP tool. Pick any two tag dimensions as hierarchy levels
 - A cost matrix with heat-colored cells
 - A drill-down table filtered to a specific Level 1 value
 - Cost over time by your chosen dimension
-- A **phase cost waterfall** (design → build → test → review → rework)
-  with rework highlighted in red — the quickest way to see rework share
+- A **phase cost waterfall** (design → build → test → review → iterate)
+  with iterate highlighted in red — the quickest way to see iteration share
 - Burn-rate projection from month-to-date daily cost
 
 ![Cost over time by component](img/cost_by_component.png)
@@ -155,10 +163,13 @@ units, engineers, agents, phase mix, and duration.
 
 | Dashboard | Purpose |
 |-----------|---------|
+| **Landing Page** | Welcome/index page linking to the other dashboards |
 | **Outcome Cost Explorer** | Per-outcome cost drill-down with agent and phase breakdown |
+| **Realtime Fleet View** | Grafana mirror of `ctop`'s agent hierarchy — model, cost, activity, and context pressure per agent |
 | **Realtime Activity Feed** | Live agent activity stream in Grafana (mirrors the terminal `feed`) |
 | **Simple Cost Explorer** | Single-dimension cost breakdown — pick one tag key, see cost by its values |
 | **Claude Code Metrics** | Anthropic's OTEL metrics: sessions, tokens, commits, PRs, active time, tool decisions |
+| **Codex Metrics** | OpenAI Codex CLI's OTEL metrics: sessions, tokens, cost, tool decisions |
 | **System Health** | Pipeline health, attribution coverage, sweep freshness, tag hygiene, stale sessions |
 
 ## Real-time activity stream
@@ -204,11 +215,16 @@ open Grafana for the dashboards.
 ## How attribution works (briefly)
 
 Agents declare what they're working on via built-in MCP tools. A pipeline
-joins per-message token spend to the declared work item. Sessions that didn't
-declare focus are recovered after the fact — deterministically from transcripts
-and session shape, or with optional LLM-assisted synthesis. Every attributed
-dollar records how it was attributed, so confidence is always inspectable.
-A scheduled sweep runs all recovery passes automatically.
+joins per-message token spend to the declared work item. When work is
+dispatched through work units, agents call `wms_claimWorkUnit` to pick up
+their assignment — the claim atomically returns the brief, opens a focus
+interval, and transitions the work unit to active, so attribution is
+mechanical rather than depending on a voluntary `wms_setFocus` call.
+Sessions that didn't declare focus are recovered after the fact —
+deterministically from transcripts and session shape, or with optional
+LLM-assisted synthesis. Every attributed dollar records how it was
+attributed, so confidence is always inspectable. A scheduled sweep runs
+all recovery passes automatically.
 
 ## Codex CLI support
 
@@ -336,6 +352,22 @@ sudo systemctl start teamster-backup.timer
 
 What gets backed up is configurable per store (`mysql`, `grafana`, `otel`, `teamster`). Prometheus is opt-in (ephemeral data). Grafana is skipped in external mode. Retention defaults to 7 days (`backup.retention.keep_for`).
 
+## Cloning
+
+Stand up a disposable Teamster instance — the same commit, a copy of the same
+data — on a fresh target host reached over SSH:
+
+```bash
+teamster clone --repo-dir=/path/to/repo user@target-vm
+```
+
+Runs from the source and pushes outward: ships verified source code,
+installs the full managed stack (MySQL 8.x, Grafana, Prometheus, OTEL,
+hookd) on the target, and restores a copy of the source's data. The sweep
+and backup timers are masked permanently on the clone, and the source is
+never modified. See [docs/clone.md](docs/clone.md) for prerequisites, all
+flags, and exactly what the target gets.
+
 ## Finding sessions
 
 Claude Code's `--resume` picker can't find a session by what it was *about* —
@@ -388,6 +420,7 @@ Early alpha, but built for multi-user environments and trustable data.
 | `teamster backup` / `list` / `status` | Take a backup, list backups, show timer status |
 | `teamster restore <path>` | Restore from a backup directory |
 | `teamster install-remote user@host` | Install the client on a remote host |
+| `teamster clone [OPTIONS] user@host` | Stand up a disposable instance running the same commit and data on a remote host |
 | `feed` | Terminal activity viewer |
 | `ctop` | Terminal fleet dashboard — agent hierarchy, cost, activity, context pressure |
 | `rollup --sweep` | Run the attribution pipeline manually |
@@ -410,6 +443,7 @@ Early alpha, but built for multi-user environments and trustable data.
 
 - [docs/quickstart.md](docs/quickstart.md) — fresh clone to running dashboard
 - [docs/wizard.md](docs/wizard.md) — installer and tag setup walkthrough
+- [docs/clone.md](docs/clone.md) — `teamster clone`: stand up a disposable instance on a remote host
 - [docs/specs/CODEX-INSTALL.md](docs/specs/CODEX-INSTALL.md) — Codex CLI support: install wiring, cost tailer, known limitations
 - `skel/doc/specs/architecture.md` — system design and data flows
 - [docs/specs/replication.md](docs/specs/replication.md) — read-only replica topology

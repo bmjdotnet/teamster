@@ -1067,4 +1067,306 @@ var migrations = []store.Migration{
 			`CREATE INDEX IF NOT EXISTS idx_roster_agent_id ON agent_roster(session_id, agent_id)`,
 		},
 	},
+	{
+		// Mirrors mysql v64 "worktype-cardinality-fix": work-type was omitted
+		// from the phase/resolution/lifecycle single-cardinality fix and stayed
+		// at the multi default, disabling TagEntity's replace-not-accumulate
+		// guard for work-type. Key-only fix; existing entity_tags are untouched.
+		Version: 63,
+		Name:    "worktype-cardinality-fix",
+		SQL: []string{
+			`UPDATE tags SET cardinality = 'single'
+				WHERE tag_key = 'work-type' AND cardinality != 'single'`,
+		},
+	},
+	{
+		// Mirrors mysql v65 "outcome-true-cost-rollup" (WP3 stage 1): see that
+		// migration's comment for the full rationale. relation_kind/miss_class/
+		// depth are populated by WP3 stage 2; stage 1 writes '' into both.
+		Version: 64,
+		Name:    "outcome-true-cost-rollup",
+		SQL: []string{
+			`CREATE TABLE IF NOT EXISTS outcome_true_cost_rollup (
+				bucket_day    DATE NOT NULL,
+				bucket_hour   DATETIME NOT NULL,
+				outcome_id    TEXT NOT NULL,
+				source_type   TEXT NOT NULL,
+				source_id     TEXT NOT NULL DEFAULT '',
+				relation_kind TEXT NOT NULL DEFAULT '',
+				miss_class    TEXT NOT NULL DEFAULT '',
+				depth         INTEGER NOT NULL DEFAULT 0,
+				model         TEXT NOT NULL DEFAULT '',
+				agent_name    TEXT NOT NULL DEFAULT '',
+				tokens        INTEGER NOT NULL DEFAULT 0,
+				cost_usd      REAL NOT NULL DEFAULT 0,
+				PRIMARY KEY (bucket_hour, outcome_id, source_type, source_id, relation_kind, model, agent_name)
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_tcr_outcome ON outcome_true_cost_rollup(outcome_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_tcr_day ON outcome_true_cost_rollup(bucket_day)`,
+			`CREATE INDEX IF NOT EXISTS idx_tcr_kind ON outcome_true_cost_rollup(relation_kind)`,
+		},
+	},
+	{
+		// Mirrors mysql v66 "wp2-phase-worktype-weed": see that migration's
+		// comment for the full rationale (WP2-phase-reconciliation.md,
+		// TAXONOMY.md). Dialect differences only:
+		//   - INSERT IGNORE -> INSERT OR IGNORE
+		//   - UTC_TIMESTAMP(6) -> CURRENT_TIMESTAMP (audit rows; SQLite has no
+		//     microsecond-precision timestamp function, matching this backend's
+		//     existing DATETIME-without-fractional-seconds convention)
+		//   - the "delete conflicting row before remap" collision guard cannot
+		//     use MySQL's multi-table JOIN-DELETE form (SQLite has no such
+		//     syntax) -- rewritten as a correlated-subquery DELETE ... WHERE
+		//     EXISTS, which SQLite supports natively (no MySQL-style "can't
+		//     specify target table for update in FROM clause" restriction here).
+		//   - the plain tag_id remap UPDATEs are unchanged: MySQL and SQLite both
+		//     accept a scalar subquery in SET/WHERE against a DIFFERENT table
+		//     (tags, not entity_tags), so no dialect split was needed there.
+		Version: 65,
+		Name:    "wp2-phase-worktype-weed",
+		SQL: []string{
+			`CREATE TABLE IF NOT EXISTS wp2_migration_audit (
+				id           INTEGER PRIMARY KEY AUTOINCREMENT,
+				entity_type  TEXT NOT NULL,
+				entity_id    TEXT NOT NULL,
+				tag_key      TEXT NOT NULL,
+				old_value    TEXT NOT NULL,
+				new_value    TEXT NOT NULL,
+				migrated_at  DATETIME NOT NULL
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_wp2audit_entity ON wp2_migration_audit(entity_type, entity_id)`,
+
+			// --- PART 1: phase reconciliation + rename -------------------------
+
+			// required=1: v40-equivalent requires EVERY row of the phase key,
+			// not just the key overall — ListTags/wms.Tag.Required reads the
+			// per-row column directly, no key-level derivation in Go.
+			`INSERT OR IGNORE INTO tags (tag_key, tag_value, is_seed, category, cardinality, required, description) VALUES
+				('phase','iterate',1,'lifecycle','single',1,'Correction made BEFORE delivery — the build→test→iterate loop within a WorkUnit, re-entering an earlier phase to fix problems found before the work is accepted. NOT taxed: it is the cost of doing the work, not a penalty. Distinct from post-delivery rework, which is recorded as a typed relation edge to prior DELIVERED work, never as a phase value. Apply when an entity re-enters design/build/test after review sends it back, before acceptance.')`,
+
+			`UPDATE wms_intervals SET phase = 'iterate'
+				WHERE phase = 'rework' AND phase_source != 'warmup_recovery'`,
+
+			`INSERT INTO wp2_migration_audit (entity_type, entity_id, tag_key, old_value, new_value, migrated_at)
+				SELECT et.entity_type, et.entity_id, 'phase', 'rework', 'iterate', CURRENT_TIMESTAMP
+				FROM entity_tags et JOIN tags t ON t.id = et.tag_id
+				WHERE t.tag_key = 'phase' AND t.tag_value = 'rework'`,
+			`UPDATE entity_tags
+				SET tag_id = (SELECT id FROM tags WHERE tag_key = 'phase' AND tag_value = 'iterate')
+				WHERE tag_id = (SELECT id FROM tags WHERE tag_key = 'phase' AND tag_value = 'rework')`,
+
+			`UPDATE tags SET retired = 1
+				WHERE tag_key = 'phase'
+				  AND tag_value NOT IN ('design','build','test','review','rework','iterate','admin')
+				  AND retired = 0`,
+
+			`UPDATE tags SET retired = 1 WHERE tag_key = 'phase' AND tag_value = 'rework'`,
+
+			// --- PART 2: work-type vocabulary weed (TAXONOMY.md § 18→11) -------
+
+			`INSERT OR IGNORE INTO tags (tag_key, tag_value, is_seed, category, cardinality, description) VALUES
+				('work-type','polish',0,'lifecycle','single',''),
+				('work-type','investigation',0,'lifecycle','single',''),
+				('work-type','admin',0,'lifecycle','single',''),
+				('work-type','processor',0,'lifecycle','single','')`,
+			// required=1: v30-equivalent requires EVERY row of the work-type
+			// key, not just the key overall (same reasoning as phase:iterate
+			// above) — heals both the freshly-inserted rows and any
+			// pre-existing create-on-apply row.
+			`UPDATE tags SET is_seed = 1, category = 'lifecycle', cardinality = 'single', required = 1
+				WHERE tag_key = 'work-type' AND tag_value IN ('polish','investigation','admin','processor')`,
+
+			`INSERT INTO wp2_migration_audit (entity_type, entity_id, tag_key, old_value, new_value, migrated_at)
+				SELECT et.entity_type, et.entity_id, 'work-type', 'rework', 'bug', CURRENT_TIMESTAMP
+				FROM entity_tags et JOIN tags t ON t.id = et.tag_id
+				WHERE t.tag_key = 'work-type' AND t.tag_value = 'rework'`,
+			`DELETE FROM entity_tags
+				WHERE tag_id = (SELECT id FROM tags WHERE tag_key = 'work-type' AND tag_value = 'rework')
+				  AND EXISTS (
+					SELECT 1 FROM entity_tags et2
+					WHERE et2.entity_type = entity_tags.entity_type
+					  AND et2.entity_id = entity_tags.entity_id
+					  AND et2.tag_id = (SELECT id FROM tags WHERE tag_key = 'work-type' AND tag_value = 'bug')
+				  )`,
+			`UPDATE entity_tags
+				SET tag_id = (SELECT id FROM tags WHERE tag_key = 'work-type' AND tag_value = 'bug')
+				WHERE tag_id = (SELECT id FROM tags WHERE tag_key = 'work-type' AND tag_value = 'rework')`,
+
+			`INSERT INTO wp2_migration_audit (entity_type, entity_id, tag_key, old_value, new_value, migrated_at)
+				SELECT et.entity_type, et.entity_id, 'work-type', 'review', 'admin', CURRENT_TIMESTAMP
+				FROM entity_tags et JOIN tags t ON t.id = et.tag_id
+				WHERE t.tag_key = 'work-type' AND t.tag_value = 'review'`,
+			`DELETE FROM entity_tags
+				WHERE tag_id = (SELECT id FROM tags WHERE tag_key = 'work-type' AND tag_value = 'review')
+				  AND EXISTS (
+					SELECT 1 FROM entity_tags et2
+					WHERE et2.entity_type = entity_tags.entity_type
+					  AND et2.entity_id = entity_tags.entity_id
+					  AND et2.tag_id = (SELECT id FROM tags WHERE tag_key = 'work-type' AND tag_value = 'admin')
+				  )`,
+			`UPDATE entity_tags
+				SET tag_id = (SELECT id FROM tags WHERE tag_key = 'work-type' AND tag_value = 'admin')
+				WHERE tag_id = (SELECT id FROM tags WHERE tag_key = 'work-type' AND tag_value = 'review')`,
+
+			`INSERT INTO wp2_migration_audit (entity_type, entity_id, tag_key, old_value, new_value, migrated_at)
+				SELECT et.entity_type, et.entity_id, 'work-type', 'security', 'investigation', CURRENT_TIMESTAMP
+				FROM entity_tags et JOIN tags t ON t.id = et.tag_id
+				WHERE t.tag_key = 'work-type' AND t.tag_value = 'security'`,
+			`DELETE FROM entity_tags
+				WHERE tag_id = (SELECT id FROM tags WHERE tag_key = 'work-type' AND tag_value = 'security')
+				  AND EXISTS (
+					SELECT 1 FROM entity_tags et2
+					WHERE et2.entity_type = entity_tags.entity_type
+					  AND et2.entity_id = entity_tags.entity_id
+					  AND et2.tag_id = (SELECT id FROM tags WHERE tag_key = 'work-type' AND tag_value = 'investigation')
+				  )`,
+			`UPDATE entity_tags
+				SET tag_id = (SELECT id FROM tags WHERE tag_key = 'work-type' AND tag_value = 'investigation')
+				WHERE tag_id = (SELECT id FROM tags WHERE tag_key = 'work-type' AND tag_value = 'security')`,
+
+			`UPDATE tags SET retired = 1
+				WHERE tag_key = 'work-type' AND tag_value IN ('bugfix','build','design','review','rework','ops','security')`,
+
+			`UPDATE tags SET description = 'Delivers a capability the system did not have before — a new endpoint, panel, column, command, or integration. Titles typically start Add/Implement/Build/Create/Support. NOT restoring broken behavior (bug). NOT improving how an existing capability looks or feels (polish). NOT tooling nobody invokes as a product capability (infra).'
+				WHERE tag_key = 'work-type' AND tag_value = 'feature'`,
+			`UPDATE tags SET description = 'Restores intended behavior that the system currently gets wrong — a defined correct behavior with an observable deviation from it. Titles typically start Fix/Repair/Correct/Resolve. NOT works-as-intended-but-rough (polish: would a user file it as broken? bug. As could-be-nicer? polish). NOT diagnosing why it is wrong (investigation). NOT fixing tooling rather than product behavior (infra).'
+				WHERE tag_key = 'work-type' AND tag_value = 'bug'`,
+			`UPDATE tags SET description = 'Restructures existing code without changing its external behavior — extraction, renaming, decomposition, API-boundary cleanup. Done means the same observable behavior with better internals. NOT any behavior change, however small (feature/bug/polish). NOT repo or process housekeeping (admin).'
+				WHERE tag_key = 'work-type' AND tag_value = 'refactor'`,
+			`UPDATE tags SET description = 'Improves the look or experience of a delivered capability, without adding capability or fixing a defect — expected follow-up, because polish details aren’t discoverable until the function exists.'
+				WHERE tag_key = 'work-type' AND tag_value = 'polish'`,
+			`UPDATE tags SET description = 'Produces documentation as the deliverable — the prose itself: README, architecture doc, spec, guide, comments. Title names a doc file or says write/rewrite/document. NOT investigation or research that feeds a doc — synthesis is research even under a docs outcome.'
+				WHERE tag_key = 'work-type' AND tag_value = 'docs'`,
+			`UPDATE tags SET description = 'Executes a predefined check to produce a pass/fail verdict on something already built — acceptance runs, smoke tests, cleanroom installs, live validation of a shipped fix. NOT testing while building (phase:test inside the deliverable’s own WorkUnit). NOT working out why something fails (investigation). Tiebreaker: if the next step depends on what you find, you are investigating; if you could hand the procedure to a checklist, it is test.'
+				WHERE tag_key = 'work-type' AND tag_value = 'test'`,
+			`UPDATE tags SET description = 'Answers one specific closed-ended question: does X work? what caused Y? A symptom, claim, or doubt is in hand; the output is a yes/no/root-cause answer. Titles typically start Verify/Determine/Diagnose/Triage. NOT open-ended exploration of an option space (research). NOT running a predefined check whose question is already settled (test).'
+				WHERE tag_key = 'work-type' AND tag_value = 'investigation'`,
+			`UPDATE tags SET description = 'Explores an open problem space to produce knowledge, a design, or a recommendation — option surveys, synthesis of scattered knowledge into a design for a human. Titles typically start Explore/Design/Evaluate/Synthesize/Recon. NOT settling one specific existing question (investigation). NOT authoring the document that presents finished knowledge (docs).'
+				WHERE tag_key = 'work-type' AND tag_value = 'research'`,
+			`UPDATE tags SET description = 'Builds, changes, or operates the tooling, hosts, CI, deploy, and data substrate the product runs on — provisioning, install/systemd work, schema scaffolding, exporter wiring, test harnesses, dev tooling, and operating live systems (deploys, upgrades, service surgery). NOT a product capability users invoke (feature). NOT a fix to product behavior (bug). NOT project records and process (admin).'
+				WHERE tag_key = 'work-type' AND tag_value = 'infra'`,
+			`UPDATE tags SET description = 'Maintains the project’s process and records rather than its code or machinery — release prep, branch consolidation, repo hygiene, WMS and tag stewardship, data cleanup, bootstrap ceremony. NOT anything users or machines consume (feature/infra). NOT code restructuring (refactor).'
+				WHERE tag_key = 'work-type' AND tag_value = 'admin'`,
+			`UPDATE tags SET description = 'Unattended, per-item pipeline work whose deliverable is processed or classified data — schedule-, queue-, or per-item-driven runs: the slug processor, the sweep’s synthesis pass, ingest jobs. NOT human-directed work of any kind. NOT infra (the substrate the job runs ON, not the job itself). NOT research (research yields a finding for a human).'
+				WHERE tag_key = 'work-type' AND tag_value = 'processor'`,
+
+			// --- PART 3: slug key changes ---------------------------------------
+
+			`INSERT OR IGNORE INTO tags (tag_key, tag_value, is_seed, category, cardinality, description, scope, exclusion_group, interview, facet_source)
+				VALUES ('polish', '', 1, 'context', 'single', 'Polish slug — identifies the specific polish/experience-refinement effort', 'outcome', 'work-scope', 'propose', 'work-type')`,
+			`UPDATE tags SET facet_source = 'work-type', scope = 'outcome', exclusion_group = 'work-scope', interview = 'propose', cardinality = 'single'
+				WHERE tag_key = 'polish' AND facet_source = ''`,
+
+			`UPDATE tags SET retired = 1 WHERE tag_key = 'rework'`,
+
+			// Belt-and-suspenders: mirrors the mysql backend's identical catch-all
+			// — both phase and work-type are already-required keys, so every row
+			// of either must carry required=1.
+			`UPDATE tags SET required = 1 WHERE tag_key IN ('phase', 'work-type') AND required != 1`,
+
+			// Belt-and-suspenders, is_seed: mirrors the mysql backend's
+			// identical catch-all — v15's INSERT IGNORE seed for work-type:
+			// test/docs is a no-op if the row already existed via
+			// create-on-apply before v15 ran, leaving is_seed=0 forever.
+			// Closes the whole class for all 11 surviving work-type values.
+			`UPDATE tags SET is_seed = 1
+				WHERE tag_key = 'work-type'
+				  AND tag_value IN ('feature','bug','refactor','polish','docs','test','investigation','research','infra','admin','processor')
+				  AND is_seed != 1`,
+		},
+	},
+	{
+		// Mirrors mysql v67 "relation-kinds": see that migration's comment for
+		// the full rationale (WP3-relations-reporting.md §3.2). Dialect
+		// differences only: TINYINT(1) -> INTEGER, INSERT IGNORE -> INSERT OR
+		// IGNORE.
+		Version: 66,
+		Name:    "relation-kinds",
+		SQL: []string{
+			`CREATE TABLE IF NOT EXISTS relation_kinds (
+				kind        TEXT NOT NULL,
+				taxable     INTEGER NOT NULL DEFAULT 0,
+				miss_class  TEXT NOT NULL DEFAULT '',
+				lineage     INTEGER NOT NULL DEFAULT 1,
+				is_seed     INTEGER NOT NULL DEFAULT 1,
+				description TEXT NOT NULL DEFAULT '',
+				PRIMARY KEY (kind)
+			)`,
+			`INSERT OR IGNORE INTO relation_kinds (kind, taxable, miss_class, lineage, description) VALUES
+				('remediates',           1, 'code',   1, 'Fixes a defect in delivered work: it did not do what it was specified to do. Operator category 2 (shipped-to-bug). Counts as rework tax.'),
+				('addresses-limitation', 1, 'design', 1, 'Removes an unintended functional constraint in delivered work: it did what was asked, but the result could not be used as needed. Operator category 3. Counts as rework tax.'),
+				('fulfills-realization', 1, 'spec',   1, 'Supplies a requirement the delivered work should have had but nobody identified at the time. Operator category 4 (specification miss, not a code miss). Counts as rework tax.'),
+				('reverts',              1, 'code',   1, 'Undoes delivered work because shipping it was itself the error. Counts as rework tax.'),
+				('supersedes',           0, '',       1, 'Replaces delivered work because requirements, scale, or environment changed. The prior work was right for its time. Records lineage; NOT taxed.'),
+				('follows-up-on',        0, '',       1, 'A planned continuation of delivered work that was complete and correct. Records lineage; NOT taxed.'),
+				('discovered-during',    0, '',       0, 'This work was surfaced while doing the target, but is not a correction of it. Records provenance only; NOT taxed and NOT lineage.'),
+				('duplicate-of',         0, '',       0, 'The same work tracked twice — an intake error. Flags a merge candidate; NOT taxed.')`,
+		},
+	},
+	{
+		// Mirrors mysql v68 "outcome-relations": see that migration's comment
+		// for the full rationale (WP3-relations-reporting.md §3.3). Dialect
+		// differences only: VARCHAR(n) -> TEXT (SQLite ignores length),
+		// BIGINT UNSIGNED AUTO_INCREMENT -> INTEGER PRIMARY KEY AUTOINCREMENT,
+		// DATETIME(6) -> DATETIME (no microsecond precision, matching this
+		// backend's existing convention), inline INDEX(...) clauses -> separate
+		// CREATE INDEX statements (SQLite has no inline index syntax). No FK
+		// constraints, same reasoning as entity_dependencies and the mysql step.
+		Version: 67,
+		Name:    "outcome-relations",
+		SQL: []string{
+			`CREATE TABLE IF NOT EXISTS outcome_relations (
+				id          INTEGER PRIMARY KEY AUTOINCREMENT,
+				kind        TEXT NOT NULL,
+				from_type   TEXT NOT NULL,
+				from_id     TEXT NOT NULL,
+				to_type     TEXT NOT NULL,
+				to_id       TEXT NOT NULL,
+				created_at  DATETIME NOT NULL,
+				created_by  TEXT NOT NULL DEFAULT '',
+				source      TEXT NOT NULL DEFAULT 'manual',
+				note        TEXT NOT NULL DEFAULT '',
+				UNIQUE (kind, from_type, from_id, to_type, to_id)
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_rel_to ON outcome_relations(kind, to_type, to_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_rel_from ON outcome_relations(kind, from_type, from_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_rel_created ON outcome_relations(created_at)`,
+		},
+	},
+	{
+		// Mirrors mysql v69 "dispatch-package": see that migration's comment
+		// for the full rationale. Dialect differences only: MEDIUMTEXT ->
+		// TEXT, DATETIME(6) -> DATETIME, BIGINT UNSIGNED AUTO_INCREMENT ->
+		// INTEGER PRIMARY KEY AUTOINCREMENT.
+		Version: 68,
+		Name:    "dispatch-package",
+		SQL: []string{
+			`ALTER TABLE workunits ADD COLUMN brief TEXT`,
+			`ALTER TABLE workunits ADD COLUMN claimed_at DATETIME`,
+			`CREATE TABLE IF NOT EXISTS wms_deliverables (
+				id             INTEGER PRIMARY KEY AUTOINCREMENT,
+				entity_type    TEXT NOT NULL,
+				entity_id      TEXT NOT NULL,
+				agent_id       TEXT NOT NULL,
+				session_id     TEXT NOT NULL,
+				summary        TEXT NOT NULL,
+				result         TEXT NOT NULL,
+				artifact_paths TEXT,
+				created_at     DATETIME NOT NULL
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_deliverables_entity ON wms_deliverables(entity_type, entity_id)`,
+		},
+	},
+	{
+		// Mirrors mysql v70 "roster-lifecycle": see that migration's comment
+		// for the full rationale. DEFAULT CURRENT_TIMESTAMP backfills
+		// existing rows at ALTER time only — the Go code always sets
+		// updated_at explicitly, same contract as agent_health_gauge's.
+		Version: 69,
+		Name:    "roster-lifecycle",
+		SQL: []string{
+			`ALTER TABLE agent_roster ADD COLUMN updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP`,
+			`CREATE INDEX IF NOT EXISTS idx_roster_updated ON agent_roster(updated_at)`,
+		},
+	},
 }

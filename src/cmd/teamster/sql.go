@@ -6,8 +6,10 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"strings"
+	"unicode"
 
 	"github.com/bmjdotnet/teamster/internal/store"
 )
@@ -36,6 +38,8 @@ func runSQL(args []string) int {
 	query := fs.String("e", "", "SQL statement to execute (reads stdin if empty)")
 	skipNames := fs.Bool("N", false, "skip the column-header line (like mysql -N)")
 	fs.BoolVar(skipNames, "skip-column-names", false, "skip the column-header line (like mysql -N)")
+	readOnly := fs.Bool("read-only", false, "refuse any statement that doesn't start with SELECT/SHOW/EXPLAIN/DESCRIBE")
+	database := fs.String("database", "", "query this database instead of the one named in the resolved DSN (e.g. claude_telemetry)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -54,7 +58,18 @@ func runSQL(args []string) int {
 		return 2
 	}
 
-	s, err := openTagsDB()
+	if *readOnly {
+		if err := checkReadOnlyStmt(stmt); err != nil {
+			fmt.Fprintf(os.Stderr, "sql: %v\n", err)
+			return 1
+		}
+	}
+
+	var storeOpts []store.Option
+	if *readOnly || *database != "" {
+		storeOpts = append(storeOpts, store.WithSkipMigrate())
+	}
+	s, err := openSQLDB(*database, storeOpts...)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "sql: %v\n", err)
 		return 1
@@ -72,6 +87,66 @@ func runSQL(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// openSQLDB resolves the DSN the same way openTagsDB does and, when
+// database is non-empty, retargets the DSN's path segment before opening —
+// e.g. `teamster sql --database=claude_telemetry` queries the sibling
+// database on the same server rather than the one named in the resolved
+// DSN. Used by clone's row-count verification (WP3-data-leg.md §4), which
+// needs to query both `teamster` and `claude_telemetry` through one
+// resolved credential (the app DSN on the target, clone_verify_ro on the
+// source) without a second env var per database.
+func openSQLDB(database string, opts ...store.Option) (store.Store, error) {
+	dsn, err := resolveStoreDSN()
+	if err != nil {
+		return nil, err
+	}
+	if database != "" {
+		u, err := url.Parse(dsn)
+		if err != nil {
+			return nil, fmt.Errorf("--database: parse resolved DSN: %w", err)
+		}
+		u.Path = "/" + database
+		dsn = u.String()
+	}
+	return store.Open(context.Background(), dsn, opts...)
+}
+
+// readOnlyAllowedVerbs is the --read-only allowlist (I7): a statement whose
+// first token (case-insensitive) isn't one of these is rejected before any
+// DB call is made. This is a single-statement CLI tool, not a script
+// executor — go-sql-driver/mysql doesn't execute multiple statements per
+// Query() call unless multiStatements=true is set in the DSN, which
+// teamster's DSNs never do — so a first-token check is not security theater
+// here: there is no semicolon-smuggling path to a second statement even if
+// this check were bypassed.
+var readOnlyAllowedVerbs = map[string]bool{
+	"SELECT":   true,
+	"SHOW":     true,
+	"EXPLAIN":  true,
+	"DESCRIBE": true,
+	"DESC":     true,
+}
+
+// checkReadOnlyStmt rejects stmt unless its first token is in
+// readOnlyAllowedVerbs. Called before openTagsDB, so a rejected statement
+// never causes a DB connection to be opened at all.
+func checkReadOnlyStmt(stmt string) error {
+	verb := strings.ToUpper(firstToken(stmt))
+	if !readOnlyAllowedVerbs[verb] {
+		return fmt.Errorf("--read-only: statement must start with SELECT/SHOW/EXPLAIN/DESCRIBE, got %q", verb)
+	}
+	return nil
+}
+
+// firstToken returns the leading whitespace-delimited token of stmt.
+func firstToken(stmt string) string {
+	stmt = strings.TrimSpace(stmt)
+	if i := strings.IndexFunc(stmt, unicode.IsSpace); i >= 0 {
+		return stmt[:i]
+	}
+	return stmt
 }
 
 // runSQLStmt executes stmt and streams the result rows to w, tab-separated.

@@ -35,9 +35,9 @@ go vet ./...
 ## Step 4 — Adversarial review (if applicable)
 
 For any task that completed IMPLEMENT phase, apply the execution loop before
-marking work ready. See `bootstrap/references/execution-loop.md` for the full
-4-phase loop (IMPLEMENT → VALIDATE → ADVERSARIAL REVIEW → COMMIT) and the
-rules on agent assignment and iteration limits.
+marking work ready. See `bootstrap/references/dispatch-pack/execution-loop.md`
+for the full 4-phase loop (IMPLEMENT → VALIDATE → ADVERSARIAL REVIEW → COMMIT)
+and the rules on agent assignment and iteration limits.
 
 **When to run full review:** multi-file changes, changes to shared interfaces
 (MCP tools, JSONL fields, hook contracts), anything touching the installer or
@@ -46,8 +46,8 @@ production infrastructure.
 **When to skip to VALIDATE only:** single-file changes with no interface impact,
 documentation-only changes, test additions.
 
-Apply the rubric checklists from `bootstrap/references/rubrics.md` during
-ADVERSARIAL REVIEW. All five rubrics are relevant to code changes:
+Apply the rubric checklists from `bootstrap/references/dispatch-pack/rubrics.md`
+during ADVERSARIAL REVIEW. All five rubrics are relevant to code changes:
 - Code Quality — naming, dead code, error handling
 - Architecture — single responsibility, no circular deps, interface boundaries
 - Security — no injection, no hardcoded secrets, input validation at boundaries

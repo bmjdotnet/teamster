@@ -209,14 +209,49 @@ with descriptions. Each tag value has a `description` field that tells you
   `ScrollZ` (IRC client), `anchor` (IRC coordination harness), `job-search`
 - Only propose a new value if genuinely new and reusable across future sessions
 
-**`work-type`** (lifecycle, required — pick ONE):
+**`work-type`** (lifecycle, required — pick ONE). Classify by walking this
+decision procedure in order and taking the FIRST match (`TAXONOMY.md` §4):
+
+```
+1. Produced by an unattended pipeline (schedule / queue / per-item)?
+     → processor
+2. Is the deliverable knowledge?
+     One specific closed-ended question (does X work? what caused Y?)
+     → investigation
+     Open-ended exploration / design / recommendation
+     → research
+3. Is the deliverable a pass/fail verdict from a predefined check?
+     → test
+4. Is the deliverable prose documentation?
+     → docs
+5. Does the deliverable change the product?
+     New capability                       → feature
+     Wrong behavior made right            → bug
+     Same behavior, better structure      → refactor
+     Same capability, better experience   → polish
+6. Does it sustain the machinery?
+     Tooling / hosts / CI / deploy / substrate (incl. operating live systems)
+     → infra
+     Process / records / releases / repo hygiene / stewardship
+     → admin
+```
+
 - `feature` — adds a NEW capability that didn't exist before
 - `bug` — fixes incorrect EXISTING behavior
 - `refactor` — restructures code without changing external behavior
-- `infra` — infrastructure, provisioning, CI, host setup
-- `research` — investigation/audit whose output is knowledge, not code
+- `polish` — improves the look/experience of a delivered capability without
+  adding capability or fixing a defect — expected follow-up work, nothing was
+  missed
+- `investigation` — answers one specific closed-ended question (does X work?
+  what caused Y?)
+- `research` — explores an open problem space to produce knowledge, a design,
+  or a recommendation
 - `docs` — documentation as the deliverable
 - `test` — validation run producing a pass/fail verdict
+- `infra` — infrastructure, provisioning, CI, host setup, or operating live
+  systems (deploys, upgrades, service surgery)
+- `admin` — maintains the project's process and records rather than its code
+  or machinery (release prep, repo hygiene, WMS/tag stewardship)
 - `processor` — rote, rule-based or LLM-driven data processing run on a
   schedule/queue/per-item basis, where the deliverable is processed or
   classified data rather than a human-facing capability or a finding for a
@@ -224,9 +259,17 @@ with descriptions. Each tag value has a `description` field that tells you
   for an orphan session that turns out to BE a sweep/ingest/scrape-style run,
   not one that merely touches data as a means to some other end)
 
+**Rework is never assigned here.** There is no `rework` value on `phase` or
+`work-type` — post-delivery correction is recorded as a typed
+`outcome_relations` edge at WorkUnit intake (`wms_addRelation`), not
+inferred from a synthesized session's tags. This skill has no mechanism to
+draw that edge retroactively, so a synthesized orphan session never gets
+one — that's an acceptable gap, not a bug to route around.
+
 **Work-scope slug** (context, single — pick ONE or omit):
-- All slug keys (`feature`, `bug`, `refactor`, `infra`, `docs`, `research`,
-  `test`, `admin`) share the `work-scope` exclusion group — set at most one.
+- All slug keys (`feature`, `bug`, `refactor`, `polish`, `infra`, `docs`,
+  `research`, `test`, `admin`) share the `work-scope` exclusion group — set at
+  most one.
 - The slug key should match the `work-type` you chose above:
   `work-type:bug` → `bug:<slug>`, `work-type:feature` → `feature:<slug>`,
   `work-type:infra` → `infra:<slug>`, etc.
@@ -282,7 +325,7 @@ wms_tagEntity(entityType="outcome", entityID="synth-<slug>",
 wms_tagEntity(entityType="outcome", entityID="synth-<slug>",
               tagKey="work-type", tagValue="<work-type>", source="manual")
 wms_tagEntity(entityType="outcome", entityID="synth-<slug>",
-              tagKey="<feature|bug|refactor|infra|docs|research|test|admin>", tagValue="<slug>", source="manual")
+              tagKey="<feature|bug|refactor|polish|infra|docs|research|test|admin>", tagValue="<slug>", source="manual")
 wms_tagEntity(entityType="outcome", entityID="synth-<slug>",
               tagKey="priority", tagValue="<priority>", source="manual")
 wms_tagEntity(entityType="outcome", entityID="synth-<slug>",

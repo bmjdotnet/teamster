@@ -120,6 +120,7 @@ BASEDIR_EXPLICIT=0
 # Per-service mode flags
 HOOKD_MODE=""         # --hookd-mode=systemd|supervisor|external
 STORE_MODE=""         # --store-mode=install|external|managed
+STORE_ENGINE=""       # --store-engine=mariadb|mysql-8.4 (only valid with --store-mode=install; default mariadb — today's default-mysql-server behavior, unchanged for every existing caller)
 OTELCOL_MODE=""       # --otelcol-mode=install|external|managed|none
 PROMETHEUS_MODE=""    # --prometheus-mode=install|external|managed|none
 GRAFANA_MODE=""       # --grafana-mode=install|external|managed|none
@@ -185,6 +186,8 @@ while [[ $# -gt 0 ]]; do
         --hookd-mode)           require_value "$1" "${2-}"; HOOKD_MODE="$2"; shift 2 ;;
         --store-mode=*)         STORE_MODE="${1#--store-mode=}"; shift ;;
         --store-mode)           require_value "$1" "${2-}"; STORE_MODE="$2"; shift 2 ;;
+        --store-engine=*)       STORE_ENGINE="${1#--store-engine=}"; shift ;;
+        --store-engine)         require_value "$1" "${2-}"; STORE_ENGINE="$2"; shift 2 ;;
         --otelcol-mode=*)       OTELCOL_MODE="${1#--otelcol-mode=}"; shift ;;
         --otelcol-mode)         require_value "$1" "${2-}"; OTELCOL_MODE="$2"; shift 2 ;;
         --prometheus-mode=*)    PROMETHEUS_MODE="${1#--prometheus-mode=}"; shift ;;
@@ -254,6 +257,7 @@ while [[ $# -gt 0 ]]; do
             echo "Per-service mode flags:"
             echo "  --hookd-mode=MODE        hookd mode: systemd (default) | supervisor | external"
             echo "  --store-mode=MODE        store mode: managed (default) | install | external"
+            echo "  --store-engine=ENGINE    store engine (only with --store-mode=install): mariadb (default) | mysql-8.4"
             echo "  --otelcol-mode=MODE      otelcol mode: install (default) | external | managed | none"
             echo "  --prometheus-mode=MODE   prometheus mode: install (default) | external | managed | none"
             echo "  --grafana-mode=MODE      grafana mode: none (default) | install | external | managed"
@@ -319,6 +323,7 @@ dlog INFO install.parse "parsed flags" \
     "wire=$WIRE" \
     "hookd_mode=$HOOKD_MODE" \
     "store_mode=$STORE_MODE" \
+    "store_engine=$STORE_ENGINE" \
     "otelcol_mode=$OTELCOL_MODE" \
     "prometheus_mode=$PROMETHEUS_MODE" \
     "grafana_mode=$GRAFANA_MODE" \
@@ -339,6 +344,10 @@ dlog INFO install.parse "parsed flags" \
 # --- Validation ---
 [[ "$STORE_MODE" == "external" || "$STORE_MODE" == "managed" ]] && [[ -z "$STORE_DSN" ]] \
     && die "--store-mode=$STORE_MODE requires --store-dsn"
+[[ -n "$STORE_ENGINE" ]] && [[ "$STORE_ENGINE" != "mariadb" && "$STORE_ENGINE" != "mysql-8.4" ]] \
+    && die "--store-engine must be 'mariadb' or 'mysql-8.4', got '$STORE_ENGINE'"
+[[ -n "$STORE_ENGINE" ]] && [[ "$STORE_MODE" != "install" ]] \
+    && die "--store-engine is only valid with --store-mode=install (there is no engine to provision when the DSN points at something this installer doesn't manage)"
 [[ "$HOOKD_MODE" == "external" ]] && [[ -z "$HOOKD_ENDPOINT" ]] \
     && die "--hookd-mode=external requires --hookd-endpoint"
 [[ "$OTELCOL_MODE" == "external" ]] && [[ -z "$OTELCOL_ENDPOINT" ]] \
@@ -512,11 +521,127 @@ install_otelcol() {
 }
 
 # install_mysql installs MySQL/MariaDB and creates the teamster database and user.
+# install_mysql_84 provisions genuine MySQL 8.4 LTS via Oracle's apt repo,
+# invoked only when --store-engine=mysql-8.4 is passed (clone-specific,
+# R5/R5a/R5b — not the new default for ordinary --store-mode=install
+# callers, which keep today's default-mysql-server/MariaDB behavior via
+# install_mysql()'s own package-install branch). Only provisions the server
+# package; DSN parsing, database/user creation, and grants are shared with
+# the MariaDB path via install_mysql()'s common tail.
+#
+# 8.4 is native utf8mb4_0900_ai_ci (no collation rewrite needed vs the
+# hub's 8.0), apt-installable on trixie (unlike 8.0, whose Packages index is a
+# confirmed 0-byte file there), and keeps every .deb postinst benefit
+# (systemd unit, socket-auth root, data-dir init) a hand-rolled tarball
+# install would have to reproduce from scratch.
+install_mysql_84() {
+    echo ""
+    printf -- "${C_BOLD_CYAN}--- Installing MySQL 8.4 LTS (store-engine=mysql-8.4) ---${C_RESET}\n"
+
+    # gpg is needed to dearmor Oracle's signing key below. A fresh minimal
+    # trixie image may not have it — ensure it before using it.
+    if ! command -v gpg &>/dev/null; then
+        sudo apt-get install -y gnupg >/dev/null 2>&1 \
+            || die "failed to install gnupg (needed for MySQL keyring setup)"
+    fi
+
+    # apt-key is fully removed on Debian 13 — Oracle's own quick-guide still
+    # instructs it, which would `command not found` on this exact platform.
+    # signed-by= + a dearmored standalone keyring is the modern replacement:
+    # no system-wide trusted keyring, no apt-key binary needed.
+    local _key_url="https://repo.mysql.com/RPM-GPG-KEY-mysql-2025"
+    local _key_tmp
+    _key_tmp="$(mktemp)"
+    curl -fsSL "$_key_url" -o "$_key_tmp" \
+        || die "failed to download MySQL's signing key from $_key_url"
+
+    # Runtime expiry check: Oracle's dated key exports go stale on their own
+    # schedule (this exact URL's predecessor, RPM-GPG-KEY-mysql-2023, was
+    # already expired when this design was written). Fail loudly and
+    # specifically here rather than let a future re-staling surface as an
+    # opaque `apt-get update` failure. R13: an unsigned/unverified source is
+    # an acceptable fallback for the CLONE TARGET only — warn and proceed
+    # rather than die, since the operator has already ruled this acceptable.
+    # This never applies to the source hub; its MySQL trust chain stays Canonical's.
+    local _key_expiry
+    _key_expiry="$(gpg --show-keys --with-colons "$_key_tmp" 2>/dev/null | awk -F: '/^pub/ {print $7; exit}' || true)"
+    if [[ -n "$_key_expiry" ]] && [[ "$_key_expiry" -lt "$(date +%s)" ]]; then
+        printf -- "${C_YELLOW}  WARN: MySQL's signing key (%s, fingerprint BCA43417C3B485DD128EC6D4B7B3B788A8D3785C) expired on %s — Oracle has likely re-issued a fresh export under a new dated URL; check https://dev.mysql.com/doc/mysql-apt-repo-quick-guide/en/ for the current one and update this function's key URL. Proceeding with an expired-but-otherwise-valid key per R13 (clone target only).${C_RESET}\n" \
+            "$_key_url" "$(date -d "@${_key_expiry}" '+%Y-%m-%d' 2>/dev/null || echo "unknown")"
+    fi
+
+    sudo gpg --dearmor -o /usr/share/keyrings/mysql.gpg "$_key_tmp"
+    rm -f "$_key_tmp"
+    sudo tee /etc/apt/sources.list.d/mysql.list >/dev/null <<EOF
+deb [signed-by=/usr/share/keyrings/mysql.gpg] http://repo.mysql.com/apt/debian/ trixie mysql-8.4-lts
+EOF
+    sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq \
+        || die "apt-get update failed after adding MySQL's repo — check network/repo reachability"
+
+    # Install MySQL 8.x from Oracle's apt repo — no version pin, takes
+    # whatever is latest in the 8.x LTS train.
+    #
+    # debconf-set-selections preseeds the root-password prompt to avoid
+    # interactive hang. The password itself doesn't matter — we switch root
+    # to auth_socket immediately after install (see below).
+    local _root_pass
+    _root_pass="$(openssl rand -hex 16 2>/dev/null || head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    echo "mysql-community-server mysql-community-server/root-pass password ${_root_pass}" | sudo debconf-set-selections
+    echo "mysql-community-server mysql-community-server/re-root-pass password ${_root_pass}" | sudo debconf-set-selections
+
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        mysql-community-server mysql-community-client \
+        || die "mysql-community-server install failed — check repo reachability and apt sources"
+
+    sudo systemctl start mysql 2>/dev/null || sudo systemctl start mysqld 2>/dev/null
+
+    # Switch root@localhost to auth_socket so `sudo mysql` works passwordlessly
+    # for the rest of the installer — matching MariaDB's unix_socket default.
+    # Oracle's 8.4 .deb on trixie uses --initialize-insecure and no credential
+    # actually authenticates as root afterward (empty, preseeded, or bare — all
+    # produce ACCESS DENIED). The only reliable path: restart with
+    # --skip-grant-tables, alter root, restart normally.
+    # Oracle's MySQL 8.4 does not auto-load auth_socket (MariaDB's unix_socket
+    # is built in). Load the plugin first — || true since it may already exist.
+    local _auth_socket_sql="INSTALL PLUGIN auth_socket SONAME 'auth_socket.so'"
+    local _alter_sql="ALTER USER 'root'@'localhost' IDENTIFIED WITH auth_socket; FLUSH PRIVILEGES;"
+    if ! sudo mysql -u root --password= -e "${_auth_socket_sql}; ${_alter_sql}" 2>/dev/null \
+    && ! sudo mysql -u root -p"${_root_pass}" -e "${_auth_socket_sql}; ${_alter_sql}" 2>/dev/null; then
+        echo "  root auth failed — using --skip-grant-tables fallback"
+        sudo systemctl stop mysql
+        sudo mysqld --skip-grant-tables --skip-networking --user=mysql &
+        local _mgpid=$!
+        local _tries=0
+        while ! mysql -u root -e "SELECT 1" &>/dev/null && [[ $_tries -lt 30 ]]; do
+            sleep 1
+            _tries=$((_tries + 1))
+        done
+        # All three statements must run in ONE session: FLUSH PRIVILEGES
+        # re-enables auth, so any subsequent NEW connection would need a
+        # credential — which we don't have (that's why we're here).
+        mysql -u root <<'SQL' 2>/dev/null \
+            || { kill "$_mgpid" 2>/dev/null; die "auth_socket setup failed under --skip-grant-tables"; }
+FLUSH PRIVILEGES;
+INSTALL PLUGIN auth_socket SONAME 'auth_socket.so';
+ALTER USER 'root'@'localhost' IDENTIFIED WITH auth_socket;
+SQL
+        kill "$_mgpid" 2>/dev/null
+        wait "$_mgpid" 2>/dev/null || true
+        sudo systemctl start mysql
+    fi
+
+    local _mysql_ver
+    _mysql_ver="$(mysql --version 2>/dev/null | head -1 || echo "unknown")"
+    printf -- "${C_GREEN}  MySQL 8.x LTS installed (%s)${C_RESET}\n" "$_mysql_ver"
+}
+
 install_mysql() {
     local dsn="$1"
 
     if command -v mysql &>/dev/null && (systemctl is-active --quiet mysql 2>/dev/null || systemctl is-active --quiet mysqld 2>/dev/null || systemctl is-active --quiet mariadb 2>/dev/null); then
         echo "  MySQL already installed and running — skipping package install"
+    elif [[ "${STORE_ENGINE:-mariadb}" == "mysql-8.4" ]]; then
+        install_mysql_84
     else
         echo ""
         printf -- "${C_BOLD_CYAN}--- Installing MySQL ---${C_RESET}\n"
@@ -548,7 +673,34 @@ install_mysql() {
         printf "CREATE USER '%s'@'localhost' IDENTIFIED BY '%s';\n" "$_user" "$_pass" \
             | sudo mysql 2>/dev/null
     fi
+    # ALTER USER unconditionally applies the DSN password even when CREATE USER
+    # IF NOT EXISTS was a no-op — e.g. after `teamster clone`, where the account
+    # already exists from a prior install but teamster.yaml carries a freshly
+    # generated password. Without this, the account silently keeps its old
+    # password and every subsequent connection fails with access denied. Same
+    # CREATE USER IF NOT EXISTS + ALTER USER pattern as provision_grafana_ro /
+    # provision_clone_verify_ro below.
+    printf "ALTER USER '%s'@'localhost' IDENTIFIED BY '%s';\n" "$_user" "$_pass" \
+        | sudo mysql 2>/dev/null
     sudo mysql -e "GRANT ALL PRIVILEGES ON \`$_db\`.* TO '$_user'@'localhost'; FLUSH PRIVILEGES;" 2>/dev/null
+
+    # No install path creates claude_telemetry — it's populated externally
+    # (otelcol, on a normal hub) but nothing here provisions the database
+    # itself, so a fresh target has nowhere for a restored dump to land.
+    # Unconditional: benefits every --store-mode=install user, not just
+    # clone. GRANT ALL makes the SELECT/LOCK TABLES/SHOW VIEW/TRIGGER loop
+    # below redundant for claude_telemetry specifically — left in place
+    # since it still matters if that loop ever grows a second database.
+    sudo mysql -e "CREATE DATABASE IF NOT EXISTS \`claude_telemetry\` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;" 2>/dev/null \
+        || sudo mysql -e "CREATE DATABASE IF NOT EXISTS \`claude_telemetry\` CHARACTER SET utf8mb4;" 2>/dev/null
+    sudo mysql -e "GRANT ALL PRIVILEGES ON \`claude_telemetry\`.* TO '$_user'@'localhost'; FLUSH PRIVILEGES;" 2>/dev/null
+
+    # Restoring a mysqldump with DEFINER= clauses (views, routines, triggers)
+    # requires SET_ANY_DEFINER + SYSTEM_USER (MySQL 8.2+) when the definer
+    # is a system user (like root). Both are global-only privileges. Without
+    # them, `teamster restore` fails on the first definer-bearing object.
+    # || true: these privileges don't exist on MariaDB or older MySQL.
+    sudo mysql -e "GRANT SET_ANY_DEFINER, SYSTEM_USER ON *.* TO '$_user'@'localhost';" 2>/dev/null || true
 
     # The backup config lists databases beyond the DSN database (e.g.
     # claude_telemetry). Grant the minimum privileges mysqldump needs so
@@ -696,6 +848,88 @@ provision_grafana_ro() {
         return 0
     else
         _ro_fail
+        return 1
+    fi
+}
+
+# provision_clone_verify_ro creates the least-privilege read-only MySQL user
+# (clone_verify_ro) `teamster clone`'s own source-side verification queries
+# connect as — I7 (DESIGN.md §6, WP3-data-leg.md §4). Near-identical to
+# provision_grafana_ro immediately above (same socket-root admin path, same
+# idempotent CREATE USER IF NOT EXISTS + ALTER USER + additive-GRANT
+# pattern, same password-file-is-the-success-marker discipline) — it exists
+# on every install that can locally administer MySQL, not just clone
+# targets, because the user this control protects is always the SOURCE of a
+# future clone, and there's no way to know in advance which install that
+# will be. A host that never runs `teamster clone` simply never uses it.
+#
+# Unlike grafana_ro (host '%', serves a remote Grafana datasource),
+# clone_verify_ro is scoped to 'localhost' — clone's source-side queries
+# always run locally on the source host itself (R9).
+#
+# Password ownership lives HERE, same as grafana_ro: generated once,
+# persisted 0600 to <basedir>/var/clone/clone_verify_ro_password, reused on
+# re-run so an already-working credential isn't rotated out from under
+# anything holding it. Args: $1=store DSN, $2=basedir.
+provision_clone_verify_ro() {
+    local dsn="$1" basedir="$2"
+    local _db _ro_user="clone_verify_ro"
+    _db=$(echo "$dsn" | sed -n 's|mysql://[^/]*/\([^?]*\).*|\1|p')
+
+    local sql_tmpl="$basedir/etc/clone-verify-ro-user.sql"
+    local pw_dir="$basedir/var/clone"
+    local pw_file="$pw_dir/clone_verify_ro_password"
+
+    # Same discipline as grafana_ro's _ro_fail: clear the marker ONLY on a
+    # confirmed failure (SQL ran, GRANT errored) — never on an early bail
+    # that doesn't disprove an earlier successful provisioning.
+    _clone_ro_fail() {
+        rm -f "$pw_file"
+        printf -- "${C_YELLOW}    clone_verify_ro provisioning FAILED — 'teamster clone' will have no I7 read-only credential for source-side verification.${C_RESET}\n"
+        printf -- "${C_YELLOW}    Apply manually as a DB admin: %s (substitute placeholders).${C_RESET}\n" "$sql_tmpl"
+        dlog WARN install.clone-verify-ro "grant failed — cleared stale password marker" "db=$_db"
+    }
+
+    if [[ -z "$_db" ]]; then
+        printf -- "${C_YELLOW}    WARN: could not parse store DB from DSN — skipping clone_verify_ro provisioning${C_RESET}\n"
+        dlog WARN install.clone-verify-ro "no db parsed from dsn"
+        return 1
+    fi
+    if [[ ! -f "$sql_tmpl" ]]; then
+        printf -- "${C_YELLOW}    WARN: %s not found — skipping clone_verify_ro provisioning${C_RESET}\n" "$sql_tmpl"
+        dlog WARN install.clone-verify-ro "sql template missing" "path=$sql_tmpl"
+        return 1
+    fi
+
+    if ! sudo mysql -e "SELECT 1" >/dev/null 2>&1; then
+        printf -- "${C_YELLOW}    clone_verify_ro not provisioned — MySQL is not locally administrable from this host.${C_RESET}\n"
+        printf -- "${C_YELLOW}    'teamster clone' will have no I7 read-only credential until you apply, as a DB admin:${C_RESET}\n"
+        printf -- "${C_YELLOW}      %s  (substitute clone_verify_ro user/password/db placeholders first)${C_RESET}\n" "$sql_tmpl"
+        dlog WARN install.clone-verify-ro "mysql not locally administrable — manual step required" "db=$_db"
+        return 1
+    fi
+
+    local _pw
+    if [[ -s "$pw_file" ]]; then
+        _pw=$(tr -d '\n' < "$pw_file")
+    else
+        _pw=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
+    fi
+
+    local _pw_esc
+    _pw_esc=$(sed_escape_replacement "$_pw")
+    if sed -e "s|__CLONE_VERIFY_RO_USER__|$_ro_user|g" \
+           -e "s|__CLONE_VERIFY_RO_PASSWORD__|$_pw_esc|g" \
+           -e "s|__STORE_DB__|$_db|g" "$sql_tmpl" \
+       | sudo mysql >/dev/null 2>&1; then
+        mkdir -p "$pw_dir"
+        printf '%s' "$_pw" > "$pw_file"
+        chmod 600 "$pw_file"
+        printf -- "${C_GREEN}    clone_verify_ro read-only DB user provisioned (db '%s')${C_RESET}\n" "$_db"
+        dlog INFO install.clone-verify-ro "provisioned" "user=$_ro_user" "db=$_db"
+        return 0
+    else
+        _clone_ro_fail
         return 1
     fi
 }
@@ -1298,9 +1532,16 @@ mkdir -p "$BUILDDIR"
 # The `|| true` is required: git describe exits 128 ("No names found") on a
 # tagless tree, which under `set -euo pipefail` would otherwise abort the install.
 # Stamped into internal/version via -ldflags -X so every binary reports the same build.
-TEAMSTER_VERSION="$(cd "$REPO" && git describe --tags --dirty 2>/dev/null || true)"
+# TEAMSTER_VERSION/TEAMSTER_COMMIT respect a pre-set environment variable
+# before falling back to git derivation — required for `teamster clone`,
+# which ships via `git archive` (no .git in the extracted tree, so the git
+# derivation below would silently degrade to "none"/the bare VERSION floor)
+# and exports the values it already resolved at the source instead. Unset
+# for every other caller, so `${VAR:-...}` falls straight through to the
+# original derivation — byte-for-byte unchanged behavior.
+TEAMSTER_VERSION="${TEAMSTER_VERSION:-$(cd "$REPO" && git describe --tags --dirty 2>/dev/null || true)}"
 [[ -z "$TEAMSTER_VERSION" ]] && TEAMSTER_VERSION="$(cat "$REPO/VERSION" 2>/dev/null || echo dev)"
-TEAMSTER_COMMIT="$(cd "$REPO" && git rev-parse --short HEAD 2>/dev/null || echo none)"
+TEAMSTER_COMMIT="${TEAMSTER_COMMIT:-$(cd "$REPO" && git rev-parse --short HEAD 2>/dev/null || echo none)}"
 TEAMSTER_BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 _vpkg="github.com/bmjdotnet/teamster/internal/version"
 LDFLAGS="-X ${_vpkg}.Version=${TEAMSTER_VERSION} -X ${_vpkg}.Commit=${TEAMSTER_COMMIT} -X ${_vpkg}.BuildTime=${TEAMSTER_BUILD_TIME}"
@@ -1931,6 +2172,19 @@ if [[ "$GRAFANA_MODE" == "install" || "$GRAFANA_MODE" == "external" ]] && [[ -n 
     echo ""
     printf -- "${C_BOLD_WHITE}--> Provisioning Grafana read-only DB user...${C_RESET}\n"
     provision_grafana_ro "$MIGRATE_DSN" "$BASEDIR" || true
+fi
+
+# Provision the clone_verify_ro read-only DB user (I7) unconditionally — not
+# gated on grafana mode. Every install is a potential future clone SOURCE, so
+# `teamster clone`'s source-side verification queries always need this
+# credential available locally, regardless of what this particular host's
+# Grafana mode is. Same locally-administrable-MySQL requirement as
+# grafana_ro (socket-root `sudo mysql`), so it's non-fatal on a managed/
+# remote DB this host can't administer.
+if [[ -n "${MIGRATE_DSN:-}" ]] && [[ "$WIRE" -eq 1 ]]; then
+    echo ""
+    printf -- "${C_BOLD_WHITE}--> Provisioning clone_verify_ro read-only DB user (I7)...${C_RESET}\n"
+    provision_clone_verify_ro "$MIGRATE_DSN" "$BASEDIR" || true
 fi
 
 # Deploy Grafana dashboard provisioning if Grafana is running on this host.

@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -200,6 +201,59 @@ func applyRuntimeTag(ctx context.Context, store wms.Store, entityType, entityID,
 	}
 }
 
+// parseInlineTagValue accepts either a plain string (the tag value, no
+// description) or an object {"value": "...", "description": "..."} — the
+// latter lets an inline tags map carry the same create-only description
+// semantics as a direct wms_tagEntity call.
+func parseInlineTagValue(v interface{}) (value, description string, ok bool) {
+	switch t := v.(type) {
+	case string:
+		return t, "", t != ""
+	case map[string]interface{}:
+		value, _ = t["value"].(string)
+		description, _ = t["description"].(string)
+		return value, description, value != ""
+	default:
+		return "", "", false
+	}
+}
+
+// applyInlineTags applies the optional `tags` argument (key→value or
+// key→{value, description}) to a freshly created entity, one wms.TagEntity
+// call per key. Best-effort like applyCreatorUserTag/applyRuntimeTag: the
+// entity is already created by the time this runs, so a tag failure never
+// unwinds it — failures are collected and returned for the caller to surface
+// in its response rather than fail the whole create call.
+func applyInlineTags(ctx context.Context, store wms.Store, entityType, entityID string, tagsArg interface{}) []string {
+	tagsMap, ok := tagsArg.(map[string]interface{})
+	if !ok || len(tagsMap) == 0 {
+		return nil
+	}
+	var errs []string
+	for tagKey, raw := range tagsMap {
+		value, description, ok := parseInlineTagValue(raw)
+		if !ok {
+			errs = append(errs, fmt.Sprintf("tag %q: value must be a non-empty string or {value, description} object", tagKey))
+			continue
+		}
+		if err := store.TagEntity(ctx, entityType, entityID, tagKey, value, "manual", description); err != nil {
+			errs = append(errs, fmt.Sprintf("tag %q=%q: %s", tagKey, value, err.Error()))
+		}
+	}
+	return errs
+}
+
+// relationStore is the typed-relations capability (WP3 stage 2,
+// outcome_relations) — not part of wms.Store, so the wms_*Relation* handlers
+// reach it via type assertion on the concrete store, same pattern as
+// ListRelatedEntities above.
+type relationStore interface {
+	AddRelation(ctx context.Context, kind, fromType, fromID, toType, toID, createdBy, source, note string) error
+	RemoveRelation(ctx context.Context, kind, fromType, fromID, toType, toID string) error
+	ListRelations(ctx context.Context, entityType, entityID, direction, kind string) ([]storeTypes.Relation, error)
+	ListRelationKinds(ctx context.Context) ([]storeTypes.RelationKind, error)
+}
+
 // HandleToolCall dispatches a tools/call request to the appropriate store method.
 // meta is captured from params._meta and stored on mutations.
 func HandleToolCall(store wms.Store, eng wms.Engine, rawParams json.RawMessage) (Result, *CallError) {
@@ -370,6 +424,11 @@ func HandleToolCall(store wms.Store, eng wms.Engine, rawParams json.RawMessage) 
 		}
 		if phase == "" {
 			return Result{}, &CallError{Code: -32602, Message: "phase is required"}
+		}
+		switch phase {
+		case "design", "build", "test", "review", "iterate", "admin":
+		default:
+			return Result{}, &CallError{Code: -32602, Message: fmt.Sprintf("invalid phase %q: must be one of design, build, test, review, iterate, admin", phase)}
 		}
 		rec, err := store.GetOpenEventRecord(ctx, wms.EntityWorkUnit, entityID)
 		if err != nil && !storeTypes.IsNotFound(err) {
@@ -583,6 +642,13 @@ func HandleToolCall(store wms.Store, eng wms.Engine, rawParams json.RawMessage) 
 		store.OpenEventRecord(ctx, wms.EntityOutcome, o.ID, o.Status, p.Meta.SessionID, p.Meta.AgentType, p.Meta.Host) //nolint:errcheck
 		applyCreatorUserTag(ctx, store, wms.EntityOutcome, o.ID)
 		applyRuntimeTag(ctx, store, wms.EntityOutcome, o.ID, runtime)
+		tagErrors := applyInlineTags(ctx, store, wms.EntityOutcome, o.ID, p.Arguments["tags"])
+		if len(tagErrors) > 0 {
+			return JSONResult(map[string]interface{}{
+				"message":   "Created outcome: " + o.Title,
+				"tagErrors": tagErrors,
+			}), nil
+		}
 		return TextResult("Created outcome: " + o.Title), nil
 
 	case ToolGetOutcome:
@@ -669,6 +735,38 @@ func HandleToolCall(store wms.Store, eng wms.Engine, rawParams json.RawMessage) 
 		}
 		return TextResult(fmt.Sprintf("Renamed outcome %s: %q → %q", entityID, oldTitle, newTitle)), nil
 
+	case ToolAddOutcomeParent, "wms.addOutcomeParent":
+		parentID := strArg("parentID")
+		childID := strArg("childID")
+		if parentID == "" || childID == "" {
+			return Result{}, &CallError{Code: -32602, Message: "parentID and childID are required"}
+		}
+		// Pre-flight existence checks on BOTH sides: AddOutcomeEdge's INSERT
+		// IGNORE silently swallows a foreign-key violation for an unknown
+		// outcome id, which would otherwise report success for an edge that
+		// was never actually written.
+		if _, err := store.GetOutcome(ctx, parentID); err != nil {
+			return Result{}, &CallError{Code: -32000, Message: fmt.Sprintf("parent outcome %s: %s", parentID, err.Error())}
+		}
+		if _, err := store.GetOutcome(ctx, childID); err != nil {
+			return Result{}, &CallError{Code: -32000, Message: fmt.Sprintf("child outcome %s: %s", childID, err.Error())}
+		}
+		if err := store.AddOutcomeEdge(ctx, parentID, childID); err != nil {
+			return Result{}, &CallError{Code: -32000, Message: err.Error()}
+		}
+		return TextResult(fmt.Sprintf("Added outcome edge: %s → %s", parentID, childID)), nil
+
+	case ToolRemoveOutcomeParent, "wms.removeOutcomeParent":
+		parentID := strArg("parentID")
+		childID := strArg("childID")
+		if parentID == "" || childID == "" {
+			return Result{}, &CallError{Code: -32602, Message: "parentID and childID are required"}
+		}
+		if err := store.RemoveOutcomeEdge(ctx, parentID, childID); err != nil {
+			return Result{}, &CallError{Code: -32000, Message: err.Error()}
+		}
+		return TextResult(fmt.Sprintf("Removed outcome edge: %s → %s", parentID, childID)), nil
+
 	// --- v2 WorkUnit tools ---
 
 	case ToolCreateWorkUnit:
@@ -679,6 +777,7 @@ func HandleToolCall(store wms.Store, eng wms.Engine, rawParams json.RawMessage) 
 			Description:   strArg("description"),
 			AgentID:       strArg("agentID"),
 			Status:        strArgDefault("status", wms.StatusPending),
+			Brief:         strArg("brief"),
 			OriginHost:    p.Meta.Host,
 			OriginSession: p.Meta.SessionID,
 			OriginAgent:   p.Meta.AgentType,
@@ -689,17 +788,26 @@ func HandleToolCall(store wms.Store, eng wms.Engine, rawParams json.RawMessage) 
 		store.OpenEventRecord(ctx, wms.EntityWorkUnit, wu.ID, wu.Status, p.Meta.SessionID, p.Meta.AgentType, p.Meta.Host) //nolint:errcheck
 		applyCreatorUserTag(ctx, store, wms.EntityWorkUnit, wu.ID)
 		applyRuntimeTag(ctx, store, wms.EntityWorkUnit, wu.ID, runtime)
-		// Dispatch-time reminder (W3): a freshly created work unit carries no
-		// tags, so any required keys are by definition missing. Surface them as
-		// an advisory hint appended to the success response — never a block. If
-		// the required-keys lookup itself fails, the creation still succeeds;
-		// the reminder is observability, not a gate.
+		tagErrors := applyInlineTags(ctx, store, wms.EntityWorkUnit, wu.ID, p.Arguments["tags"])
+		// Dispatch-time reminder (W3): surface any required tag key still
+		// missing after direct + inherited (parent outcome) tags are
+		// considered, as an advisory hint appended to the success response —
+		// never a block. If the required-keys lookup itself fails, the
+		// creation still succeeds; the reminder is observability, not a gate.
+		// Computed AFTER inline tags apply, so a required key satisfied via
+		// `tags` doesn't also warn.
 		warnings := missingRequiredTagWarnings(ctx, store, wms.EntityWorkUnit, wu.ID)
-		if len(warnings) > 0 {
-			return JSONResult(map[string]interface{}{
-				"message":  "Created work unit: " + wu.Title,
-				"warnings": warnings,
-			}), nil
+		if len(warnings) > 0 || len(tagErrors) > 0 {
+			result := map[string]interface{}{
+				"message": "Created work unit: " + wu.Title,
+			}
+			if len(warnings) > 0 {
+				result["warnings"] = warnings
+			}
+			if len(tagErrors) > 0 {
+				result["tagErrors"] = tagErrors
+			}
+			return JSONResult(result), nil
 		}
 		return TextResult("Created work unit: " + wu.Title), nil
 
@@ -783,15 +891,146 @@ func HandleToolCall(store wms.Store, eng wms.Engine, rawParams json.RawMessage) 
 	case ToolClaimWorkUnit:
 		id := strArg("id")
 		agentID := p.Meta.AgentType
-		if err := store.ClaimWorkUnit(ctx, id, agentID); err != nil {
+		preClaimStatus, err := store.ClaimWorkUnit(ctx, id, agentID)
+		if err != nil {
+			var alreadyClaimed *storeTypes.AlreadyClaimedError
+			if errors.As(err, &alreadyClaimed) {
+				return Result{}, &CallError{Code: -32000, Message: fmt.Sprintf("work unit '%s' already claimed by @%s — ask the lead for another work unit", id, alreadyClaimed.Owner)}
+			}
+			var notClaimable *storeTypes.NotClaimableError
+			if errors.As(err, &notClaimable) {
+				return Result{}, &CallError{Code: -32000, Message: fmt.Sprintf("work unit '%s' not claimable — status is %s", id, notClaimable.Status)}
+			}
+			if errors.Is(err, storeTypes.ErrNotFound) {
+				return Result{}, &CallError{Code: -32000, Message: fmt.Sprintf("work unit '%s' not found", id)}
+			}
 			return Result{}, &CallError{Code: -32000, Message: err.Error()}
+		}
+		// Only a real pending→active transition gets a status-change event —
+		// adopt (was active, no owner) and idempotent re-claim (was active,
+		// already owned by this agent) don't change status, so firing one
+		// would be a phantom event with a fabricated OldStatus.
+		if preClaimStatus == wms.StatusPending {
+			eng.OnStatusChange(ctx, wms.StatusChange{ //nolint:errcheck
+				EntityType: wms.EntityWorkUnit, EntityID: id,
+				OldStatus: wms.StatusPending, NewStatus: wms.StatusActive,
+				SessionID: p.Meta.SessionID, AgentName: p.Meta.AgentType, Host: p.Meta.Host,
+			})
+		}
+
+		wu, err := store.GetWorkUnit(ctx, id)
+		if err != nil {
+			return Result{}, &CallError{Code: -32000, Message: err.Error()}
+		}
+		entityTags, err := store.GetEntityTags(ctx, wms.EntityWorkUnit, id)
+		if err != nil {
+			slog.Warn("wms-mcp: get entity tags failed after claim", "workunit_id", id, "err", err)
+		}
+		tags := map[string]string{}
+		for _, t := range entityTags {
+			tags[t.TagKey] = t.TagValue
+		}
+		resp := map[string]interface{}{
+			"id":             wu.ID,
+			"title":          wu.Title,
+			"outcome_id":     wu.OutcomeID,
+			"brief":          wu.Brief,
+			"description":    wu.Description,
+			"tags":           tags,
+			"claimed_by":     agentID,
+			"focus_interval": "opened",
+		}
+		if wu.ClaimedAt != nil {
+			resp["claimed_at"] = wu.ClaimedAt.UTC().Format(time.RFC3339)
+		}
+		return JSONResult(resp), nil
+
+	case ToolDeliverResult:
+		id := strArg("id")
+		summary := strArg("summary")
+		result := strArg("result")
+		if id == "" || summary == "" || result == "" {
+			return Result{}, &CallError{Code: -32602, Message: "id, summary, and result are required"}
+		}
+		wu, err := store.GetWorkUnit(ctx, id)
+		if err != nil {
+			if errors.Is(err, storeTypes.ErrNotFound) {
+				return Result{}, &CallError{Code: -32000, Message: fmt.Sprintf("work unit '%s' not found", id)}
+			}
+			return Result{}, &CallError{Code: -32000, Message: err.Error()}
+		}
+		if wu.Status != wms.StatusActive {
+			return Result{}, &CallError{Code: -32000, Message: fmt.Sprintf("work unit '%s' is not active (status: %s) — cannot deliver a result", id, wu.Status)}
+		}
+		caller := p.Meta.AgentType
+		if caller != "" && wu.AgentID != caller {
+			return Result{}, &CallError{Code: -32000, Message: fmt.Sprintf("work unit '%s' is owned by %q, not %q — only the owner or the lead may deliver", id, wu.AgentID, caller)}
+		}
+
+		var artifactPaths string
+		if raw, ok := p.Arguments["artifact_paths"].([]interface{}); ok {
+			var paths []string
+			for _, v := range raw {
+				if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+					paths = append(paths, strings.TrimSpace(s))
+				}
+			}
+			artifactPaths = strings.Join(paths, "\n")
+		}
+		d := wms.Deliverable{
+			EntityType:    wms.EntityWorkUnit,
+			EntityID:      id,
+			AgentID:       caller,
+			SessionID:     p.Meta.SessionID,
+			Summary:       summary,
+			Result:        result,
+			ArtifactPaths: artifactPaths,
+		}
+		if err := store.InsertDeliverable(ctx, d); err != nil {
+			return Result{}, &CallError{Code: -32000, Message: err.Error()}
+		}
+
+		oldStatus := wu.Status
+		newStatus := wms.StatusReview
+		if !wms.ValidTransition(wms.EntityWorkUnit, oldStatus, newStatus) {
+			return Result{}, &CallError{Code: -32000, Message: fmt.Sprintf("invalid transition workunit: %s → %s", oldStatus, newStatus)}
+		}
+		role := p.Meta.AgentType
+		allowed, err := store.RoleAllowed(ctx, wms.EntityWorkUnit, oldStatus, newStatus, role)
+		if err != nil {
+			return Result{}, &CallError{Code: -32000, Message: err.Error()}
+		}
+		if !allowed {
+			return Result{}, &CallError{Code: -32000, Message: fmt.Sprintf("role %q not allowed: workunit %s→%s", role, oldStatus, newStatus)}
+		}
+		if err := store.UpdateWorkUnitStatus(ctx, id, newStatus); err != nil {
+			return Result{}, &CallError{Code: -32000, Message: err.Error()}
+		}
+		if err := store.TransitionEventRecord(ctx, wms.EntityWorkUnit, id, newStatus, p.Meta.SessionID, p.Meta.AgentType, p.Meta.Host); err != nil {
+			slog.Warn("wms-mcp: transition event record failed",
+				"entity_type", wms.EntityWorkUnit, "entity_id", id, "status", newStatus, "err", err)
 		}
 		eng.OnStatusChange(ctx, wms.StatusChange{ //nolint:errcheck
 			EntityType: wms.EntityWorkUnit, EntityID: id,
-			OldStatus: wms.StatusPending, NewStatus: wms.StatusActive,
+			OldStatus: oldStatus, NewStatus: newStatus,
 			SessionID: p.Meta.SessionID, AgentName: p.Meta.AgentType, Host: p.Meta.Host,
 		})
-		return TextResult(fmt.Sprintf("Claimed work unit %s for %s", id, agentID)), nil
+		return TextResult(fmt.Sprintf("Delivered result for work unit %s: %s → %s", id, oldStatus, newStatus)), nil
+
+	case ToolListDeliverables:
+		id := strArg("entityID")
+		if id == "" {
+			return Result{}, &CallError{Code: -32602, Message: "entityID is required"}
+		}
+		limit := 50
+		if v, ok := p.Arguments["limit"].(float64); ok && v > 0 {
+			limit = int(v)
+		}
+		deliverables, err := store.ListDeliverables(ctx, wms.EntityWorkUnit, id, limit)
+		if err != nil {
+			return Result{}, &CallError{Code: -32000, Message: err.Error()}
+		}
+		return JSONResult(deliverables), nil
 
 	case ToolClassifyEntity:
 		if ActiveClassifier == nil {
@@ -1006,15 +1245,99 @@ func HandleToolCall(store wms.Store, eng wms.Engine, rawParams json.RawMessage) 
 			"reverted": reverted, "skipped": skipped, "notFound": notFound, "failed": failed,
 		}), nil
 
+	case ToolAddRelation, "wms.addRelation":
+		relStore, ok := store.(relationStore)
+		if !ok {
+			return Result{}, &CallError{Code: -32000, Message: "store does not support relations"}
+		}
+		kind := strArg("kind")
+		fromType := strArg("fromType")
+		fromID := strArg("fromID")
+		toType := strArg("toType")
+		toID := strArg("toID")
+		note := strArg("note")
+		if kind == "" || fromType == "" || fromID == "" || toType == "" || toID == "" {
+			return Result{}, &CallError{Code: -32602, Message: "kind, fromType, fromID, toType, and toID are required"}
+		}
+
+		kinds, err := relStore.ListRelationKinds(ctx)
+		if err != nil {
+			return Result{}, &CallError{Code: -32000, Message: err.Error()}
+		}
+		validKind := false
+		validKinds := make([]string, 0, len(kinds))
+		for _, k := range kinds {
+			validKinds = append(validKinds, k.Kind)
+			if k.Kind == kind {
+				validKind = true
+			}
+		}
+		if !validKind {
+			return Result{}, &CallError{Code: -32602, Message: fmt.Sprintf("unknown relation kind %q — valid kinds: %s", kind, strings.Join(validKinds, ", "))}
+		}
+
+		if err := relStore.AddRelation(ctx, kind, fromType, fromID, toType, toID, p.Meta.AgentType, "manual", note); err != nil {
+			return Result{}, &CallError{Code: -32000, Message: err.Error()}
+		}
+		return TextResult(fmt.Sprintf("Added relation: %s %s %s", fromID, kind, toID)), nil
+
+	case ToolRemoveRelation, "wms.removeRelation":
+		relStore, ok := store.(relationStore)
+		if !ok {
+			return Result{}, &CallError{Code: -32000, Message: "store does not support relations"}
+		}
+		kind := strArg("kind")
+		fromType := strArg("fromType")
+		fromID := strArg("fromID")
+		toType := strArg("toType")
+		toID := strArg("toID")
+		if kind == "" || fromType == "" || fromID == "" || toType == "" || toID == "" {
+			return Result{}, &CallError{Code: -32602, Message: "kind, fromType, fromID, toType, and toID are required"}
+		}
+		if err := relStore.RemoveRelation(ctx, kind, fromType, fromID, toType, toID); err != nil {
+			return Result{}, &CallError{Code: -32000, Message: err.Error()}
+		}
+		return TextResult(fmt.Sprintf("Removed relation: %s %s %s", fromID, kind, toID)), nil
+
+	case ToolListRelations, "wms.listRelations":
+		relStore, ok := store.(relationStore)
+		if !ok {
+			return Result{}, &CallError{Code: -32000, Message: "store does not support relations"}
+		}
+		entityType := strArg("entityType")
+		entityID := strArg("entityID")
+		if entityType == "" || entityID == "" {
+			return Result{}, &CallError{Code: -32602, Message: "entityType and entityID are required"}
+		}
+		direction := strArgDefault("direction", "both")
+		kind := strArg("kind")
+		relations, err := relStore.ListRelations(ctx, entityType, entityID, direction, kind)
+		if err != nil {
+			return Result{}, &CallError{Code: -32000, Message: err.Error()}
+		}
+		return JSONResult(relations), nil
+
+	case ToolListRelationKinds, "wms.listRelationKinds":
+		relStore, ok := store.(relationStore)
+		if !ok {
+			return Result{}, &CallError{Code: -32000, Message: "store does not support relations"}
+		}
+		kinds, err := relStore.ListRelationKinds(ctx)
+		if err != nil {
+			return Result{}, &CallError{Code: -32000, Message: err.Error()}
+		}
+		return JSONResult(kinds), nil
+
 	default:
 		return Result{}, &CallError{Code: -32601, Message: "unknown tool: " + p.Name}
 	}
 }
 
 // missingRequiredTagWarnings returns one advisory warning per required tag key
-// that has no binding on the entity. It is best-effort: if either the required-
-// keys lookup or the entity-tags lookup fails, it returns no warnings (the
-// caller's primary operation must not be blocked by an observability hint).
+// that has no binding on the entity, direct or inherited from a parent outcome.
+// It is best-effort: if either the required-keys lookup or the entity-tags
+// lookup fails, it returns no warnings (the caller's primary operation must
+// not be blocked by an observability hint).
 func missingRequiredTagWarnings(ctx context.Context, store wms.Store, entityType, entityID string) []string {
 	requiredKeys, err := store.ListRequiredTagKeys(ctx)
 	if err != nil {
@@ -1025,7 +1348,7 @@ func missingRequiredTagWarnings(ctx context.Context, store wms.Store, entityType
 	if len(requiredKeys) == 0 {
 		return nil
 	}
-	tags, err := store.GetEntityTags(ctx, entityType, entityID)
+	tags, err := resolveEntityTags(ctx, store, entityType, entityID)
 	if err != nil {
 		slog.Warn("wms-mcp: entity-tags lookup failed; skipping dispatch reminder",
 			"entity_type", entityType, "entity_id", entityID, "err", err)
@@ -1605,6 +1928,12 @@ func buildTagManifest(tags []wms.Tag) wms.TagManifest {
 			ki = &keyInfo{first: t}
 			keys[t.Key] = ki
 			order = append(order, t.Key)
+		} else if t.IsSeed && !ki.first.IsSeed {
+			// The is_seed=1 row's metadata (description, scope, cardinality,
+			// exclusion group, facetOf, ...) is authoritative for the key.
+			// Without this, whichever row the DB happens to return first —
+			// non-deterministic across values — wins instead.
+			ki.first = t
 		}
 		if t.Value != "" {
 			ki.values = append(ki.values, t.Value)
@@ -1681,6 +2010,30 @@ func buildTagManifest(tags []wms.Tag) wms.TagManifest {
 	}
 
 	return m
+}
+
+// inlineTagsSchema is the shared `tags` parameter schema for
+// wms_createOutcome and wms_createWorkUnit — applies each key immediately
+// after creation via the same path as wms_tagEntity, collapsing
+// create-then-N-tag-calls into one round-trip. Each value is either a plain
+// string (the tag value) or an object carrying a description, matching
+// parseInlineTagValue's two accepted shapes.
+var inlineTagsSchema = map[string]interface{}{
+	"type":        "object",
+	"description": "Optional inline tags to apply immediately after creation — one wms_tagEntity call per key, in the same request. Each value is either a plain tag-value string, or an object {\"value\": \"...\", \"description\": \"...\"} to record a description when introducing a NEW (tagKey, tagValue) — same create-only semantics as wms_tagEntity's `description` (ignored if the value already exists). Applied best-effort after the entity is created: a failed tag never unwinds the create; failures are reported back in the response's `tagErrors`.",
+	"additionalProperties": map[string]interface{}{
+		"anyOf": []interface{}{
+			map[string]interface{}{"type": "string", "description": "The tag value, e.g. \"build\", \"feature\"."},
+			map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"value":       map[string]interface{}{"type": "string"},
+					"description": map[string]interface{}{"type": "string", "maxLength": 1024},
+				},
+				"required": []string{"value"},
+			},
+		},
+	},
 }
 
 // ToolDefs is the MCP tools/list payload for this server.
@@ -1774,7 +2127,7 @@ var ToolDefs = []map[string]interface{}{
 			"properties": map[string]interface{}{
 				"entityType": map[string]interface{}{"type": "string", "description": "Must be 'workunit'."},
 				"entityID":   map[string]interface{}{"type": "string"},
-				"phase":      map[string]interface{}{"type": "string", "description": "e.g. design, build, test, review, rework"},
+				"phase":      map[string]interface{}{"type": "string", "description": "One of: design, build, test, review, iterate, admin."},
 			},
 			"required": []string{"entityType", "entityID", "phase"},
 		},
@@ -1935,6 +2288,7 @@ var ToolDefs = []map[string]interface{}{
 				"description":      map[string]interface{}{"type": "string"},
 				"parentOutcomeIDs": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Parent outcome ID(s). Omit for top-level (root) outcomes."},
 				"status":           map[string]interface{}{"type": "string", "description": "Initial status (default: pending)"},
+				"tags":             inlineTagsSchema,
 			},
 			"required": []string{"id", "title"},
 		},
@@ -1986,6 +2340,30 @@ var ToolDefs = []map[string]interface{}{
 		},
 	},
 	{
+		"name":        ToolAddOutcomeParent,
+		"description": "Add a parent→child DAG edge between two existing outcomes, without recreating either one. Use this to decompose a large outcome after the fact: create the child outcomes first, then attach each to its parent with this tool. Rejects a self-loop (parentID == childID) and any edge that would create a cycle (childID is already an ancestor of parentID) — fix by choosing a different parent or removing the conflicting edge first with wms_removeOutcomeParent. Idempotent: re-adding an edge that already exists succeeds without creating a duplicate. Both outcomes must already exist — a typo’d ID errors here rather than silently no-op’ing.",
+		"inputSchema": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"parentID": map[string]interface{}{"type": "string", "description": "ID of the parent outcome."},
+				"childID":  map[string]interface{}{"type": "string", "description": "ID of the child outcome."},
+			},
+			"required": []string{"parentID", "childID"},
+		},
+	},
+	{
+		"name":        ToolRemoveOutcomeParent,
+		"description": "Remove a parent→child DAG edge between two outcomes. Idempotent: removing an edge that does not exist succeeds as a no-op — use this to correct a mistaken wms_addOutcomeParent call or detach a child being re-parented elsewhere.",
+		"inputSchema": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"parentID": map[string]interface{}{"type": "string", "description": "ID of the parent outcome."},
+				"childID":  map[string]interface{}{"type": "string", "description": "ID of the child outcome."},
+			},
+			"required": []string{"parentID", "childID"},
+		},
+	},
+	{
 		"name":        ToolCreateWorkUnit,
 		"description": "Create a new work unit under an outcome.",
 		"inputSchema": map[string]interface{}{
@@ -1997,6 +2375,8 @@ var ToolDefs = []map[string]interface{}{
 				"description": map[string]interface{}{"type": "string"},
 				"agentID":     map[string]interface{}{"type": "string", "description": "Agent to assign (omit for unassigned)"},
 				"status":      map[string]interface{}{"type": "string", "description": "Initial status (default: pending)"},
+				"tags":        inlineTagsSchema,
+				"brief":       map[string]interface{}{"type": "string", "description": "Optional full markdown dispatch brief. Returned by wms_getWorkUnit and wms_claimWorkUnit, but not in list responses."},
 			},
 			"required": []string{"id", "title", "outcomeID"},
 		},
@@ -2060,11 +2440,41 @@ var ToolDefs = []map[string]interface{}{
 	},
 	{
 		"name":        ToolClaimWorkUnit,
-		"description": "Agent self-assigns a work unit, atomically transitioning pending → active. AgentID is read from _meta.",
+		"description": "Agent self-assigns a work unit, atomically transitioning pending → active. AgentID is read from _meta. On success, returns the full work unit — including its dispatch brief and tags — as the assignment payload.",
 		"inputSchema": map[string]interface{}{
 			"type":       "object",
 			"properties": map[string]interface{}{"id": map[string]interface{}{"type": "string"}},
 			"required":   []string{"id"},
+		},
+	},
+	{
+		"name":        ToolDeliverResult,
+		"description": "Submit a work unit's deliverable and transition it active → review. The caller must own the work unit (or be the lead — no agent_type). Records an append-only deliverable row (summary + full markdown result, optional artifact paths); redelivery is allowed.",
+		"inputSchema": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"id":      map[string]interface{}{"type": "string", "description": "Work unit ID."},
+				"summary": map[string]interface{}{"type": "string", "description": "Headline summary of the result, <=1KB."},
+				"result":  map[string]interface{}{"type": "string", "description": "Full markdown deliverable."},
+				"artifact_paths": map[string]interface{}{
+					"type":        "array",
+					"items":       map[string]interface{}{"type": "string"},
+					"description": "Optional file paths produced by this work.",
+				},
+			},
+			"required": []string{"id", "summary", "result"},
+		},
+	},
+	{
+		"name":        ToolListDeliverables,
+		"description": "Read back the deliverable rows submitted via wms_deliverResult for a work unit, oldest first. Each row has summary, result, artifact_paths, agent_id, session_id, created_at. Redelivery is allowed — for a single answer, take the last row.",
+		"inputSchema": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"entityID": map[string]interface{}{"type": "string", "description": "Work unit ID."},
+				"limit":    map[string]interface{}{"type": "integer", "description": "Maximum rows to return (default 50)."},
+			},
+			"required": []string{"entityID"},
 		},
 	},
 	{
@@ -2139,6 +2549,59 @@ var ToolDefs = []map[string]interface{}{
 				"batchID": map[string]interface{}{"type": "string", "description": "The batch identifier to roll back; reads <batchID>.jsonl from the snapshot dir."},
 			},
 			"required": []string{"batchID"},
+		},
+	},
+	{
+		"name":        ToolAddRelation,
+		"description": "Record a typed relationship from new work to prior work. Reads as a sentence: fromID <kind> toID (e.g. 'auth-v2 remediates auth-v1'). Use at intake, when creating work that exists because of earlier work. For an antecedent that is not tracked in WMS (pre-WMS code, work never given its own Outcome), set toType='external' and put a short description in toID — the work still counts toward rework reporting. Call wms_listRelationKinds for the vocabulary; kind is validated against it and the call is rejected with the valid list on an unknown value.",
+		"inputSchema": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"kind":     map[string]interface{}{"type": "string", "description": "One of the values from wms_listRelationKinds."},
+				"fromType": map[string]interface{}{"type": "string", "description": "'outcome' or 'workunit'. The NEW work."},
+				"fromID":   map[string]interface{}{"type": "string"},
+				"toType":   map[string]interface{}{"type": "string", "description": "'outcome', 'workunit', or 'external'. The PRIOR work."},
+				"toID":     map[string]interface{}{"type": "string", "description": "Entity ID, or free text when toType='external'."},
+				"note":     map[string]interface{}{"type": "string", "description": "Optional: why this relationship holds."},
+			},
+			"required": []string{"kind", "fromType", "fromID", "toType", "toID"},
+		},
+	},
+	{
+		"name":        ToolRemoveRelation,
+		"description": "Remove a typed relationship between two work items. Identity is the same five fields wms_addRelation used to create it (kind, fromType, fromID, toType, toID) — the uq_rel key makes it unambiguous. Idempotent: removing a relation that does not exist succeeds as a no-op.",
+		"inputSchema": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"kind":     map[string]interface{}{"type": "string"},
+				"fromType": map[string]interface{}{"type": "string", "description": "'outcome' or 'workunit'."},
+				"fromID":   map[string]interface{}{"type": "string"},
+				"toType":   map[string]interface{}{"type": "string", "description": "'outcome', 'workunit', or 'external'."},
+				"toID":     map[string]interface{}{"type": "string"},
+			},
+			"required": []string{"kind", "fromType", "fromID", "toType", "toID"},
+		},
+	},
+	{
+		"name":        ToolListRelations,
+		"description": "List typed relations touching one entity. Returns both directions by default so an agent can ask 'what reworked this' (direction=to) and 'what did this rework' (direction=from) in one call.",
+		"inputSchema": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"entityType": map[string]interface{}{"type": "string", "description": "'outcome' or 'workunit'."},
+				"entityID":   map[string]interface{}{"type": "string"},
+				"direction":  map[string]interface{}{"type": "string", "description": "'from', 'to', or 'both' (default 'both')."},
+				"kind":       map[string]interface{}{"type": "string", "description": "Optional: filter to a single relation kind."},
+			},
+			"required": []string{"entityType", "entityID"},
+		},
+	},
+	{
+		"name":        ToolListRelationKinds,
+		"description": "List the relation_kinds vocabulary: kind, whether it counts toward rework tax (taxable), its miss_class (code/design/spec), whether it participates in cycle-checking/transitive closure (lineage — false for kinds like discovered-during and duplicate-of that record circumstance rather than derivation), and a description. Call this before wms_addRelation — kind is validated against exactly this set.",
+		"inputSchema": map[string]interface{}{
+			"type":       "object",
+			"properties": map[string]interface{}{},
 		},
 	},
 }

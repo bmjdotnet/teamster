@@ -78,9 +78,11 @@ Confirm the Grafana datasource points at the correct MySQL instance. Run
 `teamster status` to verify store connectivity.
 
 **Cost not attributed?**
-Make sure you call `wms_setFocus` at the start of each work session. Without
-a focus interval, token spend lands in `unallocated`. Run `teamster wms drain`
-to close stale intervals.
+For work scoped to a WorkUnit, call `wms_claimWorkUnit` at the start of each
+work session — it opens the focus interval as part of the claim. Fall back to
+`wms_setFocus` for work that isn't WU-scoped. Without a focus interval, token
+spend lands in `unallocated`. Run `teamster wms drain` to close stale
+intervals.
 
 **Feed showing wrong tags or a generic `[TOOL]`?**
 The activity feed's tags and display text come from `etc/interceptors.yaml`.

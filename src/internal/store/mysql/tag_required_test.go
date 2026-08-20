@@ -247,7 +247,7 @@ func TestUpdateTagValueDescription(t *testing.T) {
 
 	// (2) LIFECYCLE key (work-type:bug, seeded): the steward's whole reason to
 	// exist. There must be NO system-managed-key guard blocking this.
-	const bugRubric = "Fixes a defect. Indicators: title says 'fix', a bug:* tag, build→test→rework phases."
+	const bugRubric = "Fixes a defect. Indicators: title says 'fix', a bug:* tag, build→test→iterate phases."
 	if err := s.UpdateTagValueDescription(ctx, "work-type", "bug", bugRubric); err != nil {
 		t.Fatalf("update work-type:bug desc (lifecycle key must be allowed): %v", err)
 	}
@@ -334,23 +334,25 @@ func TestTagDescriptionLengthGuard_CountsRunes(t *testing.T) {
 func TestV32_WorkTypeRubricRefined(t *testing.T) {
 	s, _ := newTestStore(t)
 
+	// v66 (wp2-phase-worktype-weed) later bakes in the TAXONOMY.md §3
+	// descriptions for every surviving work-type value — including refactor,
+	// which v32 (asserted here) had left untouched. A fully migrated schema
+	// carries v66's text, so these "want" strings are v66's, not v32's; the
+	// separate "refactor stays unchanged" assertion no longer holds and is
+	// folded into this same map instead.
 	want := map[string]string{
-		"research": "Investigation, audit, or synthesis whose output is knowledge (a finding or recommendation), not code or docs. Title starts Investigate/Recon/Audit/Explore/Evaluate/Inspect/Synthesize/Diagnose. Synthesis is research even under a docs/build outcome.",
-		"docs":     "Authoring or rewriting documentation as the deliverable: README, architecture doc, spec, guide, comments. Output is the prose itself; title names a doc file or says write/rewrite/document. NOT investigation that feeds a doc (that is research).",
-		"infra":    "Infrastructure, build, deploy, CI, provisioning, host setup, or schema/migration plumbing: tooling/substrate, not user-facing behavior. Title: host setup, install/CI/systemd, DB schema scaffolding, exporter wiring. NOT a product capability users invoke.",
-		"feature":  "Adds a new capability that did not exist before: a new endpoint, panel, column, command, or integration. Title starts Add/Implement/Build/Create/Support and the result is new. NOT fixing broken behavior (bug), NOT restructuring code (refactor).",
-		"bug":      "Fixes incorrect existing behavior, a defect in something that already exists. Title starts Fix/Repair/Correct/Resolve, or restores a broken panel/metric/label. NOT adding something new (feature), NOT tooling/infra changes (infra).",
-		"test":     "Validation run: exercising a deployed system end-to-end to confirm it behaves correctly. Apply when the primary output is a pass/fail verdict on deployed behavior, not new code.",
+		"research": "Explores an open problem space to produce knowledge, a design, or a recommendation — option surveys, synthesis of scattered knowledge into a design for a human. Titles typically start Explore/Design/Evaluate/Synthesize/Recon. NOT settling one specific existing question (investigation). NOT authoring the document that presents finished knowledge (docs).",
+		"docs":     "Produces documentation as the deliverable — the prose itself: README, architecture doc, spec, guide, comments. Title names a doc file or says write/rewrite/document. NOT investigation or research that feeds a doc — synthesis is research even under a docs outcome.",
+		"infra":    "Builds, changes, or operates the tooling, hosts, CI, deploy, and data substrate the product runs on — provisioning, install/systemd work, schema scaffolding, exporter wiring, test harnesses, dev tooling, and operating live systems (deploys, upgrades, service surgery). NOT a product capability users invoke (feature). NOT a fix to product behavior (bug). NOT project records and process (admin).",
+		"feature":  "Delivers a capability the system did not have before — a new endpoint, panel, column, command, or integration. Titles typically start Add/Implement/Build/Create/Support. NOT restoring broken behavior (bug). NOT improving how an existing capability looks or feels (polish). NOT tooling nobody invokes as a product capability (infra).",
+		"bug":      "Restores intended behavior that the system currently gets wrong — a defined correct behavior with an observable deviation from it. Titles typically start Fix/Repair/Correct/Resolve. NOT works-as-intended-but-rough (polish: would a user file it as broken? bug. As could-be-nicer? polish). NOT diagnosing why it is wrong (investigation). NOT fixing tooling rather than product behavior (infra).",
+		"test":     "Executes a predefined check to produce a pass/fail verdict on something already built — acceptance runs, smoke tests, cleanroom installs, live validation of a shipped fix. NOT testing while building (phase:test inside the deliverable’s own WorkUnit). NOT working out why something fails (investigation). Tiebreaker: if the next step depends on what you find, you are investigating; if you could hand the procedure to a checklist, it is test.",
+		"refactor": "Restructures existing code without changing its external behavior — extraction, renaming, decomposition, API-boundary cleanup. Done means the same observable behavior with better internals. NOT any behavior change, however small (feature/bug/polish). NOT repo or process housekeeping (admin).",
 	}
 	for value, desc := range want {
 		if got := descViaListTags(t, s, "work-type", value); got != desc {
 			t.Errorf("work-type:%s description mismatch.\n got: %q\nwant: %q", value, got, desc)
 		}
-	}
-	// refactor was left unchanged — still its original short seed, NOT overwritten.
-	const refactorSeed = "Restructures existing code without changing its external behavior (cleanup, extraction, renaming)."
-	if got := descViaListTags(t, s, "work-type", "refactor"); got != refactorSeed {
-		t.Errorf("work-type:refactor should keep its original seed.\n got: %q\nwant: %q", got, refactorSeed)
 	}
 }
 

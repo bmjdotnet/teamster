@@ -104,7 +104,7 @@ Respond with ONLY a JSON object (no markdown fencing, no explanation):
   "description": "<1-2 sentence description of what the session accomplished>",
   "product": "<existing product tag value, e.g. 'Teamster'>",
   "work_type": "<feature|bug|refactor|infra|research|docs|test>",
-  "phase": "<design|build|test|review|rework — the lifecycle phase: design=investigation/planning, build=implementation/fixing/deploying, test=testing/validation, review=auditing/evaluating existing work, rework=redoing previously completed work>",
+  "phase": "<design|build|test|review|iterate — the lifecycle phase: design=investigation/planning, build=implementation/fixing/deploying, test=testing/validation, review=auditing/evaluating existing work, iterate=redoing previously completed work>",
   "work_scope_key": "<'feature'|'bug'|'refactor'|'infra'|'docs'|'research'|'test'|'admin' — which slug key matches the work_type, or empty if too generic>",
   "work_scope_slug": "<short kebab-case slug value identifying the specific feature/bug/etc., or empty if too generic>",
   "component": "<component if identifiable, else empty string>",

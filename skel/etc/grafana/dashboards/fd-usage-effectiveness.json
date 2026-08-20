@@ -1548,7 +1548,7 @@
       },
       "id": 500,
       "panels": [],
-      "title": "Phase Economics (Rework Tax)",
+      "title": "Phase Economics (Iteration)",
       "type": "row"
     },
     {
@@ -1556,7 +1556,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "Rework and review cost as a share of total attributed phase cost per day. Rising rework tax signals quality or coordination problems.\nscope: attributed spend (wms_intervals with phase + cost_usd)",
+      "description": "Tracks how much attributed cost goes into the build→test→iterate loop before delivery. Not a quality penalty by itself — rising iteration can mean either coordination friction or healthy pre-delivery correction; read alongside cycle time.\nscope: attributed spend (wms_intervals with phase + cost_usd)",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1611,7 +1611,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "rework_pct"
+              "options": "iterate_pct"
             },
             "properties": [
               {
@@ -1641,7 +1641,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "combined_tax_pct"
+              "options": "iteration_plus_review_pct"
             },
             "properties": [
               {
@@ -1685,11 +1685,11 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\n  $__timeGroupAlias(wi.started_at, $agg),\n  ROUND(100.0 * SUM(CASE WHEN wi.phase = 'rework' THEN wi.cost_usd ELSE 0 END)\n    / NULLIF(SUM(wi.cost_usd), 0), 1) AS rework_pct,\n  ROUND(100.0 * SUM(CASE WHEN wi.phase = 'review' THEN wi.cost_usd ELSE 0 END)\n    / NULLIF(SUM(wi.cost_usd), 0), 1) AS review_pct,\n  ROUND(100.0 * SUM(CASE WHEN wi.phase IN ('rework','review') THEN wi.cost_usd ELSE 0 END)\n    / NULLIF(SUM(wi.cost_usd), 0), 1) AS combined_tax_pct\nFROM wms_intervals wi\nWHERE wi.kind = 'state'\n  AND wi.phase IS NOT NULL\n  AND wi.cost_usd IS NOT NULL\n  AND wi.started_at BETWEEN $__timeFrom() AND $__timeTo()\nGROUP BY 1\nORDER BY 1",
+          "rawSql": "SELECT\n  $__timeGroupAlias(wi.started_at, $agg),\n  ROUND(100.0 * SUM(CASE WHEN wi.phase = 'iterate' THEN wi.cost_usd ELSE 0 END)\n    / NULLIF(SUM(wi.cost_usd), 0), 1) AS iterate_pct,\n  ROUND(100.0 * SUM(CASE WHEN wi.phase = 'review' THEN wi.cost_usd ELSE 0 END)\n    / NULLIF(SUM(wi.cost_usd), 0), 1) AS review_pct,\n  ROUND(100.0 * SUM(CASE WHEN wi.phase IN ('iterate','review') THEN wi.cost_usd ELSE 0 END)\n    / NULLIF(SUM(wi.cost_usd), 0), 1) AS iteration_plus_review_pct\nFROM wms_intervals wi\nWHERE wi.kind = 'state'\n  AND wi.phase IS NOT NULL\n  AND wi.cost_usd IS NOT NULL\n  AND wi.started_at BETWEEN $__timeFrom() AND $__timeTo()\nGROUP BY 1\nORDER BY 1",
           "refId": "A"
         }
       ],
-      "title": "Rework Tax \u2014 Rework + Review Share of Attributed Cost",
+      "title": "Iteration Rate \u2014 Iteration + Review Share of Attributed Cost",
       "type": "timeseries"
     },
     {
@@ -1697,7 +1697,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "Attributed cost and hours by phase for the window. Rework=orange, review=blue per color doctrine A3.\nscope: attributed spend (wms_intervals with phase)",
+      "description": "Attributed cost and hours by phase for the window. Iterate=orange, review=blue per color doctrine A3.\nscope: attributed spend (wms_intervals with phase)",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1788,7 +1788,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\n  wi.phase,\n  ROUND(SUM(wi.cost_usd), 2) AS cost_usd,\n  ROUND(SUM(wi.duration_ms) / 3600000.0, 1) AS hours,\n  COUNT(DISTINCT wi.entity_id) AS entities\nFROM wms_intervals wi\nWHERE wi.kind = 'state'\n  AND wi.phase IS NOT NULL\n  AND wi.cost_usd IS NOT NULL\n  AND wi.started_at BETWEEN $__timeFrom() AND $__timeTo()\nGROUP BY wi.phase\nORDER BY FIELD(wi.phase, 'design','build','test','review','rework','admin')",
+          "rawSql": "SELECT\n  wi.phase,\n  ROUND(SUM(wi.cost_usd), 2) AS cost_usd,\n  ROUND(SUM(wi.duration_ms) / 3600000.0, 1) AS hours,\n  COUNT(DISTINCT wi.entity_id) AS entities\nFROM wms_intervals wi\nWHERE wi.kind = 'state'\n  AND wi.phase IS NOT NULL\n  AND wi.cost_usd IS NOT NULL\n  AND wi.started_at BETWEEN $__timeFrom() AND $__timeTo()\nGROUP BY wi.phase\nORDER BY FIELD(wi.phase, 'design','build','test','review','iterate','admin')",
           "refId": "A"
         }
       ],

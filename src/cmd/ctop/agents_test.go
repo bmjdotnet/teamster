@@ -308,6 +308,74 @@ func TestFilterStaleClosedMembersNeverDropsLeadOrLiveMembers(t *testing.T) {
 	}
 }
 
+// TestFilterStaleClosedMembersDropsGhostLeadKeepsCurrentLead is the
+// regression for the ctop "ghost second lead" bug: groupBySession merges
+// any two rows sharing a team_name into one group with no recency check,
+// so a week-old dead session's own AgentName == "" roster row can ride
+// along in the same group as today's live lead. Before this fix, the
+// blanket "AgentName == ''" exemption kept BOTH — the ghost was
+// unfilterable. Only the most recently active lead should survive; the
+// other AgentName == "" row is just another stale row now.
+func TestFilterStaleClosedMembersDropsGhostLeadKeepsCurrentLead(t *testing.T) {
+	m := &agentsModel{maxAge: time.Hour, lastActions: make(map[string]lastAction)}
+	m.lastActions[activityKey("s1", "")] = lastAction{tag: "ACT", ts: time.Now()}
+	m.lastActions[activityKey("ghost-session", "")] = lastAction{tag: "RCAP", ts: time.Now().Add(-7 * 24 * time.Hour)}
+
+	groups := []agentGroup{{sessionID: "s1", rows: []Agent{
+		{AgentName: "", SessionID: "s1", Liveness: "live"},
+		{AgentName: "", SessionID: "ghost-session", Liveness: "closed"},
+	}}}
+	out := m.filterStaleClosedMembers(groups)
+	if len(out) != 1 || len(out[0].rows) != 1 {
+		t.Fatalf("filterStaleClosedMembers = %+v, want the ghost lead dropped, current lead kept", out)
+	}
+	if out[0].rows[0].SessionID != "s1" {
+		t.Errorf("survivor session = %q, want the current lead's session s1", out[0].rows[0].SessionID)
+	}
+}
+
+// TestFilterStaleClosedMembersKeepsBothLeadsWhenGhostRecentlyClosed mirrors
+// TestFilterStaleClosedMembersKeepsRecentlyClosedTeammate for the two-lead
+// case: a closed lead row still within the age window is not a ghost yet
+// and should not be dropped just for being a second AgentName == "" row.
+func TestFilterStaleClosedMembersKeepsBothLeadsWhenGhostRecentlyClosed(t *testing.T) {
+	m := &agentsModel{maxAge: time.Hour, lastActions: make(map[string]lastAction)}
+	m.lastActions[activityKey("s1", "")] = lastAction{tag: "ACT", ts: time.Now()}
+	m.lastActions[activityKey("other-session", "")] = lastAction{tag: "DONE", ts: time.Now().Add(-20 * time.Minute)}
+
+	groups := []agentGroup{{sessionID: "s1", rows: []Agent{
+		{AgentName: "", SessionID: "s1", Liveness: "live"},
+		{AgentName: "", SessionID: "other-session", Liveness: "closed"},
+	}}}
+	out := m.filterStaleClosedMembers(groups)
+	if len(out) != 1 || len(out[0].rows) != 2 {
+		t.Fatalf("filterStaleClosedMembers = %+v, want both leads kept (second lead closed recently, within age window)", out)
+	}
+}
+
+func TestCurrentLeadIndexPicksMostRecentAmongMultipleLeads(t *testing.T) {
+	m := &agentsModel{lastActions: map[string]lastAction{
+		activityKey("s1", ""): {ts: time.Now().Add(-7 * 24 * time.Hour)},
+		activityKey("s2", ""): {ts: time.Now()},
+	}}
+	rows := []Agent{
+		{AgentName: "", SessionID: "s1"},
+		{AgentName: "@teammate", SessionID: "s2"},
+		{AgentName: "", SessionID: "s2"},
+	}
+	if got := m.currentLeadIndex(rows); got != 2 {
+		t.Errorf("currentLeadIndex = %d, want 2 (the s2 lead, most recently active)", got)
+	}
+}
+
+func TestCurrentLeadIndexNoLeadReturnsNegativeOne(t *testing.T) {
+	m := &agentsModel{}
+	rows := []Agent{{AgentName: "@a", SessionID: "s1"}, {AgentName: "@b", SessionID: "s1"}}
+	if got := m.currentLeadIndex(rows); got != -1 {
+		t.Errorf("currentLeadIndex = %d, want -1 (no lead row present)", got)
+	}
+}
+
 func TestFilterStaleClosedMembersDisabledAtZeroMaxAge(t *testing.T) {
 	m := &agentsModel{maxAge: 0}
 	groups := []agentGroup{{sessionID: "s1", rows: []Agent{
@@ -619,6 +687,51 @@ func TestCursorSurvivesRefreshWithoutCommittedSelection(t *testing.T) {
 	row, ok := m.current()
 	if !ok || row.AgentName != "b" {
 		t.Errorf("after reorder, cursor row = %+v (ok=%v), want agent b (cursor should track cursorKey even without a committed selection)", row, ok)
+	}
+}
+
+// TestPruneStaleActionsDropsOldEntriesKeepsFresh is the regression for
+// ctop's unbounded lastActions map: recordActivity has no eviction of its
+// own, so a long-running ctop process could keep resurfacing an
+// arbitrarily old SSE-derived event (e.g. a stale [RCAP]) forever.
+func TestPruneStaleActionsDropsOldEntriesKeepsFresh(t *testing.T) {
+	m := &agentsModel{maxAge: time.Hour, lastActions: map[string]lastAction{
+		"stale":  {ts: time.Now().Add(-7 * 24 * time.Hour)},
+		"fresh":  {ts: time.Now()},
+		"border": {ts: time.Now().Add(-30 * time.Minute)},
+	}}
+	m.pruneStaleActions()
+	if _, ok := m.lastActions["stale"]; ok {
+		t.Error("pruneStaleActions kept an entry older than maxAge")
+	}
+	if _, ok := m.lastActions["fresh"]; !ok {
+		t.Error("pruneStaleActions dropped a fresh entry")
+	}
+	if _, ok := m.lastActions["border"]; !ok {
+		t.Error("pruneStaleActions dropped an entry within maxAge")
+	}
+}
+
+func TestPruneStaleActionsDisabledAtZeroMaxAge(t *testing.T) {
+	m := &agentsModel{maxAge: 0, lastActions: map[string]lastAction{
+		"ancient": {ts: time.Now().Add(-30 * 24 * time.Hour)},
+	}}
+	m.pruneStaleActions()
+	if _, ok := m.lastActions["ancient"]; !ok {
+		t.Error("pruneStaleActions(maxAge=0) should be a no-op, but dropped an entry")
+	}
+}
+
+// TestSetRowsPrunesStaleActions confirms setRows (the poll-refresh path)
+// actually calls pruneStaleActions, not just that the method works in
+// isolation.
+func TestSetRowsPrunesStaleActions(t *testing.T) {
+	m := &agentsModel{maxAge: time.Hour, lastActions: map[string]lastAction{
+		"stale": {ts: time.Now().Add(-7 * 24 * time.Hour)},
+	}}
+	m.setRows([]Agent{{AgentName: "a", SessionID: "s1", RosterID: strPtr("r1")}})
+	if _, ok := m.lastActions["stale"]; ok {
+		t.Error("setRows did not prune a stale lastActions entry")
 	}
 }
 

@@ -261,6 +261,144 @@ func (s *Store) BuildOutcomeCostRollup(ctx context.Context) error {
 	})
 }
 
+// BuildOutcomeTrueCostRollup implements store.AllocationStore (WP3 stage 2:
+// see docs/../WP3-relations-reporting.md §5.3). It rebuilds
+// outcome_true_cost_rollup via AtomicReplace, same as BuildOutcomeCostRollup.
+//
+// Stage-2 form: anchor leg (every outcome is its own root) + leg 1 (DAG
+// descent over outcome_edges, parent→child) + leg 2 (rework: anything that
+// transitively reworked anything already in the closure, over
+// outcome_relations joined to relation_kinds so only taxable,
+// entity-resolvable kinds traverse — non-taxable kinds like
+// discovered-during and duplicate-of never extend the closure).
+//
+// The recursive CTE's non-numeric anchor columns (reason, rel_kind, miss,
+// path) MUST be explicit CASTs — MySQL types a recursive CTE column from the
+// anchor row alone, so an un-CASTed 'direct' (6 chars) types the column
+// CHAR(6) and the recursive legs' wider values ('child_outcome' at 13 chars,
+// a rel_kind like 'addresses-limitation' at 21) then overflow with error
+// 1406. Reproduced, not theorized — see §8.1(a).
+//
+// Cycle guard is the accumulated path breadcrumb + NOT LIKE, not NOT EXISTS —
+// MySQL forbids referencing a recursive CTE inside a subquery (§8.1(b)). The
+// depth < 20 cap bounds the blast radius if path ever truncated. Leg 2 has
+// its own independent path check (r.from_id against the same breadcrumb) so
+// a rework cycle reachable through the closure is bounded the same way the
+// DAG leg is.
+//
+// Both legs' NOT LIKE patterns carry an explicit COLLATE utf8mb4_general_ci:
+// path's CAST(... AS CHAR(4000)) takes the connection's default collation (a
+// MySQL CAST-to-CHAR quirk, distinct from §8.1's width bug), which does not
+// necessarily match outcome_edges.child_id's / outcome_relations.from_id's
+// own column collation — MariaDB and MySQL 8.4 default utf8mb4 columns to
+// different collations (utf8mb4_general_ci vs utf8mb4_0900_ai_ci), and this
+// repo installs either (see --store-engine). Reproduced on the mysql-8.4
+// test harness: "Illegal mix of collations" on the bare comparison. An
+// explicit COLLATE on one side always wins over the other's implicit
+// collation, so this is safe regardless of which collation either table
+// carries — we are doing plain substring containment on ASCII kebab-case
+// entity IDs, where general_ci vs 0900_ai_ci make no matching difference.
+//
+// The `nodes` CTE collapses to one row per (anchor, node): an outcome
+// reachable via multiple paths (DAG diamond, rework fan-in, or a mix of the
+// two) is still counted once. This is the double-counting defence — see
+// §8.2 (measured 2x error without it). is_self is tested first in the final
+// CASE, so an anchor's own direct/workunit rows (source_type/source_id
+// passed through from outcome_cost_rollup) survive unrelabeled even if some
+// other path also reaches the anchor. A non-anchor node reachable BOTH as a
+// DAG descendant and via a rework edge is labelled child_outcome, not
+// rework — via_rework is guarded with `AND is_child = 0` in the final CASE
+// — matching §5.3's prose and §11's mixed-diamond acceptance test: the
+// conservative direction under-reports the tax rather than inflating it,
+// same reasoning as the is_self priority. rel_kind/miss are aggregated via
+// SUBSTRING_INDEX(GROUP_CONCAT(... ORDER BY depth), ',', 1): GROUP_CONCAT
+// skips NULLs (the CASE inside it yields NULL for non-rework closure rows),
+// so this picks the taxable kind/miss_class from the lowest-depth rework hop
+// that reached this node, and both aggregates come back NULL for a node
+// reached only via the anchor/DAG legs — COALESCE'd to '' in the final
+// SELECT, matching stage 1's empty-column behavior when no rework rows
+// apply to a given node.
+//
+// The final SELECT's computed columns are aliased out_source_type/
+// out_source_id, not source_type/source_id — outcome_cost_rollup (joined as
+// ocr) already has REAL columns named source_type/source_id, and MySQL's
+// GROUP BY name resolution prefers a same-named FROM-list column over a
+// SELECT-list alias. Grouping by "source_type" therefore silently grouped by
+// ocr.source_type (the pre-CASE, per-child raw value) instead of the
+// intended post-CASE collapse, and MySQL's own only_full_group_by check then
+// correctly rejected the query over the resulting non-functionally-dependent
+// n.is_self reference. Reproduced against mysql-8.4, not theorized — the
+// alias collision is present verbatim in WP3-relations-reporting.md §5.3's
+// own reference query too. relation_kind/miss_class need no such rename:
+// neither `nodes` nor outcome_cost_rollup has a real column by either name,
+// so the GROUP BY can reference the SELECT-list alias directly.
+func (s *Store) BuildOutcomeTrueCostRollup(ctx context.Context) error {
+	return s.AtomicReplace(ctx, "outcome_true_cost_rollup", func(ctx context.Context, into string) error {
+		_, err := s.db.ExecContext(ctx, `
+			INSERT INTO `+into+`
+				(bucket_day, bucket_hour, outcome_id, source_type, source_id,
+				 relation_kind, miss_class, depth, model, agent_name, tokens, cost_usd)
+			WITH RECURSIVE closure (anchor, node, reason, rel_kind, miss, depth, path) AS (
+				SELECT o.id,
+				       o.id,
+				       CAST('direct' AS CHAR(16)),
+				       CAST('' AS CHAR(32)),
+				       CAST('' AS CHAR(16)),
+				       0,
+				       CAST(CONCAT('/', o.id, '/') AS CHAR(4000))
+				  FROM outcomes o
+				UNION ALL
+				SELECT c.anchor, oe.child_id,
+				       CAST('child_outcome' AS CHAR(16)), c.rel_kind, c.miss,
+				       c.depth + 1, CONCAT(c.path, oe.child_id, '/')
+				  FROM closure c
+				  JOIN outcome_edges oe ON oe.parent_id = c.node
+				 WHERE c.depth < 20
+				   AND c.path NOT LIKE CONCAT('%/', oe.child_id, '/%') COLLATE utf8mb4_general_ci
+				UNION ALL
+				SELECT c.anchor, r.from_id,
+				       CAST('rework' AS CHAR(16)), r.kind, k.miss_class,
+				       c.depth + 1, CONCAT(c.path, r.from_id, '/')
+				  FROM closure c
+				  JOIN outcome_relations r
+				    ON r.to_type = 'outcome' AND r.to_id = c.node AND r.from_type = 'outcome'
+				  JOIN relation_kinds k ON k.kind = r.kind AND k.taxable = 1
+				 WHERE c.depth < 20
+				   AND c.path NOT LIKE CONCAT('%/', r.from_id, '/%') COLLATE utf8mb4_general_ci
+			),
+			nodes AS (
+				SELECT anchor, node,
+				       MIN(depth) AS depth,
+				       MAX(reason = 'direct')        AS is_self,
+				       MAX(reason = 'child_outcome') AS is_child,
+				       MAX(reason = 'rework')        AS via_rework,
+				       SUBSTRING_INDEX(GROUP_CONCAT(CASE WHEN reason = 'rework' THEN rel_kind END
+				                       ORDER BY depth), ',', 1) AS rel_kind,
+				       SUBSTRING_INDEX(GROUP_CONCAT(CASE WHEN reason = 'rework' THEN miss END
+				                       ORDER BY depth), ',', 1) AS miss
+				  FROM closure
+				 GROUP BY anchor, node
+			)
+			SELECT
+				ocr.bucket_day, ocr.bucket_hour,
+				n.anchor AS outcome_id,
+				CASE WHEN n.is_self = 1                       THEN ocr.source_type
+				     WHEN n.via_rework = 1 AND n.is_child = 0 THEN 'rework'
+				     ELSE 'child_outcome' END                                        AS out_source_type,
+				CASE WHEN n.is_self = 1 THEN ocr.source_id ELSE n.node END           AS out_source_id,
+				COALESCE(n.rel_kind, '')                                             AS relation_kind,
+				COALESCE(n.miss, '')                                                 AS miss_class,
+				n.depth,
+				ocr.model, ocr.agent_name,
+				SUM(ocr.tokens), SUM(ocr.cost_usd)
+			FROM nodes n
+			JOIN outcome_cost_rollup ocr ON ocr.outcome_id = n.node
+			GROUP BY ocr.bucket_day, ocr.bucket_hour, n.anchor, out_source_type, out_source_id,
+			         relation_kind, miss_class, n.depth, ocr.model, ocr.agent_name`)
+		return err
+	})
+}
+
 // Reconcile implements store.AllocationStore. otelCosts is the caller's
 // already-fetched Prometheus session-cost map (MySQL cannot reach Prometheus
 // itself) — see store.go's doc comment on this signature deviation from

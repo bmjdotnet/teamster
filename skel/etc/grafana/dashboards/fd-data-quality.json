@@ -1827,12 +1827,85 @@
       "type": "table"
     },
     {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "teamster-prometheus"
+      },
+      "description": "Share of outcomes attached to the outcome_edges DAG via at least one parent edge (wms_addOutcomeParent). Low adoption means large outcomes aren't being decomposed into a parent/child structure.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 1,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": 0
+              },
+              {
+                "color": "yellow",
+                "value": 10
+              },
+              {
+                "color": "green",
+                "value": 30
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 24,
+        "x": 0,
+        "y": 53
+      },
+      "id": 35,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "teamster-prometheus"
+          },
+          "expr": "100 * teamster_wms_outcome_decomposition{kind=\"parented_outcomes\"} / (teamster_wms_outcome_decomposition{kind=\"root_outcomes\"} + teamster_wms_outcome_decomposition{kind=\"parented_outcomes\"})",
+          "legendFormat": "parented %",
+          "refId": "A"
+        }
+      ],
+      "title": "Outcome Decomposition Adoption (% parented)",
+      "type": "stat"
+    },
+    {
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 53
+        "y": 56
       },
       "id": 40,
       "panels": [],
@@ -1853,7 +1926,7 @@
         "h": 14,
         "w": 24,
         "x": 0,
-        "y": 54
+        "y": 57
       },
       "id": 41,
       "options": {

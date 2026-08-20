@@ -517,6 +517,167 @@ func TestRosterCreateConflict(t *testing.T) {
 	})
 }
 
+// TestRosterUpdatedAtStamped guards the roster-lifecycle heartbeat contract:
+// Create/Upsert/Bind must all stamp UpdatedAt themselves, since it's what
+// lets a dead session's roster entry age out of the health-listAgents
+// fallback and the sweep — see internal/mcp/health.rosterFallbackMaxAge and
+// RosterStore.SweepStaleRoster.
+func TestRosterUpdatedAtStamped(t *testing.T) {
+	run(t, func(t *testing.T, s store.Store) {
+		ctx := context.Background()
+		now := time.Now().UTC().Truncate(time.Microsecond)
+		sid := "sess-heartbeat"
+
+		before := time.Now().UTC()
+		entry := store.RosterEntry{
+			RosterID:     "r-heartbeat",
+			SessionID:    &sid,
+			AgentName:    "@heartbeat",
+			Host:         "host-a",
+			Runtime:      "claude_code",
+			Relationship: "teammate",
+			CreatedAt:    now,
+			BoundAt:      &now,
+		}
+		if err := s.CreateRosterEntry(ctx, entry); err != nil {
+			t.Fatal(err)
+		}
+		after := time.Now().UTC()
+
+		got, err := s.GetRosterEntry(ctx, "r-heartbeat")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.UpdatedAt.Before(before.Add(-time.Second)) || got.UpdatedAt.After(after.Add(time.Second)) {
+			t.Fatalf("CreateRosterEntry did not stamp UpdatedAt near now: got %v, want between %v and %v", got.UpdatedAt, before, after)
+		}
+
+		// Upsert must advance it again, even when no other column changes.
+		time.Sleep(10 * time.Millisecond)
+		beforeUpsert := time.Now().UTC()
+		if err := s.UpsertRosterEntry(ctx, got); err != nil {
+			t.Fatal(err)
+		}
+		reGot, err := s.GetRosterEntry(ctx, "r-heartbeat")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reGot.UpdatedAt.After(got.UpdatedAt) {
+			t.Fatalf("UpsertRosterEntry did not advance UpdatedAt: before=%v after=%v", got.UpdatedAt, reGot.UpdatedAt)
+		}
+		if reGot.UpdatedAt.Before(beforeUpsert.Add(-time.Second)) {
+			t.Fatalf("UpsertRosterEntry's UpdatedAt too old: got %v, want >= %v", reGot.UpdatedAt, beforeUpsert)
+		}
+	})
+}
+
+// TestRosterListUpdatedSinceFilter guards the UpdatedSince filter used by
+// health.handleListAgents' roster-fallback pass to exclude entries whose
+// session has gone dark.
+func TestRosterListUpdatedSinceFilter(t *testing.T) {
+	run(t, func(t *testing.T, s store.Store) {
+		ctx := context.Background()
+		now := time.Now().UTC().Truncate(time.Microsecond)
+		sidOld, sidFresh := "s-old", "s-fresh"
+
+		old := store.RosterEntry{
+			RosterID: "r-since-old", SessionID: &sidOld, AgentName: "@old",
+			Host: "host-a", Runtime: "claude_code", Relationship: "teammate",
+			CreatedAt: now, BoundAt: &now,
+		}
+		if err := s.CreateRosterEntry(ctx, old); err != nil {
+			t.Fatal(err)
+		}
+
+		cutoff := time.Now().UTC()
+		time.Sleep(10 * time.Millisecond)
+
+		fresh := store.RosterEntry{
+			RosterID: "r-since-fresh", SessionID: &sidFresh, AgentName: "@fresh",
+			Host: "host-a", Runtime: "claude_code", Relationship: "teammate",
+			CreatedAt: now, BoundAt: &now,
+		}
+		if err := s.CreateRosterEntry(ctx, fresh); err != nil {
+			t.Fatal(err)
+		}
+
+		filtered, err := s.ListRosterEntries(ctx, store.RosterFilter{UpdatedSince: &cutoff})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var sawOld, sawFresh bool
+		for _, e := range filtered {
+			if e.RosterID == "r-since-old" {
+				sawOld = true
+			}
+			if e.RosterID == "r-since-fresh" {
+				sawFresh = true
+			}
+		}
+		if sawOld {
+			t.Fatal("UpdatedSince filter should have excluded the entry created before the cutoff")
+		}
+		if !sawFresh {
+			t.Fatal("UpdatedSince filter should have included the entry created after the cutoff")
+		}
+	})
+}
+
+// TestRosterSweepStale guards RosterStore.SweepStaleRoster, the
+// health-collector-driven counterpart to GaugeStore.SweepOffline.
+func TestRosterSweepStale(t *testing.T) {
+	run(t, func(t *testing.T, s store.Store) {
+		ctx := context.Background()
+		now := time.Now().UTC().Truncate(time.Microsecond)
+		sidStale, sidLive := "s-stale", "s-live"
+
+		stale := store.RosterEntry{
+			RosterID: "r-sweep-stale", SessionID: &sidStale, AgentName: "@stale",
+			Host: "host-a", Runtime: "claude_code", Relationship: "teammate",
+			CreatedAt: now, BoundAt: &now,
+		}
+		live := store.RosterEntry{
+			RosterID: "r-sweep-live", SessionID: &sidLive, AgentName: "@live",
+			Host: "host-a", Runtime: "claude_code", Relationship: "teammate",
+			CreatedAt: now, BoundAt: &now,
+		}
+		if err := s.CreateRosterEntry(ctx, stale); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.CreateRosterEntry(ctx, live); err != nil {
+			t.Fatal(err)
+		}
+
+		// A cutoff in the future catches both; use a cutoff between the two
+		// writes instead so only "stale" (created first) is swept.
+		midCutoff := time.Now().UTC()
+		time.Sleep(10 * time.Millisecond)
+		if err := s.UpsertRosterEntry(ctx, live); err != nil {
+			t.Fatal(err) // re-touch "live" so its UpdatedAt lands after midCutoff
+		}
+
+		n, err := s.SweepStaleRoster(ctx, midCutoff)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n < 1 {
+			t.Fatalf("expected at least 1 row swept, got %d", n)
+		}
+
+		_, err = s.GetRosterEntry(ctx, "r-sweep-stale")
+		if !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("expected stale entry to be swept, got err=%v", err)
+		}
+		got, err := s.GetRosterEntry(ctx, "r-sweep-live")
+		if err != nil {
+			t.Fatalf("live entry should have survived the sweep: %v", err)
+		}
+		if got.RosterID != "r-sweep-live" {
+			t.Fatalf("unexpected surviving entry: %+v", got)
+		}
+	})
+}
+
 func TestRosterUnboundEntry(t *testing.T) {
 	run(t, func(t *testing.T, s store.Store) {
 		ctx := context.Background()

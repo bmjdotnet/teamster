@@ -54,11 +54,37 @@ const (
 	ToolUpdateWorkUnitStatus = "wms_updateWorkUnitStatus"
 	ToolAssignWorkUnit       = "wms_assignWorkUnit"
 	ToolClaimWorkUnit        = "wms_claimWorkUnit"
+
+	// ToolDeliverResult submits a work unit's deliverable (summary + full
+	// markdown result) and transitions it active → review. See D4/dispatch
+	// package spec.
+	ToolDeliverResult = "wms_deliverResult"
+
+	// ToolListDeliverables reads back the deliverable rows submitted via
+	// wms_deliverResult for a work unit (oldest first) — lets a lead read
+	// stored deliverables instead of trusting final-message compression.
+	ToolListDeliverables = "wms_listDeliverables"
 	ToolClassifyEntity       = "wms_classifyEntity"
 	ToolListRelated          = "wms_listRelated"
 	ToolSearch               = "wms_search"
 	ToolRenameOutcome        = "wms_renameOutcome"
 	ToolRenameWorkUnit       = "wms_renameWorkUnit"
+
+	// Decomposition enablement (outcome_edges reparenting): expose the
+	// existing AddOutcomeEdge/RemoveOutcomeEdge store primitives so an agent
+	// can restructure the outcome DAG after creation, not just at
+	// wms_createOutcome time via parentOutcomeIDs.
+	ToolAddOutcomeParent    = "wms_addOutcomeParent"
+	ToolRemoveOutcomeParent = "wms_removeOutcomeParent"
+
+	// Typed relations (WP3 stage 2, outcome_relations): record and query a
+	// typed edge from new work to prior work — remediation, rework lineage,
+	// provenance. See skel/doc/specs semantic-conventions for the kind
+	// vocabulary (relation_kinds table).
+	ToolAddRelation       = "wms_addRelation"
+	ToolRemoveRelation    = "wms_removeRelation"
+	ToolListRelations     = "wms_listRelations"
+	ToolListRelationKinds = "wms_listRelationKinds"
 )
 
 // v2 MCP wire names

@@ -621,11 +621,22 @@ func (m *agentsModel) filterGroupsByMaxAge(groups []agentGroup) []agentGroup {
 // overall is still within maxAge) — an active session can still be dragging
 // along long-closed teammates (e.g. an @Explore subagent from 2h ago) that
 // have nothing left to show. Only a CLOSED or STALE agent whose own last
-// activity is older than maxAge (or unknown) is dropped; the lead
-// (AgentName == "") and any live/idle member are never filtered, and a
-// teammate that closed out recently (within the age window) still shows —
-// "just wrapped up" work stays visible. maxAge<=0 disables the filter
-// entirely, matching filterGroupsByMaxAge's own convention.
+// activity is older than maxAge (or unknown) is dropped; the group's
+// current lead (see currentLeadIndex) and any live/idle member are never
+// filtered, and a teammate that closed out recently (within the age
+// window) still shows — "just wrapped up" work stays visible. maxAge<=0
+// disables the filter entirely, matching filterGroupsByMaxAge's own
+// convention.
+//
+// A group can legitimately contain more than one AgentName == "" row:
+// groupBySession merges every row sharing a team_name into one group with
+// no recency check, and team names are persistent (reused across sessions
+// for a project's whole lifetime — see the Eight Rules), so a long-dead
+// session's own lead entry can ride along in the same group as today's
+// live lead. Only the single most recently active lead is exempt from
+// staleness; any other AgentName == "" row is just another stale/closed
+// member and gets filtered like one — this is what keeps a week-old dead
+// session's lead from permanently riding along as an unfilterable ghost.
 func (m *agentsModel) filterStaleClosedMembers(groups []agentGroup) []agentGroup {
 	if m.maxAge <= 0 {
 		return groups
@@ -633,10 +644,12 @@ func (m *agentsModel) filterStaleClosedMembers(groups []agentGroup) []agentGroup
 	cutoff := time.Now().Add(-m.maxAge)
 	out := make([]agentGroup, 0, len(groups))
 	for _, g := range groups {
+		currentLead := m.currentLeadIndex(g.rows)
 		rows := make([]Agent, 0, len(g.rows))
-		for _, r := range g.rows {
+		for i, r := range g.rows {
 			stale := r.Liveness == "closed" || r.Liveness == "stale"
-			if r.AgentName == "" || !stale || m.activityTsFor(r).After(cutoff) {
+			isCurrentLead := r.AgentName == "" && i == currentLead
+			if isCurrentLead || !stale || m.activityTsFor(r).After(cutoff) {
 				rows = append(rows, r)
 			}
 		}
@@ -647,6 +660,25 @@ func (m *agentsModel) filterStaleClosedMembers(groups []agentGroup) []agentGroup
 		out = append(out, g)
 	}
 	return out
+}
+
+// currentLeadIndex returns the index within rows of the most recently
+// active AgentName == "" row (by m.activityTsFor), or -1 if rows has no
+// lead row at all. Ties fall back to the lowest index for determinism.
+func (m *agentsModel) currentLeadIndex(rows []Agent) int {
+	best := -1
+	var bestTs time.Time
+	for i, r := range rows {
+		if r.AgentName != "" {
+			continue
+		}
+		ts := m.activityTsFor(r)
+		if best == -1 || ts.After(bestTs) {
+			best = i
+			bestTs = ts
+		}
+	}
+	return best
 }
 
 // sortGroupMembers orders one group's rows: the lead (if present) first,
@@ -692,7 +724,30 @@ func strOrEmpty(s *string) string {
 // every poll result.
 func (m *agentsModel) setRows(rows []Agent) {
 	m.allRows = rows
+	m.pruneStaleActions()
 	m.recomputeRows()
+}
+
+// pruneStaleActions drops entries from m.lastActions older than m.maxAge.
+// lastActions is a plain map populated by every tagged SSE record for the
+// lifetime of the ctop process (recordActivity) with no eviction otherwise
+// — left unpruned, a long-running ctop can keep resurfacing an arbitrarily
+// old event (e.g. a stale [RCAP] from a session that died days ago) onto a
+// row the health API no longer backs with live data, via resolvedActivity's
+// "newer SSE timestamp wins" merge. Called once per poll (setRows) so the
+// map can't outgrow the currently visible age window. maxAge<=0 (the
+// unfiltered "all" view) disables pruning, matching
+// filterGroupsByMaxAge/filterStaleClosedMembers's own convention.
+func (m *agentsModel) pruneStaleActions() {
+	if m.maxAge <= 0 || len(m.lastActions) == 0 {
+		return
+	}
+	cutoff := time.Now().Add(-m.maxAge)
+	for key, la := range m.lastActions {
+		if la.ts.Before(cutoff) {
+			delete(m.lastActions, key)
+		}
+	}
 }
 
 // buildVisRows flattens groups into the rendered/navigable row list: one

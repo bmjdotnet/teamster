@@ -3,6 +3,33 @@
 All notable changes to Teamster are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## v0.2.7 (unreleased)
+
+### Added
+- **`teamster clone`.** `teamster clone <user>@<host>` stands up a disposable Teamster instance on a remote host — same commit, copy of the same data — without touching the source. See [docs/clone.md](docs/clone.md).
+- **Outcome decomposition.** Outcomes can now be nested under parent Outcomes, so sessions can record their work as part of a larger deliverable.
+- **True cost rollup.** Parent Outcomes now include the cost of all descendants, not just direct costs.
+- **Rework tracking.** Typed relations record why post-delivery work exists (bug escape, design gap, revert), enabling prevention-lever reporting.
+- **Claim system.** Mechanized work assignment and delivery as core WMS functionality (`wms_claimWorkUnit`, `wms_deliverResult`, `wms_listDeliverables`). Cost attribution for dispatched work is now automatic.
+- **Dispatch feedback.** Protocol violations now reach the agent that caused them, not just the activity log.
+- **Work-type vocabulary consolidation.** 18 values → 11. Removed duplicates and ambiguous categories; added `polish` for post-delivery refinements.
+
+### Changed
+- Pre-delivery correction phase renamed from `rework` to `iterate`. "Rework" now refers exclusively to post-delivery relation tracking.
+- Phase tags and interval phase columns are now kept in sync automatically.
+- `wms_setPhase` enforces a closed vocabulary (design, build, test, review, iterate, admin).
+- Upgrades now always ship the current `interceptors.yaml` instead of preserving operator customizations. The prior version is backed up as `interceptors-<version>.yaml.bak`.
+
+### Fixed
+- Fixed a tag manifest bug that returned inconsistent metadata depending on database row ordering.
+- Fixed a cardinality bug allowing multiple work-types to be assigned to a single entity.
+- Fixed a bug where ~11% of teammate cost was silently unattributed due to long agent names overflowing an internal limit.
+- Fixed a race condition where concurrent MCP calls could mis-attribute one agent's identity to another.
+- Fixed a bug where bundled scout/reviewer agents could not attribute their own cost.
+- Fixed a bug where the fleet view showed agents under the wrong parent in the hierarchy.
+- Fixed a bug where ghost agents lingered indefinitely in the fleet view and activity log.
+- Silent attribution failures are now logged.
+
 ## v0.2.6 (2026-08-13)
 
 ### Added

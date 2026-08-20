@@ -183,7 +183,7 @@ func TestDescribeTagRoundtrip(t *testing.T) {
 
 	// Lifecycle key: work-type:bug is seeded by the v30 migration. defineTag
 	// refuses lifecycle keys, so describeTag is the only way to refine it.
-	const bugDesc = "Fixes incorrect existing product behavior. Indicators: title 'fix', build→test→rework intervals. NOT infra (which fixes tooling)."
+	const bugDesc = "Fixes incorrect existing product behavior. Indicators: title 'fix', build→test→iterate intervals. NOT infra (which fixes tooling)."
 	if _, ce := call(t, store, ToolDescribeTag, map[string]interface{}{
 		"tagKey": "work-type", "tagValue": "bug", "description": bugDesc,
 	}); ce != nil {
@@ -442,6 +442,39 @@ func TestCreateWorkUnitWarnsMissingRequired(t *testing.T) {
 	}
 }
 
+// TestCreateWorkUnitNoWarningWhenRequiredTagInherited: a work unit created
+// under an outcome that already carries the required key (work-type) must
+// NOT warn — the dispatch reminder considers inherited tags, not just the
+// work unit's own direct bindings (F2 regression: missingRequiredTagWarnings
+// previously called store.GetEntityTags directly instead of
+// resolveEntityTags, so it ignored the parent outcome entirely).
+func TestCreateWorkUnitNoWarningWhenRequiredTagInherited(t *testing.T) {
+	store, oid := newStewardStore(t)
+	ctx := context.Background()
+
+	if err := store.TagEntity(ctx, wms.EntityOutcome, oid, "work-type", "feature", "manual", ""); err != nil {
+		t.Fatalf("seed outcome work-type tag: %v", err)
+	}
+
+	r, ce := call(t, store, ToolCreateWorkUnit, map[string]interface{}{
+		"id": "wu-inherits-warn", "title": "inherits work-type", "outcomeID": oid,
+	})
+	if ce != nil {
+		t.Fatalf("createWorkUnit: %v", ce)
+	}
+	var resp struct {
+		Message  string   `json:"message"`
+		Warnings []string `json:"warnings"`
+	}
+	if err := json.Unmarshal([]byte(resultText(t, r)), &resp); err != nil {
+		t.Fatalf("decode createWorkUnit response: %v (raw=%s)", err, resultText(t, r))
+	}
+	joined := strings.Join(resp.Warnings, "|")
+	if strings.Contains(joined, "work-type") {
+		t.Errorf("warnings %q wrongly flag work-type as missing; it is inherited from outcome %s", joined, oid)
+	}
+}
+
 // TestSnapshotRollbackRoundtrip covers the W5 contract:
 //   - a previously-absent steward tag is removed on rollback;
 //   - a steward overwrite is restored to its prior (manual) value;
@@ -490,10 +523,10 @@ func TestSnapshotRollbackRoundtrip(t *testing.T) {
 		t.Fatalf("steward tag overridden: %v", err)
 	}
 	// A human then overrides wu-overridden after the steward: they delete the
-	// steward value and set their own. work-type is multi-cardinality, so the
-	// human's value does not auto-replace the steward's — the override is the
-	// delete plus the manual set. With no steward binding left, rollback must
-	// skip this entity rather than clobber the human's choice.
+	// steward value and set their own (the explicit delete makes the override
+	// unambiguous regardless of the key's cardinality). With no steward
+	// binding left, rollback must skip this entity rather than clobber the
+	// human's choice.
 	if err := store.DeleteEntityTag(ctx, wms.EntityWorkUnit, "wu-overridden", key, "bug"); err != nil {
 		t.Fatalf("human delete steward tag: %v", err)
 	}
@@ -534,11 +567,13 @@ func TestSnapshotRollbackRoundtrip(t *testing.T) {
 }
 
 // TestStewardRollbackRestoresMultiCardinality covers F6: a multi-cardinality
-// key (work-type) can hold several values at once, and rollback must restore
+// key (team) can hold several values at once, and rollback must restore
 // ALL of them, not just the first. snapshotEntityTags now collects every
 // current binding into OldValues (see stewardSnapshotLine's doc comment) —
 // asserted here directly against the on-disk snapshot, not just the rollback
 // outcome — and rollbackTags restores every one of them via oldBindings().
+// Uses "team" rather than work-type, which v64 (worktype-cardinality-fix)
+// made single-cardinality.
 func TestStewardRollbackRestoresMultiCardinality(t *testing.T) {
 	store, oid := newStewardStore(t)
 	ctx := context.Background()
@@ -546,16 +581,16 @@ func TestStewardRollbackRestoresMultiCardinality(t *testing.T) {
 	if err := store.CreateWorkUnit(ctx, &wms.WorkUnit{ID: wuID, OutcomeID: oid, Title: wuID, Status: wms.StatusPending}); err != nil {
 		t.Fatalf("create wu: %v", err)
 	}
-	const key = "work-type"
-	// Two manual values bound at once — work-type is multi-cardinality.
-	if err := store.TagEntity(ctx, wms.EntityWorkUnit, wuID, key, "bug", "manual", ""); err != nil {
-		t.Fatalf("seed bug: %v", err)
+	const key = "team"
+	// Two manual values bound at once — team is multi-cardinality.
+	if err := store.TagEntity(ctx, wms.EntityWorkUnit, wuID, key, "alpha", "manual", ""); err != nil {
+		t.Fatalf("seed alpha: %v", err)
 	}
-	if err := store.TagEntity(ctx, wms.EntityWorkUnit, wuID, key, "infra", "manual", ""); err != nil {
-		t.Fatalf("seed infra: %v", err)
+	if err := store.TagEntity(ctx, wms.EntityWorkUnit, wuID, key, "beta", "manual", ""); err != nil {
+		t.Fatalf("seed beta: %v", err)
 	}
 
-	const batchID = "steward-work-type-multi-20260812-000000"
+	const batchID = "steward-team-multi-20260812-000000"
 	r, ce := call(t, store, ToolSnapshotEntityTags, map[string]interface{}{
 		"entityType": wms.EntityWorkUnit, "entityIDs": []interface{}{wuID},
 		"tagKey": key, "batchID": batchID,
@@ -591,12 +626,12 @@ func TestStewardRollbackRestoresMultiCardinality(t *testing.T) {
 		t.Fatalf("decode snapshot line: %v", err)
 	}
 	if len(line.OldValues) != 2 {
-		t.Fatalf("snapshot old_values = %v, want 2 entries (bug, infra)", line.OldValues)
+		t.Fatalf("snapshot old_values = %v, want 2 entries (alpha, beta)", line.OldValues)
 	}
 	gotValues := []string{line.OldValues[0].Value, line.OldValues[1].Value}
 	sort.Strings(gotValues)
-	if !reflect.DeepEqual(gotValues, []string{"bug", "infra"}) {
-		t.Errorf("snapshot old_values = %v, want [bug infra]", gotValues)
+	if !reflect.DeepEqual(gotValues, []string{"alpha", "beta"}) {
+		t.Errorf("snapshot old_values = %v, want [alpha beta]", gotValues)
 	}
 	for _, ob := range line.OldValues {
 		if ob.Source != "manual" {
@@ -611,13 +646,13 @@ func TestStewardRollbackRestoresMultiCardinality(t *testing.T) {
 	}
 
 	// Steward retags: delete both prior values, apply one steward value.
-	if err := store.DeleteEntityTag(ctx, wms.EntityWorkUnit, wuID, key, "bug"); err != nil {
-		t.Fatalf("delete bug: %v", err)
+	if err := store.DeleteEntityTag(ctx, wms.EntityWorkUnit, wuID, key, "alpha"); err != nil {
+		t.Fatalf("delete alpha: %v", err)
 	}
-	if err := store.DeleteEntityTag(ctx, wms.EntityWorkUnit, wuID, key, "infra"); err != nil {
-		t.Fatalf("delete infra: %v", err)
+	if err := store.DeleteEntityTag(ctx, wms.EntityWorkUnit, wuID, key, "beta"); err != nil {
+		t.Fatalf("delete beta: %v", err)
 	}
-	if err := store.TagEntity(ctx, wms.EntityWorkUnit, wuID, key, "refactor", "steward", ""); err != nil {
+	if err := store.TagEntity(ctx, wms.EntityWorkUnit, wuID, key, "gamma", "steward", ""); err != nil {
 		t.Fatalf("steward tag: %v", err)
 	}
 
@@ -640,8 +675,8 @@ func TestStewardRollbackRestoresMultiCardinality(t *testing.T) {
 
 	// BOTH prior values must be back, and the steward's value gone.
 	got := boundValues(t, store, wuID, key)
-	if !reflect.DeepEqual(got, []string{"bug", "infra"}) {
-		t.Errorf("%s after rollback = %v, want [bug infra] (both prior values restored)", key, got)
+	if !reflect.DeepEqual(got, []string{"alpha", "beta"}) {
+		t.Errorf("%s after rollback = %v, want [alpha beta] (both prior values restored)", key, got)
 	}
 }
 
@@ -1799,8 +1834,8 @@ func TestUntagEntityReversible(t *testing.T) {
 	if err := store.CreateWorkUnit(ctx, &wms.WorkUnit{ID: "wu-untag", OutcomeID: oid, Title: "untag", Status: wms.StatusPending}); err != nil {
 		t.Fatalf("create wu: %v", err)
 	}
-	const key = "work-type" // multi-cardinality: can hold several values
-	for _, v := range []string{"bug", "feature", "infra"} {
+	const key = "team" // multi-cardinality: can hold several values
+	for _, v := range []string{"alpha", "beta", "gamma"} {
 		if err := store.TagEntity(ctx, wms.EntityWorkUnit, "wu-untag", key, v, "manual", ""); err != nil {
 			t.Fatalf("seed tag %s: %v", v, err)
 		}
@@ -1822,28 +1857,28 @@ func TestUntagEntityReversible(t *testing.T) {
 		return out.Removed, out.Snapshot
 	}
 
-	// 1. Single-value removal: drop work-type:bug, leave feature+infra.
+	// 1. Single-value removal: drop team:alpha, leave beta+gamma.
 	removed, snap := untag(map[string]interface{}{
-		"entityType": wms.EntityWorkUnit, "entityID": "wu-untag", "tagKey": key, "tagValue": "bug",
+		"entityType": wms.EntityWorkUnit, "entityID": "wu-untag", "tagKey": key, "tagValue": "alpha",
 	})
 	if removed != 1 {
 		t.Errorf("single untag removed=%d, want 1", removed)
 	}
-	assertUntagSnapshot(t, snap, key, map[string]string{"bug": "manual"})
-	if got := boundValues(t, store, "wu-untag", key); !reflect.DeepEqual(got, []string{"feature", "infra"}) {
-		t.Errorf("after single untag, work-type = %v, want [feature infra]", got)
+	assertUntagSnapshot(t, snap, key, map[string]string{"alpha": "manual"})
+	if got := boundValues(t, store, "wu-untag", key); !reflect.DeepEqual(got, []string{"beta", "gamma"}) {
+		t.Errorf("after single untag, team = %v, want [beta gamma]", got)
 	}
 
-	// 2. Remove-all (omit tagValue): drop the remaining feature+infra.
+	// 2. Remove-all (omit tagValue): drop the remaining beta+gamma.
 	removed, snap = untag(map[string]interface{}{
 		"entityType": wms.EntityWorkUnit, "entityID": "wu-untag", "tagKey": key,
 	})
 	if removed != 2 {
 		t.Errorf("remove-all untag removed=%d, want 2", removed)
 	}
-	assertUntagSnapshot(t, snap, key, map[string]string{"feature": "manual", "infra": "manual"})
+	assertUntagSnapshot(t, snap, key, map[string]string{"beta": "manual", "gamma": "manual"})
 	if got := boundValues(t, store, "wu-untag", key); len(got) != 0 {
-		t.Errorf("after remove-all untag, work-type = %v, want none", got)
+		t.Errorf("after remove-all untag, team = %v, want none", got)
 	}
 
 	// 3. No-op: nothing left to remove → 0 removed, no snapshot.

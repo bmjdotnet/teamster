@@ -628,45 +628,15 @@ func TestBackfillV1ToV3_OutputMapping(t *testing.T) {
 		t.Errorf("wu-t1 should have no incoming blockers (orphan blocker dropped), got %d", wu1IncomingBlockers)
 	}
 
-	// 11c-behavioral. Assert COHERENCE through the real reader, not just the raw row.
-	// The phantom dependency was the doubly-nasty case: it makes the unblock scan
-	// FAIL CLOSED (engine bails on getEntityStatus(phantom)) AND ListReadyWorkUnits
-	// FAIL OPEN (its inner EXISTS is false for a phantom, so the WU is returned
-	// "ready" even while spuriously gated). Because the fix never creates the phantom
-	// dep, wu-t1 (no real incoming blocker, status active) must appear correctly on
-	// ListReadyWorkUnits, while wu-t2 (still blocked by the REAL, non-done wu-t1) must
-	// NOT — proving the formerly-only-orphan-blocked WU is coherent, neither stuck
-	// nor spuriously gated.
-	store := &Store{db: db}
-
-	// Fail-closed guarantee: the engine's unblock scan iterates exactly these
-	// blockers and bails if any getEntityStatus(blocker) errors. With the orphan
-	// dep dropped, wu-t1 has ZERO blockers, so the scan can never touch a phantom.
-	wu1Blockers, err := store.ListEntityDependencyBlockers(ctx, "workunit", "wu-t1")
-	if err != nil {
-		t.Fatalf("ListEntityDependencyBlockers(wu-t1): %v", err)
-	}
-	if len(wu1Blockers) != 0 {
-		t.Errorf("wu-t1 should have no dependency blockers after orphan-dep drop, got %d: %+v", len(wu1Blockers), wu1Blockers)
-	}
-
-	ready, err := store.ListReadyWorkUnits(ctx, "out-g1")
-	if err != nil {
-		t.Fatalf("ListReadyWorkUnits(out-g1): %v", err)
-	}
-	readyIDs := map[string]bool{}
-	for _, wu := range ready {
-		readyIDs[wu.ID] = true
-	}
-	if !readyIDs["wu-t1"] {
-		t.Errorf("wu-t1 (orphan-only blocker dropped, active) should be READY, ready set = %v", readyIDs)
-	}
-	if readyIDs["wu-t2"] {
-		t.Errorf("wu-t2 is still blocked by the real non-done wu-t1 and must NOT be ready, ready set = %v", readyIDs)
-	}
-	if readyIDs["wu-t3"] {
-		t.Errorf("phantom wu-t3 must never appear in the ready set, ready set = %v", readyIDs)
-	}
+	// 11c is asserted further below, AFTER the idempotency re-run (§12): it
+	// goes through the real Store, whose workUnitColumns selects every column
+	// workunits has at HEAD (e.g. claimed_at, added by dispatch-package/v69) —
+	// a real Store is only ever opened against a fully-migrated database, so
+	// that assertion needs the schema caught up through the rest of the chain
+	// first. Catching up here (before §12's second backfillV1ToV3 call) would
+	// break it: v17 (part of that catch-up) renames the raw v1 tables away,
+	// and §12 deliberately re-invokes backfillV1ToV3 against those same v1
+	// tables to prove the backfill itself is idempotent.
 
 	// 11d. Multi-workitem absorption (wi1 + wi2 both under t1): exactly ONE WorkUnit
 	// (wu-t1, asserted above), no separate wu-wi2, and the same-tag (phase=build)
@@ -755,5 +725,54 @@ func TestBackfillV1ToV3_OutputMapping(t *testing.T) {
 	}
 	if phantomDepAfter != 0 {
 		t.Errorf("after second backfill: no entity_dependency may reference phantom wu-t3, got %d", phantomDepAfter)
+	}
+
+	// 11c-behavioral (deferred from just after the first backfillV1ToV3 call —
+	// see that comment). Assert COHERENCE through the real reader, not just
+	// the raw row. The phantom dependency was the doubly-nasty case: it makes
+	// the unblock scan FAIL CLOSED (engine bails on getEntityStatus(phantom))
+	// AND ListReadyWorkUnits FAIL OPEN (its inner EXISTS is false for a
+	// phantom, so the WU is returned "ready" even while spuriously gated).
+	// Because the fix never creates the phantom dep, wu-t1 (no real incoming
+	// blocker, status active) must appear correctly on ListReadyWorkUnits,
+	// while wu-t2 (still blocked by the REAL, non-done wu-t1) must NOT —
+	// proving the formerly-only-orphan-blocked WU is coherent, neither stuck
+	// nor spuriously gated.
+	//
+	// Catch the schema up through the rest of the chain now that §12's
+	// idempotency re-run (which needs the raw, not-yet-archived v1 tables) is
+	// done — mirrors what a genuine upgrade does after backfill.
+	if err := migrateUpTo(ctx, db, MaxSchemaVersion()); err != nil {
+		t.Fatalf("migrate v17..head after backfill: %v", err)
+	}
+	store := &Store{db: db}
+
+	// Fail-closed guarantee: the engine's unblock scan iterates exactly these
+	// blockers and bails if any getEntityStatus(blocker) errors. With the orphan
+	// dep dropped, wu-t1 has ZERO blockers, so the scan can never touch a phantom.
+	wu1Blockers, err := store.ListEntityDependencyBlockers(ctx, "workunit", "wu-t1")
+	if err != nil {
+		t.Fatalf("ListEntityDependencyBlockers(wu-t1): %v", err)
+	}
+	if len(wu1Blockers) != 0 {
+		t.Errorf("wu-t1 should have no dependency blockers after orphan-dep drop, got %d: %+v", len(wu1Blockers), wu1Blockers)
+	}
+
+	ready, err := store.ListReadyWorkUnits(ctx, "out-g1")
+	if err != nil {
+		t.Fatalf("ListReadyWorkUnits(out-g1): %v", err)
+	}
+	readyIDs := map[string]bool{}
+	for _, wu := range ready {
+		readyIDs[wu.ID] = true
+	}
+	if !readyIDs["wu-t1"] {
+		t.Errorf("wu-t1 (orphan-only blocker dropped, active) should be READY, ready set = %v", readyIDs)
+	}
+	if readyIDs["wu-t2"] {
+		t.Errorf("wu-t2 is still blocked by the real non-done wu-t1 and must NOT be ready, ready set = %v", readyIDs)
+	}
+	if readyIDs["wu-t3"] {
+		t.Errorf("phantom wu-t3 must never appear in the ready set, ready set = %v", readyIDs)
 	}
 }

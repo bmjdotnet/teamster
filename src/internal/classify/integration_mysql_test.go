@@ -86,7 +86,7 @@ func assembledAtOf(t *testing.T, db store.Store, id int64) time.Time {
 }
 
 // TestClassify_EndToEnd is the headline proof: real signals → populated phase
-// rows with derived build/test/review/rework/design values, declared-wins
+// rows with derived build/test/review/iterate/design values, declared-wins
 // respected, idempotent re-run, and --reclassify re-derivation.
 func TestClassify_EndToEnd(t *testing.T) {
 	st := freshStore(t)
@@ -108,7 +108,7 @@ func TestClassify_EndToEnd(t *testing.T) {
 	sDesign, eDesign, tsDesign := win(20)
 	// review: lifecycle state drives it; declared-wins interval too.
 	sReview, eReview, _ := win(30)
-	// rework: entity wu-rw goes active → review → active(re-entry).
+	// iterate: entity wu-rw goes active → review → active(re-entry).
 	sRw1, eRw1, _ := win(40)
 	sRw2, eRw2, _ := win(50)
 	sRw3, eRw3, tsRw3 := win(60)
@@ -136,8 +136,8 @@ func TestClassify_EndToEnd(t *testing.T) {
 		jsonlLine("sessdesign001", "agdesign", tsDesign, "READ", "", "a.go"),
 		jsonlLine("sessdesign001", "agdesign", tsDesign, "READ", "", "b.go"),
 		jsonlLine("sessdesign001", "agdesign", tsDesign, "GREP", "", ""),
-		// rework re-entry interval: has signal so derivePhase reaches it, but
-		// re-entry short-circuits to rework regardless.
+		// iterate re-entry interval: has signal so derivePhase reaches it, but
+		// re-entry short-circuits to iterate regardless.
 		jsonlLine("sessrw0000001", "agrw", tsRw3, "EDIT", "", "fix.go"),
 	})
 
@@ -157,7 +157,7 @@ func TestClassify_EndToEnd(t *testing.T) {
 	check(idTest, "test", "classifier")
 	check(idDesign, "design", "classifier")
 	check(idReview, "review", "classifier")
-	check(idRw3, "rework", "classifier")
+	check(idRw3, "iterate", "classifier")
 	// Declared-wins: the declared interval is untouched.
 	check(idDeclared, "design", "declared")
 
@@ -203,7 +203,7 @@ func TestClassify_EndToEnd(t *testing.T) {
 	}
 	check(idBuild, "build", "classifier")
 	check(idTest, "test", "classifier")
-	check(idRw3, "rework", "classifier")
+	check(idRw3, "iterate", "classifier")
 	check(idDeclared, "design", "declared") // declared never cleared
 }
 
@@ -268,7 +268,7 @@ func TestClassify_SessionlessCostedIntervalIsBuild(t *testing.T) {
 }
 
 // TestClassify_CrossBatchRework is the M1 regression: a re-entry active interval
-// is derived as rework on a NORMAL forward pass even when its predecessor
+// is derived as iterate on a NORMAL forward pass even when its predecessor
 // review interval was assembled in an EARLIER batch (and is therefore excluded
 // from the current work set by the anti-join). Before the fix, detectReEntry
 // only saw in-batch intervals, so the re-entry was mis-derived as build and
@@ -315,12 +315,12 @@ func TestClassify_CrossBatchRework(t *testing.T) {
 
 	// Second forward pass (NOT --reclassify). The batch contains ONLY active2;
 	// the predecessor review is out of batch, but EarliestClosureByEntity still
-	// sees it, so active2 must derive rework.
+	// sees it, so active2 must derive iterate.
 	if err := r.Run(ctx, false, DefaultReclassifyLimit, false); err != nil {
 		t.Fatalf("pass 2 Run: %v", err)
 	}
-	if p, s := phaseOf(t, db, idActive2); p != "rework" || s != "classifier" {
-		t.Errorf("cross-batch re-entry active2 phase=(%q,%q), want (rework,classifier) — M1 forward-pass self-heal failed", p, s)
+	if p, s := phaseOf(t, db, idActive2); p != "iterate" || s != "classifier" {
+		t.Errorf("cross-batch re-entry active2 phase=(%q,%q), want (iterate,classifier) — M1 forward-pass self-heal failed", p, s)
 	}
 }
 
@@ -345,7 +345,7 @@ func seedAssembledInterval(t *testing.T, db store.Store, entityType, entityID, s
 // TestClassify_OutOfBatchPredecessorRework is @b4audit's exact re-verify case for
 // M1: the predecessor review is seeded ALREADY phased + assembled (out of the
 // work set), and a SINGLE normal forward pass over only the later active interval
-// must derive rework — never build. This is the case the pre-fix code failed:
+// must derive iterate — never build. This is the case the pre-fix code failed:
 // detectReEntry could not see the out-of-batch review, so the active fell to the
 // rule-6 build default and was frozen. No first pass, no --reclassify.
 func TestClassify_OutOfBatchPredecessorRework(t *testing.T) {
@@ -362,7 +362,7 @@ func TestClassify_OutOfBatchPredecessorRework(t *testing.T) {
 
 	// Later active interval for the SAME entity, started after the review ended.
 	// Unassembled → IS in the work set. Give it EDIT/WRITE signals so that absent
-	// the rework rule it would derive build (rule 4) — the exact mislabel to beat.
+	// the iterate rule it would derive build (rule 4) — the exact mislabel to beat.
 	tsA := base.Add(12 * time.Minute).Format(time.RFC3339)
 	idActive := seedClosedInterval(t, db, wms.EntityWorkUnit, "wu-rwX", "active", "sessrwx00001", "agrwx",
 		base.Add(10*time.Minute), base.Add(15*time.Minute), "", "")
@@ -386,8 +386,8 @@ func TestClassify_OutOfBatchPredecessorRework(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	if p, s := phaseOf(t, db, idActive); p != "rework" || s != "classifier" {
-		t.Errorf("out-of-batch re-entry phase=(%q,%q), want (rework,classifier) — must NOT be build; M1 forward path failed", p, s)
+	if p, s := phaseOf(t, db, idActive); p != "iterate" || s != "classifier" {
+		t.Errorf("out-of-batch re-entry phase=(%q,%q), want (iterate,classifier) — must NOT be build; M1 forward path failed", p, s)
 	}
 	// The out-of-batch review is untouched (it was already assembled).
 	if p, _ := phaseOf(t, db, idReview); p != "review" {

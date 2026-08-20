@@ -306,6 +306,34 @@ type RelatedStore interface {
 	ListRelatedEntities(ctx context.Context, opts ListRelatedOpts) ([]RelatedEntity, error)
 }
 
+// RelationStore manages typed outcome/workunit relations (WP3 stage 2,
+// outcome_relations): the primitive "A <kind> B" needs — rework, supersession,
+// lineage — distinct from entity_dependencies' blocker→blocked semantics. See
+// WP3-relations-reporting.md §3.1 for why this is a new table rather than a
+// kind column bolted onto entity_dependencies.
+type RelationStore interface {
+	// AddRelation records "fromType/fromID <kind> toType/toID". Validates, in
+	// order: kind is a known relation_kinds row; no self-loop; fromID exists
+	// (toID must exist too, unless toType is "external", in which case toID is
+	// free text and must be non-empty); for lineage=1 kinds, the edge would not
+	// close a cycle; for taxable kinds, from/to are not already connected in
+	// outcome_edges (either direction) — a child outcome reworking its own
+	// parent is pre-delivery iteration, not post-delivery rework. Idempotent:
+	// re-adding an identical edge (same kind, from, to) is a no-op.
+	AddRelation(ctx context.Context, kind, fromType, fromID, toType, toID, createdBy, source, note string) error
+	// RemoveRelation is a hard delete keyed on the same five identity fields
+	// AddRelation used. Idempotent: removing a relation that does not exist
+	// succeeds as a no-op.
+	RemoveRelation(ctx context.Context, kind, fromType, fromID, toType, toID string) error
+	// ListRelations returns relations touching (entityType, entityID).
+	// direction is "from" (entity is the new work), "to" (entity is the prior
+	// work), or "both" (default). kind, if non-empty, filters to that kind.
+	ListRelations(ctx context.Context, entityType, entityID, direction, kind string) ([]Relation, error)
+	// ListRelationKinds returns the seeded relation_kinds vocabulary a
+	// Relation.Kind must belong to.
+	ListRelationKinds(ctx context.Context) ([]RelationKind, error)
+}
+
 // ClassifierStore is the B4 phase/work-type classifier's persistence surface:
 // promoted from concrete-only methods on *mysql.Store (they had no interface
 // home before this phase) — signatures and behavior are unchanged.
@@ -450,6 +478,7 @@ type ReportingStore interface {
 	UnattributedBacklogDepth(ctx context.Context) (int64, error)
 	CostByEntityLast30Days(ctx context.Context) ([]CostRow, error)
 	DependencyCounts(ctx context.Context) (blockers, blocked int64, err error)
+	OutcomeDecompositionCounts(ctx context.Context) (rootCount, parentedCount, edgeCount int64, err error)
 	IntervalCostByPhase(ctx context.Context) ([]PhaseCostRow, error)
 	TagBindingCounts(ctx context.Context) ([]TagCountRow, error)
 	DailyTokenUsage(ctx context.Context) (UsageSnapshot, error)
@@ -625,6 +654,14 @@ type AllocationStore interface {
 	// outcome rollup.
 	BuildCostRollup(ctx context.Context) error
 	BuildOutcomeCostRollup(ctx context.Context) error
+	// BuildOutcomeTrueCostRollup rebuilds outcome_true_cost_rollup: for every
+	// outcome, the cost of itself, its workunits, and its transitive DAG
+	// descendants via outcome_edges (WP3 stage 1 — child_outcome legs only).
+	// Stage 2 adds a rework leg over outcome_relations; this method's
+	// signature does not change. Read-only with respect to
+	// usage_attribution/cost_rollup/outcome_cost_rollup — a projection,
+	// never a re-attribution. Uses AtomicReplace, same as BuildOutcomeCostRollup.
+	BuildOutcomeTrueCostRollup(ctx context.Context) error
 	// Reconcile is cited in 01-interfaces.md with no way to receive OTel data
 	// (MySQL cannot reach Prometheus itself; only the Go rollup service holds
 	// an OTelSource) — flagged to the lead, proceeding with otelCosts (keyed
@@ -831,6 +868,14 @@ type RosterEntry struct {
 	AgentID      string
 	CreatedAt    time.Time
 	BoundAt      *time.Time
+	// UpdatedAt is stamped by the store on every Create/Upsert/Bind — a
+	// heartbeat driven by the same auto-registration calls that fire on
+	// every hook event for an active session. A session that stops
+	// producing events simply stops advancing this value, which is what
+	// lets ListRosterEntries' UpdatedSince filter and SweepStaleRoster age
+	// a dead session's entry out without any explicit close signal —
+	// mirrors GaugeStore.SweepOffline's updated_at cutoff.
+	UpdatedAt time.Time
 }
 
 // AgentToken is one agent_tokens row — the credential record for a roster entry.
@@ -850,6 +895,9 @@ type RosterFilter struct {
 	BusTeam      string
 	Runtime      string
 	Relationship string
+	// UpdatedSince, when set, excludes entries whose UpdatedAt is older than
+	// this time — the roster-side equivalent of GaugeFilter.MinUpdatedAt.
+	UpdatedSince *time.Time
 }
 
 // RosterStore is agent-roster identity and bearer-token persistence:
@@ -867,6 +915,10 @@ type RosterStore interface {
 	RevokeToken(ctx context.Context, rosterID string) error
 	RevokeTokenCascade(ctx context.Context, rosterID string) (int64, error)
 	TouchTokenLastUsed(ctx context.Context, tokenHash string) error
+	// SweepStaleRoster deletes roster entries whose UpdatedAt is older than
+	// cutoff, returning the number of rows deleted. Mirrors
+	// gauge.GaugeStore.SweepOffline.
+	SweepStaleRoster(ctx context.Context, cutoff time.Time) (int64, error)
 }
 
 // Store is the full persistence surface implemented by every backend. It is
@@ -881,6 +933,7 @@ type Store interface {
 	ActivityStore
 	StatusStore
 	RelatedStore
+	RelationStore
 	ClassifierStore
 	TagAdminStore
 	TelemetryStore
@@ -1011,4 +1064,32 @@ type RelatedEntity struct {
 	SessionID     string            `json:"session_id"`
 	SessionStatus string            `json:"session_status"`
 	IsTerminal    bool              `json:"is_terminal"`
+}
+
+// Relation is one row from outcome_relations: a typed edge "from <kind> to",
+// read as a sentence — "from remediates to". See RelationStore.
+type Relation struct {
+	ID        int64     `json:"id"`
+	Kind      string    `json:"kind"`
+	FromType  string    `json:"from_type"`
+	FromID    string    `json:"from_id"`
+	ToType    string    `json:"to_type"`
+	ToID      string    `json:"to_id"`
+	CreatedAt time.Time `json:"created_at"`
+	CreatedBy string    `json:"created_by"`
+	Source    string    `json:"source"`
+	Note      string    `json:"note"`
+}
+
+// RelationKind is one row from relation_kinds: the seeded vocabulary a
+// Relation.Kind must belong to. Taxable kinds count toward the rework tax;
+// MissClass ('code'|'design'|'spec') names the prevention lever; Lineage
+// gates cycle-checking and transitive closure.
+type RelationKind struct {
+	Kind        string `json:"kind"`
+	Taxable     bool   `json:"taxable"`
+	MissClass   string `json:"miss_class"`
+	Lineage     bool   `json:"lineage"`
+	IsSeed      bool   `json:"is_seed"`
+	Description string `json:"description"`
 }

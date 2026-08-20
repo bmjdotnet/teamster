@@ -16,8 +16,9 @@ The WMS tag keyspace splits two ways:
   integration keys. The steward freely defines values, refines descriptions,
   merges, retires, and backfills these. This is the main skill's home ground.
 - **Lifecycle tags** (`category=lifecycle`): execution tracking the **engine and
-  classifier own** — `work-type` (feature|bug|refactor|infra|research|docs|test),
-  `phase` (design|build|test|review|rework), `resolution` (achieved|abandoned),
+  classifier own** — `work-type`
+  (feature|bug|refactor|polish|investigation|research|test|docs|infra|admin|processor),
+  `phase` (design|build|test|review|iterate), `resolution` (achieved|abandoned),
   `lifecycle` (archived). These values are seeded by migration and managed by the
   system, not by hand.
 
@@ -88,7 +89,7 @@ The durable artifact is a description sharp enough to classify against. For
 
 > "Fixes incorrect existing behavior. Indicators: title contains 'fix', entity
 > has a `bug:*` context tag, parent outcome is about debugging or repair,
-> interval phases show build→test→rework (the correction pattern). NOT infra
+> interval phases show build→test→iterate (the correction pattern). NOT infra
 > even when it fixes a build script — infra fixes tooling, bug fixes product
 > behavior."
 
@@ -105,7 +106,7 @@ enough. Pull in the rest of the WMS context:
   `feature:*` tag points at `feature`.
 - **Parent outcome** — its title and tags frame what the work was for (an
   outcome about "docs cleanup" makes `docs` likely).
-- **Interval phase history** — a build→test→rework arc reads as a correction
+- **Interval phase history** — a build→test→iterate arc reads as a correction
   (bug); a clean build→test→done arc reads as new work (feature).
 - **Git branch / session context** — branch names and the session's other work
   often disambiguate.

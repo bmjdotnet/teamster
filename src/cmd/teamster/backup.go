@@ -30,7 +30,7 @@ flags (backup):
   --config <path>   Path to teamster.yaml (default: auto-detect from basedir)
   --dry-run         Show what would be backed up without doing it`
 
-const restoreUsage = `usage: teamster restore <path> [flags]
+const restoreUsage = `usage: teamster restore [flags] <path>
 
 arguments:
   <path>            Backup directory to restore from (path or 'latest')
@@ -38,7 +38,12 @@ arguments:
 flags:
   --config <path>   Path to teamster.yaml (default: auto-detect from basedir)
   --dry-run         Show what would be restored without doing it
-  --force           Skip confirmation prompt`
+  --force           Skip confirmation prompt
+
+Flags must precede <path> — this CLI's flag parser stops recognizing flags
+at the first non-flag argument, so 'teamster restore latest --force' does
+NOT set --force (it silently falls through to the interactive confirmation
+prompt instead). Always write 'teamster restore --force latest'.`
 
 // runBackup dispatches the `teamster backup <subcommand>` family.
 func runBackup(args []string) int {

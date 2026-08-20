@@ -411,3 +411,142 @@ func TestEmbeddedConfigMatchesSkelSource(t *testing.T) {
 		t.Errorf("internal/intercept/interceptors.yaml (go:embed source) has drifted from %s — copy the shipped file over the embedded one", skelPath)
 	}
 }
+
+// allTeamsterMCPTools is the full mcp__<server>__<tool> wire-name list for
+// Teamster's four native MCP servers, kept as string literals rather than
+// importing internal/mcp/wms (which pulls in internal/store and
+// internal/wms) so this test stays fast and dependency-free. Cross-check
+// against each server's tool switch (internal/mcp/{wms,activity,roster,
+// health}) when a tool is added, renamed, or removed.
+var allTeamsterMCPTools = []string{
+	// WMS (42)
+	"mcp__wms__wms_addDependency",
+	"mcp__wms__wms_addOutcomeParent",
+	"mcp__wms__wms_addRelation",
+	"mcp__wms__wms_assignWorkUnit",
+	"mcp__wms__wms_claimWorkUnit",
+	"mcp__wms__wms_classifyEntity",
+	"mcp__wms__wms_createOutcome",
+	"mcp__wms__wms_createWorkUnit",
+	"mcp__wms__wms_defineTag",
+	"mcp__wms__wms_deliverResult",
+	"mcp__wms__wms_describeTag",
+	"mcp__wms__wms_getEntityTags",
+	"mcp__wms__wms_getFocus",
+	"mcp__wms__wms_getHistory",
+	"mcp__wms__wms_getOutcome",
+	"mcp__wms__wms_getTimeline",
+	"mcp__wms__wms_getWorkUnit",
+	"mcp__wms__wms_listBlockers",
+	"mcp__wms__wms_listDeliverables",
+	"mcp__wms__wms_listDependents",
+	"mcp__wms__wms_listOutcomes",
+	"mcp__wms__wms_listRelated",
+	"mcp__wms__wms_listRelationKinds",
+	"mcp__wms__wms_listRelations",
+	"mcp__wms__wms_listTags",
+	"mcp__wms__wms_listWorkUnits",
+	"mcp__wms__wms_removeDependency",
+	"mcp__wms__wms_removeOutcomeParent",
+	"mcp__wms__wms_removeRelation",
+	"mcp__wms__wms_renameOutcome",
+	"mcp__wms__wms_renameWorkUnit",
+	"mcp__wms__wms_retireTag",
+	"mcp__wms__wms_rollbackTags",
+	"mcp__wms__wms_search",
+	"mcp__wms__wms_setFocus",
+	"mcp__wms__wms_setPhase",
+	"mcp__wms__wms_snapshotEntityTags",
+	"mcp__wms__wms_tagEntity",
+	"mcp__wms__wms_untagEntity",
+	"mcp__wms__wms_updateOutcomeStatus",
+	"mcp__wms__wms_updateStatus",
+	"mcp__wms__wms_updateWorkUnitStatus",
+
+	// Activity (4)
+	"mcp__activity__reportActivity",
+	"mcp__activity__setOverallIntent",
+	"mcp__activity__completeActivity",
+	"mcp__activity__setMode",
+
+	// Roster (7)
+	"mcp__roster__roster_listAgents",
+	"mcp__roster__roster_getAgent",
+	"mcp__roster__roster_resolveId",
+	"mcp__roster__registerPeer",
+	"mcp__roster__verifyToken",
+	"mcp__roster__roster_bindSession",
+	"mcp__roster__getRosterEntry",
+
+	// Health (4) — covered by a namespace-level blanket suppress rather
+	// than per-method rules; Match() still returns a non-nil (Suppress:
+	// true) Result for these, which is what this test checks.
+	"mcp__health__health_listAgents",
+	"mcp__health__health_getAgentSnapshot",
+	"mcp__health__health_getTeamSummary",
+	"mcp__health__health_getPressureAlerts",
+}
+
+// hasExplicitInterceptorCoverage reports whether toolName is handled by a
+// specific rule, or by an explicit namespace-level suppress/display — as
+// opposed to silently falling through to the bare generic "server(__tool__)"
+// fallback. This distinction matters because Registry.Match's non-nil
+// Result cannot be used as a coverage signal on its own: per
+// TestNamespaceFallbackNoRuleMatch above, a namespace-prefix match with no
+// rule match still returns a non-nil Result (Tag defaults to "TOOL") — that
+// IS the fallback this test exists to catch, so asserting only "non-nil"
+// would pass even when a tool has no real interceptor entry.
+func hasExplicitInterceptorCoverage(reg *Registry, toolName string) bool {
+	for i := range reg.Namespaces {
+		ns := &reg.Namespaces[i]
+		if !ns.Match.matches(toolName, "", nil) {
+			continue
+		}
+		methodRemainder := strings.TrimPrefix(toolName, ns.Match.Prefix)
+		for j := range ns.Rules {
+			if ns.Rules[j].Match.matches(toolName, methodRemainder, nil) {
+				return true
+			}
+		}
+		// No rule matched: only an explicit namespace-level suppress or
+		// display (e.g. mcp__health__'s blanket suppress) counts as
+		// coverage — the bare generic fallback does not.
+		return ns.Suppress || ns.Display != nil
+	}
+	return false
+}
+
+// TestAllTeamsterToolsHaveInterceptorCoverage is a regression test for the
+// class of bug found in wu-interceptor-audit: a tool registered on a native
+// MCP server with no corresponding interceptor rule silently falls back to
+// generic "[TOOL] server(__tool__)" display. It fails loudly, one t.Errorf
+// per gap, if a future tool addition to wms/activity/roster/health isn't
+// matched by the shipped interceptors.yaml.
+func TestAllTeamsterToolsHaveInterceptorCoverage(t *testing.T) {
+	reg, err := LoadDefault()
+	if err != nil {
+		t.Fatalf("LoadDefault: %v", err)
+	}
+	for _, toolName := range allTeamsterMCPTools {
+		if !hasExplicitInterceptorCoverage(reg, toolName) {
+			t.Errorf("no interceptor coverage for %s — falls back to generic [TOOL] display", toolName)
+		}
+	}
+}
+
+// TestAllTeamsterToolsHaveInterceptorCoverageCatchesRealGap proves the test
+// above actually catches the bug it targets, using a minimal fixture with a
+// namespace but no rule for one method (mirroring the real config before
+// this WU's fix, when wms_listDeliverables/wms_deliverResult had no rule).
+func TestAllTeamsterToolsHaveInterceptorCoverageCatchesRealGap(t *testing.T) {
+	reg := mustBuildRegistry(t, fixtureYAML)
+	if hasExplicitInterceptorCoverage(reg, "mcp__wms__wms_untagEntity") {
+		t.Error("expected no coverage for a method with no rule in the fixture — the fixture has no untagEntity rule, only createOutcome/setFocus/getWorkUnit")
+	}
+	if !hasExplicitInterceptorCoverage(reg, "mcp__wms__wms_createOutcome") {
+		t.Error("expected coverage for createOutcome — the fixture defines a specific rule for it")
+	}
+	if !hasExplicitInterceptorCoverage(reg, "mcp__health__health_listAgents") {
+		t.Error("expected coverage for a health tool under the fixture's blanket-suppress mcp__health__ namespace")
+	}
+}

@@ -109,8 +109,9 @@ type mcpIdentity struct {
 // genuine new spawn (key absent) from a turn-resume of an already-registered
 // instance (key present).
 type instanceEntry struct {
-	name     string // unique roster name (e.g., "@Explore-2")
-	rosterID string
+	name         string // unique roster name (e.g., "@Explore-2")
+	rosterID     string
+	healAttempts int // bounds selfHealParentRef retries — see its doc comment
 }
 
 // Server receives hook telemetry events via HTTP and writes them to a JSONL log.
@@ -136,9 +137,10 @@ type Server struct {
 	regMu            sync.Mutex
 	instanceRegistry map[string]instanceEntry
 	pendingMCPMu     sync.Mutex
-	pendingMCPIdent  map[string]mcpIdentity // key: "toolSuffix:entityID"
+	pendingMCPIdent  map[string][]mcpIdentity // key: "toolSuffix:entityID", FIFO per key
 	focusNudge       focusNudgeCache
 	pressureNudge    pressureNudgeCache
+	wmsWarnings      wmsWarningQueue
 	rosterLastSeen   lastSeenCache
 	turnStates       turnStateTracker
 	registry         *intercept.Registry
@@ -147,6 +149,19 @@ type Server struct {
 // storeOpenMaxAttempts bounds how many times NewServer retries store.Open
 // before giving up and starting with the /wms dashboard disabled.
 const storeOpenMaxAttempts = 10
+
+// claimFocusIntervalFailuresTotal counts OpenFocusInterval failures on the
+// claim-success path (WMSStatusChange pending/""->active for a WorkUnit) —
+// the first interval-open call site with dedicated Prometheus visibility
+// instead of only a swallowed slog.Warn. Registered directly against
+// observability.Registry in NewServer (not added to observability.Metrics)
+// since NewServer runs exactly once per process (cmd/hookd/main.go), so a
+// package-level MustRegister here carries the same one-shot-registration
+// safety as the Metrics vecs without touching that struct.
+var claimFocusIntervalFailuresTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "teamster_claim_focus_interval_failures_total",
+	Help: "Focus interval open failures on WorkUnit claim success, by entity_type.",
+}, []string{"entity_type"})
 
 // tagColorsFromRegistry extracts the [3]int color for display.SetTagColors
 // from a loaded interceptor registry's tag definitions.
@@ -175,6 +190,7 @@ func NewServer(cfg config.Config) (*Server, error) {
 	// Prometheus registry and standard metric vecs.
 	reg := observability.Registry
 	metrics := observability.NewMetrics(reg)
+	metrics.BuildInfo.WithLabelValues(version.Version, version.Commit, version.BuildTime).Set(1)
 
 	sessions := observability.NewSessionTracker(
 		cfg.Host,
@@ -190,6 +206,7 @@ func NewServer(cfg config.Config) (*Server, error) {
 		observability.NewBridgeCollector(sessions),
 		observability.NewEntitiesCollector(),
 		observability.NewSweepCollector(filepath.Join(cfg.DataDir, "sweep-state.json")),
+		claimFocusIntervalFailuresTotal,
 	)
 
 	sweepStop := make(chan struct{})
@@ -213,7 +230,7 @@ func NewServer(cfg config.Config) (*Server, error) {
 		metrics:          metrics,
 		promRegistry:     reg,
 		sweepStop:        sweepStop,
-		pendingMCPIdent:  make(map[string]mcpIdentity),
+		pendingMCPIdent:  make(map[string][]mcpIdentity),
 		instanceRegistry: make(map[string]instanceEntry),
 		registry:         interceptReg,
 	}
@@ -251,6 +268,7 @@ func NewServer(cfg config.Config) (*Server, error) {
 				observability.NewTagCountsCollector(s.obsStore),
 				observability.NewAttributionCollector(s.obsStore),
 				observability.NewDependenciesCollector(s.obsStore),
+				observability.NewDecompositionCollector(s.obsStore),
 				observability.NewCostCollector(s.obsStore),
 				observability.NewIntervalPhaseCostCollector(s.obsStore),
 				observability.NewBacklogCollector(s.obsStore),
@@ -500,6 +518,32 @@ func (s *Server) handleEvent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// WMS dispatch-protocol warnings: bridge same-event warnings
+	// (data["_warn_msg"], e.g. orphan dispatch on this PreToolUse) and
+	// consume queued deferred warnings (e.g. close-out tag enforcement that
+	// fired asynchronously during a WMSStatusChange) into additionalContext
+	// so the agent sees the feedback, not just the feed/ctop.
+	if event.SessionID != "" && (event.HookEventName == "PreToolUse" || event.HookEventName == "UserPromptSubmit") {
+		var wmsCtx string
+		if warnMsg, _ := data["_warn_msg"].(string); warnMsg != "" {
+			wmsCtx = warnMsg
+		}
+		if queued := s.wmsWarnings.consume(event.SessionID, agentNameFor(event.AgentType)); queued != "" {
+			if wmsCtx != "" {
+				wmsCtx += "\n\n" + queued
+			} else {
+				wmsCtx = queued
+			}
+		}
+		if wmsCtx != "" {
+			if existing, ok := resp["additionalContext"].(string); ok && existing != "" {
+				resp["additionalContext"] = existing + "\n\n" + wmsCtx
+			} else {
+				resp["additionalContext"] = wmsCtx
+			}
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(resp) //nolint:errcheck
@@ -618,7 +662,9 @@ func (s *Server) dispatchObservability(event hook.HookEvent, data map[string]int
 						if agentType == "" {
 							sess.Model = modelFromData(data)
 						}
-						_ = s.obsStore.UpsertSession(ctx, sess)
+						if err := s.obsStore.UpsertSession(ctx, sess); err != nil {
+							slog.Warn("upsert session", "session", event.SessionID, "agent", agent, "error", err)
+						}
 						// Relationship heuristic for S2: empty agentType = lead,
 						// non-empty = teammate (the predominant Agent Teams case).
 						// A non-empty spawnerType means a teammate spawned this via
@@ -673,7 +719,9 @@ func (s *Server) dispatchObservability(event hook.HookEvent, data map[string]int
 								}
 							}
 						}
-						_ = s.obsStore.UpsertRosterEntry(ctx, entry)
+						if err := s.obsStore.UpsertRosterEntry(ctx, entry); err != nil {
+							slog.Warn("upsert roster entry", "session", event.SessionID, "agent", agent, "roster_id", rosterID, "error", err)
+						}
 					}()
 				}
 			} else if s.obsStore != nil {
@@ -690,7 +738,9 @@ func (s *Server) dispatchObservability(event hook.HookEvent, data map[string]int
 						if agentType == "" {
 							sess.Model = modelFromData(data)
 						}
-						_ = s.obsStore.UpsertSession(ctx, sess)
+						if err := s.obsStore.UpsertSession(ctx, sess); err != nil {
+							slog.Warn("upsert session", "session", event.SessionID, "agent", agent, "error", err)
+						}
 					}()
 				}
 			}
@@ -786,7 +836,9 @@ func (s *Server) dispatchObservability(event hook.HookEvent, data map[string]int
 				if s.obsStore != nil {
 					key := store.SessionKey{SessionID: event.SessionID, AgentName: agentNameFor(agentType)}
 					go func() {
-						_ = s.obsStore.OpenFocusInterval(ctx, key, wms.EntityOutcome, id)
+						if err := s.obsStore.OpenFocusInterval(ctx, key, wms.EntityOutcome, id); err != nil {
+							slog.Warn("open focus interval", "session", key.SessionID, "agent", key.AgentName, "entity_type", wms.EntityOutcome, "entity_id", id, "error", err)
+						}
 					}()
 				}
 				s.stashMCPIdentity(mcpwms.ToolCreateOutcome, id, event.SessionID, agentType)
@@ -798,7 +850,9 @@ func (s *Server) dispatchObservability(event hook.HookEvent, data map[string]int
 				if s.obsStore != nil {
 					key := store.SessionKey{SessionID: event.SessionID, AgentName: agentNameFor(agentType)}
 					go func() {
-						_ = s.obsStore.OpenFocusInterval(ctx, key, wms.EntityWorkUnit, id)
+						if err := s.obsStore.OpenFocusInterval(ctx, key, wms.EntityWorkUnit, id); err != nil {
+							slog.Warn("open focus interval", "session", key.SessionID, "agent", key.AgentName, "entity_type", wms.EntityWorkUnit, "entity_id", id, "error", err)
+						}
 					}()
 				}
 				s.stashMCPIdentity(mcpwms.ToolCreateWorkUnit, id, event.SessionID, agentType)
@@ -817,7 +871,9 @@ func (s *Server) dispatchObservability(event hook.HookEvent, data map[string]int
 					if s.obsStore != nil {
 						key := store.SessionKey{SessionID: event.SessionID, AgentName: agentNameFor(agentType)}
 						go func() {
-							_ = s.obsStore.OpenFocusInterval(ctx, key, wms.EntityWorkUnit, id)
+							if err := s.obsStore.OpenFocusInterval(ctx, key, wms.EntityWorkUnit, id); err != nil {
+								slog.Warn("open focus interval", "session", key.SessionID, "agent", key.AgentName, "entity_type", wms.EntityWorkUnit, "entity_id", id, "error", err)
+							}
 						}()
 					}
 				}
@@ -843,7 +899,9 @@ func (s *Server) dispatchObservability(event hook.HookEvent, data map[string]int
 				if s.obsStore != nil && (entityType == wms.EntityOutcome || entityType == wms.EntityWorkUnit) {
 					key := store.SessionKey{SessionID: event.SessionID, AgentName: agentNameFor(agentType)}
 					go func() {
-						_ = s.obsStore.OpenFocusInterval(ctx, key, entityType, id)
+						if err := s.obsStore.OpenFocusInterval(ctx, key, entityType, id); err != nil {
+							slog.Warn("open focus interval", "session", key.SessionID, "agent", key.AgentName, "entity_type", entityType, "entity_id", id, "error", err)
+						}
 					}()
 				}
 				s.stashMCPIdentity(mcpwms.ToolSetFocus, id, event.SessionID, agentType)
@@ -928,10 +986,46 @@ func (s *Server) dispatchObservability(event hook.HookEvent, data map[string]int
 			if sid != "" && eid != "" {
 				key := store.SessionKey{SessionID: sid, AgentName: agent}
 				go func() {
-					_ = s.obsStore.CloseFocusIntervalForEntity(ctx, key, entityType, eid)
+					if err := s.obsStore.CloseFocusIntervalForEntity(ctx, key, entityType, eid); err != nil {
+						slog.Warn("close focus interval for entity", "session", key.SessionID, "agent", key.AgentName, "entity_type", entityType, "entity_id", eid, "error", err)
+					}
 				}()
 			}
 		}
+		// Claim-success focus interval: open a focus interval for the claiming
+		// agent the moment their claim actually lands, so focus attribution is
+		// mechanical instead of depending on a voluntary wms_setFocus call.
+		// Keyed off THIS event (not wms_claimWorkUnit's PreToolUse) because
+		// WMSStatusChange only fires after the engine's OnStatusChange call,
+		// which only runs after store.ClaimWorkUnit has already succeeded — the
+		// loser of a claim race never reaches this line. PreToolUse fires before
+		// the atomic claim executes and can't distinguish winner from loser, so
+		// opening there would give the loser a bogus interval. oldStatus=="" is
+		// included alongside "pending" to also cover a workunit adopted straight
+		// into active with no recorded prior status. Also fires for a plain
+		// wms_updateWorkUnitStatus pending->active transition (WMSStatusChange
+		// carries no discriminator for which MCP tool triggered it) — harmless,
+		// since OpenFocusInterval no-ops when the exact entity is already open
+		// (e.g. from that tool's own PreToolUse-time open above).
+		if s.obsStore != nil && entityType == wms.EntityWorkUnit && newStatus == wms.StatusActive &&
+			(oldStatus == wms.StatusPending || oldStatus == "") {
+			sid := hook.StrField(data, "wms_session_id", 64)
+			rawAgent := hook.StrField(data, "wms_agent_name", 64)
+			eid := hook.StrField(data, "wms_entity_id", 128)
+			if sid != "" && eid != "" && rawAgent != "" {
+				agent := agentNameFor(rawAgent)
+				key := store.SessionKey{SessionID: sid, AgentName: agent}
+				go func() {
+					if err := s.obsStore.OpenFocusInterval(ctx, key, wms.EntityWorkUnit, eid); err != nil {
+						slog.Warn("open focus interval on claim", "session", sid, "agent", agent, "work_unit_id", eid, "error", err)
+						claimFocusIntervalFailuresTotal.With(prometheus.Labels{"entity_type": wms.EntityWorkUnit}).Inc()
+						s.wmsWarnings.queue(sid, agent, fmt.Sprintf(
+							"[WMS] focus interval failed to open for WU %s — call wms_setFocus manually", eid))
+					}
+				}()
+			}
+		}
+
 		// W2 soft enforcement: warn (don't block) when a workunit reaches done
 		// without a tag for every required key. Unconditional — distinct from the
 		// hard store-level reject gated by RequireTagsOnDone. The transition has
@@ -977,6 +1071,7 @@ func (s *Server) dispatchObservability(event hook.HookEvent, data map[string]int
 			s.subagentNames.clearAgent(event.SessionID, agentType)
 			s.focusNudge.clearAgentTurn(event.SessionID, agent)
 			s.pressureNudge.clearAgent(event.SessionID, agent)
+			s.wmsWarnings.clearAgent(event.SessionID, agent)
 			s.rosterLastSeen.clearAgent(event.SessionID, agent)
 			s.turnStates.EndTurnForAgent(event.SessionID, agent)
 		} else {
@@ -985,6 +1080,7 @@ func (s *Server) dispatchObservability(event hook.HookEvent, data map[string]int
 			s.subagentNames.clearSession(event.SessionID)
 			s.focusNudge.clearSession(event.SessionID)
 			s.pressureNudge.clearSession(event.SessionID)
+			s.wmsWarnings.clearSession(event.SessionID)
 			s.rosterLastSeen.clearSession(event.SessionID)
 			s.turnStates.EndTurn(event.SessionID)
 			s.regMu.Lock()
@@ -1013,7 +1109,7 @@ func (s *Server) dispatchObservability(event hook.HookEvent, data map[string]int
 					}
 				}
 				for _, k := range affectedKeys {
-					_ = s.obsStore.UpsertSession(ctx, store.Session{
+					if err := s.obsStore.UpsertSession(ctx, store.Session{
 						SessionID: k.SessionID,
 						AgentName: k.AgentName,
 						Host:      hostFromData(data, s.cfg.Host),
@@ -1026,7 +1122,9 @@ func (s *Server) dispatchObservability(event hook.HookEvent, data map[string]int
 						// session); the store's COALESCE guard on this column
 						// protects against clobbering another agent's already-
 						// captured model with the lead's.
-					})
+					}); err != nil {
+						slog.Warn("upsert session", "session", k.SessionID, "agent", k.AgentName, "error", err)
+					}
 					n, drainErr := s.obsStore.CloseSessionIntervals(ctx, k.SessionID, k.AgentName, closeTime)
 					if drainErr != nil {
 						slog.Warn("drain session intervals",
@@ -1043,14 +1141,22 @@ func (s *Server) dispatchObservability(event hook.HookEvent, data map[string]int
 	}
 }
 
-// registerSubagentStart is the sole registration authority for sub-subagent
-// SubagentStart events. It resolves the instance key (session + the
-// spawn's own agent_id, a unique per-instance identifier unlike
-// agent_type, which is a reusable category label shared by every same-type
-// spawn) against instanceRegistry: a known key is a turn-resume (mailbox
-// wakeup or hookd-restart already-registered instance) and only needs a
-// liveness refresh; an unknown key is a potentially new spawn, resolved via
-// registerNewSubagentInstance. Returns the resolved unique agent name.
+// registerSubagentStart is the registration entry point for SubagentStart
+// events — both true sub-subagents (spawned by a non-lead agent) and direct
+// teammates/subagents of the lead (see registerNewSubagentInstance's rel
+// derivation; "sole registration authority" was this comment's claim in an
+// earlier revision, but dispatchObservability's PreToolUse/UserPromptSubmit
+// early-upsert path can ALSO first-register a teammate whose SubagentStart
+// hasn't been processed yet — see the parent-ref-fifo-fix WU's DEFECTS.md
+// entry for the untested latent race that leaves open). It resolves the
+// instance key (session + the spawn's own agent_id, a unique per-instance
+// identifier unlike agent_type, which is a reusable category label shared by
+// every same-type spawn) against instanceRegistry: a known key is a
+// turn-resume (mailbox wakeup or hookd-restart already-registered instance)
+// and only needs a liveness refresh (plus a bounded parent-ref self-heal
+// attempt, see selfHealParentRef); an unknown key is a potentially new
+// spawn, resolved via registerNewSubagentInstance. Returns the resolved
+// unique agent name.
 func (s *Server) registerSubagentStart(ctx context.Context, event hook.HookEvent, data map[string]interface{}) string {
 	instKey := event.SessionID + "|" + event.AgentID
 
@@ -1063,7 +1169,7 @@ func (s *Server) registerSubagentStart(ctx context.Context, event hook.HookEvent
 		s.sessions.Upsert(event.SessionID, strings.TrimPrefix(inst.name, "@"))
 		if s.obsStore != nil && s.rosterLastSeen.shouldRefresh(event.SessionID, inst.name) {
 			go func() {
-				_ = s.obsStore.UpsertSession(ctx, store.Session{
+				if err := s.obsStore.UpsertSession(ctx, store.Session{
 					SessionID: event.SessionID,
 					AgentName: inst.name,
 					Host:      hostFromData(data, s.cfg.Host),
@@ -1072,9 +1178,16 @@ func (s *Server) registerSubagentStart(ctx context.Context, event hook.HookEvent
 					// Model intentionally omitted — the store's COALESCE guard on
 					// that column protects against an empty value clobbering one
 					// already captured from a prior event.
-				})
+				}); err != nil {
+					slog.Warn("upsert session", "session", event.SessionID, "agent", inst.name, "error", err)
+				}
 			}()
 		}
+		// A resumed instance may still carry a nil ParentRef from a spawn-time
+		// sidecar/FIFO miss (see registerNewSubagentInstance) — bounded retry,
+		// see selfHealParentRef's doc comment for why this is safe to call on
+		// every resume.
+		s.selfHealParentRef(ctx, event, instKey)
 		// SubagentStart marks the subagent processing the same way a lead's
 		// UserPromptSubmit does — without this, a subagent that never
 		// receives its own UserPromptSubmit would stay at the
@@ -1105,23 +1218,25 @@ func (s *Server) registerNewSubagentInstance(ctx context.Context, event hook.Hoo
 	sessionID := event.SessionID
 	agentType := event.AgentType
 
-	// Ground-truth enrichment from the launch-time sidecar, when available —
-	// the child's own .meta.json sits beside its transcript at
-	// <parentTranscriptDir>/subagents/agent-<id>.meta.json (same layout
-	// hook.go's getModelFromMetaSidecar and health-collector's
-	// teammate_context.go rely on). Best-effort: absent file or fields just
-	// mean this stays nil and registration falls back to the FIFO/TTL
-	// name-matching heuristic below.
-	var sidecarMeta *subagentMeta
-	if event.AgentID != "" && event.TranscriptPath != "" {
-		childDir := strings.TrimSuffix(event.TranscriptPath, ".jsonl")
-		metaPath := filepath.Join(childDir, "subagents", "agent-"+event.AgentID+".meta.json")
-		if meta, err := readSubagentMeta(metaPath); err == nil {
-			sidecarMeta = meta
-		}
-	}
+	// Ground-truth enrichment from the launch-time sidecar, when available.
+	// Best-effort: an unreadable file or absent fields just mean this stays
+	// nil and registration falls back to the FIFO/TTL name-matching
+	// heuristic below. See readSidecarForEvent's doc comment — a failure
+	// here is now logged (it wasn't, and that silence is exactly what let
+	// two real spawns land mis-parented to the lead; see the
+	// parent-ref-fifo-fix WU).
+	sidecarMeta := readSidecarForEvent(event)
 
 	baseName, spawnerType := s.subagentNames.pop(sessionID, agentType)
+	// spawnerKnown distinguishes "the FIFO gave us a confirmed answer, and
+	// that answer happens to be the lead" (baseName came back non-empty,
+	// spawnerType=="" because the lead's own events carry no agent_type)
+	// from "we have no signal at all" (baseName came back empty and no
+	// roster-adopt match below). Both cases reach the parentAgent=="" default
+	// further down, but only the first one is a real "spawned by lead"
+	// signal — see the ParentRef==nil handling after rel/parentAgent for
+	// where this matters.
+	spawnerKnown := true
 	if baseName == "" {
 		// FIFO empty or expired: no Agent-tool PreToolUse queued a name for
 		// this spawn within the TTL. Check the roster before assuming this
@@ -1159,10 +1274,11 @@ func (s *Server) registerNewSubagentInstance(ctx context.Context, event hook.Hoo
 		}
 		baseName = agentNameFor(agentType)
 		spawnerType = ""
+		spawnerKnown = false
 	}
 
 	rel := "teammate"
-	parentAgent := "" // resolves to the lead when empty
+	parentAgent := "" // resolves to the lead when empty AND spawnerKnown
 	if spawnerType != "" {
 		rel = "subagent"
 		parentAgent = agentNameFor(spawnerType)
@@ -1221,11 +1337,25 @@ func (s *Server) registerNewSubagentInstance(ctx context.Context, event hook.Hoo
 		// FIFO/TTL name-matching heuristic's parentAgent guess, which can
 		// misattribute under concurrent same-type spawns.
 		if sidecarMeta != nil && sidecarMeta.ParentAgentID != "" {
-			if parentID, err := s.obsStore.ResolveByAgentID(ctx, sessionID, sidecarMeta.ParentAgentID); err == nil {
+			if parentID, err := s.resolveParentRosterID(ctx, sessionID, sidecarMeta.ParentAgentID); err == nil {
 				entry.ParentRef = &parentID
+			} else {
+				slog.Warn("resolve parent by agent_id", "session", sessionID, "agent_id", event.AgentID,
+					"parent_agent_id", sidecarMeta.ParentAgentID, "error", err)
 			}
 		}
-		if entry.ParentRef == nil {
+		// Only trust the FIFO-derived parentAgent when spawnerKnown — an
+		// unconditional fallback here is exactly the bug the
+		// parent-ref-fifo-fix WU traced: parentAgent=="" is ambiguous
+		// between "confirmed spawned by the lead" and "we have no signal at
+		// all", and ResolveRosterID(sessionID, "") always succeeds (it's the
+		// lead's own roster row), so the ambiguous case silently resolved to
+		// a confident wrong answer. When spawnerKnown is false and the
+		// sidecar above didn't resolve it either, ParentRef stays nil — an
+		// honest unknown that selfHealParentRef can correct once the sidecar
+		// becomes readable (ctop and the roster/health APIs already render a
+		// nil ParentRef as an unparented top-level row, not an error).
+		if entry.ParentRef == nil && spawnerKnown {
 			if parentID, err := s.obsStore.ResolveRosterID(ctx, sessionID, parentAgent); err == nil {
 				entry.ParentRef = &parentID
 			}
@@ -1235,7 +1365,9 @@ func (s *Server) registerNewSubagentInstance(ctx context.Context, event hook.Hoo
 				entry.TeamName = leadRoster.TeamName
 			}
 		}
-		_ = s.obsStore.UpsertRosterEntry(ctx, entry)
+		if err := s.obsStore.UpsertRosterEntry(ctx, entry); err != nil {
+			slog.Warn("upsert roster entry", "session", sessionID, "agent", unique, "roster_id", rosterID, "error", err)
+		}
 	}
 	s.instanceRegistry[instKey] = instanceEntry{name: unique, rosterID: rosterID}
 	s.regMu.Unlock()
@@ -1248,14 +1380,16 @@ func (s *Server) registerNewSubagentInstance(ctx context.Context, event hook.Hoo
 		// Model intentionally omitted — the store's COALESCE guard on that
 		// column protects against an empty value clobbering one already
 		// captured from a prior event.
-		_ = s.obsStore.UpsertSession(ctx, store.Session{
+		if err := s.obsStore.UpsertSession(ctx, store.Session{
 			SessionID: sessionID,
 			AgentName: unique,
 			Host:      hostFromData(data, s.cfg.Host),
 			Username:  s.cfg.User,
 			Status:    store.SessionStatusActive,
 			Runtime:   "claude_code",
-		})
+		}); err != nil {
+			slog.Warn("upsert session", "session", sessionID, "agent", unique, "error", err)
+		}
 	}
 
 	return unique
@@ -1285,6 +1419,124 @@ func readSubagentMeta(path string) (*subagentMeta, error) {
 		return nil, err
 	}
 	return &m, nil
+}
+
+// resolveParentRosterID maps a sidecar's parentAgentId (CC's per-instance
+// agent_id for the spawning agent) to that parent's roster_id — the type
+// ParentRef actually holds. This is two hops, not one: store.Store's
+// ResolveByAgentID resolves agent_id -> agent_name (its documented contract,
+// and the correct thing for its other caller, telemetry.go's ledger-row
+// attribution, which wants a display name) — it does NOT return a roster_id.
+// A prior revision of registerNewSubagentInstance stored ResolveByAgentID's
+// return value directly into entry.ParentRef, which happened to go
+// unnoticed only because sidecar reads were ALSO failing for the rows this
+// path exists to get right (see parent-ref-fifo-fix WU); the moment
+// ResolveByAgentID legitimately succeeds, that bug writes an agent_name
+// string into a column every consumer (ctop's byRoster lookup, the roster
+// and health APIs) expects to be a roster_id, rendering the row as an
+// unresolvable orphan instead of correctly parented. ResolveRosterID here is
+// the second hop, from that agent_name to its actual roster_id.
+func (s *Server) resolveParentRosterID(ctx context.Context, sessionID, parentAgentID string) (string, error) {
+	parentName, err := s.obsStore.ResolveByAgentID(ctx, sessionID, parentAgentID)
+	if err != nil {
+		return "", err
+	}
+	return s.obsStore.ResolveRosterID(ctx, sessionID, parentName)
+}
+
+// readSidecarForEvent reads a subagent's own .meta.json sidecar
+// (<parentTranscriptDir>/subagents/agent-<agent_id>.meta.json, written by
+// Claude Code itself at spawn time, same layout hook.go's
+// getModelFromMetaSidecar and health-collector's teammate_context.go rely
+// on) for the ground-truth parent/model/depth fields the FIFO/TTL
+// name-matching heuristic can't provide. Returns nil when the file can't be
+// read or parsed — logged at WARN rather than swallowed: the
+// parent-ref-fifo-fix WU traced two real spawns (@teamster:implementer,
+// @general-purpose) whose sidecars DID have the correct parentAgentId on
+// disk minutes later, meaning the read failed transiently at the exact
+// moment registration ran — most plausibly Claude Code hadn't finished
+// writing the file yet — and the resulting nil sidecarMeta was
+// indistinguishable from "no sidecar data exists" with nothing in the logs
+// to tell the two apart. Called from both the initial registration
+// (registerNewSubagentInstance) and the bounded resume retry
+// (selfHealParentRef), so a transient miss gets a few more chances at the
+// same signal instead of being permanent.
+func readSidecarForEvent(event hook.HookEvent) *subagentMeta {
+	if event.AgentID == "" || event.TranscriptPath == "" {
+		return nil
+	}
+	childDir := strings.TrimSuffix(event.TranscriptPath, ".jsonl")
+	metaPath := filepath.Join(childDir, "subagents", "agent-"+event.AgentID+".meta.json")
+	meta, err := readSubagentMeta(metaPath)
+	if err != nil {
+		slog.Warn("read subagent sidecar", "session", event.SessionID, "agent_id", event.AgentID, "path", metaPath, "error", err)
+		return nil
+	}
+	return meta
+}
+
+// selfHealMaxAttempts bounds how many SubagentStart resumes will retry a nil
+// ParentRef before giving up permanently on that instance. A transient
+// sidecar-read miss at spawn time (see readSidecarForEvent) typically
+// becomes readable within an instance's first few turns; a small bounded
+// number of tries is enough to catch that without turning a long-lived
+// agent's every turn-resume (@agent-defs had 17 in one session) into a disk
+// read plus a DB round trip for the rest of its life.
+const selfHealMaxAttempts = 3
+
+// selfHealParentRef re-attempts parent resolution for an already-registered
+// instance (instKey already in instanceRegistry, i.e. this is a turn-resume,
+// not the initial registration) whose roster row still has a nil ParentRef —
+// the "we didn't know" marker the ParentRef==nil handling in
+// registerNewSubagentInstance leaves behind instead of a confident wrong
+// answer. It NEVER touches a row that already has a non-nil ParentRef: only
+// an acknowledged unknown can be improved, a stored value — right or wrong —
+// is left alone so a later bad read can't corrupt a good one. Bounded to
+// selfHealMaxAttempts per instance (tracked in instanceRegistry) and cheap
+// to fail: a still-unreadable sidecar just leaves ParentRef nil and returns,
+// no retry loop, no blocking.
+func (s *Server) selfHealParentRef(ctx context.Context, event hook.HookEvent, instKey string) {
+	if s.obsStore == nil {
+		return
+	}
+
+	s.regMu.Lock()
+	inst, ok := s.instanceRegistry[instKey]
+	if !ok || inst.healAttempts >= selfHealMaxAttempts {
+		s.regMu.Unlock()
+		return
+	}
+	inst.healAttempts++
+	s.instanceRegistry[instKey] = inst
+	s.regMu.Unlock()
+
+	entry, err := s.obsStore.GetRosterEntry(ctx, inst.rosterID)
+	if err != nil || entry.ParentRef != nil {
+		return
+	}
+
+	sidecarMeta := readSidecarForEvent(event)
+	if sidecarMeta == nil || sidecarMeta.ParentAgentID == "" {
+		return
+	}
+	parentID, err := s.resolveParentRosterID(ctx, event.SessionID, sidecarMeta.ParentAgentID)
+	if err != nil {
+		slog.Warn("self-heal: resolve parent by agent_id", "session", event.SessionID, "agent_id", event.AgentID,
+			"parent_agent_id", sidecarMeta.ParentAgentID, "error", err)
+		return
+	}
+	entry.ParentRef = &parentID
+	if sidecarMeta.SpawnDepth > 0 {
+		// The sidecar becoming readable also resolves the rel misclassification
+		// that a nil ParentRef at spawn time leaves behind (see
+		// registerNewSubagentInstance's rel derivation) — correcting one
+		// without the other would leave the row internally inconsistent
+		// (a correctly-parented row still labeled "teammate").
+		entry.Relationship = "subagent"
+	}
+	if err := s.obsStore.UpsertRosterEntry(ctx, entry); err != nil {
+		slog.Warn("self-heal: correct parent_ref", "session", event.SessionID, "roster_id", inst.rosterID, "error", err)
+	}
 }
 
 // activityFromData extracts the (tag, display) pair hook.EnrichRecord wrote
@@ -1336,6 +1588,9 @@ func (s *Server) warnMissingRequiredTags(ctx context.Context, entityType, id, ag
 		return
 	}
 	slog.Warn("workunit done without required tags", "entity_id", id, "missing", missing)
+	s.wmsWarnings.queue(sessionID, agentName,
+		fmt.Sprintf("[WMS] workunit %s closed without required tags: %s — add them with wms_tagEntity",
+			id, strings.Join(missing, ", ")))
 	s.emitCloseOutWarning(id, agentName, missing, sessionID)
 }
 
@@ -1431,18 +1686,23 @@ func resolvedAgentName(data map[string]interface{}, agentType string) string {
 }
 
 // stashMCPIdentity records hook-derived identity for injection into the
-// subsequent MCP call keyed by toolSuffix:entityID (10 s TTL).
+// subsequent MCP call keyed by toolSuffix:entityID (10 s TTL). Appended to a
+// FIFO per key rather than overwriting: two agents calling the same tool on
+// the same entity within the TTL window each get their own stashed identity
+// instead of the second stash clobbering the first, and injectMCPIdentity
+// consumes them in the same order PreToolUse events arrived — the order the
+// corresponding MCP calls arrive in.
 func (s *Server) stashMCPIdentity(toolSuffix, entityID, sessionID, agentType string) {
 	key := toolSuffix + ":" + entityID
 	s.pendingMCPMu.Lock()
 	if s.pendingMCPIdent == nil {
-		s.pendingMCPIdent = make(map[string]mcpIdentity)
+		s.pendingMCPIdent = make(map[string][]mcpIdentity)
 	}
-	s.pendingMCPIdent[key] = mcpIdentity{
+	s.pendingMCPIdent[key] = append(s.pendingMCPIdent[key], mcpIdentity{
 		SessionID: sessionID,
 		AgentType: agentType,
 		ExpiresAt: time.Now().Add(10 * time.Second),
-	}
+	})
 	s.pendingMCPMu.Unlock()
 }
 
@@ -1480,9 +1740,18 @@ func (s *Server) injectMCPIdentity(raw json.RawMessage) json.RawMessage {
 	var ident mcpIdentity
 	var ok bool
 	if s.pendingMCPIdent != nil {
-		ident, ok = s.pendingMCPIdent[key]
-		if ok {
-			delete(s.pendingMCPIdent, key)
+		entries := s.pendingMCPIdent[key]
+		for i, e := range entries {
+			if now.After(e.ExpiresAt) {
+				continue
+			}
+			ident = e
+			ok = true
+			s.pendingMCPIdent[key] = append(entries[:i], entries[i+1:]...)
+			if len(s.pendingMCPIdent[key]) == 0 {
+				delete(s.pendingMCPIdent, key)
+			}
+			break
 		}
 	}
 	// Lazy TTL cleanup — bounded to avoid holding the lock too long.
@@ -1491,14 +1760,22 @@ func (s *Server) injectMCPIdentity(raw json.RawMessage) json.RawMessage {
 		if cleaned >= 10 {
 			break
 		}
-		if now.After(v.ExpiresAt) {
-			delete(s.pendingMCPIdent, k)
-			cleaned++
+		live := v[:0]
+		for _, e := range v {
+			if !now.After(e.ExpiresAt) {
+				live = append(live, e)
+			}
 		}
+		if len(live) == 0 {
+			delete(s.pendingMCPIdent, k)
+		} else {
+			s.pendingMCPIdent[k] = live
+		}
+		cleaned++
 	}
 	s.pendingMCPMu.Unlock()
 
-	if !ok || now.After(ident.ExpiresAt) {
+	if !ok {
 		return raw
 	}
 
