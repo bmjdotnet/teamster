@@ -1589,7 +1589,7 @@
             "spanNulls": true,
             "stacking": {
               "group": "A",
-              "mode": "none"
+              "mode": "normal"
             },
             "thresholdsStyle": {
               "mode": "off"
@@ -1637,21 +1637,6 @@
                 }
               }
             ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "iteration_plus_review_pct"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "red",
-                  "mode": "fixed"
-                }
-              }
-            ]
           }
         ]
       },
@@ -1685,7 +1670,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\n  $__timeGroupAlias(wi.started_at, $agg),\n  ROUND(100.0 * SUM(CASE WHEN wi.phase = 'iterate' THEN wi.cost_usd ELSE 0 END)\n    / NULLIF(SUM(wi.cost_usd), 0), 1) AS iterate_pct,\n  ROUND(100.0 * SUM(CASE WHEN wi.phase = 'review' THEN wi.cost_usd ELSE 0 END)\n    / NULLIF(SUM(wi.cost_usd), 0), 1) AS review_pct,\n  ROUND(100.0 * SUM(CASE WHEN wi.phase IN ('iterate','review') THEN wi.cost_usd ELSE 0 END)\n    / NULLIF(SUM(wi.cost_usd), 0), 1) AS iteration_plus_review_pct\nFROM wms_intervals wi\nWHERE wi.kind = 'state'\n  AND wi.phase IS NOT NULL\n  AND wi.cost_usd IS NOT NULL\n  AND wi.started_at BETWEEN $__timeFrom() AND $__timeTo()\nGROUP BY 1\nORDER BY 1",
+          "rawSql": "SELECT\n  $__timeGroupAlias(wi.started_at, $agg),\n  ROUND(100.0 * SUM(CASE WHEN wi.phase = 'iterate' THEN wi.cost_usd ELSE 0 END)\n    / NULLIF(SUM(wi.cost_usd), 0), 1) AS iterate_pct,\n  ROUND(100.0 * SUM(CASE WHEN wi.phase = 'review' THEN wi.cost_usd ELSE 0 END)\n    / NULLIF(SUM(wi.cost_usd), 0), 1) AS review_pct\nFROM wms_intervals wi\nWHERE wi.kind = 'state'\n  AND wi.phase IS NOT NULL\n  AND wi.cost_usd IS NOT NULL\n  AND wi.started_at BETWEEN $__timeFrom() AND $__timeTo()\nGROUP BY 1\nORDER BY 1",
           "refId": "A"
         }
       ],
