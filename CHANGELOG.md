@@ -13,6 +13,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - **Claim system.** Mechanized work assignment and delivery as core WMS functionality (`wms_claimWorkUnit`, `wms_deliverResult`, `wms_listDeliverables`). Cost attribution for dispatched work is now automatic.
 - **Dispatch feedback.** Protocol violations now reach the agent that caused them, not just the activity log.
 - **Work-type vocabulary consolidation.** 18 values → 11. Removed duplicates and ambiguous categories; added `polish` for post-delivery refinements.
+- **Model x Phase Cost Matrix.** Added a phase-dimension companion to the Model x Work-Type Cost Matrix in the Usage & Effectiveness dashboard, for spotting model-fit issues by pipeline stage.
 
 ### Changed
 - Pre-delivery correction phase renamed from `rework` to `iterate`. "Rework" now refers exclusively to post-delivery relation tracking.
