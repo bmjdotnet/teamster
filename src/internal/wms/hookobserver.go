@@ -4,12 +4,26 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 )
+
+// ReviewSweepAgentID is the fixed, non-live-session identity `teamster wms
+// review-sweep` (cmd/teamster/wms_review_sweep.go) stamps on every close and
+// journal row it writes — as the journal agent_id, and as the StatusChange
+// SessionID/AgentName so hookd's session-keyed side effects run under a
+// stable identity instead of impersonating whatever session happens to be
+// live on the host (WP3-DESIGN.md Operator Decision 9). Exported so hookd
+// (internal/server) can recognize that a close-out warning posted under
+// this identity can never be consumed — no PreToolUse, Stop or
+// UserPromptSubmit for this (session, agent) pair will ever run — and must
+// not be queued (wh2-sweep-warning-queue). One constant, defined once, so
+// cmd/teamster and internal/server can never drift apart on the literal.
+const ReviewSweepAgentID = "wms-review-sweep"
 
 // HookObserver posts WMS status and focus changes to the hook server so they
 // appear in the JSONL activity stream alongside normal tool events.
@@ -59,17 +73,34 @@ func NewHookObserver(serverURL, host string) *HookObserver {
 // originating PreToolUse event; this event carries raw WMS fields for
 // auditing, rollup attribution, and rollup-driven auto-completions.
 func (h *HookObserver) OnStatusChange(change StatusChange) {
+	h.post(h.statusChangeRecord(change))
+}
+
+// PostStatusChange is the additive counterpart to OnStatusChange (the
+// Observer-interface method above, whose signature stays unchanged) for a
+// caller that needs to know whether the notification actually landed
+// instead of silently discarding the outcome — LF-VER-1, Operator Decision
+// 3 (WP3-DESIGN.md §5). `teamster wms review-sweep` calls this directly
+// (not via a full Engine) after every close and accumulates a run-level
+// notified/failed count from the returned bool.
+func (h *HookObserver) PostStatusChange(change StatusChange) bool {
+	return h.post(h.statusChangeRecord(change))
+}
+
+// statusChangeRecord builds the WMSStatusChange event body shared by
+// OnStatusChange and PostStatusChange. WMSStatusChange is a metadata-only
+// event — no _tool_tag or _tool_display. The PreToolUse event (enriched by
+// the interceptor registry) produces the visible feed line with __param__
+// markers; this event logs the raw WMS transition for auditing, rollup
+// attribution, and cases where no PreToolUse exists (rollup
+// auto-completions, and now the review sweep, which bypasses the engine
+// entirely).
+func (h *HookObserver) statusChangeRecord(change StatusChange) map[string]interface{} {
 	sid := h.sessionID
 	if change.SessionID != "" {
 		sid = change.SessionID
 	}
-
-	// WMSStatusChange is now a metadata-only event — no _tool_tag or
-	// _tool_display. The PreToolUse event (enriched by the interceptor
-	// registry) produces the visible feed line with __param__ markers.
-	// This event still logs the raw WMS transition for auditing, rollup,
-	// and cases where no PreToolUse exists (rollup auto-completions).
-	record := map[string]interface{}{
+	return map[string]interface{}{
 		"session_id":      sid,
 		"_host":           h.host,
 		"hook_event_name": "WMSStatusChange",
@@ -82,8 +113,6 @@ func (h *HookObserver) OnStatusChange(change StatusChange) {
 		"wms_agent_name":  change.AgentName,
 		"wms_host":        change.Host,
 	}
-
-	h.post(record)
 }
 
 // OnFocusChange posts a focus record for the focus update.
@@ -103,22 +132,36 @@ func (h *HookObserver) OnFocusChange(update FocusUpdate) {
 	h.post(record)
 }
 
-func (h *HookObserver) post(record map[string]interface{}) {
+// post sends record to the hook server and reports whether it landed (2xx,
+// no request/marshal error). LF-VER-1: previously every failure path
+// returned silently, with no way for any caller — including wms-mcp's own
+// registration — to know a notification was lost. Additive: OnStatusChange
+// still discards the result, unchanged for every existing caller; only
+// PostStatusChange (above) uses it.
+func (h *HookObserver) post(record map[string]interface{}) bool {
 	body, err := json.Marshal(record)
 	if err != nil {
-		return
+		slog.Warn("hookobserver: marshal failed", "err", err)
+		return false
 	}
 	client := &http.Client{Timeout: 2 * time.Second}
 	req, err := http.NewRequest(http.MethodPost, h.serverURL, bytes.NewReader(body))
 	if err != nil {
-		return
+		slog.Warn("hookobserver: build request failed", "url", h.serverURL, "err", err)
+		return false
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {
-		return
+		slog.Warn("hookobserver: post failed", "url", h.serverURL, "err", err)
+		return false
 	}
-	resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		slog.Warn("hookobserver: non-2xx response", "url", h.serverURL, "status", resp.StatusCode)
+		return false
+	}
+	return true
 }
 
 // readCurrentSessionID reads ~/.claude/current-session-id written by the hook client.

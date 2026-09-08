@@ -42,16 +42,28 @@ type grafanaTemplateData struct {
 	GrafanaDBPassword string
 }
 
-// StartGrafana renders the grafana.ini template and provisioning configs,
-// then launches grafana-server. Returns the running *exec.Cmd so the
-// supervisor can reap it.
-func StartGrafana(ctx context.Context, cfg config.Config) (*exec.Cmd, error) {
+// grafanaArgs computes grafana-server's CLI argv from iniPath and
+// grafanaHomePath. Shared by StartGrafana (supervisor mode) and
+// prepareComponentExec (start.go's systemd exec-wrapper,
+// wh2-supervisor-systemd-units) so there is exactly one construction of the
+// command line — round-4 grant extension, same reasoning as prometheusArgs.
+func grafanaArgs(iniPath, grafanaHomePath string) []string {
+	return []string{"--config=" + iniPath, "--homepath=" + grafanaHomePath}
+}
+
+// prepareGrafanaConfig creates grafana's directory tree, resolves its secret
+// key and read-only DB credential, builds the template data, and renders
+// grafana.ini + provisioning from it. Shared by StartGrafana (supervisor
+// mode) and prepareComponentExec (start.go's systemd exec-wrapper,
+// wh2-supervisor-systemd-units) so the credential-bearing setup —
+// grafanaSecretKey, readGrafanaReadonlyPassword — lives in exactly one
+// place: a second, independently-maintained copy risks the two drifting to a
+// different secret key or a blank DB credential, silently, with no build
+// error and no failing test (SUPERVISOR-UNITS-DESIGN.md §4).
+func prepareGrafanaConfig(cfg config.Config) error {
 	basedir := grafanaBasedir(cfg)
 	grafanaEtcDir := filepath.Join(basedir, "etc", "grafana")
 	grafanaStateDir := filepath.Join(basedir, "var", "grafana")
-	iniPath := filepath.Join(grafanaEtcDir, "grafana.ini")
-	logPath := filepath.Join(basedir, "var", "logs", "grafana.log")
-	binPath := filepath.Join(basedir, "bin", "grafana-server")
 
 	for _, dir := range []string{
 		grafanaEtcDir,
@@ -64,13 +76,13 @@ func StartGrafana(ctx context.Context, cfg config.Config) (*exec.Cmd, error) {
 		filepath.Join(basedir, "var", "logs"),
 	} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return nil, fmt.Errorf("grafana: mkdir %s: %w", dir, err)
+			return fmt.Errorf("grafana: mkdir %s: %w", dir, err)
 		}
 	}
 
 	secretKey, err := grafanaSecretKey(grafanaStateDir)
 	if err != nil {
-		return nil, fmt.Errorf("grafana: secret key: %w", err)
+		return fmt.Errorf("grafana: secret key: %w", err)
 	}
 
 	adminPassword := "admin"
@@ -108,7 +120,7 @@ func StartGrafana(ctx context.Context, cfg config.Config) (*exec.Cmd, error) {
 	if cfg.StoreDSN.Scheme == "mysql" && cfg.StoreDSN.Host != "" && cfg.StoreDSN.Database != "" {
 		roPassword, perr := readGrafanaReadonlyPassword(grafanaStateDir)
 		if perr != nil {
-			return nil, fmt.Errorf("grafana: read-only db password: %w", perr)
+			return fmt.Errorf("grafana: read-only db password: %w", perr)
 		}
 		data.StoreHost = cfg.StoreDSN.Host
 		data.StorePort = storePortString(cfg.StoreDSN.Port)
@@ -122,7 +134,22 @@ func StartGrafana(ctx context.Context, cfg config.Config) (*exec.Cmd, error) {
 	}
 
 	if err := renderGrafanaConfigs(basedir, grafanaEtcDir, data); err != nil {
-		return nil, fmt.Errorf("grafana: render configs: %w", err)
+		return fmt.Errorf("grafana: render configs: %w", err)
+	}
+	return nil
+}
+
+// StartGrafana renders the grafana.ini template and provisioning configs,
+// then launches grafana-server. Returns the running *exec.Cmd so the
+// supervisor can reap it.
+func StartGrafana(ctx context.Context, cfg config.Config) (*exec.Cmd, error) {
+	basedir := grafanaBasedir(cfg)
+	iniPath := filepath.Join(basedir, "etc", "grafana", "grafana.ini")
+	logPath := filepath.Join(basedir, "var", "logs", "grafana.log")
+	binPath := filepath.Join(basedir, "bin", "grafana-server")
+
+	if err := prepareGrafanaConfig(cfg); err != nil {
+		return nil, err
 	}
 
 	logFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
@@ -131,10 +158,7 @@ func StartGrafana(ctx context.Context, cfg config.Config) (*exec.Cmd, error) {
 	}
 
 	grafanaHomePath := filepath.Join(basedir, "var", "grafana-home")
-	cmd := exec.CommandContext(ctx, binPath,
-		"--config="+iniPath,
-		"--homepath="+grafanaHomePath,
-	)
+	cmd := exec.CommandContext(ctx, binPath, grafanaArgs(iniPath, grafanaHomePath)...)
 	cmd.Dir = basedir
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile

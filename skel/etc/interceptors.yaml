@@ -167,6 +167,10 @@ interceptors:
         tag: TASK
         display: 'Claimed workunit __{{f "id"}}__'
 
+      - match: { method: "deliverResult" }
+        tag: TASK
+        display: 'Delivering result for __{{f "id"}}__'
+
       - match: { method: "classifyEntity" }
         tag: TASK
         display: 'Classifying __{{f "entityType"}}__ __{{f "entityID"}}__'
@@ -216,7 +220,7 @@ interceptors:
 
       - match: { method: "describeTag" }
         tag: TASK
-        display: 'Describing tag __{{f "tagKey"}}__'
+        display: 'Describing tag __{{f "tagKey"}}__=__{{f "tagValue"}}__'
 
       - match: { method: "retireTag" }
         tag: TASK
@@ -266,7 +270,11 @@ interceptors:
 
       - match: { method: "getTimeline" }
         tag: TASK
-        display: 'Getting timeline for __{{f "entityID"}}__'
+        display: 'Getting timeline for __{{f "entityType"}}__ __{{f "entityID"}}__'
+
+      - match: { method: "listDeliverables" }
+        tag: TASK
+        display: 'Listing deliverables for __{{f "entityID"}}__'
 
       - match: { method: "listBlockers" }
         tag: TASK
@@ -281,6 +289,30 @@ interceptors:
       - match: { method: "listRelated" }
         tag: TASK
         display: 'Finding related to: __{{f "query"}}__'
+
+      - match: { method: "addOutcomeParent" }
+        tag: TASK
+        display: 'Parenting __{{f "childID"}}__ under __{{f "parentID"}}__'
+
+      - match: { method: "removeOutcomeParent" }
+        tag: TASK
+        display: 'Unparenting __{{f "childID"}}__ from __{{f "parentID"}}__'
+
+      - match: { method: "addRelation" }
+        tag: TASK
+        display: '__{{f "fromID"}}__ __{{f "kind"}}__ __{{f "toID"}}__'
+
+      - match: { method: "removeRelation" }
+        tag: TASK
+        display: 'Removing relation: __{{f "fromID"}}__ __{{f "kind"}}__ __{{f "toID"}}__'
+
+      - match: { method: "listRelations" }
+        tag: TASK
+        display: 'Listing relations for __{{f "entityType"}}__ __{{f "entityID"}}__'
+
+      - match: { method: "listRelationKinds" }
+        tag: TASK
+        display: 'Listing relation kinds'
 
   # --- Activity ---
   - match: { prefix: "mcp__activity__" }

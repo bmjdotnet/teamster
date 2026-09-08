@@ -80,19 +80,37 @@ func TestMissingRequiredKeys(t *testing.T) {
 
 // fakeCloseoutStore satisfies store.Store via the embedded interface (left nil:
 // any method the close-out path does not exercise will panic if called, which is
-// the desired failure signal). It overrides only the three methods the
-// WMSStatusChange→done→workunit branch touches.
+// the desired failure signal). It overrides only the methods the
+// WMSStatusChange→done→workunit branch touches, including the inheritance walk
+// warnMissingRequiredTags now does via wms.ResolveEntityTags: GetWorkUnit
+// (to find the workunit's parent outcome) and GetEntityTags keyed by entity
+// type/id (workunit tags vs. the outcome's, so a test can set them
+// independently to exercise inheritance/shadowing).
 type fakeCloseoutStore struct {
 	store.Store
 	required []string
-	tags     []wms.EntityTag
+	tags     []wms.EntityTag // direct tags on the workunit under test
+
+	// outcomeID and outcomeTags are optional: unset (outcomeID=="") means the
+	// workunit has no resolvable parent, matching the pre-inheritance tests'
+	// behavior exactly (ResolveEntityTags never calls GetEntityTags for the
+	// outcome when OutcomeID is empty).
+	outcomeID   string
+	outcomeTags []wms.EntityTag
 }
 
 func (f *fakeCloseoutStore) ListRequiredTagKeys(context.Context) ([]string, error) {
 	return f.required, nil
 }
 
-func (f *fakeCloseoutStore) GetEntityTags(_ context.Context, _, _ string) ([]wms.EntityTag, error) {
+func (f *fakeCloseoutStore) GetWorkUnit(_ context.Context, id string) (*wms.WorkUnit, error) {
+	return &wms.WorkUnit{ID: id, OutcomeID: f.outcomeID}, nil
+}
+
+func (f *fakeCloseoutStore) GetEntityTags(_ context.Context, entityType, _ string) ([]wms.EntityTag, error) {
+	if entityType == wms.EntityOutcome {
+		return f.outcomeTags, nil
+	}
 	return f.tags, nil
 }
 
@@ -192,6 +210,243 @@ func TestEmitCloseOutWarning_NoWarnWhenSatisfied(t *testing.T) {
 	}
 }
 
+// TestEmitCloseOutWarning_InheritedFromOutcome is the regression case for the
+// inheritance fix: a required key (product) is bound only on the workunit's
+// parent outcome, never on the workunit itself. Before the fix this produced
+// a spurious warning on nearly every close-out (MCP-KG-3) because the check
+// read GetEntityTags directly; now it must count as satisfied, so no warning
+// is queued and no WMSCloseOutWarning record lands.
+func TestEmitCloseOutWarning_InheritedFromOutcome(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "events.jsonl")
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("open log: %v", err)
+	}
+	defer f.Close()
+
+	s := &Server{
+		cfg:      config.Config{Host: "testhost"},
+		logFile:  f,
+		metrics:  observability.NewMetrics(prometheus.NewRegistry()),
+		sessions: observability.NewSessionTracker("testhost", time.Minute, time.Minute, nil),
+		obsStore: &fakeCloseoutStore{
+			required:    []string{"product"},
+			outcomeID:   "out-1",
+			outcomeTags: []wms.EntityTag{{TagKey: "product", TagValue: "teamster"}},
+		},
+	}
+	s.bus.subscribers = make(map[uint64]chan ssePayload)
+
+	s.dispatchObservability(hook.HookEvent{HookEventName: "WMSStatusChange"}, map[string]interface{}{
+		"hook_event_name": "WMSStatusChange",
+		"wms_entity_type": wms.EntityWorkUnit,
+		"wms_entity_id":   "wu-inherit",
+		"wms_new_status":  wms.StatusDone,
+		"wms_session_id":  "s1",
+	})
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if findCloseOutWarning(logPath) != nil {
+			t.Fatal("unexpected WMSCloseOutWarning emitted when the required tag is satisfied via outcome inheritance")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestEmitCloseOutWarning_MissingOnWorkUnitAndOutcome is the negative case:
+// the required key is bound on neither the workunit nor its parent outcome,
+// so the warning must still fire.
+func TestEmitCloseOutWarning_MissingOnWorkUnitAndOutcome(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "events.jsonl")
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("open log: %v", err)
+	}
+	defer f.Close()
+
+	s := &Server{
+		cfg:      config.Config{Host: "testhost"},
+		logFile:  f,
+		metrics:  observability.NewMetrics(prometheus.NewRegistry()),
+		sessions: observability.NewSessionTracker("testhost", time.Minute, time.Minute, nil),
+		obsStore: &fakeCloseoutStore{
+			required:  []string{"product"},
+			outcomeID: "out-1",
+			// tags and outcomeTags both left empty: product is bound nowhere.
+		},
+	}
+	s.bus.subscribers = make(map[uint64]chan ssePayload)
+
+	s.dispatchObservability(hook.HookEvent{HookEventName: "WMSStatusChange"}, map[string]interface{}{
+		"hook_event_name": "WMSStatusChange",
+		"wms_entity_type": wms.EntityWorkUnit,
+		"wms_entity_id":   "wu-neither",
+		"wms_new_status":  wms.StatusDone,
+		"wms_session_id":  "s1",
+	})
+
+	rec := waitForCloseOutWarning(t, logPath)
+	missing, _ := rec["missing"].([]interface{})
+	if len(missing) != 1 || missing[0] != "product" {
+		t.Errorf("missing = %v, want [product]", rec["missing"])
+	}
+}
+
+// TestEmitCloseOutWarning_WorkUnitBindingShadowsOutcome: the workunit carries
+// its own binding for the required key (a different value than the outcome's)
+// — no warning. This is a regression guard for the direct-binding case
+// through the real warning path (missingRequiredKeys keys on TagKey only, so
+// it can't itself distinguish "satisfied by the workunit's own value" from
+// "satisfied by the outcome's" — that distinction is what
+// TestResolveEntityTags_WorkUnitOwnBindingShadowsOutcome in internal/wms
+// proves, asserting TagValue/Inherited/Origin directly).
+func TestEmitCloseOutWarning_WorkUnitBindingShadowsOutcome(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "events.jsonl")
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("open log: %v", err)
+	}
+	defer f.Close()
+
+	s := &Server{
+		cfg:      config.Config{Host: "testhost"},
+		logFile:  f,
+		metrics:  observability.NewMetrics(prometheus.NewRegistry()),
+		sessions: observability.NewSessionTracker("testhost", time.Minute, time.Minute, nil),
+		obsStore: &fakeCloseoutStore{
+			required:    []string{"product"},
+			tags:        []wms.EntityTag{{TagKey: "product", TagValue: "wms-hygiene"}},
+			outcomeID:   "out-1",
+			outcomeTags: []wms.EntityTag{{TagKey: "product", TagValue: "teamster"}},
+		},
+	}
+	s.bus.subscribers = make(map[uint64]chan ssePayload)
+
+	s.dispatchObservability(hook.HookEvent{HookEventName: "WMSStatusChange"}, map[string]interface{}{
+		"hook_event_name": "WMSStatusChange",
+		"wms_entity_type": wms.EntityWorkUnit,
+		"wms_entity_id":   "wu-shadow",
+		"wms_new_status":  wms.StatusDone,
+		"wms_session_id":  "s1",
+	})
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if findCloseOutWarning(logPath) != nil {
+			t.Fatal("unexpected WMSCloseOutWarning emitted when the workunit's own binding satisfies the required key")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestWarnMissingRequiredTags_SweepIdentity_NoQueue is the regression case for
+// wh2-sweep-warning-queue: a close posted under the review sweep's fixed,
+// non-live identity (wms.ReviewSweepAgentID as both session and agent, exactly
+// as recordSweepClose in cmd/teamster/wms_review_sweep.go sets them) must still
+// land its WMSCloseOutWarning JSONL record, but must NOT queue an agent-facing
+// nudge — nothing ever calls consume/clearAgent/clearSession for that
+// (session, agent) pair, so a queued entry there is permanently unreachable.
+// queue() runs (if at all) synchronously before emitCloseOutWarning inside the
+// same detached goroutine, so observing the JSONL record first makes the
+// consume() check below race-free: whatever queue() did has already happened.
+func TestWarnMissingRequiredTags_SweepIdentity_NoQueue(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "events.jsonl")
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("open log: %v", err)
+	}
+	defer f.Close()
+
+	s := &Server{
+		cfg:      config.Config{Host: "testhost"},
+		logFile:  f,
+		metrics:  observability.NewMetrics(prometheus.NewRegistry()),
+		sessions: observability.NewSessionTracker("testhost", time.Minute, time.Minute, nil),
+		obsStore: &fakeCloseoutStore{
+			required: []string{"work-type"},
+			// tags left empty: work-type missing, exactly like an unreviewed
+			// sweep-closed workunit.
+		},
+	}
+	s.bus.subscribers = make(map[uint64]chan ssePayload)
+
+	s.dispatchObservability(hook.HookEvent{HookEventName: "WMSStatusChange"}, map[string]interface{}{
+		"hook_event_name": "WMSStatusChange",
+		"wms_entity_type": wms.EntityWorkUnit,
+		"wms_entity_id":   "wu-sweep",
+		"wms_new_status":  wms.StatusDone,
+		"wms_session_id":  wms.ReviewSweepAgentID,
+		"wms_agent_name":  wms.ReviewSweepAgentID,
+	})
+
+	rec := waitForCloseOutWarning(t, logPath)
+	if got := rec["entity_id"]; got != "wu-sweep" {
+		t.Errorf("entity_id = %v, want %q", got, "wu-sweep")
+	}
+	// Not just "at least one" — the audit trail (constraint 1) must be
+	// exactly the single record this one close produces. A test that only
+	// checked presence would pass just as well if the guard's queue() were
+	// accidentally left in place emitting the record twice, or if some other
+	// duplicate-emit defect crept in; count is the assertion that actually
+	// pins "the audit trail is unaffected" rather than merely "not deleted."
+	if n := countCloseOutWarnings(logPath); n != 1 {
+		t.Fatalf("found %d WMSCloseOutWarning record(s) for the sweep-identity close, want exactly 1", n)
+	}
+
+	if queued := s.wmsWarnings.consume(wms.ReviewSweepAgentID, agentNameFor(wms.ReviewSweepAgentID)); queued != "" {
+		t.Errorf("wmsWarningQueue holds an entry for the sweep's fixed identity, which can never consume it: %q", queued)
+	}
+}
+
+// TestWarnMissingRequiredTags_LiveSession_StillQueued is the positive control
+// for the same fix: an ordinary live session's close-out warning must still
+// queue exactly as before, and be consumable (the shape PreToolUse's
+// consume() call exercises).
+func TestWarnMissingRequiredTags_LiveSession_StillQueued(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "events.jsonl")
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("open log: %v", err)
+	}
+	defer f.Close()
+
+	s := &Server{
+		cfg:      config.Config{Host: "testhost"},
+		logFile:  f,
+		metrics:  observability.NewMetrics(prometheus.NewRegistry()),
+		sessions: observability.NewSessionTracker("testhost", time.Minute, time.Minute, nil),
+		obsStore: &fakeCloseoutStore{
+			required: []string{"work-type"},
+		},
+	}
+	s.bus.subscribers = make(map[uint64]chan ssePayload)
+
+	s.dispatchObservability(hook.HookEvent{HookEventName: "WMSStatusChange"}, map[string]interface{}{
+		"hook_event_name": "WMSStatusChange",
+		"wms_entity_type": wms.EntityWorkUnit,
+		"wms_entity_id":   "wu-live",
+		"wms_new_status":  wms.StatusDone,
+		"wms_session_id":  "sess-live-1",
+		"wms_agent_name":  "scout",
+	})
+
+	waitForCloseOutWarning(t, logPath)
+
+	queued := s.wmsWarnings.consume("sess-live-1", agentNameFor("scout"))
+	if queued == "" {
+		t.Fatal("expected a queued close-out warning for a live session, got none")
+	}
+	if !strings.Contains(queued, "wu-live") {
+		t.Errorf("queued warning = %q, want it to mention wu-live", queued)
+	}
+	// consume() is destructive (matches PreToolUse's real usage) — a second
+	// call must find nothing left, proving this was a real dequeue.
+	if again := s.wmsWarnings.consume("sess-live-1", agentNameFor("scout")); again != "" {
+		t.Errorf("consume() after consume() returned %q, want empty (queue not actually drained)", again)
+	}
+}
+
 // waitForCloseOutWarning polls the JSONL log until a WMSCloseOutWarning record
 // appears (the emit runs in a detached goroutine) or a 2s deadline elapses.
 func waitForCloseOutWarning(t *testing.T, logPath string) map[string]interface{} {
@@ -205,6 +460,33 @@ func waitForCloseOutWarning(t *testing.T, logPath string) map[string]interface{}
 	}
 	t.Fatalf("no WMSCloseOutWarning record in %s within deadline", logPath)
 	return nil
+}
+
+// countCloseOutWarnings scans the JSONL log and counts every record whose
+// event field is WMSCloseOutWarning. Used where "a record was written" is
+// not a strong enough assertion and the test needs "exactly one."
+func countCloseOutWarnings(logPath string) int {
+	f, err := os.Open(logPath)
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	n := 0
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var rec map[string]interface{}
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			continue
+		}
+		if rec["event"] == "WMSCloseOutWarning" {
+			n++
+		}
+	}
+	return n
 }
 
 // findCloseOutWarning scans the JSONL log for a record whose event field is

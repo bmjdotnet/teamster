@@ -87,13 +87,14 @@ func (s *Store) OpenFocusInterval(ctx context.Context, key store.SessionKey, ent
 	return tx.Commit()
 }
 
-// HasAnyFocusInterval returns true when (session, agent) has any kind='focus'
-// interval row, open or closed.
+// HasAnyFocusInterval returns true when (session, agent) has a kind='focus'
+// interval row that is currently OPEN. See the interface doc in store.go for
+// why this now requires ended_at IS NULL rather than "open or closed".
 func (s *Store) HasAnyFocusInterval(ctx context.Context, key store.SessionKey) (bool, error) {
 	var exists int
 	err := s.db.QueryRowContext(ctx,
 		`SELECT 1 FROM wms_intervals
-		 WHERE kind = 'focus' AND session_id = ? AND agent_name = ?
+		 WHERE kind = 'focus' AND session_id = ? AND agent_name = ? AND ended_at IS NULL
 		 LIMIT 1`,
 		key.SessionID, key.AgentName,
 	).Scan(&exists)
@@ -215,7 +216,7 @@ func closeCandidatesByID(ctx context.Context, db *sql.DB, base time.Time, candid
 }
 
 // CloseIntervalsOnTerminalEntities closes open intervals whose entity has
-// reached a terminal status (done). Phase 1 of the reaper.
+// reached a terminal status (done or abandoned). Phase 1 of the reaper.
 func (s *Store) CloseIntervalsOnTerminalEntities(ctx context.Context) (int64, error) {
 	var total int64
 	base := nowUTC()
@@ -226,7 +227,7 @@ func (s *Store) CloseIntervalsOnTerminalEntities(ctx context.Context) (int64, er
 		rows, err := s.db.QueryContext(ctx, `
 			SELECT i.id, i.started_at
 			FROM wms_intervals i
-			JOIN `+tbl.table+` e ON e.id = i.entity_id AND e.status = 'done'
+			JOIN `+tbl.table+` e ON e.id = i.entity_id AND e.status IN ('done', 'abandoned')
 			WHERE i.entity_type = ? AND i.ended_at IS NULL`, tbl.entityType)
 		if err != nil {
 			return total, err
@@ -287,9 +288,35 @@ func (s *Store) CloseIntervalsForClosedSessions(ctx context.Context) (int64, err
 	return closeCandidatesByID(ctx, s.db, base, candidates)
 }
 
+// MarkStaleSessionsClosed marks every session whose last_seen is older than
+// staleThreshold as closed. Returns the number of session rows updated.
+//
+// Lives here rather than in session.go because it is one half of a pair with
+// CloseIntervalsForStaleSessions below, and the two carry an ordering
+// contract: intervals first, then this. That method's predicate skips
+// sessions already marked closed, so marking first would strand their
+// intervals open until a later pass.
+//
+// This is the sole writer of SessionStatusClosed now that the per-turn
+// Stop-time close is gone. Without it the roster's "closed" liveness tier,
+// which ComputeLiveness derives from sessions.status alone, is unreachable.
+func (s *Store) MarkStaleSessionsClosed(ctx context.Context, staleThreshold time.Time) (int64, error) {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE sessions SET status = ? WHERE last_seen < ? AND status <> ?`,
+		string(store.SessionStatusClosed), staleThreshold, string(store.SessionStatusClosed),
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // CloseIntervalsForStaleSessions closes open intervals for sessions whose
 // last_seen is older than staleThreshold and that are not already closed.
-// Phase 3 of the reaper (guarded, disabled by default).
+// Phase 3 of the reaper — the primary interval terminator since the per-turn
+// Stop-time close was removed, and enabled by default (TEAMSTER_GC_STALE_HOURS=0
+// still disables it). Call it BEFORE MarkStaleSessionsClosed above: the
+// "not already closed" predicate here is what makes that ordering matter.
 func (s *Store) CloseIntervalsForStaleSessions(ctx context.Context, staleThreshold time.Time) (int64, error) {
 	base := nowUTC()
 	rows, err := s.db.QueryContext(ctx, `
@@ -319,6 +346,90 @@ func (s *Store) CloseIntervalsForStaleSessions(ctx context.Context, staleThresho
 	rows.Close() //nolint:errcheck
 
 	return closeCandidatesByID(ctx, s.db, base, candidates)
+}
+
+// CloseIntervalsForStaleSessionsExceptLiveLead is the sweep-scoped variant
+// of CloseIntervalsForStaleSessions above: the identical candidate query,
+// plus a LEFT JOIN back onto sessions that exempts a named-agent row whose
+// lead row (same session_id, empty agent_name) is itself not stale. See the
+// interface doc in store.go for why this exists and which callers use it
+// vs. the unexempted method.
+func (s *Store) CloseIntervalsForStaleSessionsExceptLiveLead(ctx context.Context, staleThreshold time.Time) (int64, error) {
+	base := nowUTC()
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT i.id, i.started_at
+		FROM wms_intervals i
+		JOIN sessions se ON se.session_id = i.session_id
+		                AND se.agent_name = i.agent_name
+		LEFT JOIN sessions ld ON ld.session_id = se.session_id
+		                     AND ld.agent_name = ''
+		                     AND ld.last_seen >= ?
+		                     AND se.agent_name <> ''
+		WHERE i.ended_at IS NULL
+		  AND se.last_seen < ?
+		  AND se.status <> 'closed'
+		  AND ld.session_id IS NULL`, staleThreshold, staleThreshold)
+	if err != nil {
+		return 0, err
+	}
+	var candidates []closeCandidate
+	for rows.Next() {
+		var c closeCandidate
+		if err := rows.Scan(&c.id, &c.startedAt); err != nil {
+			rows.Close() //nolint:errcheck
+			return 0, err
+		}
+		candidates = append(candidates, c)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close() //nolint:errcheck
+		return 0, err
+	}
+	rows.Close() //nolint:errcheck
+
+	return closeCandidatesByID(ctx, s.db, base, candidates)
+}
+
+// MarkStaleSessionsClosedExceptLiveLead is the sweep-scoped variant of
+// MarkStaleSessionsClosed above, carrying the identical lead-liveness
+// exemption as CloseIntervalsForStaleSessionsExceptLiveLead. A single UPDATE
+// with a correlated NOT EXISTS subquery — SQLite has no multi-table
+// UPDATE...JOIN, but a subquery referencing the target table is fine here,
+// unlike the interval close above, since this has no per-row computed
+// column that needs the Go-side unique-timestamp/candidate-id dance. See the
+// interface doc in store.go for why this exists and who calls it.
+//
+// NOT (agent_name is not empty AND EXISTS(...)) is only equivalent to
+// mysql's LEFT JOIN anti-join because agent_name can never be NULL here:
+// three-valued SQL logic makes a NULL agent_name's "is not empty" test
+// evaluate to NULL, so NOT (NULL AND true) is also NULL — not TRUE — and
+// such a row would silently fail to match this WHERE clause while mysql's
+// anti-join would still update it. The schema guarantees this is
+// unreachable (agent_name is VARCHAR NOT NULL, default empty string, in
+// both backends' migrations), so it is not a live bug, but it is exactly
+// the kind of divergence that stops being obvious the next time either
+// predicate is touched in isolation.
+func (s *Store) MarkStaleSessionsClosedExceptLiveLead(ctx context.Context, staleThreshold time.Time) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE sessions AS s
+		SET status = ?
+		WHERE s.last_seen < ?
+		  AND s.status <> ?
+		  AND NOT (
+		    s.agent_name <> ''
+		    AND EXISTS (
+		      SELECT 1 FROM sessions AS ld
+		      WHERE ld.session_id = s.session_id
+		        AND ld.agent_name = ''
+		        AND ld.last_seen >= ?
+		    )
+		  )`,
+		string(store.SessionStatusClosed), staleThreshold, string(store.SessionStatusClosed), staleThreshold,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // WriteFocusInterval is the remote_scraper path: atomically closes the open

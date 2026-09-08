@@ -138,14 +138,24 @@ working. They are operating discipline, not optional metadata:
   `wms_tagEntity`. The lead owns tagging (it owns task creation + the state
   machine) and stewards the vocabulary.
 
-The tag surface is exactly two methods — dynamic and self-describing, no admin
-layer. The flow: **discover, then apply.** Call `wms_listTags` first — it
-returns each classifier's `description` ("when to apply"), so you reuse the
-existing tag that fits instead of inventing a near-duplicate. Apply with
-`wms_tagEntity`; introduce a NEW `(tag_key, tag_value)` only for a genuinely new
-dimension, and pass a `description` so it teaches the next caller what it means.
-An existing tag's description is never overwritten, so the vocabulary grows
-organically yet stays legible.
+The tag surface is dynamic and self-describing, no admin layer. The flow:
+**discover, then apply.** Call `wms_listTags` first — it returns each
+classifier's `description` ("when to apply"), so you reuse the existing tag
+that fits instead of inventing a near-duplicate. Apply a single tag to an
+existing entity with `wms_tagEntity`; introduce a NEW `(tag_key, tag_value)`
+only for a genuinely new dimension, and pass a `description` so it teaches
+the next caller what it means. An existing tag's description is never
+overwritten, so the vocabulary grows organically yet stays legible.
+
+**Creating an entity with its tags already known?** Pass them inline —
+`wms_createOutcome`/`wms_createWorkUnit` both take an optional `tags` map
+(`{tagKey: tagValue, ...}` or `{tagKey: {value, description}, ...}`) applied
+in the same call, best-effort (one bad tag doesn't unwind the create or
+block the rest — failures come back in the response's `tagErrors`). Use this
+whenever the tag set is known at creation time — see `sweep/SKILL.md` Step 4
+or `tags/SKILL.md`'s work-unit setup for the pattern. There is still no
+batch method for tagging an entity that already exists — that stays
+`wms_tagEntity`, one call per tag.
 
 Treat "did this task get focus + a phase/work-type tag?" as part of the
 definition of done, the same way you treat "does it build?".
@@ -157,6 +167,18 @@ PreToolUse response reminding the agent to set focus. It fires up to 3 times the
 stops — it's a safety net, not infinite nagging. The nudge is the system enforcing
 this lesson automatically, so agents that miss focus at session start get
 corrected early.
+
+**`wms_claimWorkUnit` is the preferred focus path for WU-scoped work.** The
+status transition (`pending` -> `active`) is atomic, and the same call
+requests a focus interval alongside it. The interval open itself is hookd's
+separate, asynchronous, best-effort follow-on — it can decline (e.g. an
+identity race between two claimants), in which case a follow-up nudge tells
+the agent to call `setFocus` itself. Most of the time this means the agent
+never needs a separate `setFocus` step for its own assignment, but it is not
+a guarantee — a working agent should still notice if attribution never
+lands. `setFocus` remains the fallback for work that isn't scoped to a
+WorkUnit — the lead's own focus on the strategic Outcome between dispatches,
+or an ephemeral subagent with no WU of its own.
 
 **The scheduled sweep recovers what the nudge missed.** A systemd timer runs
 `rollup --sweep` (deterministic passes: allocate, recover-focus, recover-warmup,
@@ -353,3 +375,40 @@ a fast, ephemeral channel (SSE, in-memory cache) and a slow, durable one
 (polled API, DB) describe the same fact, don't let every consumer pick
 whichever one it happened to see first — merge once, behind one function,
 with an explicit precedence rule.
+
+## 23. Decomposition doesn't happen by default — you have to ask
+
+Outcomes default to flat. Nothing forces a lead to record that this
+session's Outcome is part of a larger deliverable, so on a live hub audit
+84% of Outcomes had no parent at all, and most `done` Outcomes opened and
+closed the same day — meaning most real, multi-session deliverables have
+never had their cost, or their story, rolled up anywhere.
+
+The fix is not a new tool (the DAG has existed since early v2) — it's
+asking the question at Step 5 of every bootstrap, every time: **is this
+part of something bigger?** If yes, either resume the existing parent's
+edge (`wms_addOutcomeParent`) or set `parentOutcomeIDs` at creation. If
+you're not sure yet, note it in the WorkUnit description rather than
+skipping the question — reparenting later (`wms_addOutcomeParent`) is
+cheap; reconstructing a lost decomposition history from session titles is
+not.
+
+## 24. "Rework" now means exactly one thing — post-delivery correction, never pre-delivery iteration
+
+Two different costs used to share one word. Before WP2/WP3, `phase:rework`
+described the pre-delivery build→test→fix loop — the ordinary cost of
+getting something right before it shipped — while an emerging "rework" tag
+was also creeping in to mean the opposite: reopening work that had already
+been delivered and accepted. Same word, two costs, one taxed and one not,
+with nothing in the vocabulary distinguishing them.
+
+That's fixed now, structurally, not just by convention. Pre-delivery
+correction is `phase:iterate` — healthy, untaxed, the ordinary shape of
+doing the work. Post-delivery correction is recorded as a typed
+`outcome_relations` edge (`wms_addRelation`, kind `remediates` /
+`addresses-limitation` / `fulfills-realization` / `reverts`) pointing from
+the new work back at the thing it corrects — and that edge, not any tag, is
+what the rework-tax metric sums. If you find yourself reaching for a
+`rework` tag value anywhere, stop: it no longer exists on either axis. The
+phase value is `iterate`; the cost-of-correction signal is an edge, drawn at
+intake, not a tag applied after the fact.

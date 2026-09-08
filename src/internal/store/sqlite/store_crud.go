@@ -86,7 +86,7 @@ func (s *Store) GetJournalEntries(ctx context.Context, entityType, entityID stri
 		       created_at
 		FROM wms_journal
 		WHERE entity_type = ? AND entity_id = ?
-		ORDER BY created_at DESC
+		ORDER BY created_at DESC, id DESC
 		LIMIT ?`, entityType, entityID, limit)
 	if err != nil {
 		return nil, err
@@ -360,14 +360,34 @@ func closeOpenStateIntervals(ctx context.Context, tx *sql.Tx, entityType, entity
 
 // UpdateEventRecordPhase sets the phase classification on one interval row,
 // enforcing declared-wins precedence in the WHERE clause. No dialect changes
-// from MySQL.
+// from MySQL. The column is the generative source of truth; every successful
+// write here is mirrored to the entity's `phase` tag in entity_tags
+// (single-cardinality replace, same source) — see mysql's UpdateEventRecordPhase
+// doc comment for the full rationale.
 func (s *Store) UpdateEventRecordPhase(ctx context.Context, id int64, phase, source string) error {
-	_, err := s.db.ExecContext(ctx, `
+	res, err := s.db.ExecContext(ctx, `
 		UPDATE wms_intervals
 		SET phase = ?, phase_source = ?, phase_assembled_at = ?
 		WHERE id = ? AND kind = 'state' AND (phase_source <> 'declared' OR ? = 'declared')`,
 		phase, source, nowUTC(), id, source)
-	return err
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return nil
+	}
+
+	var entityType, entityID string
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT entity_type, entity_id FROM wms_intervals WHERE id = ?`, id,
+	).Scan(&entityType, &entityID); err != nil {
+		return err
+	}
+	return s.TagEntity(ctx, entityType, entityID, "phase", phase, source, "")
 }
 
 // --- Tags ---

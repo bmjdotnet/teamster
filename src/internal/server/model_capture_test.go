@@ -92,16 +92,23 @@ func TestDispatchObservabilityNoModelStaysEmpty(t *testing.T) {
 	}
 }
 
-// TestDispatchObservabilityStopPreservesModel is the regression this fix
-// must not introduce: UpsertSession's UPSERT does "model = VALUES(model)"
-// unconditionally (every column, every call — see internal/store/mysql/
-// store.go), so if the Stop/close branch's store.Session literal didn't
-// also carry Model, the very next Stop event would blindly wipe out the
-// model captured at registration. Since the hook client attaches the same
-// settings.json-derived _model on every event (registration, refresh, and
-// Stop alike), passing it through on close re-writes the same value rather
-// than clobbering it — this proves that in practice.
-func TestDispatchObservabilityStopPreservesModel(t *testing.T) {
+// This test used to assert that a Stop CLOSED the session and that the
+// close's own UpsertSession carried Model, because UpsertSession's UPSERT
+// does "model = VALUES(model)" unconditionally (every column, every call —
+// see internal/store/mysql/store.go), so a close that omitted Model would
+// blindly wipe the model captured at registration.
+//
+// Stop no longer writes anything durable: it is a turn boundary, not a
+// session boundary, so both halves of the old assertion are gone. The
+// surviving obligation is the interesting one, and it is now stronger —
+// a Stop must leave the session row completely alone. Sessions are closed
+// by the reaper's phase 3 (MarkStaleSessionsClosed), which touches only
+// the status column and so cannot clobber Model at all.
+//
+// Kept rather than deleted because the clobber hazard is real for every
+// OTHER UpsertSession caller: if anyone reintroduces a Stop-time session
+// write, this fails whether or not they remember to carry Model.
+func TestDispatchObservabilityStopLeavesSessionRowAlone(t *testing.T) {
 	s := newModelCaptureTestServer(t)
 
 	s.dispatchObservability(hook.HookEvent{
@@ -115,20 +122,18 @@ func TestDispatchObservabilityStopPreservesModel(t *testing.T) {
 		SessionID:     "sess-3",
 	}, map[string]interface{}{"_model": "claude-opus-4-6"})
 
-	deadline := time.Now().Add(2 * time.Second)
-	var sess store.Session
-	for time.Now().Before(deadline) {
-		var err error
-		sess, err = s.obsStore.GetSession(context.Background(), store.SessionKey{SessionID: "sess-3"})
-		if err == nil && sess.Status == store.SessionStatusClosed {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
+	// Negative assertion — there is no positive signal to poll for, so give
+	// any detached goroutine time to have done the wrong thing.
+	time.Sleep(500 * time.Millisecond)
+
+	sess, err := s.obsStore.GetSession(context.Background(), store.SessionKey{SessionID: "sess-3"})
+	if err != nil {
+		t.Fatalf("GetSession after Stop: %v", err)
 	}
-	if sess.Status != store.SessionStatusClosed {
-		t.Fatalf("session never closed within deadline (status = %q)", sess.Status)
+	if sess.Status == store.SessionStatusClosed {
+		t.Error("Stop closed the session; Stop is a turn boundary and must not write session status")
 	}
 	if sess.Model != "claude-opus-4-6" {
-		t.Errorf("sess.Model after Stop = %q, want %q (must survive session close, not get wiped)", sess.Model, "claude-opus-4-6")
+		t.Errorf("sess.Model after Stop = %q, want %q (must survive untouched)", sess.Model, "claude-opus-4-6")
 	}
 }

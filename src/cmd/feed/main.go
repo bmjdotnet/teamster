@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"syscall"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -69,12 +70,13 @@ type model struct {
 
 // startTail launches a background goroutine that reads the JSONL tail and sends
 // displayable records to the returned channel.
-func startTail(f *os.File, startOffset int64, sessionFilter string) <-chan render.Record {
+func startTail(f *os.File, path string, startOffset int64, sessionFilter string) <-chan render.Record {
 	ch := make(chan render.Record, 16)
 	go func() {
+		tf := newTailFollower(f, path)
 		offset := startOffset
 		for {
-			line, err := readNextLine(f, &offset)
+			line, err := tf.next(&offset)
 			if err != nil || line == "" {
 				time.Sleep(100 * time.Millisecond)
 				continue
@@ -98,6 +100,73 @@ func (m model) waitCmd() tea.Cmd {
 	return func() tea.Msg {
 		return newEventMsg(<-ch)
 	}
+}
+
+// tailFollower wraps the *os.File being followed by absolute offset,
+// detecting both an in-place truncation (logrotate's copytruncate, what the
+// installed stanza does) and a path replacement (rename/create rotation) —
+// the same shrink/rotate handling as cmd/relay's chunkReader, see that
+// file's comment for the failure this prevents. Without it, readNextLine's
+// ReadAt past a shrunk file's new EOF returns n==0 forever, and the feed
+// (both the TUI's startTail and --tail's runPureTail, which share this)
+// goes silent with no indication why.
+type tailFollower struct {
+	f    *os.File
+	path string
+	ino  uint64
+}
+
+func newTailFollower(f *os.File, path string) *tailFollower {
+	return &tailFollower{f: f, path: path, ino: inodeOf(f)}
+}
+
+// inodeOf returns f's inode, or 0 (treated as "unknown," never as "matches")
+// if it can't be determined.
+func inodeOf(f *os.File) uint64 {
+	info, err := f.Stat()
+	if err != nil {
+		return 0
+	}
+	if sys, ok := info.Sys().(*syscall.Stat_t); ok {
+		return sys.Ino
+	}
+	return 0
+}
+
+// checkRotation re-stats the path (not the open fd, which no longer sees a
+// replaced file's new content) and, if the on-disk file was replaced or has
+// shrunk below offset, reopens or resets so the tail resumes from the new
+// head. Returns the offset to continue from and whether anything changed.
+func (tf *tailFollower) checkRotation(offset int64) (int64, bool) {
+	info, err := os.Stat(tf.path)
+	if err != nil {
+		return offset, false
+	}
+
+	if sys, ok := info.Sys().(*syscall.Stat_t); ok && tf.ino != 0 && sys.Ino != tf.ino {
+		newF, err := os.Open(tf.path)
+		if err != nil {
+			return offset, false
+		}
+		tf.f.Close()
+		tf.f = newF
+		tf.ino = sys.Ino
+		return 0, true
+	}
+
+	if info.Size() < offset {
+		return 0, true
+	}
+
+	return offset, false
+}
+
+// next reads one newline-terminated line, checking for rotation first.
+func (tf *tailFollower) next(offset *int64) (string, error) {
+	if newOffset, rotated := tf.checkRotation(*offset); rotated {
+		*offset = newOffset
+	}
+	return readNextLine(tf.f, offset)
 }
 
 // readNextLine reads one newline-terminated line from f starting at *offset.
@@ -172,7 +241,7 @@ func newModel(logPath string, excludeTags map[string]bool, sessionFilter string,
 		return nil, fmt.Errorf("seek: %w", err)
 	}
 
-	m.events = startTail(f, off, sessionFilter)
+	m.events = startTail(f, logPath, off, sessionFilter)
 	return m, nil
 }
 
@@ -693,8 +762,9 @@ func runPureTail(logPath string, excludeTags map[string]bool, sessionFilter stri
 	// bufio.Scanner marks EOF as terminal; recreating it each tick still reads
 	// from the current file position which never advances past the last EOF.
 	// ReadAt + manual offset is the correct follow pattern.
+	tf := newTailFollower(f, logPath)
 	for {
-		line, err := readNextLine(f, &offset)
+		line, err := tf.next(&offset)
 		if err != nil || line == "" {
 			time.Sleep(100 * time.Millisecond)
 			continue

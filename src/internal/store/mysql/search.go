@@ -10,16 +10,23 @@ import (
 	"github.com/bmjdotnet/teamster/internal/wms"
 )
 
-// searchLikePattern escapes % and _ then wraps query for a case-insensitive
-// substring LIKE, matching the convention in ListOutcomes/SearchTags. ok is
-// false for an empty query: callers skip LIKE-based matching entirely rather
-// than matching everything, the same "no clause" convention ListOutcomes
-// uses for an empty query.
+// searchLikePattern escapes \, %, and _ then wraps query for a
+// case-insensitive substring LIKE, matching the convention in
+// ListOutcomes/SearchTags. The backslash must be escaped alongside % and _
+// (not just the two wildcards) since MySQL's default LIKE escape character
+// is backslash itself — a literal backslash in query would otherwise be
+// read as an escape prefix for whatever byte follows it, silently
+// corrupting the match. NewReplacer applies all three substitutions in a
+// single left-to-right pass over the original string, so escaping backslash
+// in the same call as % and _ does not double-escape the backslashes those
+// two substitutions introduce. ok is false for an empty query: callers skip
+// LIKE-based matching entirely rather than matching everything, the same
+// "no clause" convention ListOutcomes uses for an empty query.
 func searchLikePattern(query string) (pattern string, ok bool) {
 	if query == "" {
 		return "", false
 	}
-	esc := strings.NewReplacer("%", `\%`, "_", `\_`)
+	esc := strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`)
 	return "%" + esc.Replace(query) + "%", true
 }
 

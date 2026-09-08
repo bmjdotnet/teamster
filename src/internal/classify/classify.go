@@ -10,7 +10,7 @@
 //   - phase ON the closed INTERVAL (wms_intervals.phase column). NEW in B4.
 //     For each closed, non-declared, unassembled/stale interval the engine
 //     reads the same JSONL activity signals the inline classifier uses, maps
-//     them to exactly one phase from {design,build,test,review,rework}, and
+//     them to exactly one phase from {design,build,test,review,iterate}, and
 //     writes it via UpdateEventRecordPhase(id, phase, "classifier"). The
 //     declared-wins guard in that UPDATE means a wms_setPhase declaration is
 //     never overwritten.
@@ -49,7 +49,7 @@ type Store interface {
 	ListOutcomesNeedingPhase(ctx context.Context) ([][2]string, error)
 	MarkIntervalAssembled(ctx context.Context, id int64) error
 	// EarliestClosureByEntity returns each entity's first review/done start time,
-	// keyed by [entity_type, entity_id], so cross-batch rework is detectable.
+	// keyed by [entity_type, entity_id], so cross-batch iterate is detectable.
 	EarliestClosureByEntity(ctx context.Context, keys [][2]string) (map[[2]string]time.Time, error)
 	// ListWorkUnitsNeedingLifecycleTags returns [workunitID, missingKey,
 	// existingWorkType] triples for work units missing any required lifecycle
@@ -217,13 +217,17 @@ func (r *Runner) classifyWorkTypes(ctx context.Context) error {
 // Used by the outcome-phase safety net for outcomes that have no workunits and
 // therefore cannot acquire phase via the view's promotion leg.
 var workTypeToPhase = map[string]string{
-	"feature":  "build",
-	"bug":      "build",
-	"infra":    "build",
-	"refactor": "build",
-	"research": "design",
-	"docs":     "design",
-	"test":     "test",
+	"feature":       "build",
+	"bug":           "build",
+	"infra":         "build",
+	"refactor":      "build",
+	"research":      "design",
+	"docs":          "design",
+	"test":          "test",
+	"polish":        "build",
+	"investigation": "design",
+	"admin":         "build",
+	"processor":     "build",
 }
 
 // classifyOutcomePhases is the safety net: outcomes with no workunits and no
@@ -344,14 +348,14 @@ func (r *Runner) classifyPhases(ctx context.Context) (int, error) {
 	}
 
 	// reEntry marks the intervals that re-enter active work after the entity had
-	// already reached review/done — the rework signal. It is computed against the
+	// already reached review/done — the iterate signal. It is computed against the
 	// entity's FULL closure history (queried per batch entity), NOT just the
 	// intervals in this batch, so a re-entry whose predecessor review/done
 	// interval was assembled in an earlier batch is still detected. A query
-	// failure degrades to no-rework (logged) rather than aborting the pass.
+	// failure degrades to no-iterate (logged) rather than aborting the pass.
 	reEntry, err := r.detectReEntry(ctx, intervals)
 	if err != nil {
-		r.log.Warn("re-entry detection degraded (no cross-batch rework this pass)", "error", err)
+		r.log.Warn("re-entry detection degraded (no cross-batch iterate this pass)", "error", err)
 		reEntry = map[int64]bool{}
 	}
 
@@ -398,7 +402,7 @@ func (r *Runner) classifyPhases(ctx context.Context) (int, error) {
 }
 
 // batchReadSignals builds one SessionWindow per batch interval that actually
-// needs signals (rework and review-state intervals are decided by reEntry/
+// needs signals (iterate and review-state intervals are decided by reEntry/
 // rec.State alone, without touching the log — see derivePhaseWithSignals) and
 // issues a SINGLE JSONL scan for the whole set via wms.BatchSignalReader.
 // lowerBound/upperBound are the batch's own window extents, so the scan is
@@ -455,11 +459,11 @@ func (r *Runner) batchReadSignals(ctx context.Context, intervals []wms.EventReco
 
 // detectReEntry returns the set of batch interval ids that begin active work
 // AFTER the same entity first finished a review/done interval — i.e. correction
-// work (rework). It queries each batch entity's EARLIEST review/done END across
+// work (iterate). It queries each batch entity's EARLIEST review/done END across
 // its FULL history (EarliestClosureByEntity), so the predecessor closure need
 // NOT be in the current batch: a re-entry active interval is detected even when
 // the review/done interval that closed the first pass was assembled in an earlier
-// batch and is therefore excluded by the anti-join. An active interval is rework
+// batch and is therefore excluded by the anti-join. An active interval is iterate
 // iff its started_at is strictly after the entity's earliest closure end (a
 // review/done that ENDED before this active STARTED).
 func (r *Runner) detectReEntry(ctx context.Context, intervals []wms.EventRecord) (map[int64]bool, error) {
@@ -485,7 +489,7 @@ func (r *Runner) detectReEntry(ctx context.Context, intervals []wms.EventRecord)
 // entity's earliest review/done END. It is the pure comparison split out of
 // detectReEntry so it is unit-testable without a store. firstClosure maps
 // [entity_type, entity_id] → earliest review/done ended_at; an entity absent
-// from the map has never closed, so none of its active intervals are rework.
+// from the map has never closed, so none of its active intervals are iterate.
 func markReEntry(intervals []wms.EventRecord, firstClosure map[[2]string]time.Time) map[int64]bool {
 	out := map[int64]bool{}
 	for _, rec := range intervals {
@@ -501,9 +505,9 @@ func markReEntry(intervals []wms.EventRecord, firstClosure map[[2]string]time.Ti
 }
 
 // derivePhase maps one closed interval to exactly one phase from the seeded
-// vocabulary {design,build,test,review,rework}. Priority (first match wins):
+// vocabulary {design,build,test,review,iterate}. Priority (first match wins):
 //
-//  1. rework  — the interval re-enters active work after review/done (the
+//  1. iterate  — the interval re-enters active work after review/done (the
 //     entity was sent back; correction cost, the most important to isolate).
 //  2. review  — the interval itself occupies the review state (review work is
 //     defined by lifecycle position, not tool mix).
@@ -519,7 +523,7 @@ func markReEntry(intervals []wms.EventRecord, firstClosure map[[2]string]time.Ti
 //     readable signal window at all (no session/agent) yet demonstrably had
 //     activity (positive duration); see below.
 //
-// The interval's own state column drives review (and feeds rework); tool/bash
+// The interval's own state column drives review (and feeds iterate); tool/bash
 // ratios come from the same JSONL signals the work-type rules read, scoped to a
 // SessionWindow built from THIS interval.
 //
@@ -534,7 +538,7 @@ func markReEntry(intervals []wms.EventRecord, firstClosure map[[2]string]time.Ti
 // to a session window. Such an interval takes the rule-6 build default.
 func (r *Runner) derivePhase(ctx context.Context, rec wms.EventRecord, reEntry bool) (string, error) {
 	if reEntry {
-		return "rework", nil
+		return "iterate", nil
 	}
 	if rec.State == wms.StatusReview {
 		return "review", nil
@@ -555,7 +559,7 @@ func (r *Runner) derivePhase(ctx context.Context, rec wms.EventRecord, reEntry b
 // derivePhase's own "no window → no ReadSignals call" behavior).
 func (r *Runner) derivePhaseWithSignals(rec wms.EventRecord, reEntry bool, sigs *wms.ActivitySignals) (string, error) {
 	if reEntry {
-		return "rework", nil
+		return "iterate", nil
 	}
 	if rec.State == wms.StatusReview {
 		return "review", nil
@@ -568,7 +572,7 @@ func (r *Runner) derivePhaseWithSignals(rec wms.EventRecord, reEntry bool, sigs 
 // derivePhaseWithSignals: given an interval, whether it had no session window
 // at all, and its (possibly nil) signals, pick exactly one phase. See
 // derivePhase's original doc comment for the full priority-order rationale
-// (rework > review > test > build > design > build-default).
+// (iterate > review > test > build > design > build-default).
 func classifyIntervalPhase(rec wms.EventRecord, noWindow bool, sigs *wms.ActivitySignals) (string, error) {
 	if sigs == nil || sigs.TotalEvents == 0 {
 		// An interval with no readable signal window (no session/agent — the

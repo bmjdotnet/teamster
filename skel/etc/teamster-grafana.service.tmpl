@@ -1,0 +1,14 @@
+[Unit]
+Description=Teamster Grafana dashboard server
+After=network.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__BASEDIR__
+ExecStart=__BASEDIR__/bin/teamster start --exec=grafana
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -71,6 +71,7 @@ type StatusChange struct {
 	SessionID  string `json:"session_id,omitempty"`
 	AgentName  string `json:"agent_name,omitempty"`
 	Host       string `json:"host,omitempty"`
+	Notes      string `json:"notes,omitempty"`
 }
 
 // Tag is a key:value classifier (e.g. phase=build, work-type=feature). IsSeed
@@ -209,6 +210,11 @@ type Reader interface {
 	ListEntityDependencyBlockers(ctx context.Context, entityType, entityID string) ([]*Dependency, error)
 	ListEntityDependencyDependents(ctx context.Context, entityType, entityID string) ([]*Dependency, error)
 
+	// ListDeliverables returns an entity's submitted deliverables, oldest
+	// first. Redelivery is allowed, so a caller that wants "the" deliverable
+	// takes the LAST element, not the only one.
+	ListDeliverables(ctx context.Context, entityType, entityID string, limit int) ([]Deliverable, error)
+
 	// Search is the generic search primitive (L1): granular Hits across
 	// outcomes, workunits, and focus intervals/session-focus text, gated by
 	// SearchQuery.Types and filtered by User/Host/Status/Session/Tags/Since.
@@ -292,10 +298,28 @@ type Writer interface {
 	UpdateWorkUnitStatus(ctx context.Context, id, status string) error
 	UpdateWorkUnitFocus(ctx context.Context, id, focus string) error
 	UpdateWorkUnitTitle(ctx context.Context, id, title string) error
+	UpdateWorkUnitBrief(ctx context.Context, id, brief string) error
 	AssignWorkUnit(ctx context.Context, id, agentID string) error
-	ClaimWorkUnit(ctx context.Context, id, agentID string) error
+	// ClaimWorkUnit implements the claim-state matrix: pending -> claim
+	// (sets owner + claimed_at, status -> active); active with no owner ->
+	// adopt (sets owner + claimed_at, status unchanged); active already
+	// owned by agentID -> idempotent success (safe retry after a crash);
+	// active owned by a different agent -> store.AlreadyClaimed; review/
+	// done/blocked -> store.NotClaimable; unknown id -> store.ErrNotFound.
+	//
+	// On success it returns the workunit's status immediately BEFORE this
+	// call ("pending" for the claim row, "active" for both the adopt and
+	// idempotent-reclaim rows) — callers need this to know whether a real
+	// pending->active transition happened (fire OnStatusChange) or the
+	// status was already active and unchanged (must NOT fire a phantom
+	// pending->active event). The returned string is "" on error.
+	ClaimWorkUnit(ctx context.Context, id, agentID string) (string, error)
 	AddEntityDependency(ctx context.Context, dep *Dependency) error
 	RemoveEntityDependency(ctx context.Context, blockerType, blockerID, blockedType, blockedID string) error
+
+	// InsertDeliverable appends one deliverable row. Redelivery (multiple
+	// rows for the same entity) is expected and allowed.
+	InsertDeliverable(ctx context.Context, d Deliverable) error
 }
 
 // Store is the persistence interface for work entities. Both Anchor (SQLite)

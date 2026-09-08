@@ -16,10 +16,18 @@ The WMS tag keyspace splits two ways:
   integration keys. The steward freely defines values, refines descriptions,
   merges, retires, and backfills these. This is the main skill's home ground.
 - **Lifecycle tags** (`category=lifecycle`): execution tracking the **engine and
-  classifier own** — `work-type` (feature|bug|refactor|infra|research|docs|test),
-  `phase` (design|build|test|review|rework), `resolution` (achieved|abandoned),
-  `lifecycle` (archived). These values are seeded by migration and managed by the
-  system, not by hand.
+  classifier own** — `work-type`
+  (feature|bug|refactor|polish|investigation|research|test|docs|infra|admin|processor),
+  `phase` (design|build|test|review|iterate), `resolution` (two values
+  written now: `achieved` by a human's close-out, `swept-unreviewed` by the
+  nightly `wms review-sweep` timer closing a delivered-but-unreviewed
+  WorkUnit — deliberately silent on whether the work was good, only that a
+  deliverable exists and nobody looked; a dropped Outcome or WorkUnit gets
+  the `abandoned` status instead, not this tag), `lifecycle` (archived).
+  These values are seeded by migration and managed by the system, not by
+  hand. **Legacy note:** you may still find `resolution:abandoned` on
+  entities closed before v0.3.0, from when abandonment was `status=done`
+  plus this tag — it's historical, never applied going forward.
 
 The split matters because the tools behave differently on the two categories
 (below). Surface lifecycle work only when the operator asks for it.
@@ -37,8 +45,14 @@ So when you backfill or refine `work-type`, the entities you target are
 **WorkUnits**, not Outcomes. Coverage is measured over WorkUnits; you snapshot,
 apply, and roll back WorkUnit tags. An Outcome legitimately carries no
 `work-type` of its own — that is correct, not a gap to fill. (The one exception
-is `resolution`, which marks a terminal Outcome's disposition — but you do not
-backfill that; the close-out ritual sets it.)
+is `resolution`, applied on an Outcome that closed `achieved`, or on a
+WorkUnit the nightly `wms review-sweep` closed `done` with
+`swept-unreviewed` — but you do not backfill either; the close-out step or
+the sweep sets it. An `abandoned` Outcome or WorkUnit that reached
+`abandoned` via a `done → review` reopen carries no `resolution` tag — the
+engine clears it on that edge; the status is the record. A `resolution` tag
+applied by hand to an entity that was never `done` is untouched by that
+clear and survives to `abandoned`.)
 
 ## The hard rule: you do not reshape lifecycle vocabulary
 
@@ -88,7 +102,7 @@ The durable artifact is a description sharp enough to classify against. For
 
 > "Fixes incorrect existing behavior. Indicators: title contains 'fix', entity
 > has a `bug:*` context tag, parent outcome is about debugging or repair,
-> interval phases show build→test→rework (the correction pattern). NOT infra
+> interval phases show build→test→iterate (the correction pattern). NOT infra
 > even when it fixes a build script — infra fixes tooling, bug fixes product
 > behavior."
 
@@ -105,7 +119,7 @@ enough. Pull in the rest of the WMS context:
   `feature:*` tag points at `feature`.
 - **Parent outcome** — its title and tags frame what the work was for (an
   outcome about "docs cleanup" makes `docs` likely).
-- **Interval phase history** — a build→test→rework arc reads as a correction
+- **Interval phase history** — a build→test→iterate arc reads as a correction
   (bug); a clean build→test→done arc reads as new work (feature).
 - **Git branch / session context** — branch names and the session's other work
   often disambiguate.

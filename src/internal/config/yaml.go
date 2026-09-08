@@ -21,14 +21,43 @@ type ServiceConfig struct {
 // and yaml tags MUST stay identical to the installer's yamlTagConfig
 // (src/cmd/teamster-install/yaml_config.go) or the installer round-trip drifts.
 type TagConfig struct {
-	Category       string   `yaml:"category"`        // "context" | "lifecycle"
-	Cardinality    string   `yaml:"cardinality"`     // "single" | "multi"
-	Values         []string `yaml:"values"`          // explicit value list; empty for create-on-apply keys
+	Category       string   `yaml:"category"`    // "context" | "lifecycle"
+	Cardinality    string   `yaml:"cardinality"` // "single" | "multi"
+	Values         []string `yaml:"values"`      // explicit value list; empty for create-on-apply keys
 	Description    string   `yaml:"description"`
 	Scope          string   `yaml:"scope"`           // "outcome" | "workunit" | ""
 	ExclusionGroup string   `yaml:"exclusion_group"` // mutual exclusion group slug
 	AutoExtract    string   `yaml:"auto_extract"`    // "git" | "env" | ""
 	Interview      string   `yaml:"interview"`       // "propose" | "auto" | "skip"
+}
+
+// ReviewSweepFileConfig is the yaml `review-sweep:` section —
+// WP3-DESIGN.md §8/§9, Operator Decision 4: read at the START of every
+// `teamster wms review-sweep` run, not baked into the systemd unit at
+// install time, so flipping Confirm after burn-in is a one-line edit that
+// takes effect on the next scheduled run. Durations are strings (e.g.
+// "168h"), matching the CLI flags' own syntax, not raw nanoseconds — an
+// operator's hand-edit round-trips the same units the command accepts.
+type ReviewSweepFileConfig struct {
+	Enabled      bool   `yaml:"enabled"`
+	OlderThan    string `yaml:"older_than"`
+	AbandonAfter string `yaml:"abandon_after"`
+	Confirm      bool   `yaml:"confirm"`
+	// NotifyHookd defaults to true when the key is absent — yaml has no
+	// tri-state bool, so this field alone cannot distinguish "absent" from
+	// "explicitly true". config.Load() treats both the same (hookd
+	// notification stays on unless a caller explicitly disables it via
+	// this key, TEAMSTER_REVIEW_SWEEP_NOTIFY_HOOKD=0, or --no-hookd), so
+	// the ambiguity is harmless: every path that matters keeps notification
+	// on by default and only an explicit "false"/"0"/flag turns it off.
+	NotifyHookd *bool `yaml:"notify_hookd"`
+}
+
+// MCPScraperFileConfig is the yaml `mcp-scraper:` section
+// (WP11-TAILER-DESIGN.md §7) — mirrors ReviewSweepFileConfig's shape with
+// the one field mcp-scraper needs.
+type MCPScraperFileConfig struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 // FileConfig is the parsed shape of ~/teamster/etc/teamster.yaml.
@@ -46,9 +75,11 @@ type FileConfig struct {
 	TokenScraper struct {
 		Mode string `yaml:"mode"`
 	} `yaml:"token-scraper"`
-	Env      string               `yaml:"env"`
-	LogLevel string               `yaml:"log_level"`
-	Tags     map[string]TagConfig `yaml:"tags"`
+	Env         string                `yaml:"env"`
+	LogLevel    string                `yaml:"log_level"`
+	Tags        map[string]TagConfig  `yaml:"tags"`
+	ReviewSweep ReviewSweepFileConfig `yaml:"review-sweep"`
+	MCPScraper  MCPScraperFileConfig  `yaml:"mcp-scraper"`
 }
 
 // LoadFile reads ~/teamster/etc/teamster.yaml.

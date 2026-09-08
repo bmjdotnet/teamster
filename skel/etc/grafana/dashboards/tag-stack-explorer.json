@@ -759,7 +759,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "Cost per lifecycle phase from wms_intervals (kind=state, assembled). Rework is highlighted red as the key inefficiency metric.",
+      "description": "Cost per lifecycle phase from wms_intervals (kind=state, assembled). Iterate is highlighted red as the key inefficiency metric.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -803,7 +803,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "rework"
+              "options": "iterate"
             },
             "properties": [
               {
@@ -916,11 +916,11 @@
             "uid": "teamster-mysql"
           },
           "format": "table",
-          "rawSql": "SELECT\n    wi.phase AS Phase,\n    ROUND(SUM(wi.cost_usd), 4) AS Cost_USD,\n    ROUND(SUM(wi.duration_ms) / 3600000.0, 1) AS Hours\nFROM wms_intervals wi\nWHERE wi.kind = 'state'\n  AND wi.assembled_at IS NOT NULL\n  AND wi.phase IS NOT NULL\n  AND $__timeFilter(wi.started_at)\nGROUP BY wi.phase\nORDER BY FIELD(wi.phase, 'design', 'build', 'test', 'review', 'rework')",
+          "rawSql": "SELECT\n    wi.phase AS Phase,\n    ROUND(SUM(wi.cost_usd), 4) AS Cost_USD,\n    ROUND(SUM(wi.duration_ms) / 3600000.0, 1) AS Hours\nFROM wms_intervals wi\nWHERE wi.kind = 'state'\n  AND wi.assembled_at IS NOT NULL\n  AND wi.phase IS NOT NULL\n  AND $__timeFilter(wi.started_at)\nGROUP BY wi.phase\nORDER BY FIELD(wi.phase, 'design', 'build', 'test', 'review', 'iterate')",
           "refId": "A"
         }
       ],
-      "title": "Phase Cost Waterfall (design \u2192 build \u2192 test \u2192 review \u2192 rework)",
+      "title": "Phase Cost Waterfall (design \u2192 build \u2192 test \u2192 review \u2192 iterate)",
       "type": "barchart"
     },
     {
@@ -928,7 +928,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "Phase cost and hours table. Rework % is the key efficiency metric.",
+      "description": "Phase cost and hours table. Iterate % is the key efficiency metric.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1025,7 +1025,7 @@
             "uid": "teamster-mysql"
           },
           "format": "table",
-          "rawSql": "SELECT\n    wi.phase AS Phase,\n    ROUND(SUM(wi.cost_usd), 4) AS Cost_USD,\n    ROUND(SUM(wi.duration_ms) / 3600000.0, 1) AS Hours\nFROM wms_intervals wi\nWHERE wi.kind = 'state'\n  AND wi.assembled_at IS NOT NULL\n  AND wi.phase IS NOT NULL\n  AND $__timeFilter(wi.started_at)\nGROUP BY wi.phase\nORDER BY FIELD(wi.phase, 'design', 'build', 'test', 'review', 'rework')",
+          "rawSql": "SELECT\n    wi.phase AS Phase,\n    ROUND(SUM(wi.cost_usd), 4) AS Cost_USD,\n    ROUND(SUM(wi.duration_ms) / 3600000.0, 1) AS Hours\nFROM wms_intervals wi\nWHERE wi.kind = 'state'\n  AND wi.assembled_at IS NOT NULL\n  AND wi.phase IS NOT NULL\n  AND $__timeFilter(wi.started_at)\nGROUP BY wi.phase\nORDER BY FIELD(wi.phase, 'design', 'build', 'test', 'review', 'iterate')",
           "refId": "A"
         }
       ],

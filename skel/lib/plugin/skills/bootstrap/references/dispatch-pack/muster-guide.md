@@ -97,14 +97,17 @@ for deciding whether to continue or close out.
 
 ## Liveness tiers
 
-Liveness is computed at query time from `last_seen` recency, never stored:
+Liveness is computed at query time. `live`/`idle`/`stale` derive from
+`last_seen` recency; `closed` instead reads the session's stored status,
+which only the staleness reaper writes (see below) — `Stop` no longer marks
+a session closed:
 
 | Tier | Meaning |
 |------|---------|
 | `live` | Active within the last 15 seconds. |
 | `idle` | 15 seconds to 5 minutes since last activity. Between turns or waiting on a long tool call. |
-| `stale` | Over 5 minutes, no Stop event. Probably stuck or crashed. |
-| `closed` | Stop event received. Clean shutdown. |
+| `stale` | Over 5 minutes since last activity, session not yet marked closed. Probably stuck, crashed, or just idle past the reaper's threshold. |
+| `closed` | The staleness reaper marked the session closed (`TEAMSTER_GC_STALE_HOURS`, default 2h, checked every `TEAMSTER_REAPER_INTERVAL`, default 15m). `Stop` fires at the end of every assistant turn, not at session end, and writes nothing durable — it is not what produces this tier. |
 | `unbound` | Registered but session_id not yet known (spawn-time peer). |
 
 ## Turn state

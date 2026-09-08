@@ -64,7 +64,7 @@ func runWMSDrain(args []string) int {
 	// Default: drain done entities, then closed sessions
 	if isDryRun {
 		fmt.Println("[dry-run] would drain intervals on:")
-		fmt.Println("  - entities in terminal (done) status")
+		fmt.Println("  - entities in a terminal status (done, abandoned)")
 		fmt.Println("  - sessions marked closed")
 		fmt.Println("pass --confirm to execute")
 		return 0

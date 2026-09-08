@@ -26,23 +26,25 @@ directly invocable **by the operator** (user-typed slash command) — someone wh
 already knows they want solo mode skips this interview by typing the command.
 Team mode is the safe default: when the signals are ambiguous, recommend team.
 
+This skill is the one place `../shared/session-protocol.md`'s Steps 1–2 and
+the outcome-search half of Step 6 run for most sessions — the dispatched
+mode skill (`bootstrap` or `solo`) is told to skip its own copy of them and
+use what's gathered here instead. Everything below is what's genuinely
+`start`-specific: the batched mode+tag interview and the dispatch handoff.
+
 ## Step 1 — Gather the objective + context (once)
 
-Establish what this session is for. This is the same focus interview both
-`bootstrap` and `solo` open with — run it here ONCE and hand the result down so
-the dispatched skill does not re-ask.
+Establish what this session is for. This is the same intake
+`session-protocol.md` Steps 1–2 describe — run it here ONCE and hand the
+result down so the dispatched skill does not re-ask.
 
-**Focus slug.**
-- If `$ARGUMENTS` is non-empty, use it as the focus slug.
-- Otherwise ask with AskUserQuestion:
-  - question: "What is this session focused on? (a short phrase)"
-  - header: "Session focus"
-  - options: one per plausible focus you can infer from the conversation, recent
-    files, and the working directory (2–3 max). The operator can pick "Other".
+**Focus slug.** Follow `../shared/session-protocol.md` Step 1 — use
+`$ARGUMENTS` if non-empty, otherwise ask with AskUserQuestion (header
+"Session focus").
 
 **Load WMS tools needed for context gathering** (deferred — load before first
-use). The dispatched skill loads the full set; start only needs these for the
-interview:
+use). The dispatched skill loads the full set (session-protocol Step 5);
+start only needs these for the interview:
 
 ```
 ToolSearch("select:mcp__wms__wms_listTags,mcp__wms__wms_listOutcomes")
@@ -57,19 +59,17 @@ skill would otherwise gather, so it inherits it:
 
 **Outcome search.** Extract 2–3 keywords from the focus slug (e.g., "fix the
 auth timeout bug in the login flow" → `"auth timeout"`) and call
-`wms_listOutcomes(status="open", query="<keywords>")` to check for existing
-open outcomes that match the session's focus. Note any matches — they'll be
-presented in Step 3 if found. If more than 3 outcomes match, keep only the 3
-most recently updated.
+`wms_listOutcomes(query="<keywords>")` — the search half of session-protocol
+Step 6 (do NOT create an Outcome here; that happens in the dispatched skill).
+Omit `status` so `done` outcomes surface too, not just open ones — a match on
+a `done` outcome is the signal for the rework branch in Step 3/4 below. Note
+any matches — they'll be presented in Step 3 if found. If more than 3
+outcomes match, keep only the 3 most recently updated.
 
-**Verify referenced artifacts.** If the focus slug or the operator's message
-names specific local files, paths, or kits, verify each one exists (`ls` or
-`Read`) before treating it as real — flag anything missing to the operator
-and confirm intent (wrong path? not built yet? proceed without it?) rather
-than assuming or improvising. Do this now, since this is the interview that
-actually runs for most sessions — the dispatched skill's own copy of this
-check (below) only fires when the operator invokes it directly, bypassing
-`start`.
+**Verify referenced artifacts.** Follow `../shared/session-protocol.md`
+Step 2. Do this now, since this is the interview that actually runs for
+most sessions — the dispatched skill's own copy of this check only fires
+when the operator invokes it directly, bypassing `start`.
 
 Keep this context — you pass it to the dispatched skill in Step 4 so it skips
 its own redundant gather. One interview, not two.
@@ -104,25 +104,13 @@ in the rationale.
 
 ### 2b — Pre-compute context-tag proposals (from manifest)
 
-Call `wms_listTags` (no args) to get the role-shaped manifest. The response
-groups keys by role — no interpretation needed:
-
-- **`propose`** — keys to offer the operator. For each key, `values` lists
-  available options (when present); `n` means drill down with
-  `wms_listTags(tagKey=...)` to see values. Respect `exclusive`: propose at
-  most one key per exclusion group (e.g., `feature` and `bug` share
-  `work-scope` — propose only the one that fits). Apply `scope: "outcome"`
-  keys to the Outcome; keys without scope can go on either.
-- **`autoExtract`** — extract these keys silently from the environment (git
-  remotes, branch) and apply without asking. The value is the extraction
-  source (`git`, `env`).
-- **`requiredLifecycle`** — lifecycle keys the lead MUST apply to every
-  WorkUnit at dispatch time. Values are included (e.g. `phase`:
-  design/build/test/review/rework; `work-type`: feature/bug/refactor/…).
-  Note these for dispatch time, not the interview.
-- **`required`** — non-lifecycle keys that must be set on every WorkUnit
-  before close-out. Note these for dispatch time, not the interview.
-- **`engineManaged`** — engine-only keys: do not propose, set, or modify.
+Call `wms_listTags` (no args) to get the role-shaped manifest — see
+`../shared/session-protocol.md` Step 7a for what each role group
+(`propose`/`autoExtract`/`requiredLifecycle`/`required`/`engineManaged`)
+means and Step 7b for the work-scope-slug convention. Apply that same
+reasoning here to build candidates; the difference from the shared
+interview is only in how they're presented (batched multiSelect below,
+instead of a free-form conversational confirm).
 
 **Split into interview buckets:**
 - Auto-apply: everything from `autoExtract` (extract values, apply silently)
@@ -130,10 +118,9 @@ groups keys by role — no interpretation needed:
 
 **Work-scope slug.** If the focus slug implies a work type (e.g., "fix auth
 timeout" → bug, "add prometheus exporter" → feature), include the matching slug
-key in the multiSelect proposals. Drill down with `wms_listTags(tagKey=...)` to
-find existing values. Propose a new value only if no existing one fits. All slug
-keys (`feature`, `bug`, `refactor`, `infra`, `docs`, `research`, `test`,
-`admin`) share the `work-scope` exclusion group — propose exactly one.
+key in the multiSelect proposals per session-protocol Step 7b's convention —
+drill down with `wms_listTags(tagKey=...)` to find existing values, propose a
+new value only if no existing one fits.
 
 **Reuse existing values:** Check `wms_listTags` results for existing
 `(tag_key, tag_value)` pairs — reuse (case-insensitive slug match), don't
@@ -151,12 +138,13 @@ include Q0 before the mode and tag questions; otherwise skip Q0 entirely:
 ```
 AskUserQuestion with questions:
   Q0 (single-select, header "Outcome") — ONLY if matching outcomes were found:
-    question: "Found open outcomes that may match your focus. Resume an existing
-               outcome or start new work?"
+    question: "Found outcomes that may match your focus. Continue existing
+               work, rework something closed, or start new?"
     options (up to 3 matches + "New outcome"):
       - label: "<outcome-id>: <title> (<status>)"
         description: "<description snippet or focus string>"
-      - ... (up to 3 most recent matches)
+      - ... (up to 3 most recent matches — status in the label tells you
+        continuation vs. rework: `done` is rework, anything else continues)
       - label: "New outcome"
         description: "Create a fresh strategic Outcome for this session"
 
@@ -186,7 +174,8 @@ AskUserQuestion with questions:
 - Only include keys from the `propose` group in the multiSelect options.
   Respect `exclusive` — propose at most one key per exclusion group.
 - Do NOT include `requiredLifecycle` keys in the interview — the lead applies
-  them per-WorkUnit at dispatch time (Step 4), not on the strategic Outcome.
+  them per-WorkUnit at dispatch time (see the mode skill's dispatch step), not
+  on the strategic Outcome.
 - The operator can add tags via "Other" (free text) — parse additions and apply
   them alongside the selected tags.
 
@@ -210,42 +199,54 @@ If neither escape is triggered, proceed directly to Step 4.
 
 Once all answers are confirmed:
 
-**If the operator selected an existing outcome (Q0):**
-- Do NOT create a new Outcome in the dispatched skill — use the selected one.
-- Set focus on the selected outcome (`wms_setFocus`).
-- If the outcome's status is `done`, reactivate it (`wms_updateOutcomeStatus`
-  to `active`).
-- Apply any confirmed tags that aren't already on the outcome (call
-  `wms_getOutcome` to check existing tags first).
-- Carry the selected outcome forward to the dispatched skill so it skips its
-  own creation step.
+**If the operator selected an existing outcome (Q0), check its status —
+this is the same three-way triage as session-protocol Step 6, just decided
+here instead of there:**
+
+- **Not `done`** (session-protocol Step 6 branch B — continuation): do NOT
+  create a new Outcome in the dispatched skill — use the selected one. Set
+  focus on it (`wms_setFocus`). Do not change its status. Apply any
+  confirmed tags that aren't already on the outcome (call `wms_getOutcome`
+  to check existing tags first). Carry the selected outcome forward to the
+  dispatched skill so it skips its own creation step.
+- **`done`** (session-protocol Step 6 branch C — rework): **never reactivate
+  it.** Do NOT carry it forward as the strategic Outcome and do NOT skip the
+  dispatched skill's Step 6 — treat this exactly like the "New outcome" path
+  below (the dispatched skill creates a fresh Outcome), but pass along which
+  done outcome triggered the rework so the dispatched skill can run branch
+  C's relation step in full: `wms_listRelationKinds` +
+  `wms_addRelation(fromType="outcome", fromID=<new outcome>,
+  toType="outcome", toID=<the done outcome>, kind=<best-fit kind>)` once the
+  new Outcome exists. Apply the confirmed tags to the new Outcome fresh (same
+  as the "New outcome" path — a rework Outcome doesn't inherit tags from the
+  closed one it's related to).
 
 If the operator selected "New outcome" or Q0 was not shown (no matches),
-proceed as today — the dispatched skill creates the Outcome.
+proceed as today — the dispatched skill creates the Outcome
+(session-protocol Step 6 branch A).
 
-**Set the mode.** Load and call the mode signal (deferred MCP tool — load once):
+**Set the mode.** Follow `../shared/session-protocol.md` Step 3, using the
+mode chosen here (`mode="solo"` for Subagent, `mode="team"` for Team). Call
+it **once**, before dispatching.
 
-```
-ToolSearch("select:mcp__activity__setMode")
-mcp__activity__setMode(mode="solo")   # for Subagent
-mcp__activity__setMode(mode="team")   # for Team
-```
+**Build the confirmed tag map — do not apply it as a separate step.**
+Assemble it now, before dispatching, so it can ride into Step 6's create
+call inline instead of being applied serially afterward:
+- The tags the operator selected in the multiSelect.
+- The auto-apply integration keys (git.branch, github.owner, etc.).
+- Any tags added via "Other" (parsed).
+- Reuse existing `(tag_key, tag_value)` pairs (case-insensitive). For
+  genuinely new values, use the `{value, description}` form so the
+  description rides in with the create call. For genuinely new keys, seed
+  with `wms_defineTag` before dispatching.
 
-`setMode` is a no-op confirmation tool; the Teamster hook recognizes the call and
-records the session's mode so the runtime gates behave correctly (solo relaxes
-the team-dispatch mandate and the bare-`Agent` block; team keeps them enforced).
-Call it **once**, before dispatching, so the marker is in place before any work —
-not every turn; the hook keeps the marker fresh on its own while the session is
-active.
-
-**Apply the confirmed tags.** Using `mcp__wms__wms_tagEntity` on the strategic
-Outcome (source `manual`), after the dispatched skill creates it:
-- Apply the tags the operator selected in the multiSelect.
-- Apply the auto-apply integration keys (git.branch, github.owner, etc.).
-- For tags added via "Other", parse and apply them.
-- Reuse existing `(tag_key, tag_value)` pairs (case-insensitive). For genuinely
-  new values, pass a `description`. For genuinely new keys, seed with
-  `wms_defineTag` before applying.
+Hand this map to the dispatched skill as the `tags` argument for its
+session-protocol Step 6 `wms_createOutcome` call — see the Subagent/Team
+bullets below. This only applies when Step 6 is about to *create* a new
+Outcome (branches A/C). If the operator picked an existing Outcome at Q0
+(branch B — continuation), there is no create call to attach tags to;
+apply any tags not already present with serial `wms_tagEntity` calls per
+session-protocol Step 7d, exactly as documented today.
 
 **Dispatch by following the chosen skill INLINE — do NOT call the Skill tool.**
 `/teamster:solo` and the bootstrap skill both set `disable-model-invocation`,
@@ -254,22 +255,32 @@ dispatch, **Read the chosen skill's file and follow its steps yourself, inline,
 in this same session**, reusing the focus slug + Step-1 context AND the
 confirmed tag set.
 
-- **Subagent** → Read `../solo/SKILL.md` and follow its steps inline: generate a
-  team name from the slug (solo Step 1.1), **register it via `registerPeer`
-  (solo Step 1.2 — do not skip this)**, create the strategic Outcome, **skip
-  Step 4 (the context-tag interview)** — tags were already confirmed here,
-  apply them (including `team:<name>`) after the Outcome is created — then
-  set focus and work. (You already called `setMode("solo")`.)
-- **Team** → Read `../bootstrap/SKILL.md` and follow its steps inline: generate a
-  team name from the slug, **register it via `registerPeer` (bootstrap Step
-  2.1 — do not skip this)**, load WMS tools, create the strategic Outcome,
-  **skip Step 6 (the context-tag interview)** — tags were already confirmed
-  here, apply them after the Outcome is created — then dispatch. (You already
-  called `setMode("team")`.) Do not call `registerPeer` a second time here —
-  it is called exactly once, in bootstrap's Step 2.1.
+- **Subagent** → Read `../solo/SKILL.md` and follow it inline. It sends you
+  to `session-protocol.md` for team identity (Step 4 — **register it via
+  `registerPeer` at 4b, do not skip this**), WMS tool loading (Step 5), and
+  Outcome creation/resume (Step 6). At Step 6 branch A/C, pass the tag map
+  built above as `wms_createOutcome`'s `tags` argument instead of creating
+  bare — **skip session-protocol Step 7** entirely (the tag interview is
+  already confirmed here, and nothing is left for 7d to apply). Branch B
+  (continuation) has no create call — apply any missing tags serially per
+  Step 7d as documented, same as always. Also apply `team:<name>` (inline
+  for A/C, serially for B). Continue with Step 8 (focus) and solo's own
+  Step 6 (proceed with work). (You already called `setMode("solo")`.)
+- **Team** → Read `../bootstrap/SKILL.md` and follow it inline. Same
+  pattern: it sends you to `session-protocol.md` for team identity (Step 4
+  — **register it via `registerPeer` at 4b, do not skip this**), WMS tool
+  loading (Step 5), and Outcome creation/resume (Step 6). At Step 6 branch
+  A/C, pass the tag map into `wms_createOutcome`'s `tags` argument; branch
+  B stays serial via Step 7d, same reasoning as Subagent above. Once the
+  Outcome exists, run bootstrap's "is this part of something bigger?"
+  check, then continue with Step 8 (focus) and bootstrap's dispatch
+  protocol. (You already called `setMode("team")`.) Do not call
+  `registerPeer` a second time — it is called exactly once, at
+  session-protocol Step 4b.
 
-Carry the context forward — do **not** re-ask the focus slug, do **not** re-run
-the tag interview, and do **not** call the Skill tool to enter the sibling skill.
+Carry the context forward — do **not** re-ask the focus slug, do **not**
+re-run the tag interview, and do **not** call the Skill tool to enter the
+sibling skill.
 
 ## Notes
 
@@ -282,7 +293,9 @@ the tag interview, and do **not** call the Skill tool to enter the sibling skill
 
 ## Reference
 
+- [session-protocol.md](../shared/session-protocol.md) — the shared intake
+  mechanics both dispatch targets build on.
 - [solo/SKILL.md](../solo/SKILL.md) — the dispatched subagent path.
 - [bootstrap/SKILL.md](../bootstrap/SKILL.md) — the dispatched team path.
-- [eight-rules.md](../bootstrap/references/eight-rules.md) — the protocol + the
-  solo carve-out (which rules apply in each mode).
+- [eight-rules.md](../bootstrap/references/dispatch-pack/eight-rules.md) —
+  the protocol + the solo carve-out (which rules apply in each mode).

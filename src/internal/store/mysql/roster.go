@@ -17,14 +17,15 @@ func (s *Store) CreateRosterEntry(ctx context.Context, entry store.RosterEntry) 
 	if entry.RosterID == "" {
 		return fmt.Errorf("CreateRosterEntry: roster_id is required")
 	}
+	now := time.Now().UTC()
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO agent_roster (
 			roster_id, session_id, agent_name, host, runtime, model,
-			relationship, team_name, bus_team, parent_ref, created_at, bound_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			relationship, team_name, bus_team, parent_ref, created_at, bound_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		entry.RosterID, entry.SessionID, entry.AgentName, entry.Host,
 		entry.Runtime, entry.Model, entry.Relationship, entry.TeamName,
-		entry.BusTeam, entry.ParentRef, entry.CreatedAt.UTC(), nullableTime(entry.BoundAt))
+		entry.BusTeam, entry.ParentRef, entry.CreatedAt.UTC(), nullableTime(entry.BoundAt), now)
 	if err != nil {
 		return classifyRosterConflict("CreateRosterEntry", err)
 	}
@@ -60,9 +61,9 @@ func (s *Store) BindRosterSession(ctx context.Context, rosterID, sessionID strin
 	}
 
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE agent_roster SET session_id = ?, bound_at = ?
+		`UPDATE agent_roster SET session_id = ?, bound_at = ?, updated_at = ?
 		 WHERE roster_id = ? AND session_id IS NULL`,
-		sessionID, now, rosterID)
+		sessionID, now, now, rosterID)
 	if err != nil {
 		return classifyRosterConflict("BindRosterSession", err)
 	}
@@ -76,7 +77,7 @@ func (s *Store) BindRosterSession(ctx context.Context, rosterID, sessionID strin
 func (s *Store) GetRosterEntry(ctx context.Context, rosterID string) (store.RosterEntry, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT roster_id, session_id, agent_name, host, runtime, model,
-		       relationship, team_name, bus_team, parent_ref, created_at, bound_at
+		       relationship, team_name, bus_team, parent_ref, created_at, bound_at, updated_at
 		FROM agent_roster WHERE roster_id = ?`, rosterID)
 	var e store.RosterEntry
 	if err := scanRosterEntry(row, &e); err != nil {
@@ -104,7 +105,7 @@ func (s *Store) ResolveRosterID(ctx context.Context, sessionID, agentName string
 
 func (s *Store) ListRosterEntries(ctx context.Context, filter store.RosterFilter) ([]store.RosterEntry, error) {
 	q := `SELECT roster_id, session_id, agent_name, host, runtime, model,
-	             relationship, team_name, bus_team, parent_ref, created_at, bound_at
+	             relationship, team_name, bus_team, parent_ref, created_at, bound_at, updated_at
 	      FROM agent_roster`
 	var where []string
 	var args []any
@@ -124,6 +125,10 @@ func (s *Store) ListRosterEntries(ctx context.Context, filter store.RosterFilter
 	if filter.Relationship != "" {
 		where = append(where, "relationship = ?")
 		args = append(args, filter.Relationship)
+	}
+	if filter.UpdatedSince != nil {
+		where = append(where, "updated_at >= ?")
+		args = append(args, filter.UpdatedSince.UTC())
 	}
 	if len(where) > 0 {
 		q += " WHERE " + strings.Join(where, " AND ")
@@ -147,6 +152,18 @@ func (s *Store) ListRosterEntries(ctx context.Context, filter store.RosterFilter
 	return result, rows.Err()
 }
 
+// SweepStaleRoster deletes roster entries whose updated_at is older than
+// cutoff. Mirrors gauge.mysql.Store.SweepOffline.
+func (s *Store) SweepStaleRoster(ctx context.Context, cutoff time.Time) (int64, error) {
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM agent_roster WHERE updated_at < ?`, cutoff.UTC())
+	if err != nil {
+		return 0, fmt.Errorf("SweepStaleRoster: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 func (s *Store) UpsertRosterEntry(ctx context.Context, entry store.RosterEntry) error {
 	if entry.RosterID == "" {
 		return fmt.Errorf("UpsertRosterEntry: roster_id is required")
@@ -157,11 +174,12 @@ func (s *Store) UpsertRosterEntry(ctx context.Context, entry store.RosterEntry) 
 	// /session upsert) build a fresh RosterEntry with no team_name carried
 	// over, and an unconditional overwrite here clobbers an already-named
 	// team back to blank on every idle-then-resume or scraper poll (GitHub #15).
+	now := time.Now().UTC()
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO agent_roster (
 			roster_id, session_id, agent_name, host, runtime, model,
-			relationship, team_name, bus_team, parent_ref, agent_id, created_at, bound_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			relationship, team_name, bus_team, parent_ref, agent_id, created_at, bound_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON DUPLICATE KEY UPDATE
 			host = VALUES(host),
 			runtime = VALUES(runtime),
@@ -170,10 +188,11 @@ func (s *Store) UpsertRosterEntry(ctx context.Context, entry store.RosterEntry) 
 			team_name = COALESCE(NULLIF(VALUES(team_name), ''), team_name),
 			bus_team = VALUES(bus_team),
 			parent_ref = VALUES(parent_ref),
-			agent_id = COALESCE(NULLIF(VALUES(agent_id), ''), agent_id)`,
+			agent_id = COALESCE(NULLIF(VALUES(agent_id), ''), agent_id),
+			updated_at = VALUES(updated_at)`,
 		entry.RosterID, entry.SessionID, entry.AgentName, entry.Host,
 		entry.Runtime, entry.Model, entry.Relationship, entry.TeamName,
-		entry.BusTeam, entry.ParentRef, entry.AgentID, entry.CreatedAt.UTC(), nullableTime(entry.BoundAt))
+		entry.BusTeam, entry.ParentRef, entry.AgentID, entry.CreatedAt.UTC(), nullableTime(entry.BoundAt), now)
 	if err != nil {
 		return fmt.Errorf("UpsertRosterEntry: %w", err)
 	}
@@ -223,14 +242,14 @@ func (s *Store) VerifyToken(ctx context.Context, tokenHash string) (store.AgentT
 	err := s.db.QueryRowContext(ctx, `
 		SELECT t.token_hash, t.roster_id, t.issued_at, t.expires_at, t.revoked_at, t.last_used_at,
 		       r.roster_id, r.session_id, r.agent_name, r.host, r.runtime, r.model,
-		       r.relationship, r.team_name, r.bus_team, r.parent_ref, r.created_at, r.bound_at
+		       r.relationship, r.team_name, r.bus_team, r.parent_ref, r.created_at, r.bound_at, r.updated_at
 		FROM agent_tokens t
 		JOIN agent_roster r ON r.roster_id = t.roster_id
 		WHERE t.token_hash = ?`, tokenHash).Scan(
 		&tok.TokenHash, &tok.RosterID, &tok.IssuedAt, &expiresAt, &revokedAt, &lastUsedAt,
 		&entry.RosterID, &sessionID, &entry.AgentName, &entry.Host, &entry.Runtime,
 		&entry.Model, &entry.Relationship, &entry.TeamName, &entry.BusTeam,
-		&parentRef, &entry.CreatedAt, &boundAt)
+		&parentRef, &entry.CreatedAt, &boundAt, &entry.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return tok, entry, store.NotFound("VerifyToken", "token", tokenHash)
@@ -366,7 +385,7 @@ func scanRosterEntry(row rosterScanner, e *store.RosterEntry) error {
 	var boundAt sql.NullTime
 	err := row.Scan(
 		&e.RosterID, &sessionID, &e.AgentName, &e.Host, &e.Runtime, &e.Model,
-		&e.Relationship, &e.TeamName, &e.BusTeam, &parentRef, &e.CreatedAt, &boundAt)
+		&e.Relationship, &e.TeamName, &e.BusTeam, &parentRef, &e.CreatedAt, &boundAt, &e.UpdatedAt)
 	if err != nil {
 		return err
 	}

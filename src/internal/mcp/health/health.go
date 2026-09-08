@@ -9,11 +9,20 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/bmjdotnet/teamster/internal/agenthealth/gauge"
 	mcproster "github.com/bmjdotnet/teamster/internal/mcp/roster"
 	"github.com/bmjdotnet/teamster/internal/store"
 )
+
+// rosterFallbackMaxAge bounds how stale a roster entry may be and still
+// qualify for the roster-fallback pass below. Matches the cutoff
+// health-collector's sweep loop uses for GaugeStore.SweepOffline — a dead
+// session's roster entry stops advancing UpdatedAt the same way its gauge
+// row stops advancing updated_at, so the two cutoffs age entries out in
+// lockstep instead of a swept gauge row's ghost reappearing via roster.
+const rosterFallbackMaxAge = 2 * time.Hour
 
 type callParams struct {
 	Name      string                 `json:"name"`
@@ -406,7 +415,8 @@ func handleListAgents(ctx context.Context, mainStore store.Store, gaugeStore gau
 		covered[g.SessionID+"|"+g.AgentName] = true
 	}
 
-	entries, err := mainStore.ListRosterEntries(ctx, store.RosterFilter{})
+	fallbackCutoff := time.Now().Add(-rosterFallbackMaxAge)
+	entries, err := mainStore.ListRosterEntries(ctx, store.RosterFilter{UpdatedSince: &fallbackCutoff})
 	if err != nil {
 		return Result{}, internalErr(err.Error())
 	}

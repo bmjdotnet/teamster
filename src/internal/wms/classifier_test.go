@@ -204,32 +204,29 @@ func TestClassify_LeadEmptyAgentBuildsWindow(t *testing.T) {
 	}
 }
 
-// --- Re-entry rule (phase=rework), independent of signals ---
+// --- Phase is no longer classifier-owned (WP2 G3) ---
+//
+// Rule 2's entity-wide phase=rework re-entry write was retired: it
+// structurally disagreed with the per-interval classify pass (different
+// grain, different evidence) and guaranteed divergence between entity_tags
+// and wms_intervals.phase. The interval pass (internal/classify) plus
+// UpdateEventRecordPhase's mirror into entity_tags are now the only phase
+// writers — Classify() must never touch the phase key, regardless of
+// re-entry history.
 
-func TestClassify_PhaseReworkOnReEntry(t *testing.T) {
-	// ListEventRecords returns newest-first; the classifier iterates oldest→
-	// newest. A done/review followed by a return to active is re-entry.
+func TestClassify_NeverAppliesPhaseTag(t *testing.T) {
+	// A done/review followed by a return to active (the old Rule 2 trigger)
+	// must not produce any phase tag write anymore.
 	records := []EventRecord{
 		{State: StatusActive, SessionID: "abc123def456ghi", AgentName: "@worker", StartedAt: time.Unix(1747526100, 0).UTC()}, // newest
 		{State: StatusReview, SessionID: "abc123def456ghi", AgentName: "@worker", StartedAt: time.Unix(1747526040, 0).UTC()}, // older
 	}
 	sig := &ActivitySignals{ToolTagCounts: map[string]int{"EDIT": 1}, TotalEvents: 1}
 	applied := classifyWith(t, records, sig)
-	if !hasTag(applied, "phase", "rework") {
-		t.Fatalf("expected phase=rework on re-entry, got %+v", applied)
-	}
-}
-
-func TestClassify_NoReworkWithoutReEntry(t *testing.T) {
-	// A linear pending→active with no prior done/review must NOT tag rework.
-	records := []EventRecord{
-		{State: StatusActive, SessionID: "abc123def456ghi", AgentName: "@worker", StartedAt: time.Unix(1747526100, 0).UTC()},
-		{State: StatusPending, SessionID: "abc123def456ghi", AgentName: "@worker", StartedAt: time.Unix(1747526040, 0).UTC()},
-	}
-	sig := &ActivitySignals{ToolTagCounts: map[string]int{"EDIT": 1}, TotalEvents: 1}
-	applied := classifyWith(t, records, sig)
-	if hasTag(applied, "phase", "rework") {
-		t.Fatalf("did not expect phase=rework without re-entry, got %+v", applied)
+	for _, a := range applied {
+		if a.tagKey == "phase" {
+			t.Fatalf("classifier must not write a phase tag anymore, got %+v", applied)
+		}
 	}
 }
 
@@ -258,27 +255,6 @@ func TestClassify_ManualWorkTypeNotOverwritten(t *testing.T) {
 	}
 	if !hasSkip(res.Skipped, "work-type") {
 		t.Fatalf("expected work-type recorded in Skipped, got %+v", res.Skipped)
-	}
-}
-
-// A manual phase binding pins the key, so phase=rework is skipped on re-entry.
-func TestClassify_ManualPhaseNotOverwritten(t *testing.T) {
-	records := []EventRecord{
-		{State: StatusActive, SessionID: "abc123def456ghi", AgentName: "@worker", StartedAt: time.Unix(1747526100, 0).UTC()},
-		{State: StatusReview, SessionID: "abc123def456ghi", AgentName: "@worker", StartedAt: time.Unix(1747526040, 0).UTC()},
-	}
-	sig := &ActivitySignals{ToolTagCounts: map[string]int{"EDIT": 1}, TotalEvents: 1}
-	store := &fakeClassifierStore{
-		records:  records,
-		existing: []EntityTag{{TagKey: "phase", TagValue: "build", Category: "lifecycle", Source: "manual"}},
-	}
-	store, res := classifyFull(t, store, sig)
-
-	if hasTag(store.applied, "phase", "rework") {
-		t.Fatalf("classifier overwrote manual phase, got %+v", store.applied)
-	}
-	if !hasSkip(res.Skipped, "phase") {
-		t.Fatalf("expected phase recorded in Skipped, got %+v", res.Skipped)
 	}
 }
 

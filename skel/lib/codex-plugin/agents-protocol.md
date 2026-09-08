@@ -72,8 +72,9 @@ This is how Teamster monitors what you're doing. Every turn. No exceptions.
 ## Working discipline
 
 - Decompose work into WorkUnits, advance status as you go, tag lifecycle keys
-  before starting each WorkUnit, and close out (mark done, resolution tag) at
-  the end -- `$teamster-solo` documents the full ritual.
+  before starting each WorkUnit, and consider closing out the Outcome at the
+  end -- it's a deliberate reason/recommend/ask step now, not an automatic
+  close; `$teamster-solo` documents the full ritual.
 - Verify before presenting: build, test, and vet (or the project's
   equivalent) before calling anything done. Spawn a subagent for
   fresh-context review on multi-file or interface-touching changes --

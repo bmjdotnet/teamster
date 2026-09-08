@@ -192,8 +192,17 @@ func runMysqldump(ctx context.Context, defaultsFile, db, outPath string) error {
 }
 
 // runMysqlImport pipes `gunzip --stdout dumpFile` into
-// `mysql --defaults-extra-file=<file> --force db`. Both exit statuses are
-// checked: a corrupt .gz can cause a partial import even when mysql exits 0.
+// `mysql --defaults-extra-file=<file> db`. Both exit statuses are checked: a
+// corrupt .gz can cause a partial import even when mysql exits 0.
+//
+// Deliberately no --force: verified live (a 3-table dump with a failing
+// middle CREATE TABLE, on the disposable 127.0.0.1:13306 test instance)
+// that --force exits 0 with the failed table silently missing and every
+// later statement still applied — a partial restore reporting complete
+// success, indistinguishable from a good one by exit code alone. Without
+// --force, the same fixture exits 1 at the first error and nothing after
+// it gets created — an honest, immediate, actionable failure. A restore is
+// not a best-effort operation.
 func runMysqlImport(ctx context.Context, defaultsFile, db, dumpFile string) error {
 	if _, err := os.Stat(dumpFile); err != nil {
 		return fmt.Errorf("restore: dump file not found: %w", err)
@@ -201,7 +210,7 @@ func runMysqlImport(ctx context.Context, defaultsFile, db, dumpFile string) erro
 	gunzip := exec.CommandContext(ctx, "gunzip", "--stdout", dumpFile)
 	mysqlCmd := exec.CommandContext(ctx, "mysql",
 		"--defaults-extra-file="+defaultsFile,
-		"--force", db)
+		db)
 	mysqlCmd.Stdin, _ = gunzip.StdoutPipe()
 
 	if err := gunzip.Start(); err != nil {

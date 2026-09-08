@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -178,5 +179,149 @@ func TestSessionDurationRejectsBadInput(t *testing.T) {
 	t.Setenv("TEAMSTER_SESSION_TIMEOUT", "garbage")
 	if _, err := config.Load(); err == nil {
 		t.Fatal("expected error for bad TEAMSTER_SESSION_TIMEOUT")
+	}
+}
+
+// TestReviewSweepConfig_ReadFromYAMLFile proves Operator Decision 4's whole
+// point end to end: a plain teamster.yaml edit — with NO env var involved at
+// all — must reach the command's Config. LoadFile reads a fixed path derived
+// from os.UserHomeDir(), which honors $HOME on Linux, so a temp HOME plus a
+// real file at teamster/etc/teamster.yaml exercises the actual code path
+// config.Load() uses, not a mocked substitute.
+func TestReviewSweepConfig_ReadFromYAMLFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("TEAMSTER_BASEDIR", t.TempDir()) // isolate DataDir from $HOME too
+
+	etcDir := home + "/teamster/etc"
+	if err := os.MkdirAll(etcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	yamlBody := `
+review-sweep:
+  enabled: true
+  older_than: 72h
+  abandon_after: 360h
+  confirm: true
+  notify_hookd: false
+`
+	if err := os.WriteFile(etcDir+"/teamster.yaml", []byte(yamlBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.ReviewSweep.Enabled {
+		t.Error("ReviewSweep.Enabled = false, want true (from teamster.yaml, no env var set)")
+	}
+	if cfg.ReviewSweep.OlderThan != 72*time.Hour {
+		t.Errorf("ReviewSweep.OlderThan = %v, want 72h", cfg.ReviewSweep.OlderThan)
+	}
+	if cfg.ReviewSweep.AbandonAfter != 360*time.Hour {
+		t.Errorf("ReviewSweep.AbandonAfter = %v, want 360h", cfg.ReviewSweep.AbandonAfter)
+	}
+	if !cfg.ReviewSweep.Confirm {
+		t.Error("ReviewSweep.Confirm = false, want true (from teamster.yaml, no env var set)")
+	}
+	if cfg.ReviewSweep.NotifyHookd {
+		t.Error("ReviewSweep.NotifyHookd = true, want false (explicit notify_hookd: false in teamster.yaml)")
+	}
+}
+
+// TestReviewSweepConfig_AbsentYAMLSectionStaysAtSafeDefaults is the negative
+// control: no review-sweep: section at all must leave every field at its
+// Default() value (Enabled/Confirm false, NotifyHookd true) — AC4's
+// config-default-inert requirement, proven at the FileConfig-parsing layer.
+func TestReviewSweepConfig_AbsentYAMLSectionStaysAtSafeDefaults(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("TEAMSTER_BASEDIR", t.TempDir())
+
+	etcDir := home + "/teamster/etc"
+	if err := os.MkdirAll(etcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(etcDir+"/teamster.yaml", []byte("env: production\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := config.Default().ReviewSweep
+	if cfg.ReviewSweep != want {
+		t.Errorf("ReviewSweep = %+v, want Default() unchanged %+v", cfg.ReviewSweep, want)
+	}
+}
+
+// TestMCPScraperConfig_ReadFromYAMLFile proves the mcp-scraper tailer's
+// config gate (WP11-TAILER-DESIGN.md §7) reaches Config the same way
+// ReviewSweep.Enabled does: a plain teamster.yaml edit, no env var involved.
+func TestMCPScraperConfig_ReadFromYAMLFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("TEAMSTER_BASEDIR", t.TempDir())
+
+	etcDir := home + "/teamster/etc"
+	if err := os.MkdirAll(etcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	yamlBody := "mcp-scraper:\n  enabled: true\n"
+	if err := os.WriteFile(etcDir+"/teamster.yaml", []byte(yamlBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.MCPScraper.Enabled {
+		t.Error("MCPScraper.Enabled = false, want true (from teamster.yaml, no env var set)")
+	}
+}
+
+// TestMCPScraperConfig_AbsentYAMLSectionStaysAtSafeDefault is the negative
+// control: no mcp-scraper: section at all must leave Enabled at its
+// Default() value (false) — a fresh install's timer must stay a no-op.
+func TestMCPScraperConfig_AbsentYAMLSectionStaysAtSafeDefault(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("TEAMSTER_BASEDIR", t.TempDir())
+
+	etcDir := home + "/teamster/etc"
+	if err := os.MkdirAll(etcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(etcDir+"/teamster.yaml", []byte("env: production\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := config.Default().MCPScraper
+	if cfg.MCPScraper != want {
+		t.Errorf("MCPScraper = %+v, want Default() unchanged %+v", cfg.MCPScraper, want)
+	}
+}
+
+// TestMCPScraperConfig_EnvOverride proves TEAMSTER_MCP_SCRAPER_ENABLED's
+// secondary path (parity with ReviewSweep's own env override).
+func TestMCPScraperConfig_EnvOverride(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("TEAMSTER_BASEDIR", t.TempDir())
+	t.Setenv("TEAMSTER_MCP_SCRAPER_ENABLED", "1")
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.MCPScraper.Enabled {
+		t.Error("MCPScraper.Enabled = false, want true (from TEAMSTER_MCP_SCRAPER_ENABLED=1)")
 	}
 }

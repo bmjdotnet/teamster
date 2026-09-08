@@ -370,13 +370,16 @@ func TestIsRecapText(t *testing.T) {
 		{"Working on the auth middleware rewrite.", true},
 		{"Cleaning up stale Teamster WMS data.", true},
 		{"inspect spirit", false},
-		{"yes, start with the product migration", false},
+		{"yes, start with the product migration", false}, // long but no terminal punctuation, lowercase-led
 		{"commit both repos", false},
 		{"reboot phantom", false},
 		{"", false},
 		{"   ", false},
-		{"A", false},       // uppercase but no space → single word
-		{"Go ahead", true}, // uppercase + space
+		{"A", false},                                     // uppercase but no space → single word
+		{"Go ahead", false},                              // short suggested prompt, no terminal punctuation
+		{"Go ahead and merge the release branch.", true}, // long enough, terminal punctuation
+		{"Yes, please proceed.", false},                  // terminal punctuation but under minRecapLen
+		{"Reviewing changes to auth.go", false},          // known false negative: code identifier ending; less harmful than ghost agents from false positives
 	}
 	for _, tt := range tests {
 		if got := isRecapText(tt.text); got != tt.want {

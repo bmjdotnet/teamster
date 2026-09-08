@@ -73,6 +73,9 @@ func (f *fakeCloseoutStore) ListEntityDependencyDependents(context.Context, stri
 func (f *fakeCloseoutStore) Search(context.Context, SearchQuery) ([]Hit, error) {
 	panic("unexpected")
 }
+func (f *fakeCloseoutStore) ListDeliverables(context.Context, string, string, int) ([]Deliverable, error) {
+	panic("unexpected")
+}
 
 func resolutionTag() EntityTag {
 	return EntityTag{TagKey: resolutionTagKey, TagValue: "achieved", Source: "manual"}
@@ -165,15 +168,43 @@ func TestCloseoutWarnings_NoChildrenSilent(t *testing.T) {
 	}
 }
 
-// Non-done transitions never warn (the helper short-circuits).
-func TestCloseoutWarnings_NonDoneTransitionSilent(t *testing.T) {
+// Non-terminal transitions never warn (the helper short-circuits).
+func TestCloseoutWarnings_NonTerminalTransitionSilent(t *testing.T) {
 	// A store whose reads would panic — proving the helper never queries on a
 	// non-terminal transition.
 	store := &fakeCloseoutStore{}
-	for _, st := range []string{StatusActive, StatusReview, StatusBlocked, StatusPending} {
+	for _, st := range []string{StatusActive, StatusReview, StatusBlocked, StatusPending, StatusOnHold} {
 		if w := CloseoutWarnings(context.Background(), store, "o1", st); w != nil {
 			t.Fatalf("transition to %q should not warn, got: %v", st, w)
 		}
+	}
+}
+
+// An abandoned outcome with open children warns exactly like a done one —
+// abandonment orphans cost attribution the same way completion does.
+func TestCloseoutWarnings_AbandonedChildrenWarn(t *testing.T) {
+	store := &fakeCloseoutStore{
+		units: []*WorkUnit{{ID: "wu-open", Status: StatusActive}},
+	}
+	w := CloseoutWarnings(context.Background(), store, "o1", StatusAbandoned)
+	if len(w) != 1 {
+		t.Fatalf("expected 1 warning, got %d: %v", len(w), w)
+	}
+	if !strings.Contains(w[0], "wu-open") || !strings.Contains(w[0], StatusAbandoned) {
+		t.Fatalf("warning should name the open unit and the abandoned status, got: %q", w[0])
+	}
+}
+
+// The missing-resolution-tag warning (b) does not apply to abandoned — the
+// status itself now carries that meaning (R3), so a tagless abandon is clean.
+func TestCloseoutWarnings_AbandonedNoResolutionTagRequired(t *testing.T) {
+	store := &fakeCloseoutStore{
+		units: []*WorkUnit{{ID: "wu1", Status: StatusDone}}, // all children terminal
+		tags:  nil,                                          // no resolution tag
+	}
+	w := CloseoutWarnings(context.Background(), store, "o1", StatusAbandoned)
+	if len(w) != 0 {
+		t.Fatalf("abandoned outcome should not require a resolution tag, got: %v", w)
 	}
 }
 

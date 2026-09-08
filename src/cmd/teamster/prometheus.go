@@ -25,36 +25,15 @@ type prometheusTemplateData struct {
 	PrometheusRetentionSize string
 }
 
-// StartPrometheus renders the prometheus config template, writes it to
-// <basedir>/etc/prometheus.yaml, then launches the prometheus binary.
-// It returns the running *exec.Cmd so the supervisor can reap it.
-func StartPrometheus(ctx context.Context, cfg config.Config) (*exec.Cmd, error) {
-	basedir := prometheusBasedir(cfg)
-
-	configPath := filepath.Join(basedir, "etc", "prometheus.yaml")
-	dataDir := filepath.Join(basedir, "var", "prometheus")
-	logPath := filepath.Join(basedir, "var", "logs", "prometheus.log")
-	binPath := filepath.Join(basedir, "bin", "prometheus")
-
-	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
-		return nil, fmt.Errorf("prometheus: mkdir etc: %w", err)
-	}
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
-		return nil, fmt.Errorf("prometheus: mkdir data: %w", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
-		return nil, fmt.Errorf("prometheus: mkdir logs: %w", err)
-	}
-
-	if err := renderPrometheusConfig(configPath, cfg, dataDir); err != nil {
-		return nil, fmt.Errorf("prometheus: render config: %w", err)
-	}
-
-	logFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return nil, fmt.Errorf("prometheus: open log: %w", err)
-	}
-
+// prometheusArgs computes prometheus's CLI argv from cfg, configPath and
+// dataDir. Shared by StartPrometheus (supervisor mode) and
+// prepareComponentExec (start.go's systemd exec-wrapper,
+// wh2-supervisor-systemd-units) so there is exactly one construction of the
+// command line — round-4 grant extension over the original prepare-step-only
+// extraction: the retention-size flag was added to this argv after both
+// paths already existed as separate constructions, which is the concrete
+// proof that a duplicated argv drifts, not just a hypothetical risk.
+func prometheusArgs(cfg config.Config, configPath, dataDir string) []string {
 	args := []string{
 		"--config.file=" + configPath,
 		fmt.Sprintf("--web.listen-address=0.0.0.0:%d", cfg.PrometheusPort),
@@ -65,7 +44,58 @@ func StartPrometheus(ctx context.Context, cfg config.Config) (*exec.Cmd, error) 
 	if cfg.PrometheusRetentionSize != "" {
 		args = append(args, "--storage.tsdb.retention.size="+cfg.PrometheusRetentionSize)
 	}
-	cmd := exec.CommandContext(ctx, binPath, args...)
+	return args
+}
+
+// preparePrometheusConfig creates prometheus's etc/data directories and
+// renders prometheus.yaml from the current cfg. Shared by StartPrometheus
+// (supervisor mode) and prepareComponentExec (start.go's systemd exec-wrapper,
+// wh2-supervisor-systemd-units) so the directory-creation and config-rendering
+// step — which needs no process-launch machinery — lives in exactly one
+// place. Returns dataDir since callers also need it to build the
+// --storage.tsdb.path argument.
+func preparePrometheusConfig(cfg config.Config) (dataDir string, err error) {
+	basedir := prometheusBasedir(cfg)
+	configPath := filepath.Join(basedir, "etc", "prometheus.yaml")
+	dataDir = filepath.Join(basedir, "var", "prometheus")
+
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		return "", fmt.Errorf("prometheus: mkdir etc: %w", err)
+	}
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		return "", fmt.Errorf("prometheus: mkdir data: %w", err)
+	}
+	if err := renderPrometheusConfig(configPath, cfg, dataDir); err != nil {
+		return "", fmt.Errorf("prometheus: render config: %w", err)
+	}
+	return dataDir, nil
+}
+
+// StartPrometheus renders the prometheus config template, writes it to
+// <basedir>/etc/prometheus.yaml, then launches the prometheus binary.
+// It returns the running *exec.Cmd so the supervisor can reap it.
+func StartPrometheus(ctx context.Context, cfg config.Config) (*exec.Cmd, error) {
+	basedir := prometheusBasedir(cfg)
+
+	configPath := filepath.Join(basedir, "etc", "prometheus.yaml")
+	logPath := filepath.Join(basedir, "var", "logs", "prometheus.log")
+	binPath := filepath.Join(basedir, "bin", "prometheus")
+
+	dataDir, err := preparePrometheusConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		return nil, fmt.Errorf("prometheus: mkdir logs: %w", err)
+	}
+
+	logFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("prometheus: open log: %w", err)
+	}
+
+	cmd := exec.CommandContext(ctx, binPath, prometheusArgs(cfg, configPath, dataDir)...)
 	cmd.Dir = basedir
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile

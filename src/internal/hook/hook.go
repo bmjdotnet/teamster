@@ -1081,17 +1081,34 @@ func flattenNewlines(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
 
+// minRecapLen is the shortest a genuine idle recap is expected to be.
+// Claude Code's suggested next prompts ("inspect spirit", "Go ahead") are
+// almost always shorter than this; idle recaps are sentence-length work
+// summaries ("Cleaning up stale Teamster WMS data.").
+const minRecapLen = 24
+
 // isRecapText distinguishes a Claude Code idle recap from a suggested next
 // prompt in phantom SubagentStop events (no agent_type). Recaps are
 // sentence-like descriptions of work context ("Debugging why demo hosts stop
-// replicating data from hub01."); suggested prompts are conversational
-// ("inspect spirit", "yes, start with the migration"). The heuristic: a
-// recap starts with an uppercase letter and contains at least one space.
+// replicating data from hub01."); suggested prompts are short conversational
+// fragments ("inspect spirit", "yes, start with the migration", "Go ahead").
+// Uppercase-start-plus-space alone matches most well-formed English,
+// including short suggested prompts, so the heuristic also requires the text
+// to read like a finished sentence: at least minRecapLen runes long and
+// ending in terminal punctuation.
 func isRecapText(s string) bool {
 	s = strings.TrimSpace(s)
-	if s == "" {
+	if len([]rune(s)) < minRecapLen {
 		return false
 	}
 	r, _ := utf8.DecodeRuneInString(s)
-	return unicode.IsUpper(r) && strings.Contains(s, " ")
+	if !unicode.IsUpper(r) || !strings.Contains(s, " ") {
+		return false
+	}
+	switch s[len(s)-1] {
+	case '.', '!', '?':
+		return true
+	default:
+		return false
+	}
 }

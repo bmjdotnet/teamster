@@ -161,11 +161,13 @@ func buildStatusRows(cfg config.Config) []statusRow {
 	if otelMode != "none" && otelMode != "" {
 		otelEndpoint = endpointURL(cfg.OtelGRPCPort)
 		otelStatus = checkStatus(checkParams{
-			mode:    otelMode,
-			pidName: pidIfInstall(otelMode, "otelcol"),
-			port:    cfg.OtelGRPCPort,
-			cfg:     cfg,
-			timeout: timeout,
+			mode:       otelMode,
+			pidName:    pidIfInstall(otelMode, "otelcol"),
+			systemdSvc: "teamster-otelcol", // wh2-supervisor-systemd-units; checked only under cfg.HookdMode == "systemd"
+			maskName:   "otelcol",
+			port:       cfg.OtelGRPCPort,
+			cfg:        cfg,
+			timeout:    timeout,
 		})
 	}
 	rows = append(rows, statusRow{
@@ -186,12 +188,14 @@ func buildStatusRows(cfg config.Config) []statusRow {
 		}
 		promEndpoint = endpointURL(cfg.PrometheusPort)
 		promStatus = checkStatus(checkParams{
-			mode:      promMode,
-			pidName:   pidIfInstall(promMode, "prometheus"),
-			port:      cfg.PrometheusPort,
-			healthURL: promHealthURL,
-			cfg:       cfg,
-			timeout:   timeout,
+			mode:       promMode,
+			pidName:    pidIfInstall(promMode, "prometheus"),
+			systemdSvc: "teamster-prometheus", // wh2-supervisor-systemd-units; checked only under cfg.HookdMode == "systemd"
+			maskName:   "prometheus",
+			port:       cfg.PrometheusPort,
+			healthURL:  promHealthURL,
+			cfg:        cfg,
+			timeout:    timeout,
 		})
 	}
 	rows = append(rows, statusRow{
@@ -212,12 +216,14 @@ func buildStatusRows(cfg config.Config) []statusRow {
 		}
 		grafanaEndpoint = endpointURL(cfg.GrafanaPort)
 		grafanaStatus = checkStatus(checkParams{
-			mode:      grafanaMode,
-			pidName:   pidIfInstall(grafanaMode, "grafana"),
-			port:      cfg.GrafanaPort,
-			healthURL: grafanaHealthURL,
-			cfg:       cfg,
-			timeout:   timeout,
+			mode:       grafanaMode,
+			pidName:    pidIfInstall(grafanaMode, "grafana"),
+			systemdSvc: "teamster-grafana", // wh2-supervisor-systemd-units; checked only under cfg.HookdMode == "systemd"
+			maskName:   "grafana",
+			port:       cfg.GrafanaPort,
+			healthURL:  grafanaHealthURL,
+			cfg:        cfg,
+			timeout:    timeout,
 		})
 	}
 	rows = append(rows, statusRow{
@@ -318,8 +324,16 @@ type checkParams struct {
 	port       int    // TCP port to probe (0 = skip)
 	healthURL  string // HTTP health URL (empty = skip)
 	systemdSvc string // systemd service name for systemd mode (empty = skip)
-	cfg        config.Config
-	timeout    time.Duration
+	// maskName, when set, is the componentUnitMasked(name) check to run under
+	// mode=="install" + cfg.HookdMode=="systemd" (wh2-supervisor-systemd-units:
+	// otelcol/prometheus/grafana). A masked unit means the component is
+	// deliberately off on this host (no supervisor fallback, ruled) — reported
+	// distinctly rather than a bare "not running" so an operator reading
+	// `teamster status` sees why. Empty = never check (hookd has its own
+	// systemdHookdStatus path below and needs no equivalent here).
+	maskName string
+	cfg      config.Config
+	timeout  time.Duration
 }
 
 // checkStatus returns a colored status string for a single service.
@@ -332,7 +346,17 @@ func checkStatus(p checkParams) string {
 
 	switch p.mode {
 	case "install":
-		if p.pidName != "" {
+		// otelcol/prometheus/grafana: systemd-managed under systemd hookd mode
+		// (wh2-supervisor-systemd-units) — check that before falling back to
+		// PID/port, which would find nothing for a systemd-managed process
+		// (no PID file is ever written for one under this design).
+		if p.cfg.HookdMode == "systemd" && p.systemdSvc != "" {
+			if p.maskName != "" && componentUnitMasked(p.maskName) {
+				return colorize("Masked (off)", ansiYellow)
+			}
+			cmd := exec.CommandContext(ctx, "systemctl", "is-active", "--quiet", p.systemdSvc)
+			running = cmd.Run() == nil
+		} else if p.pidName != "" {
 			pid, _ = readPidFile(p.pidName, p.cfg)
 			running = pid > 0 && processAlive(p.pidName, p.cfg)
 		} else if p.port != 0 {

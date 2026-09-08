@@ -223,6 +223,88 @@ func TestBuildYAMLConfig_RelayFlagsOverridePrior(t *testing.T) {
 	}
 }
 
+// TestBuildYAMLConfig_PreservesReviewSweepNotifyHookdOnUpgrade guards the
+// gap the lead's finding named (2026-09-02): NotifyHookd was originally
+// omitted from teamsteryaml.ReviewSweep entirely, so an operator's explicit
+// `notify_hookd: false` hand-edit was silently dropped on the very next
+// upgrade install — buildYAMLConfig's `reviewSweep := prior.ReviewSweep`
+// line can only preserve a field the Go struct actually has.
+func TestBuildYAMLConfig_PreservesReviewSweepNotifyHookdOnUpgrade(t *testing.T) {
+	basedir := t.TempDir()
+	notifyOff := false
+	writePriorYAML(t, basedir, teamsterYAML{
+		Hookd: yamlHookd{Mode: "systemd", Port: 9125},
+		ReviewSweep: yamlReviewSweep{
+			Enabled:      true,
+			OlderThan:    "168h",
+			AbandonAfter: "720h",
+			Confirm:      true,
+			NotifyHookd:  &notifyOff,
+		},
+	})
+
+	got := buildYAMLConfig(yamlParams{basedir: basedir})
+
+	if got.ReviewSweep.NotifyHookd == nil {
+		t.Fatal("ReviewSweep.NotifyHookd = nil after upgrade; want the prior explicit false to survive")
+	}
+	if *got.ReviewSweep.NotifyHookd != false {
+		t.Errorf("ReviewSweep.NotifyHookd = %v; want false (preserved from prior yaml)", *got.ReviewSweep.NotifyHookd)
+	}
+	// The other three fields must survive the same upgrade untouched —
+	// proves this is a whole-struct preserve, not a field picked out
+	// specially for NotifyHookd alone.
+	if !got.ReviewSweep.Enabled || !got.ReviewSweep.Confirm {
+		t.Errorf("ReviewSweep = %+v; want Enabled/Confirm both preserved true", got.ReviewSweep)
+	}
+}
+
+// TestBuildYAMLConfig_FreshInstallReviewSweepNotifyHookdAbsent verifies a
+// fresh install (no prior teamster.yaml) leaves NotifyHookd nil — absent,
+// not an explicit true — matching config.Default()'s "true when the key is
+// absent" semantics and keeping the written file free of a redundant
+// `notify_hookd: null` line (omitempty).
+func TestBuildYAMLConfig_FreshInstallReviewSweepNotifyHookdAbsent(t *testing.T) {
+	basedir := t.TempDir()
+
+	got := buildYAMLConfig(yamlParams{basedir: basedir})
+
+	if got.ReviewSweep.NotifyHookd != nil {
+		t.Errorf("fresh install ReviewSweep.NotifyHookd = %v; want nil (absent)", *got.ReviewSweep.NotifyHookd)
+	}
+}
+
+// TestBuildYAMLConfig_PreservesMCPScraperEnabledOnUpgrade verifies that an
+// operator's mcp-scraper.enabled: true survives an upgrade install with no
+// flags re-specified — same preserve-on-upgrade contract as ReviewSweep.
+func TestBuildYAMLConfig_PreservesMCPScraperEnabledOnUpgrade(t *testing.T) {
+	basedir := t.TempDir()
+	writePriorYAML(t, basedir, teamsterYAML{
+		Hookd:      yamlHookd{Mode: "systemd", Port: 9125},
+		MCPScraper: yamlMCPScraper{Enabled: true},
+	})
+
+	got := buildYAMLConfig(yamlParams{basedir: basedir})
+
+	if !got.MCPScraper.Enabled {
+		t.Errorf("MCPScraper.Enabled = %v after upgrade; want true (preserved from prior yaml)", got.MCPScraper.Enabled)
+	}
+}
+
+// TestBuildYAMLConfig_FreshInstallMCPScraperDisabled verifies a fresh
+// install (no prior teamster.yaml) writes the inert mcp-scraper: block
+// (Enabled false) — a fresh install must never enable a timer without the
+// operator opting in first.
+func TestBuildYAMLConfig_FreshInstallMCPScraperDisabled(t *testing.T) {
+	basedir := t.TempDir()
+
+	got := buildYAMLConfig(yamlParams{basedir: basedir})
+
+	if got.MCPScraper.Enabled {
+		t.Errorf("fresh install MCPScraper.Enabled = %v; want false", got.MCPScraper.Enabled)
+	}
+}
+
 // TestBuildYAMLConfig_PreservesHealthHostnameOnUpgrade verifies that an upgrade
 // install without --prometheus-endpoint / --grafana-endpoint preserves the
 // hostname from the prior yaml's health URLs, not regressing to "localhost".

@@ -68,24 +68,19 @@ unallocated bucket. Set up accounting immediately:
    mcp__activity__reportActivity(type="planning", message="steward tags")
    ```
 
-2. **Find or create a work unit.** Check if a parent outcome exists for the
-   current session's work (`mcp__wms__wms_listOutcomes`). If one does, create
-   a work unit under it. If not, create a standalone outcome first:
+2. **Find or create a work unit**, tagging it inline at creation. Check if a
+   parent outcome exists for the current session's work
+   (`mcp__wms__wms_listOutcomes`). If one does, create a work unit under it.
+   If not, create a standalone outcome first:
    ```
    mcp__wms__wms_createOutcome(id="tag-steward-<date>", title="Tag vocabulary stewardship", status="active")
-   mcp__wms__wms_createWorkUnit(id="wu-tags-<date>", title="Steward tag vocabulary", outcomeID="<outcome>", status="active")
-   ```
-
-3. **Tag the work unit** with its context:
-   ```
-   mcp__wms__wms_tagEntity(entityType="workunit", entityID="wu-tags-<date>", tagKey="work-type", tagValue="admin")
-   mcp__wms__wms_tagEntity(entityType="workunit", entityID="wu-tags-<date>", tagKey="phase", tagValue="build")
-   mcp__wms__wms_tagEntity(entityType="workunit", entityID="wu-tags-<date>", tagKey="component", tagValue="tagging")
+   mcp__wms__wms_createWorkUnit(id="wu-tags-<date>", title="Steward tag vocabulary", outcomeID="<outcome>", status="active",
+       tags={"work-type": "admin", "phase": "build", "component": "tagging"})
    ```
    Context tags (`product`, `feature`, etc.) inherit from the parent outcome
    — do not re-apply them on the work unit.
 
-4. **Set cost-bearing focus** — this is what actually attributes your
+3. **Set cost-bearing focus** — this is what actually attributes your
    tokens:
    ```
    mcp__wms__wms_setFocus(entityType="workunit", entityID="wu-tags-<date>", focus="steward tags")
@@ -93,7 +88,7 @@ unallocated bucket. Set up accounting immediately:
    Call `wms_setFocus` again if you switch entities. Call `reportActivity` as
    you work (cosmetic only — it does NOT move focus).
 
-5. **Close out when done:**
+4. **Close out when done:**
    ```
    mcp__wms__wms_updateWorkUnitStatus(id="wu-tags-<date>", status="done")
    mcp__activity__completeActivity(message="tag stewardship complete")

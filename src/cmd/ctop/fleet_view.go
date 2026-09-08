@@ -1299,8 +1299,9 @@ func fleetBodyHeights(height, rowCount int) (gridH, logH int) {
 // flowing activity log below (operator request 2026-07-13) — the same
 // SSE-fed m.activity buffer and render.FormatLine-based rendering the
 // health view's Activity panel uses (see health_view.go), so both views
-// show identical event formatting. Newest events land at the bottom,
-// always auto-following: the fleet view has no tab/focus concept of its own
+// show identical event formatting. Newest events land at the top, pushing
+// older ones down (issue #21), always auto-following: the fleet view has no
+// tab/focus concept of its own
 // to scroll or pause the log the way the health view's Activity panel can,
 // so it's rendered unfocused (dimmer title band) and always caught up.
 func (v fleetView) View(width, height int) string {

@@ -308,6 +308,74 @@ func TestFilterStaleClosedMembersNeverDropsLeadOrLiveMembers(t *testing.T) {
 	}
 }
 
+// TestFilterStaleClosedMembersDropsGhostLeadKeepsCurrentLead is the
+// regression for the ctop "ghost second lead" bug: groupBySession merges
+// any two rows sharing a team_name into one group with no recency check,
+// so a week-old dead session's own AgentName == "" roster row can ride
+// along in the same group as today's live lead. Before this fix, the
+// blanket "AgentName == ''" exemption kept BOTH — the ghost was
+// unfilterable. Only the most recently active lead should survive; the
+// other AgentName == "" row is just another stale row now.
+func TestFilterStaleClosedMembersDropsGhostLeadKeepsCurrentLead(t *testing.T) {
+	m := &agentsModel{maxAge: time.Hour, lastActions: make(map[string]lastAction)}
+	m.lastActions[activityKey("s1", "")] = lastAction{tag: "ACT", ts: time.Now()}
+	m.lastActions[activityKey("ghost-session", "")] = lastAction{tag: "RCAP", ts: time.Now().Add(-7 * 24 * time.Hour)}
+
+	groups := []agentGroup{{sessionID: "s1", rows: []Agent{
+		{AgentName: "", SessionID: "s1", Liveness: "live"},
+		{AgentName: "", SessionID: "ghost-session", Liveness: "closed"},
+	}}}
+	out := m.filterStaleClosedMembers(groups)
+	if len(out) != 1 || len(out[0].rows) != 1 {
+		t.Fatalf("filterStaleClosedMembers = %+v, want the ghost lead dropped, current lead kept", out)
+	}
+	if out[0].rows[0].SessionID != "s1" {
+		t.Errorf("survivor session = %q, want the current lead's session s1", out[0].rows[0].SessionID)
+	}
+}
+
+// TestFilterStaleClosedMembersKeepsBothLeadsWhenGhostRecentlyClosed mirrors
+// TestFilterStaleClosedMembersKeepsRecentlyClosedTeammate for the two-lead
+// case: a closed lead row still within the age window is not a ghost yet
+// and should not be dropped just for being a second AgentName == "" row.
+func TestFilterStaleClosedMembersKeepsBothLeadsWhenGhostRecentlyClosed(t *testing.T) {
+	m := &agentsModel{maxAge: time.Hour, lastActions: make(map[string]lastAction)}
+	m.lastActions[activityKey("s1", "")] = lastAction{tag: "ACT", ts: time.Now()}
+	m.lastActions[activityKey("other-session", "")] = lastAction{tag: "DONE", ts: time.Now().Add(-20 * time.Minute)}
+
+	groups := []agentGroup{{sessionID: "s1", rows: []Agent{
+		{AgentName: "", SessionID: "s1", Liveness: "live"},
+		{AgentName: "", SessionID: "other-session", Liveness: "closed"},
+	}}}
+	out := m.filterStaleClosedMembers(groups)
+	if len(out) != 1 || len(out[0].rows) != 2 {
+		t.Fatalf("filterStaleClosedMembers = %+v, want both leads kept (second lead closed recently, within age window)", out)
+	}
+}
+
+func TestCurrentLeadIndexPicksMostRecentAmongMultipleLeads(t *testing.T) {
+	m := &agentsModel{lastActions: map[string]lastAction{
+		activityKey("s1", ""): {ts: time.Now().Add(-7 * 24 * time.Hour)},
+		activityKey("s2", ""): {ts: time.Now()},
+	}}
+	rows := []Agent{
+		{AgentName: "", SessionID: "s1"},
+		{AgentName: "@teammate", SessionID: "s2"},
+		{AgentName: "", SessionID: "s2"},
+	}
+	if got := m.currentLeadIndex(rows); got != 2 {
+		t.Errorf("currentLeadIndex = %d, want 2 (the s2 lead, most recently active)", got)
+	}
+}
+
+func TestCurrentLeadIndexNoLeadReturnsNegativeOne(t *testing.T) {
+	m := &agentsModel{}
+	rows := []Agent{{AgentName: "@a", SessionID: "s1"}, {AgentName: "@b", SessionID: "s1"}}
+	if got := m.currentLeadIndex(rows); got != -1 {
+		t.Errorf("currentLeadIndex = %d, want -1 (no lead row present)", got)
+	}
+}
+
 func TestFilterStaleClosedMembersDisabledAtZeroMaxAge(t *testing.T) {
 	m := &agentsModel{maxAge: 0}
 	groups := []agentGroup{{sessionID: "s1", rows: []Agent{
@@ -619,6 +687,51 @@ func TestCursorSurvivesRefreshWithoutCommittedSelection(t *testing.T) {
 	row, ok := m.current()
 	if !ok || row.AgentName != "b" {
 		t.Errorf("after reorder, cursor row = %+v (ok=%v), want agent b (cursor should track cursorKey even without a committed selection)", row, ok)
+	}
+}
+
+// TestPruneStaleActionsDropsOldEntriesKeepsFresh is the regression for
+// ctop's unbounded lastActions map: recordActivity has no eviction of its
+// own, so a long-running ctop process could keep resurfacing an
+// arbitrarily old SSE-derived event (e.g. a stale [RCAP]) forever.
+func TestPruneStaleActionsDropsOldEntriesKeepsFresh(t *testing.T) {
+	m := &agentsModel{maxAge: time.Hour, lastActions: map[string]lastAction{
+		"stale":  {ts: time.Now().Add(-7 * 24 * time.Hour)},
+		"fresh":  {ts: time.Now()},
+		"border": {ts: time.Now().Add(-30 * time.Minute)},
+	}}
+	m.pruneStaleActions()
+	if _, ok := m.lastActions["stale"]; ok {
+		t.Error("pruneStaleActions kept an entry older than maxAge")
+	}
+	if _, ok := m.lastActions["fresh"]; !ok {
+		t.Error("pruneStaleActions dropped a fresh entry")
+	}
+	if _, ok := m.lastActions["border"]; !ok {
+		t.Error("pruneStaleActions dropped an entry within maxAge")
+	}
+}
+
+func TestPruneStaleActionsDisabledAtZeroMaxAge(t *testing.T) {
+	m := &agentsModel{maxAge: 0, lastActions: map[string]lastAction{
+		"ancient": {ts: time.Now().Add(-30 * 24 * time.Hour)},
+	}}
+	m.pruneStaleActions()
+	if _, ok := m.lastActions["ancient"]; !ok {
+		t.Error("pruneStaleActions(maxAge=0) should be a no-op, but dropped an entry")
+	}
+}
+
+// TestSetRowsPrunesStaleActions confirms setRows (the poll-refresh path)
+// actually calls pruneStaleActions, not just that the method works in
+// isolation.
+func TestSetRowsPrunesStaleActions(t *testing.T) {
+	m := &agentsModel{maxAge: time.Hour, lastActions: map[string]lastAction{
+		"stale": {ts: time.Now().Add(-7 * 24 * time.Hour)},
+	}}
+	m.setRows([]Agent{{AgentName: "a", SessionID: "s1", RosterID: strPtr("r1")}})
+	if _, ok := m.lastActions["stale"]; ok {
+		t.Error("setRows did not prune a stale lastActions entry")
 	}
 }
 
@@ -1208,6 +1321,77 @@ func TestTeamTintRGBUsesTeamNameThenSessionIDFallback(t *testing.T) {
 	noTeam := agentGroup{sessionID: "sess-xyz", rows: []Agent{{TeamName: ""}}}
 	if got, want := teamTintRGB(noTeam), display.EntityColor("sess-xyz", ""); got != want {
 		t.Errorf("teamTintRGB(no team) = %v, want EntityColor(sessionID) fallback %v", got, want)
+	}
+}
+
+func TestRenderRowAgentColorSessionSalted(t *testing.T) {
+	// Regression guard for agents.go:1384 — verify that renderRow colors agent names
+	// with session-salt (their own SessionID). This ensures the same agent in different
+	// sessions gets different colors per instance, and catches if someone reverts the
+	// line back to EntityColor(r.AgentName, "").
+	m := &agentsModel{}
+	cs := columnsForWidth(160, false)
+	const agentName = "@colorhash"
+	const sessionID = "sess-abc-123"
+
+	row := Agent{AgentName: agentName, SessionID: sessionID, Liveness: "live"}
+	sessionSaltedColor := display.EntityColor(agentName, sessionID)
+	sessionSaltedRGB := display.RGB(sessionSaltedColor[0], sessionSaltedColor[1], sessionSaltedColor[2])
+	out := m.renderRow(row, false, cs, 16, nil, " ", false, 160)
+
+	// Output must contain the session-salted color (agents.go:1384).
+	if !strings.Contains(out, sessionSaltedRGB) {
+		t.Errorf("renderRow with SessionID %q does not render session-salted color %q", sessionID, sessionSaltedRGB)
+	}
+
+	// Output must NOT contain empty-salt if they differ — a regression would be reverting
+	// the salt parameter back to "".
+	emptySaltedColor := display.EntityColor(agentName, "")
+	emptySaltedRGB := display.RGB(emptySaltedColor[0], emptySaltedColor[1], emptySaltedColor[2])
+	if sessionSaltedRGB != emptySaltedRGB && strings.Contains(out, emptySaltedRGB) {
+		t.Errorf("renderRow output contains empty-salt color %q but should use session-salt %q", emptySaltedRGB, sessionSaltedRGB)
+	}
+}
+
+func TestRenderRowTeamAliasColorStaysEmptySaltedAcrossSessions(t *testing.T) {
+	// Regression guard for agents.go:1393-1394 — the "#team" branch must color by
+	// the un-prefixed team name with empty salt (matching teamTintRGB's own
+	// EntityColor(team, "")), not by the "#"-prefixed string and not session-salted.
+	// A team spans multiple sessions, so session-salting here would desync a team's
+	// text color from its own row background tint across sessions. Proof: two rows
+	// for the SAME team but DIFFERENT SessionIDs must render the SAME color.
+	m := &agentsModel{}
+	cs := columnsForWidth(160, false)
+	const teamAlias = "#wms-build"
+
+	rowA := Agent{AgentName: teamAlias, SessionID: "session-a", Liveness: "live"}
+	rowB := Agent{AgentName: teamAlias, SessionID: "session-b", Liveness: "live"}
+	outA := m.renderRow(rowA, false, cs, 16, nil, " ", false, 160)
+	outB := m.renderRow(rowB, false, cs, 16, nil, " ", false, 160)
+
+	wantColor := display.EntityColor("wms-build", "")
+	wantRGB := display.RGB(wantColor[0], wantColor[1], wantColor[2])
+	if !strings.Contains(outA, wantRGB) {
+		t.Errorf("renderRow(%q, session-a) does not render empty-salt, un-prefixed team color %q", teamAlias, wantRGB)
+	}
+	if !strings.Contains(outB, wantRGB) {
+		t.Errorf("renderRow(%q, session-b) does not render empty-salt, un-prefixed team color %q", teamAlias, wantRGB)
+	}
+
+	// Fixture sanity: session-salting "wms-build" with these two session ids must
+	// actually differ, or the test above would pass vacuously even with a
+	// session-salted implementation.
+	saltedA := display.EntityColor("wms-build", "session-a")
+	saltedB := display.EntityColor("wms-build", "session-b")
+	if saltedA == saltedB {
+		t.Fatal("test fixture invalid: session-a and session-b must hash wms-build to different colors")
+	}
+
+	// Must NOT use the "#"-prefixed string as the hash input.
+	prefixedColor := display.EntityColor(teamAlias, "")
+	prefixedRGB := display.RGB(prefixedColor[0], prefixedColor[1], prefixedColor[2])
+	if prefixedRGB != wantRGB && (strings.Contains(outA, prefixedRGB) || strings.Contains(outB, prefixedRGB)) {
+		t.Errorf("renderRow(%q) uses the \"#\"-prefixed string as hash input (color %q)", teamAlias, prefixedRGB)
 	}
 }
 

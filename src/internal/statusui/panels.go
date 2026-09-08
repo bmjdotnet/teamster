@@ -75,23 +75,55 @@ func renderServicesPanel(rows []ServiceRow, width int) string {
 	return renderPanel("Services", strings.TrimRight(sb.String(), "\n"), width)
 }
 
-// renderWMSPanel renders the WMS entity counts panel.
+// renderWMSPanel renders the WMS entity counts panel. OutcomesOnHold /
+// WorkUnitsOnHold (WP3-DESIGN.md §3a) are a strictly additive breakdown of
+// Open, not a separate bucket — Open's own value is unchanged here, matching
+// the store's contract — so each gets its own line directly under its
+// entity's Open/Done/Abandoned line, shown only when nonzero: a sweep-parked
+// backlog of zero should not add a permanent blank-looking line to a panel
+// operators check constantly. The "(of open)" suffix is load-bearing, not
+// decoration: open/done/abandoned on the first line is a partition, and
+// without the suffix a bare "N on_hold" on the line below reads as a fourth,
+// disjoint member of it — an operator cannot tell whether Open's own count
+// already includes the on_hold figure or sits beside it. It does (per the
+// contract above), and the line has to say so.
 func renderWMSPanel(summary store.StatusSummary, hasStore bool, width int) string {
 	var content string
 	if !hasStore {
 		content = dimStyle.Render("Store unavailable")
 	} else {
 		dot := dimStyle.Render("·")
-		content = fmt.Sprintf("%-14s %s open  %s  %s done\n%-14s %s open  %s  %s done",
-			"Outcomes",
-			boldStyle.Render(fmt.Sprintf("%3d", summary.OutcomesOpen)),
-			dot,
-			dimStyle.Render(fmt.Sprintf("%3d", summary.OutcomesDone)),
+		lines := []string{
+			fmt.Sprintf("%-14s %s open  %s  %s done  %s  %s abandoned",
+				"Outcomes",
+				boldStyle.Render(fmt.Sprintf("%3d", summary.OutcomesOpen)),
+				dot,
+				dimStyle.Render(fmt.Sprintf("%3d", summary.OutcomesDone)),
+				dot,
+				dimStyle.Render(fmt.Sprintf("%3d", summary.OutcomesAbandoned)),
+			),
+		}
+		if summary.OutcomesOnHold != 0 {
+			lines = append(lines, fmt.Sprintf("%-14s %s on_hold (of open)",
+				"Outcomes",
+				boldStyle.Render(fmt.Sprintf("%3d", summary.OutcomesOnHold)),
+			))
+		}
+		lines = append(lines, fmt.Sprintf("%-14s %s open  %s  %s done  %s  %s abandoned",
 			"Work Units",
 			boldStyle.Render(fmt.Sprintf("%3d", summary.WorkUnitsOpen)),
 			dot,
 			dimStyle.Render(fmt.Sprintf("%3d", summary.WorkUnitsDone)),
-		)
+			dot,
+			dimStyle.Render(fmt.Sprintf("%3d", summary.WorkUnitsAbandoned)),
+		))
+		if summary.WorkUnitsOnHold != 0 {
+			lines = append(lines, fmt.Sprintf("%-14s %s on_hold (of open)",
+				"Work Units",
+				boldStyle.Render(fmt.Sprintf("%3d", summary.WorkUnitsOnHold)),
+			))
+		}
+		content = strings.Join(lines, "\n")
 	}
 	return renderPanel("WMS", content, width)
 }

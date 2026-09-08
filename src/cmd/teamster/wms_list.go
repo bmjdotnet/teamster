@@ -112,7 +112,7 @@ func filterOutcomes(outcomes []*wms.Outcome, status string, staleThreshold time.
 		if status != "" && o.Status != status {
 			continue
 		}
-		if status == "" && o.Status == wms.StatusDone {
+		if status == "" && wms.IsTerminal(wms.EntityOutcome, o.Status) {
 			continue
 		}
 		if !staleThreshold.IsZero() && o.UpdatedAt.After(staleThreshold) {
@@ -129,7 +129,7 @@ func filterWorkUnits(wus []*wms.WorkUnit, status string, staleThreshold time.Tim
 		if status != "" && wu.Status != status {
 			continue
 		}
-		if status == "" && wu.Status == wms.StatusDone {
+		if status == "" && wms.IsTerminal(wms.EntityWorkUnit, wu.Status) {
 			continue
 		}
 		if !staleThreshold.IsZero() && wu.UpdatedAt.After(staleThreshold) {

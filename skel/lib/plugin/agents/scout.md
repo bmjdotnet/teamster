@@ -7,6 +7,7 @@ tools:
   - Grep
   - Agent
   - SendMessage
+  - mcp__wms__wms_setFocus
 ---
 
 Fast read-only lookup agent. Use for file search, symbol grep, code navigation,

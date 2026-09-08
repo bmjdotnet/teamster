@@ -63,6 +63,8 @@ func main() {
 			os.Exit(runSetup(os.Args[2:]))
 		case "install-remote":
 			os.Exit(runInstallRemote(os.Args[2:]))
+		case "clone":
+			os.Exit(runClone(os.Args[2:]))
 		case "check-config":
 			os.Exit(runCheckConfig(os.Args[2:]))
 		}
@@ -133,6 +135,7 @@ func printUsage() {
 	fmt.Fprintf(os.Stderr, "  restore     Restore from a backup directory\n")
 	fmt.Fprintf(os.Stderr, "  setup       Guided setup and configuration\n")
 	fmt.Fprintf(os.Stderr, "  install-remote  Install Teamster remote client on another host\n")
+	fmt.Fprintf(os.Stderr, "  clone       Stand up a disposable clone on another host (--dry-run to preview)\n")
 	fmt.Fprintf(os.Stderr, "  check-config    Validate etc/interceptors.yaml without restarting hookd\n")
 	fmt.Fprintf(os.Stderr, "  version     Print build version and exit\n")
 	fmt.Fprintf(os.Stderr, "  help        Show this message\n")

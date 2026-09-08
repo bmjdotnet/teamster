@@ -70,19 +70,30 @@ flags (list):
   --key <key>                       show values for a specific key
   --show-retired                    include retired values in output`
 
-func openTagsDB() (store.Store, error) {
+// resolveStoreDSN reads $TEAMSTER_STORE_DSN, falling back to teamster.yaml
+// via config.Load so the CLI works without the env var in the user's shell
+// (managed-mode installs only set the env in settings.json for hooks/MCPs,
+// not in the shell). Factored out of openTagsDB so callers that need a DSN
+// without opening a store (e.g. `teamster sql --database=<db>` retargeting
+// the database segment) share the same resolution logic.
+func resolveStoreDSN() (string, error) {
 	dsn := os.Getenv("TEAMSTER_STORE_DSN")
 	if dsn == "" {
-		// Fall back to DSN from teamster.yaml via config.Load so the CLI works
-		// without the env var in the user's shell (managed-mode installs only set
-		// the env in settings.json for hooks/MCPs, not in the shell).
 		cfg, err := config.Load()
 		if err == nil && cfg.StoreDSN.Raw != "" {
 			dsn = cfg.StoreDSN.Raw
 		}
 	}
 	if dsn == "" {
-		return nil, fmt.Errorf("TEAMSTER_STORE_DSN is not set and no DSN found in teamster.yaml")
+		return "", fmt.Errorf("TEAMSTER_STORE_DSN is not set and no DSN found in teamster.yaml")
+	}
+	return dsn, nil
+}
+
+func openTagsDB() (store.Store, error) {
+	dsn, err := resolveStoreDSN()
+	if err != nil {
+		return nil, err
 	}
 	return store.Open(context.Background(), dsn)
 }

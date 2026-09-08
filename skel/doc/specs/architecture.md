@@ -34,8 +34,8 @@ a local hookd. This is the default out of `./install.sh` with no flags.
 │  hookd  →  events.jsonl  →  feed (terminal viewer)                    │
 │         →  SSE dashboard (browser)                                     │
 │         →  /wms page (WMS hierarchy)                                   │
-│         →  /mcp/roster (agent roster MCP, 7 tools)                     │
-│         →  /mcp/health (agent health MCP, 4 tools)                     │
+│         →  /mcp/roster (agent roster MCP)                              │
+│         →  /mcp/health (agent health MCP)                              │
 │         →  /metrics (Prometheus)                                       │
 │                                                                        │
 │  health-collector (daemon, 15s poll) → agent_health_gauge (MySQL)      │
@@ -45,6 +45,8 @@ a local hookd. This is the default out of `./install.sh` with no flags.
 │    teamster-classify.timer → classify (phase/work-type tagging)       │
 │    teamster-sweep.timer    → claude --print (LLM sweep, gated)       │
 │    teamster-backup.timer   → backup (snapshot MySQL, OTel, config)    │
+│    teamster-wms-review-sweep.timer → review-sweep (nightly, gated)    │
+│    teamster-mcp-scraper.timer → mcp-scraper (events.jsonl → mcp_tool_calls, gated) │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -60,8 +62,8 @@ only the Python hook client. No daemons, databases, or Go binaries on remotes.
 │    POST /event          ← hook events from hub AND remote clients   │
 │    POST /mcp/activity   ← JSON-RPC 2.0 from remote Claude sessions  │
 │    POST /mcp/wms        ← JSON-RPC 2.0 from remote Claude sessions  │
-│    POST /mcp/roster     ← agent roster queries (7 tools)             │
-│    POST /mcp/health     ← agent health queries (4 tools)             │
+│    POST /mcp/roster     ← agent roster queries                       │
+│    POST /mcp/health     ← agent health queries                       │
 │    GET  /               ← SSE dashboard (htmx)                     │
 │    GET  /events/stream  ← SSE feed of events.jsonl                 │
 │    GET  /wms            ← WMS hierarchy page                       │
@@ -78,7 +80,8 @@ only the Python hook client. No daemons, databases, or Go binaries on remotes.
 │  health-collector (daemon, polls token_ledger → health gauges)      │
 │  supervisor (manages hookd + optional monitoring bundle)            │
 │                                                                     │
-│  systemd timers: rollup, classify, sweep, backup                    │
+│  systemd timers: rollup, classify, sweep, backup, wms-review-sweep, │
+│                  mcp-scraper                                        │
 └─────────────────────────────────────────────────────────────────────┘
          ▲                         ▲
          │ HTTP POST /event        │ HTTP POST /mcp/*
@@ -164,6 +167,239 @@ variables, and service templates.
 
 ---
 
+## Clone (`teamster clone`)
+
+`teamster clone <user>@<host>` stands up a **disposable development peer**:
+an independent instance running the exact commit and data of a source
+instance (default: the local one), on a target host reached over SSH. It is
+not a replica and not a failover — it is writable, standalone, and expected
+to be destroyed. `teamster clone` always runs **from** the source host and
+pushes outward; it never installs on, migrates, or mutates the source.
+
+The design principle: **instance identity travels, host topology is
+re-derived.** The git commit, the DB rows, event history, WMS state, and
+cost history all travel to the clone unchanged. Which services are managed
+vs. external, DSNs, hostnames, ports, and filesystem paths are never
+copied — `clonetopology.Translate` (`internal/clonetopology`) re-derives
+them at install time the same way any fresh install does (`os.Hostname()`,
+`findFreePort()`, a freshly-generated DSN). Conflating the two is the
+feature's primary failure mode; the isolation contract below exists to
+prevent it structurally rather than by convention.
+
+### Pipeline
+
+```
+teamster clone <user>@<host>
+  1. Resolve build (Leg 1, internal/clone)
+       local `teamster --version` (or remote GET /health when --source names
+       another host) discloses the commit the source instance is actually
+       running; re-resolved to a full hash inside --repo-dir or a
+       --github-repo fetch (a short hash cannot be expanded without a local
+       repo — the clean refusal when the commit never reached GitHub, the
+       normal case for day-to-day private development)
+  2. Probe target — `printenv HOME` over SSH, once, up front
+       every remote path built downstream is absolute (path.Join from this
+       value); a literal ~ is never passed into a remote command (see
+       "SSH transport" below)
+  3. Ship (Leg 2a, internal/clone: dirty.go, ship.go, fingerprint.go)
+       git archive <full-hash> → scp tarball → sha256 transport check →
+       enforced-fresh extraction (mkdir with no -p: an existing target dir
+       fails loudly rather than being silently reused) → content-manifest
+       fingerprint gate: git ls-tree blob hashes at the source vs.
+       git hash-object over the extracted tree at the target — the real
+       provenance check, independent of and in addition to the transport
+       checksum. --allow-dirty ships the enumerated dirty fileset instead
+       (tracked-modified + untracked-not-ignored, respecting .gitignore) and
+       both the CLI summary and the clone's own `Version` string carry a
+       -dirty marker (the commit hash itself cannot encode that — it is
+       identical for a clean and dirty tree at the same revision).
+  4. Translate topology (internal/clonetopology, pure function)
+       source teamster.yaml → lib/installrunner.sh flag vector: five
+       always-explicit --*-mode=install flags, --store-engine=mysql-8.4,
+       --env=clone, --wire; relay/store.dsn/tags are dropped, never
+       remapped; refuses an explicit --basedir under any configured
+       forbidden prefix (I5)
+  5. Invoke the installer over SSH (TEAMSTER_COMMIT/TEAMSTER_VERSION
+       exported immediately before `./lib/installrunner.sh "$@"` — without
+       this the .git-less extracted tree makes installrunner.sh's own
+       `git rev-parse` fail and silently stamp commit "none")
+  6. Stage A verify — `<binary> --version` over SSH, prefix-matched against
+       the shipped hash. Needs no daemon running (reads the ldflags stamp
+       straight off the binary); blocks the data leg on mismatch. The
+       installer's own exit code is never trusted as the success signal —
+       it exits 0 even when schema migrations fail, and exits 0 having
+       started none of otelcol/Prometheus/Grafana on a fresh install.
+  7. Assert target schema_version — SELECT MAX(version) must equal this
+       binary's own max known migration (installrunner.sh's migration step
+       runs as `cmd && printf ok || printf WARN`, non-fatal under
+       `set -euo pipefail`, so a clean install exit code alone doesn't
+       guarantee the schema actually landed)
+  8. Mask teamster-sweep.timer, teamster-backup.timer,
+       teamster-wms-review-sweep.timer, and teamster-mcp-scraper.timer
+       permanently (systemctl mask, not stop — R11: sweep makes paid
+       `claude --print` API calls hourly and would pass its own orphan-gate
+       against the restored history; backup would fire on the clone's next
+       reboot; review-sweep's failure mode is data loss — a disposable
+       clone of production-shaped data must never autonomously park or
+       abandon entities in its copy; mcp-scraper masks for a fourth,
+       distinct reason — measurement integrity, not money or destructive
+       action — a clone must not ledger its own local MCP traffic into
+       `mcp_tool_calls` as if it were the hub's, corrupting the volume
+       figure that table exists to support)
+  9. Move the data (Leg 3, internal/clonedata + cmd/teamster/clone_data.go)
+       resolve the source's backup_dir/latest snapshot (pinned by default —
+       no write against the source; --fresh-backup opts in to triggering
+       one) → transfer candidate files push-only, excluding config.tar.gz
+       (I1's actual v1 mechanism — RestoreTeamster silently skips a missing
+       config.tar.gz) → stop teamster-rollup.timer / teamster-classify.timer
+       / teamster-health-collector.service / teamster-mcp-scraper.timer (all
+       four connect to MySQL directly — mcp-scraper to claude_telemetry,
+       the other three to the app DSN — and would race a just-migrated,
+       still-empty schema; their OnBootSec deadlines are boot-relative and
+       have already elapsed by this point in the run, so they fire
+       immediately once enabled — not the "10-minute interval, no realistic
+       collision" a steady-state install would have; HTTP-only codex-scraper
+       is correctly absent from this list, having no direct DB connection of
+       its own to race)
+       → `teamster restore --force <dir>` → restart those four units →
+       verify row counts (SHOW TABLES-driven on both sides, never a
+       hand-picked subset; source-side queries run through the
+       clone_verify_ro read-only credential, I7 — never the app DSN;
+       target-side queries use the target's own already-provisioned app DSN,
+       since the target is disposable) → `teamster start` (a fresh install
+       never auto-starts hookd or the managed otelcol/prometheus/grafana
+       bundle; this is what brings the clone's stack up for the first time)
+```
+
+Row-count mismatches are reported, not fatal — the source is live
+production, so append-only tables (`token_ledger`, cost facts) and gauge
+tables (`agent_health_gauge`) drift between the pinned backup snapshot and a
+live query by construction. The acceptance harness
+(`scripts/clone-acceptance-test.sh`) is the real correctness gate.
+
+Step 8's mask is not only a clone-time action. `lib/installrunner.sh`'s
+`unit_is_masked` guard — applied at every systemd unit-install site, both
+through the shared `install_and_enable_unit` helper and hookd through
+its own compare-then-sync, not only these four timers — checks every
+unit for an existing mask before installing or enabling it and skips with
+a logged `left masked: <unit>` line instead of overwriting the `/dev/null`
+symlink. A later in-place upgrade on the clone target, or any host with a
+hand-masked unit, cannot silently undo it.
+
+### SSH transport layer
+
+Every remote command runs as a real script file, never concatenated argv
+handed to `ssh` — `ssh(1)` joins anything past the target with a bare space
+and re-parses it in the remote login shell, which is what caused a
+recurring class of quoting bugs (PATH prefixes colliding with SQL parens,
+tilde expansion breaking under quoting). `internal/clone`'s transport
+instead writes the command to a local temp file, `scp`s it to a throwaway
+remote path, and runs it as one pre-quoted `bash <path>` string — quoting is
+then interpreted exactly once, by the script actually executing.
+
+Two runner shapes cover this:
+
+- **`SSHRunner`** — a single command (`probe`, `systemctl stop`, `teamster
+  sql`), built via `scriptForArgs` (each argument individually
+  shell-quoted).
+- **`SSHScriptRunner`** — a multi-line script with positional parameters
+  (the installer invocation, the remote fingerprint reconstruction), passed
+  through with a shared `PATH` augmentation so `~/.local/bin`-installed
+  tools resolve under SSH's minimal non-interactive `PATH`.
+
+**No literal `~` ever reaches a remote command.** `ProbeTarget` interrogates
+the target's real `$HOME` once, at the very start of a run; every path
+built afterward (`clone-src/<hash>/`, the installed binary,
+`.claude/settings.json`, `clone-data/<hash>/`) is `path.Join`'d from that
+absolute value, because SSH does not reliably expand `~` once the argument
+carrying it has already been shell-quoted — which the script-based
+transport always does.
+
+**Transport is push-only (I6)**: `Uploader` always shells out to `scp` from
+source to target, never a pull. This holds even where a shortcut is
+available — a target sharing the source's NFS export could read the
+source's backup directory directly, which would be faster and would
+quietly violate both I6 (no longer a push) and I5 (reaching into
+source-owned storage). The implementation always does a genuine copy into a
+directory outside the forbidden prefixes.
+
+### MySQL 8.4 provisioning
+
+`lib/installrunner.sh --store-engine=mariadb|mysql-8.4` (only valid with
+`--store-mode=install`) selects the store package; `clonetopology.Translate`
+always emits `--store-engine=mysql-8.4` for a clone. This is clone-specific,
+not a change to the default for ordinary installs, which keep today's
+`default-mysql-server` (MariaDB) behavior unchanged.
+
+The reason is fidelity: a source instance can run genuine MySQL 8.0, whose
+dumps carry `utf8mb4_0900_ai_ci` — a MySQL-8-only collation baked into the
+`CREATE TABLE` statements themselves, which MariaDB does not recognize
+(every restore would fail `Unknown collation` on both `teamster` and
+`claude_telemetry`). MySQL 8.0 itself is not apt-installable on Debian
+trixie (Oracle ships 8.4-LTS/9.5+ only there); MySQL 8.4 LTS is the same
+engine one release ahead, is apt-installable, and needs no collation
+rewrite. (The rewrite itself — `utf8mb4_0900_ai_ci` → `utf8mb4_general_ci`,
+the pattern `repl-push-server.sh` already uses for its MySQL→MariaDB
+transition — remains the documented fallback for any target platform that
+cannot run genuine MySQL; it is simply not needed on the required path.)
+
+`install_mysql_84()` (`lib/installrunner.sh`): adds Oracle's apt repo via a
+dearmored, `signed-by=`-referenced keyring (`apt-key` is fully removed on
+trixie), checks the signing key's expiry at runtime and **warns rather than
+dies** on an expired key (an unsigned/unverified source is an accepted risk
+for the clone target only, never for the source's own trust chain),
+installs `mysql-community-server`, then switches `root@localhost` to
+`auth_socket` so `sudo mysql` works passwordlessly for the rest of the
+installer (mirroring MariaDB's built-in `unix_socket` default — Oracle's 8.4
+package doesn't auto-load `auth_socket`, so the installer loads the plugin
+first). Database/user creation and grants are shared with the MariaDB path
+via `install_mysql()`'s common tail — only the server package install
+differs between engines.
+
+`claude_telemetry` is provisioned at install time (`CREATE DATABASE IF NOT
+EXISTS`, `utf8mb4_0900_ai_ci` with a plain-`utf8mb4` fallback, `GRANT ALL`
+to the app user) — no install path created that database before clone
+needed it. The app user also receives `SET_ANY_DEFINER`/`SYSTEM_USER`
+(MySQL 8.2+), needed when a restored view or routine's original definer no
+longer exists as a user on this server.
+
+### Isolation contract (I1–I7)
+
+A clone that poisons the source defeats the feature's purpose. These are
+enforced invariants, not conventions:
+
+| | Invariant | Enforcement |
+|---|---|---|
+| I1 | Never restore `teamster.yaml` or any `etc/` config verbatim | `config.tar.gz` is never a transfer candidate (`clonedata.TransferCandidates` excludes it) — `RestoreTeamster` silently skips a missing one, so simply not shipping it satisfies I1 |
+| I2 | `relay:` / `repl_push_remote` are dropped, never remapped | `clonetopology.Translate` never reads the `Relay` section of the source config |
+| I3 | `store.dsn` is regenerated at the target, never copied | Translate never emits `--store-dsn`; `--store-mode=install` with no DSN makes installrunner.sh auto-generate a fresh local one |
+| I4 | All five `--*-mode` flags always explicit | Omitting `--store-mode` provisions no MySQL at all; the other four silently skip URL wiring |
+| I5 | No clone path under forbidden prefixes | `clonetopology.Translate` refuses an explicit `--basedir` under any prefix listed in `clone.forbidden_basedirs` in `teamster.yaml` (a target may share the source's NFS export) |
+| I6 | Transport is push-only, source → target | `Uploader` always `scp`s from source to target; never a pull, never a shared-mount read |
+| I7 | The source is read-only for the entire operation | Source-side verification queries run through the dedicated `clone_verify_ro` read-only MySQL credential, never the app DSN |
+
+**`clone_verify_ro`** (`internal/clonedata.CloneVerifyROUser`) is a
+least-privilege, `localhost`-scoped MySQL user provisioned on **every**
+install that can locally administer MySQL — not only clone targets, since
+any source host may later become a clone source and there's no way to know
+in advance which one will. `lib/installrunner.sh`'s
+`provision_clone_verify_ro` (mirroring the existing `grafana_ro` pattern)
+applies `etc/clone-verify-ro-user.sql` and persists the generated password
+0600 to `$BASEDIR/var/clone/clone_verify_ro_password`, reused on re-install
+so a working credential is never rotated out from under anything holding
+it. A missing password file at clone time means the source predates this
+fix and must be upgraded — `teamster clone` refuses rather than fall back
+to the app DSN.
+
+Two related risks are accepted by explicit ruling rather than closed:
+`teamster clone` pins the source's existing `backup_dir/latest` snapshot by
+default rather than triggering a fresh backup (itself a write against the
+source) — `--fresh-backup` opts in explicitly. And `teamster sql` has no
+read-only guard yet — every source-side query `teamster clone` issues is
+SELECT-only by discipline pending that follow-up.
+
+---
+
 ## Component Map
 
 ```
@@ -191,9 +427,11 @@ Claude Code session (hub-local)
       └─→ ~/teamster/bin/wms-mcp
               ├─ createOutcome / getOutcome / listOutcomes / updateOutcomeStatus
               ├─ createWorkUnit / getWorkUnit / listWorkUnits / updateWorkUnitStatus
-              ├─ assignWorkUnit / claimWorkUnit / classifyEntity / listRelated
+              ├─ assignWorkUnit / claimWorkUnit / deliverResult / listDeliverables / classifyEntity / listRelated
               ├─ updateStatus / setFocus / getFocus / getHistory / getTimeline
               ├─ addDependency / removeDependency / listBlockers / listDependents
+              ├─ addOutcomeParent / removeOutcomeParent
+              ├─ addRelation / removeRelation / listRelations / listRelationKinds
               ├─ tagEntity / untagEntity / listTags / defineTag / retireTag
               ├─ describeTag / setPhase / snapshotEntityTags / rollbackTags
               └─→ MySQL (via internal/store/mysql/)
@@ -219,6 +457,11 @@ Claude Code session (remote)
   │                          → session tracker / entity count updates
   │                          → focus-nudge check (injects additionalContext
   │                            if agent has no focus interval (open or closed), max 1/session+agent/turn)
+  │                          → WMSStatusChange event, WorkUnit pending→active:
+  │                            attempts to auto-open a focus interval for the
+  │                            claiming agent, asynchronously and best-effort
+  │                            (may decline — see "Claim-success focus
+  │                            interval" under Data Flows)
   ├─ GET  /health          → {"status":"ok"}
   ├─ GET  /                → SSE activity dashboard (htmx, streaming HTML)
   ├─ GET  /events/stream   → SSE feed (raw JSONL rendered as HTML divs)
@@ -231,12 +474,12 @@ Claude Code session (remote)
   ├─ GET  /metrics         → Prometheus metrics (default registry)
   ├─ POST /mcp/activity    → JSON-RPC 2.0 activity MCP (for remote sessions)
   ├─ POST /mcp/wms         → JSON-RPC 2.0 WMS MCP (for remote sessions)
-  ├─ POST /mcp/roster      → JSON-RPC 2.0 roster MCP (7 tools: agent roster,
+  ├─ POST /mcp/roster      → JSON-RPC 2.0 roster MCP (agent roster,
   │                           liveness, registration, token verification;
   │                           registerPeer propagates a set team_name onto
   │                           the session row and sibling roster entries
   │                           already bound to that session_id)
-  └─ POST /mcp/health      → JSON-RPC 2.0 health MCP (4 tools: agent health
+  └─ POST /mcp/health      → JSON-RPC 2.0 health MCP (agent health
                               snapshots, team summaries, pressure alerts)
 
 ~/teamster/bin/feed         → tail ~/teamster/var/events.jsonl, ANSI render
@@ -250,6 +493,20 @@ Claude Code session (remote)
   └─ --sweep-llm: adds LLM-assisted synthesis pass
 
 ~/teamster/bin/classify     → interval phase + work-type classifier (systemd timer)
+
+~/teamster/bin/mcp-scraper  → MCP tool-call telemetry tailer (systemd timer, oneshot,
+                               config-gated on MCPScraper.Enabled)
+  ├─ tails ~/teamster/var/events.jsonl, filters to completed (PostToolUse)
+  │   mcp__* tool calls only — wms-mcp itself never writes telemetry, so
+  │   this file is the tailer's sole data source
+  ├─ ledgers one row per call into claude_telemetry.mcp_tool_calls (a
+  │   call-volume instrument, not an audit trail — no tool_input capture)
+  ├─ cursor + generation counter survives copytruncate log rotation;
+  │   a lost/corrupt cursor recovers from MAX(source_generation)+1
+  └─ single-writer invariant: only the hub's own process ever writes this
+      table — teamster-mcp-scraper.timer is permanently masked on every
+      `teamster clone` target so a clone never ledgers its own local
+      traffic as if it were the hub's (see "Clone" isolation notes above)
 
 ~/teamster/bin/codex-scraper → Codex rollout-JSONL cost/ledger tailer (systemd timer, oneshot)
   ├─ tails ~/.codex/sessions/**/rollout-*.jsonl (+ archived_sessions/)
@@ -278,6 +535,26 @@ supervisor process
   └─ manages optional monitoring bundle (otelcol, Prometheus, Grafana)
        TEAMSTER_BUNDLE=all|otelcol|prom|grafana selects components
 ```
+
+**`teamster stop` sequence (supervisor-managed components).** `supervisorStop`
+first sends `SIGTERM` to the supervisor process itself (from its PID file),
+then — before any PID-file or port-based fallback runs — issues `systemctl
+stop` for every systemd-managed unit name a supervisor-mode host could be
+running (`teamster-hookd`, `teamster-token-scraper`,
+`teamster-health-collector`, `teamster-otelcol`, `teamster-prometheus`,
+`teamster-grafana`), best-effort: a stop against a nonexistent or inactive
+unit just errors, and that error is discarded rather than blocking the rest
+of the sequence. Only after this systemd-first pass does it fall back to
+directly stopping whatever the supervisor itself actually manages by PID
+file (`stopByPidFile`/`killByPort`), which exists to clean up orphans left
+by a dead supervisor. This ordering closes an incident (2026-09-05) where a
+component with no PID file — the normal state under systemd, which writes
+none — fell straight through to `killByPort` and SIGKILLed whatever held
+that port behind systemd's back, racing `Restart=on-failure`; it hit
+production hookd. `componentSupervisorManaged`/`hookdSupervisorManaged` are
+the single eligibility predicates for this decision, called from both the
+start and the stop paths, so start and stop can never disagree about which
+components a given host actually supervises.
 
 ---
 
@@ -381,6 +658,72 @@ Agent calls wms-mcp tool (e.g., updateOutcomeStatus)
   → event appears in activity stream with [TASK] or [DONE] tag
 ```
 
+### Claim-success focus interval (WorkUnit dispatch)
+
+```
+Agent calls wms_claimWorkUnit(id)
+  → wms-mcp Store.ClaimWorkUnit: atomic CAS on workunits.status/agent_id
+      pending              → claim:      status→active, agent_id set, claimed_at stamped
+      active, no owner     → adopt:      agent_id set, claimed_at stamped, status unchanged
+      active, own owner    → idempotent: agent_id re-set, no status change
+      active, other owner  → ErrAlreadyClaimed
+      review/done/blocked  → ErrNotClaimable
+  → only the pending→active leg calls eng.OnStatusChange (adopt/idempotent
+    never change status, so firing one would be a phantom event with a
+    fabricated OldStatus)
+  → HookObserver posts WMSStatusChange (wms_old_status=pending,
+    wms_new_status=active, wms_agent_name, wms_session_id, wms_entity_id)
+  → hookd's WMSStatusChange handler detects the pending→active WorkUnit
+    transition and calls OpenFocusInterval for the claiming agent —
+    success-gated: it only runs after the store CAS has already committed,
+    so a claim race's loser (whose UPDATE affected 0 rows) never reaches
+    this code and never gets a bogus interval
+  → on failure to open: slog WARN + teamster_claim_focus_interval_failures_total
+    Prometheus counter + a one-shot wmsWarnings additionalContext nudge
+    ("call wms_setFocus manually")
+  → the claim response returns the WorkUnit's brief, tags, and claimed_at
+```
+
+This converts the named-agent focus-interval slice from voluntary
+`wms_setFocus` to mechanical claim-time attribution for the common
+"claim a pending WorkUnit" path. Adopt and idempotent re-claim do not emit a
+WMSStatusChange event, so they do not get an auto-opened interval — an agent
+adopting an unowned active WorkUnit still needs `wms_setFocus`.
+
+### Nightly review sweep (`teamster wms review-sweep`)
+
+```
+teamster-wms-review-sweep.timer fires (03:00 nightly, config-gated)
+  → cfg.ReviewSweep.Enabled=false → print one line, exit 0 (no-op)
+  → cfg.ReviewSweep.Enabled=true:
+      Stage 1 — park stale review WorkUnits and idle Outcomes to on_hold
+        (idle >= ReviewSweep.OlderThan, default 168h)
+      Stage 2 — abandon sweep-parked entities untouched since parking
+        (>= ReviewSweep.AbandonAfter, default 720h; never a human-set on_hold)
+  → cfg.ReviewSweep.Confirm=false → dry-run: print the per-candidate listing
+      and exit 0, writing nothing
+  → cfg.ReviewSweep.Confirm=true:
+      each disposition → wms.RecordMutation (agent_id="wms-review-sweep")
+      each close (not skip) → HookObserver.PostStatusChange
+        (SessionID="wms-review-sweep" — never a live session's id)
+        → POST hookd /event, hook_event_name=WMSStatusChange
+        → hookd: entity-count gauge updates, W2 warning queued for
+          wu-review-delivered closes only (newStatus=='done')
+      after all writes: CloseIntervalsOnTerminalEntities
+        (on_hold is not terminal — Stage 1 parks drain no interval;
+         Stage 2 abandons do)
+```
+
+This bypasses the WMS engine entirely, the same as `wms_gc.go`/
+`wms_close.go` — no dependency-unblock cascade fires for anything blocked
+on an entity the sweep closes (a pre-existing, shared gap across all three
+engine-bypassing closers, not something this feature introduces). See
+`semantic-conventions.md` §4.8 for the full rule-id table, the journal
+`notes` grammar, and the `agent_id="wms-review-sweep"` discriminator that
+the interlock, the descendant-safety walk, and Sweep Stage 2's own
+candidacy queries all read to tell a sweep-set `on_hold` from a
+human-set one.
+
 ### Cost attribution flow
 
 ```
@@ -399,11 +742,37 @@ rollup --sweep runs (systemd timer, every 10 min)
   → recovery passes (recover-focus, recover-warmup, recover-gaps)
   → aggregation + reconciliation
 
-classify runs (systemd timer, every 5 min)
+classify runs (systemd timer, every 10 min)
   → reads wms_intervals + tool signals
   → derives phase (spec/build/test/review/admin) and work-type (docs/test/infra)
   → writes tags to entity_tags via classifier rules
 ```
+
+### MCP tool-call telemetry flow
+
+```
+mcp-scraper runs (systemd timer, every 10 min; oneshot, config-gated on
+MCPScraper.Enabled — no-op exit 0 when disabled)
+  → tails ~/teamster/var/events.jsonl from a persisted byte-offset +
+    generation cursor (generation increments on a detected copytruncate
+    rotation; a lost/corrupt cursor recovers from MAX(source_generation)+1
+    against the ledger table itself, never a bare zero)
+  → filters to completed (PostToolUse) mcp__* tool-call records only
+  → INSERT IGNORE one row per call into claude_telemetry.mcp_tool_calls,
+    keyed on (source_generation, source_offset) for dedup
+```
+
+This is a call-volume instrument, not an audit trail — no `tool_input` or
+entity-id argument is captured, here or anywhere upstream. `hookd`'s own
+`events.jsonl` is the tailer's only data source; `wms-mcp` never writes
+telemetry directly. The ledger table is created by `lib/installrunner.sh`
+at install time only under `--store-mode=install`; under `--store-mode=managed`
+or `--store-mode=external` (neither runs install-time DDL) the binary's own
+`CREATE TABLE IF NOT EXISTS` is the sole mechanism, and creates it on first
+enabled run — which requires the DB credential to hold `CREATE` on
+`claude_telemetry`. Single-writer invariant: exactly one `mcp-scraper` process — the
+hub's — ever writes this table, which is why `teamster-mcp-scraper.timer`
+is permanently masked on every `teamster clone` target (see "Clone" above).
 
 ### Codex runtime (second runtime)
 
@@ -494,24 +863,86 @@ staging layout, flags, and design rationale.
 The Work Management System uses a two-level hierarchy:
 
 ```
-Outcome  (pending → active → review → done | blocked)
-  └─ WorkUnit  (pending → active → review → done | blocked)
+Outcome  (pending → active → review → done | abandoned, blocked/on_hold as detours)
+  └─ WorkUnit  (pending → active → review → done | abandoned, blocked/on_hold as detours)
 ```
 
 Both entity types share the same status set: `pending`, `active`, `review`,
-`done`, `blocked`. `done` is the sole terminal status for both.
+`done`, `blocked`, `on_hold`, `abandoned`. `done` and `abandoned` are both
+terminal — `abandoned` is a status in its own right (not a `resolution`
+tag), for work that was dropped rather than finished. `done → review` is
+the sole reopen edge; there is no exit from `abandoned`. `on_hold` is set
+either by a human choosing to pause, or by the nightly `teamster wms
+review-sweep` timer parking a stale entity — see "Nightly review sweep"
+under Data Flows and `semantic-conventions.md` §4.8; the two are
+distinguished by who wrote the entity's latest status journal row, and
+only a sweep-parked `on_hold` can ever be automatically abandoned.
 
 State machines enforce valid transitions (see `src/internal/wms/transitions.go`).
 `IsTerminal()` determines whether a status change should emit a `[DONE]` tag
 instead of `[TASK]`. `HookObserver` bridges WMS mutations to the activity stream.
 
-WorkUnit completion cascades: when all WorkUnits under an Outcome reach `done`,
-the engine automatically transitions the Outcome to `done`. Outcome-to-Outcome
-parent-child relationships also cascade upward.
+**No automatic close.** The engine does not transition an Outcome to
+`done` on its own — not when every WorkUnit under it finishes, and not
+when every child Outcome under it finishes (the two auto-close cascades
+this design once had were removed: agents don't waterfall projects, and
+the full WorkUnit set is rarely known up front). Closing an Outcome is a
+deliberate act — a session-based "reason, recommend, ask" step (see
+`session-protocol.md` Step 9) or an explicit `teamster wms close`/`wms gc`
+call. Creating a WorkUnit under a `done` or `abandoned` Outcome is
+rejected, pointing at the `done → review` reopen edge, rather than being
+silently accepted.
 
-Close-out guards: when an Outcome transitions to `done`, the engine emits
-advisory warnings (never blocks) if child work units are non-terminal or no
-`resolution` tag is set.
+Close-out guards: when an Outcome transitions to `done` or `abandoned`,
+the engine emits advisory warnings (never blocks) if child work units are
+non-terminal; a `done` transition also warns if no `resolution` tag is
+set (`abandoned` needs no such tag — the status itself carries the
+meaning).
+
+### WorkUnit dispatch package (brief, claim, deliver)
+
+Each WorkUnit carries two dispatch-oriented fields beyond title/description:
+
+- **`brief`** (MEDIUMTEXT) — the full dispatch assignment text for the agent
+  doing the work. Returned only by `wms_getWorkUnit` and `wms_claimWorkUnit`,
+  never by `wms_listWorkUnits`/`wms_listRelated` — list queries never pull a
+  potentially large text blob.
+- **`claimed_at`** — timestamp of the WorkUnit's first claim or adopt.
+
+`wms_claimWorkUnit` performs an atomic compare-and-swap keyed on the caller's
+`agent_id` (from `_meta`, never a client-supplied argument):
+
+| Prior state | Result |
+|---|---|
+| `pending` | **claim** — status→`active`, `agent_id` set, `claimed_at` stamped, WMSStatusChange fires (see "Claim-success focus interval" under Data Flows) |
+| `active`, no owner (`agent_id=''`) | **adopt** — `agent_id` set, `claimed_at` stamped, status unchanged, no status-change event |
+| `active`, owned by caller | **idempotent** — no-op re-claim |
+| `active`, owned by another agent | `ErrAlreadyClaimed` |
+| `review` / `done` / `blocked` | `ErrNotClaimable` |
+
+`wms_deliverResult` is the counterpart: an agent submits its output
+(`summary`, full markdown `result`, optional `artifact_paths`), appended to
+the `wms_deliverables` table (never overwritten — redelivery is allowed, so a
+consumer takes the last row per entity), then transitions the WorkUnit
+`active → review`. Only the WorkUnit's owner (or the lead, whose `agent_type`
+is empty) may deliver.
+
+### Typed relations (`outcome_relations`)
+
+Distinct from the Outcome-DAG parent/child edges (`wms_addOutcomeParent`/
+`wms_removeOutcomeParent`, wrapping the existing `AddOutcomeEdge`/
+`RemoveOutcomeEdge` store primitives so decomposition isn't locked to
+`wms_createOutcome`-time only): a **relation** records *why* new work exists
+relative to prior **delivered** work — a correction edge, not a decomposition
+edge. `wms_addRelation` / `wms_removeRelation` / `wms_listRelations` /
+`wms_listRelationKinds` (`internal/mcp/wms/`) manage rows in
+`outcome_relations`, each carrying a `kind` drawn from `relation_kinds` — a
+seeded vocabulary (data, not a Go enum), so a new kind is a migration, not a
+schema change. Eight kinds are seeded, four of them taxable and driving
+rework-tax reporting; see `semantic-conventions.md` §4.6 for the full
+kind-by-kind table (`taxable`/`miss_class`/`lineage`) and the
+`phase:iterate`-vs-`outcome_relations` vocabulary split that motivated this
+feature.
 
 ---
 
@@ -543,8 +974,11 @@ Two backends exist:
 
 - **`internal/store/mysql`** — the production backend (MySQL/MariaDB via
   `go-sql-driver/mysql`). Schemes `mysql` and `mariadb` (same backend, dual
-  driver-string target). Migrations v1–v55 (v52–v54: muster roster/tokens,
-  v55: agent health gauge).
+  driver-string target). Migrations v1–v70 (v52–v54: muster roster/tokens,
+  v55: agent health gauge, v67–v68: `relation_kinds`/`outcome_relations`
+  typed-relations tables, v69: dispatch package — adds `workunits.brief`/
+  `claimed_at` and the `wms_deliverables` table, v70: `agent_roster.updated_at`
+  for roster-lifecycle sweeping).
 - **`internal/store/sqlite`** — a pure-Go backend (`modernc.org/sqlite`, no
   cgo) that exists solely to validate the `Store` contract is truly
   backend-agnostic. It is not exposed as an install-time option (see
@@ -570,6 +1004,13 @@ identity, session binding, and bearer-token lifecycle. A separate
 `agent_health_gauge` table — per-agent health snapshots with overwrite
 semantics. GaugeStore is deliberately outside `internal/store` (BOUNDARIES
 R2: different concern, different package).
+
+`wms_deliverables` is an append-only table of agent-submitted
+work-completion reports: `id`, `entity_type`, `entity_id`, `agent_id`,
+`session_id`, `summary`, `result`, `artifact_paths`, `created_at`, indexed on
+`(entity_type, entity_id)`. Written by `wms_deliverResult`; redelivery is
+allowed (a reopened or reclaimed WorkUnit can deliver again), so a consumer
+reads the last row per entity rather than assuming exactly one.
 
 ### Typed error model
 
@@ -818,11 +1259,13 @@ Cost attribution in subagent mode relies on two fixes in
 
 #### Close-out guards
 
-When an Outcome is transitioned to `done`, the WMS engine
+When an Outcome is transitioned to `done` or `abandoned`, the WMS engine
 (`src/internal/wms/closeout.go`) emits advisory warnings (never a block) if:
 
-- any child work units are non-terminal (pending/active/review); or
-- no `resolution` tag is set on the outcome.
+- any child work units are non-terminal (pending/active/review/blocked/
+  on_hold) — applies to both `done` and `abandoned`; or
+- no `resolution` tag is set on the outcome — `done` only; `abandoned`
+  needs none, the status itself carries the meaning.
 
 Warnings are appended to the MCP tool's success response. This is the engine's
 backstop for close-out discipline, surfaced inline so the lead doesn't skip
@@ -862,8 +1305,14 @@ All env vars are read by `src/internal/config/config.go`. Defaults shown.
 | `TEAMSTER_ATAIL_HISTORY_DEFAULT` | `20` | Default lines of scrollback history for the activity viewer |
 | `TEAMSTER_SOLO` | — | `1` = subagent mode pre-seed; see Operating Modes above |
 | `TEAMSTER_REQUIRE_TAGS_ON_DONE` | — | `1` = hard close-out enforcement (block transition if tags missing) |
-| `TEAMSTER_GC_STALE_HOURS` | — | Stale entity GC threshold in hours |
+| `TEAMSTER_GC_STALE_HOURS` | `2` | Reaper phase-3 threshold: hours of inactivity after which a session (and the intervals still open on it) is marked stale and closed. Thresholds sessions, not WMS entities — the reaper never touches outcomes or workunits. `0` disables phase 3. |
 | `TEAMSTER_REAPER_INTERVAL` | — | Interval between reaper runs (duration string) |
+| `TEAMSTER_REVIEW_SWEEP_ENABLED` | — | `1` = enable `teamster wms review-sweep` (both stages). Secondary path alongside `teamster.yaml`'s `review-sweep.enabled`; the yaml key is the intended unattended-flip mechanism. |
+| `TEAMSTER_REVIEW_SWEEP_OLDER_THAN` | `168h` | Sweep Stage 1's idle threshold (duration string) — review WorkUnits and stale Outcomes. |
+| `TEAMSTER_REVIEW_SWEEP_ABANDON_AFTER` | `720h` | Sweep Stage 2's rescue-window threshold (duration string), measured from the sweep's own parking journal row, not `updated_at`. |
+| `TEAMSTER_REVIEW_SWEEP_CONFIRM` | — | `1` = execute for real; unset/`0` = dry-run. `teamster.yaml`'s `review-sweep.confirm` is the source of truth for the unattended timer path regardless of this var. |
+| `TEAMSTER_REVIEW_SWEEP_NOTIFY_HOOKD` | — | `0` = disable the per-close hookd/gauge notification for this run. |
+| `TEAMSTER_MCP_SCRAPER_ENABLED` | — | `1` = enable the `mcp-scraper` tailer (events.jsonl → `claude_telemetry.mcp_tool_calls`). Secondary path alongside `teamster.yaml`'s `mcp-scraper.enabled`; the yaml key is the intended path. |
 | `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | `1` | Enables Agent Teams in Claude Code |
 
 Backup configuration lives in the `backup:` section of `teamster.yaml` (merged in by the installer). Key fields: `schedule` (systemd OnCalendar expression), `retention` (keep N snapshots), and per-store enable/disable flags (`mysql`, `otelcol`, `grafana`, `config`). Prometheus is disabled by default (ephemeral data). Grafana.db is skipped when `grafana-mode=external`.
@@ -886,12 +1335,16 @@ Backup configuration lives in the `backup:` section of `teamster.yaml` (merged i
 │   ├── rollup            (cost-attribution pipeline)
 │   ├── classify          (interval phase + work-type classifier)
 │   ├── token-scraper     (session transcript token scraper)
+│   ├── mcp-scraper       (MCP tool-call telemetry tailer: events.jsonl →
+│   │                      claude_telemetry.mcp_tool_calls, systemd timer)
 │   ├── backup            (backup engine, run by systemd timer)
 │   └── teamster-install  (called by lib/installrunner.sh)
 ├── var/
 │   ├── events.jsonl      (append-only JSONL event log)
 │   ├── dedup/            (hook client dedup files + session mode markers)
-│   └── sessions/         (session tracker state)
+│   ├── sessions/         (session tracker state)
+│   └── review-sweep.log  (teamster wms review-sweep stdout/stderr, appended
+│                          each run — durable beyond journald's retention)
 ├── etc/
 │   ├── interceptors.yaml         (MCP tool interceptor config: tag colors +
 │   │                              per-tool display/suppress rules; embedded
@@ -900,19 +1353,66 @@ Backup configuration lives in the `backup:` section of `teamster.yaml` (merged i
 │   ├── teamster-rollup.service   (rollup one-shot)
 │   ├── teamster-rollup.timer     (rollup timer)
 │   ├── teamster-classify.service (classifier one-shot)
-│   ├── teamster-classify.timer   (classifier timer, every 5 min)
+│   ├── teamster-classify.timer   (classifier timer, every 10 min)
 │   ├── teamster-sweep.service    (sweep one-shot)
 │   ├── teamster-sweep.timer      (sweep timer)
 │   ├── teamster-backup.service   (backup one-shot)
 │   ├── teamster-backup.timer     (backup timer, configurable, default 1h)
 │   ├── teamster-codex-scraper.service (Codex rollout tailer one-shot, when Codex wired)
-│   └── teamster-codex-scraper.timer   (Codex-scraper timer, every 10 min)
+│   ├── teamster-codex-scraper.timer   (Codex-scraper timer, every 10 min)
+│   ├── teamster-wms-review-sweep.service (review-sweep one-shot, config-gated)
+│   ├── teamster-wms-review-sweep.timer   (review-sweep timer, nightly 03:00)
+│   ├── teamster-mcp-scraper.service (MCP tool-call tailer one-shot, config-gated)
+│   ├── teamster-mcp-scraper.timer   (MCP-scraper timer, every 10 min)
+│   ├── teamster-otelcol.service    (OTel collector unit, exec-wrapper; systemd mode)
+│   ├── teamster-prometheus.service (Prometheus unit, exec-wrapper; systemd mode)
+│   └── teamster-grafana.service    (Grafana unit, exec-wrapper; systemd mode)
 ├── lib/
 │   ├── .claude-plugin/
 │   │   └── marketplace.json     (plugin marketplace root)
 │   └── plugin/                  (Claude Code plugin: skills + references)
 └── doc/
     └── specs/
+```
+
+### otelcol/Prometheus/Grafana systemd units — masking and downgrade
+
+Each of the three monitoring components gets its own `teamster-<name>.service`
+under the default `hookd_mode: systemd` (the same mode axis hookd itself
+uses, `TEAMSTER_HOOKD_MODE` above): `ExecStart` runs `teamster start
+--exec=<name>`, an exec-wrapper that loads config, renders it, and
+`syscall.Exec`s the real binary in place — no `EnvironmentFile=`, nothing
+baked in at install time, and no second command for a config value to go
+stale between. The unit files are materialized unconditionally at
+install/upgrade, but only installed into systemd's unit directory and
+enabled when that component's mode is `install` *and* `hookd_mode` is
+`systemd` (not `supervisor` or `external`) — the same masked-unit-aware
+install helper every other Teamster unit uses.
+
+**Masking one of the three means that component is off, full stop, with no
+fallback to the old supervisor path — the same shape as hookd's own masked
+handling.** `sudo systemctl mask teamster-prometheus.service` (or
+`-otelcol`/`-grafana`) takes it out of `teamster start`'s systemd branch
+entirely: `teamster start` prints that it's left masked and exits 0 anyway
+(masking is the operator's own instruction, not a failure), and `teamster
+status` reports a distinct masked state rather than a bare "not running."
+There is currently no per-component "run this one without systemd" lever —
+masking only ever means off, never "fall back to the supervisor-managed
+process for just this component." To keep a component supervisor-managed
+instead, set `hookd_mode: supervisor` for the **whole host**, which drops
+hookd and all three monitoring components back to the crashloop-supervised
+`setsid` path together; there is no way to mix systemd for some of the four
+and supervisor for others today.
+
+**Downgrading the `teamster` binary after upgrading to a version with these
+units, without disabling the units first, will fail to rebind their
+ports.** An older binary has no knowledge of `teamster-otelcol.service`/
+`-prometheus`/`-grafana`; its own PID-file liveness check reports each
+component as "not running" and it will try to launch a fresh instance on a
+port the still-running systemd-managed process already holds, and fail to
+bind. Disable the units before downgrading:
+```bash
+sudo systemctl disable --now teamster-otelcol teamster-prometheus teamster-grafana
 ```
 
 ### Remote layout
@@ -937,16 +1437,17 @@ the token scraper, and the plugin. MCP endpoints point at the hub over HTTP.
 
 | Binary | Language | Where | Purpose |
 |--------|----------|-------|---------|
-| `teamster` | Go | hub | Hook client. Forked per hook event. Reads stdin JSON, enriches, POSTs to hookd. Must exit 0 always. Also the CLI (`start`/`stop`/`status`/`wms-reset`/`tags`/`setup tags`/`wms drain`/`wms list`/`wms close`/`check-config`). |
+| `teamster` | Go | hub | Hook client. Forked per hook event. Reads stdin JSON, enriches, POSTs to hookd. Must exit 0 always. Also the CLI (`start`/`stop`/`status`/`wms-reset`/`tags`/`setup tags`/`wms drain`/`wms list`/`wms close`/`wms gc`/`wms review-sweep`/`check-config`/`clone`). `wms review-sweep` is the nightly two-stage lifecycle-hygiene sweep (§"Nightly review sweep" under Data Flows, `semantic-conventions.md` §4.8) — distinct from `rollup --sweep`/`teamster-sweep.timer`'s cost-*attribution* sweep despite the shared word. |
 | `teamster.py` | Python | remote | Hook client on remotes. Pure stdlib. Same wire contract as Go version. |
-| `hookd` | Go | hub | HTTP event server. POST `/event` → JSONL. Dashboard, SSE, WMS page, metrics, MCP routes (`/mcp/activity`, `/mcp/wms`, `/mcp/roster`, `/mcp/health`). Focus-absent nudge on PreToolUse. Auto-registers agents on roster from first hook event. Tracks per-agent turn state (processing/idle). |
+| `hookd` | Go | hub | HTTP event server. POST `/event` → JSONL. Dashboard, SSE, WMS page, metrics, MCP routes (`/mcp/activity`, `/mcp/wms`, `/mcp/roster`, `/mcp/health`). Focus-absent nudge on PreToolUse. Attempts to auto-open a focus interval for the claiming agent on WorkUnit claim success (WMSStatusChange pending→active) — asynchronous and best-effort; declines and warns on an identity race rather than guessing. Auto-registers agents on roster from first hook event. Tracks per-agent turn state (processing/idle). |
 | `feed` | Go | hub | Long-running terminal viewer. Tails events.jsonl, ANSI colorizes. |
 | `activity-mcp` | Go | hub | MCP stdio for activity tools (hub-local sessions). No-op: tools return confirmation strings; real data extracted from PreToolUse by hook client. Includes `setMode`. |
-| `wms-mcp` | Go | hub | MCP stdio for WMS CRUD (hub-local sessions). Outcome/WorkUnit lifecycle, rename, tags, focus, dependencies. Writes MySQL, emits status events via HookObserver. |
+| `wms-mcp` | Go | hub | MCP stdio for WMS CRUD (hub-local sessions). Outcome/WorkUnit lifecycle, rename, tags, focus, dependencies. `wms_claimWorkUnit` returns the WorkUnit's `brief` and performs the `pending`→`active` transition as an atomic CAS, requesting a focus interval alongside it — the interval open itself is hookd's, asynchronous and best-effort, and may be declined; `wms_deliverResult` records an agent's output in `wms_deliverables` and transitions the WorkUnit active→review. Writes MySQL, emits status events via HookObserver. |
 | `rollup` | Go | hub | Cost-attribution pipeline. Allocates token spend to WMS entities. Recovery passes for unallocated messages. Run by systemd timer. |
-| `classify` | Go | hub | Derives phase and work-type tags on intervals/workunits from rule-based signals. Run by systemd timer every 5 min. |
+| `classify` | Go | hub | Derives phase and work-type tags on intervals/workunits from rule-based signals. Run by systemd timer every 10 min. |
 | `token-scraper` | Go | hub | Reads **Claude Code** session transcripts, extracts per-message token usage, writes to token_ledger. Never reads Codex data. |
 | `codex-scraper` | Go | hub | Codex rollout-JSONL cost/ledger tailer (systemd timer, oneshot). Sole writer of Codex `token_ledger` rows (via hookd `/telemetry`) and Codex `sessions` rows (direct store). Books `thread_spawn` subagent spend under the parent session as `@<role>`. No-op on hosts with no `codex` CLI. |
+| `mcp-scraper` | Go | hub | MCP tool-call telemetry tailer (systemd timer, oneshot, config-gated on `MCPScraper.Enabled`/`TEAMSTER_MCP_SCRAPER_ENABLED`). Tails `events.jsonl`, filters to completed `mcp__*` tool calls, ledgers one row per call into `claude_telemetry.mcp_tool_calls` — a call-volume instrument, not an audit trail (no `tool_input` capture). Cursor + generation counter survive `copytruncate` rotation. Single-writer invariant: only the hub's own process writes this table, so `teamster-mcp-scraper.timer` is permanently masked on every `teamster clone` target. |
 | `health-collector` | Go | hub | Agent health gauge collector. Hub daemon, 15s poll interval. Reads `token_ledger` for per-agent token usage and cost, writes `agent_health_gauge` rows. Context window comes from Claude Code's StatusLine when available; an Agent-Teams teammate (no StatusLine channel) gets its window from its own transcript instead, falling back to a model-class table then the lead's window. Resolves `roster_id` per agent. |
 | `ctop` | Go | hub | Terminal Bubbletea dashboard over hookd's `/health/api/*` + `/health/stream` (HTTP client only — no DB/store imports), so `--server` can point it at any hub, hub-local or remote. Four views (keys 1–4): health, focus, cost, and fleet — a multi-team tree (team headers, lead + teammates + sub-spawns with tree connectors, collapse/expand) with a live activity log below the grid. Fleet is the default view on launch. |
 | `teamster-install` | Go | hub | Called by `lib/installrunner.sh`. Copies binaries, materializes systemd units, merges settings.json. |
@@ -957,10 +1458,12 @@ the token scraper, and the plugin. MCP endpoints point at the hub over HTTP.
 
 ## Grafana Dashboards
 
-Eleven provisioned dashboards in `skel/etc/grafana/dashboards/`:
+The provisioned dashboards in `skel/etc/grafana/dashboards/`:
 
 | Dashboard | File | Purpose |
 |-----------|------|---------|
+| Landing Page | `landing-page.json` | Welcome/index page linking to the other dashboards |
+| 00 - Realtime Fleet View | `fleet-view.json` | Grafana-embedded fleet view (agent tree, health, activity) — counterpart to `ctop` |
 | 01 - AI Spend Explorer | `fd-ai-spend-overview.json` | High-level AI spend overview |
 | 02 - Cost Explorer | `fd-cost-explorer.json` | Multi-facet cost drill-down |
 | 03 - AI Usage & Effectiveness | `fd-usage-effectiveness.json` | Agent efficiency, model fit, throughput |
@@ -969,9 +1472,11 @@ Eleven provisioned dashboards in `skel/etc/grafana/dashboards/`:
 | 04.03 - Work Entity Explorer | `entity-cost-explorer.json` | Per-entity cost drill-down |
 | 05 - Outcome Accounting | `fd-outcome-accounting.json` | Outcome lifecycle and cost accounting |
 | 06 - Outcome Cost Explorer | `outcome-cost-explorer.json` | Per-outcome cost drill-down |
+| 06 - Sweep Report | `sweep-report.json` | WMS review-sweep (issue #11/#17) visibility: open WorkUnit/Outcome backlog, the nightly sweep's disposition breakdown by rule id, day-by-day activity history, the sweep-parked `on_hold` queue awaiting Stage 2, and freshness. Number collides with Outcome Cost Explorer above — both dashboards ship titled "06 -", a pre-existing naming quirk, not a doc error. See `semantic-conventions.md` §4.8 for the rule-id/agent_id grammar. |
 | 07 - Realtime Activity Feed | `activity-feed.json` | Live agent activity stream in Grafana |
 | 08 - Claude Code Metrics (OTEL) | `claude-code-metrics.json` | Per-model token usage and cost metrics |
 | 09 - Teamster System Health | `fd-data-quality.json` | Data quality and system health |
+| 10 - Codex Metrics (OTEL) | `codex-metrics.json` | Codex CLI turn/token/latency metrics via OpenTelemetry (fleet visibility only — never a cost source; WMS cost attribution for Codex comes exclusively from `codex-scraper`) |
 
 ### Grafana Panel Plugins
 

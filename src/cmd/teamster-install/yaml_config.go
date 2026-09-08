@@ -7,71 +7,50 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/bmjdotnet/teamster/internal/teamsteryaml"
 	"gopkg.in/yaml.v3"
 )
 
-type yamlHookd struct {
-	Mode string `yaml:"mode"`
-	Port int    `yaml:"port"`
+// Local aliases onto the shared internal/teamsteryaml package (WP2 —
+// extracted so internal/clonetopology can read the exact same schema this
+// package writes, instead of a hand-duplicated, drift-prone copy). Aliases,
+// not new types, so every existing usage below and in yaml_config_test.go
+// compiles unchanged — this is a mechanical refactor, not a behavior change.
+type (
+	yamlHookd        = teamsteryaml.Hookd
+	yamlStore        = teamsteryaml.Store
+	yamlService      = teamsteryaml.Service
+	yamlOtelcol      = teamsteryaml.Otelcol
+	yamlTokenScraper = teamsteryaml.TokenScraper
+	yamlRelay        = teamsteryaml.Relay
+	yamlTagConfig    = teamsteryaml.TagConfig
+	yamlReviewSweep  = teamsteryaml.ReviewSweep
+	yamlMCPScraper   = teamsteryaml.MCPScraper
+	teamsterYAML     = teamsteryaml.Config
+)
+
+// defaultReviewSweepConfig is the inert review-sweep: block written into a
+// fresh teamster.yaml (WP3-DESIGN.md §9): Enabled false so a fresh install
+// stays a no-op even once the timer is wired, with the other three keys
+// pre-populated at their real defaults so an operator's later burn-in flip
+// is editing an already-present, already-correct block, not writing one
+// from scratch. Matches config.Default().ReviewSweep exactly (internal/
+// config/config.go) — keep the two in lock-step.
+func defaultReviewSweepConfig() yamlReviewSweep {
+	return yamlReviewSweep{
+		Enabled:      false,
+		OlderThan:    "168h",
+		AbandonAfter: "720h",
+		Confirm:      false,
+	}
 }
 
-type yamlStore struct {
-	Mode string `yaml:"mode"`
-	DSN  string `yaml:"dsn"`
-}
-
-type yamlService struct {
-	Mode   string `yaml:"mode"`
-	Port   int    `yaml:"port"`
-	Health string `yaml:"health,omitempty"`
-}
-
-type yamlOtelcol struct {
-	Mode     string `yaml:"mode"`
-	GRPCPort int    `yaml:"grpc_port"`
-	HTTPPort int    `yaml:"http_port"`
-	// CodexHTTPPort is the dedicated otlp/http receiver instance Codex's
-	// [otel] export points at — never shared with HTTPPort, see
-	// internal/codexconfig/otel.go's OtelSpec.MetricsEndpoint doc comment.
-	CodexHTTPPort int `yaml:"codex_http_port"`
-}
-
-type yamlTokenScraper struct {
-	Mode string `yaml:"mode"`
-}
-
-type yamlRelay struct {
-	Mode           string `yaml:"mode"`
-	Target         string `yaml:"target,omitempty"`
-	ReplPushRemote string `yaml:"repl_push_remote,omitempty"`
-}
-
-// yamlTagConfig declares one key in the work-item tag vocabulary. Field names
-// and yaml tags MUST stay identical to config.TagConfig
-// (src/internal/config/yaml.go) or the installer round-trip drifts lossy: the
-// runtime read-side reconciles from config.TagConfig, the installer preserves
-// it through this struct. Keep the two in lock-step.
-type yamlTagConfig struct {
-	Category       string   `yaml:"category"`        // "context" | "lifecycle"
-	Cardinality    string   `yaml:"cardinality"`     // "single" | "multi"
-	Values         []string `yaml:"values"`          // explicit value list; empty for create-on-apply keys
-	Description    string   `yaml:"description"`
-	Scope          string   `yaml:"scope"`           // "outcome" | "workunit" | ""
-	ExclusionGroup string   `yaml:"exclusion_group"` // mutual exclusion group slug
-	AutoExtract    string   `yaml:"auto_extract"`    // "git" | "env" | ""
-	Interview      string   `yaml:"interview"`       // "propose" | "auto" | "skip"
-}
-
-type teamsterYAML struct {
-	Hookd        yamlHookd                `yaml:"hookd"`
-	Store        yamlStore                `yaml:"store"`
-	Prometheus   yamlService              `yaml:"prometheus"`
-	Grafana      yamlService              `yaml:"grafana"`
-	Otelcol      yamlOtelcol              `yaml:"otelcol"`
-	TokenScraper yamlTokenScraper         `yaml:"token-scraper"`
-	Relay        yamlRelay                `yaml:"relay,omitempty"`
-	Env          string                   `yaml:"env"`
-	Tags         map[string]yamlTagConfig `yaml:"tags,omitempty"`
+// defaultMCPScraperConfig is the inert mcp-scraper: block written into a
+// fresh teamster.yaml (WP11-TAILER-DESIGN.md §7): Enabled false so a fresh
+// install's timer (once wired) stays a no-op until the operator opts in.
+// Matches config.Default().MCPScraper exactly — keep the two in lock-step.
+func defaultMCPScraperConfig() yamlMCPScraper {
+	return yamlMCPScraper{Enabled: false}
 }
 
 // defaultTagVocab is the starter work-item tag vocabulary written into a fresh
@@ -252,6 +231,24 @@ func buildYAMLConfig(p yamlParams) teamsterYAML {
 		tags = defaultTagVocab()
 	}
 
+	// Same preserve-on-upgrade / default-on-first-install pattern as tags
+	// above: prior.ReviewSweep is the zero value only when no review-sweep:
+	// section has ever been written (defaultReviewSweepConfig's own
+	// OlderThan is never empty, so any real prior install fails this check
+	// and its values — including an operator's later Confirm:true flip —
+	// round-trip untouched).
+	reviewSweep := prior.ReviewSweep
+	if reviewSweep == (yamlReviewSweep{}) {
+		reviewSweep = defaultReviewSweepConfig()
+	}
+
+	// Same preserve-on-upgrade / default-on-first-install pattern as
+	// reviewSweep above.
+	mcpScraper := prior.MCPScraper
+	if mcpScraper == (yamlMCPScraper{}) {
+		mcpScraper = defaultMCPScraperConfig()
+	}
+
 	return teamsterYAML{
 		Hookd: yamlHookd{
 			Mode: hookdMode,
@@ -285,7 +282,9 @@ func buildYAMLConfig(p yamlParams) teamsterYAML {
 			Target:         relayTarget,
 			ReplPushRemote: replPushRemote,
 		},
-		Env:  envLabel,
-		Tags: tags,
+		Env:         envLabel,
+		Tags:        tags,
+		ReviewSweep: reviewSweep,
+		MCPScraper:  mcpScraper,
 	}
 }

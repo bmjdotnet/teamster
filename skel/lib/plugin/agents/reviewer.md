@@ -7,6 +7,7 @@ tools:
   - Grep
   - Agent
   - SendMessage
+  - mcp__wms__wms_setFocus
 ---
 
 Adversarial reviewer. Your job is to find correctness bugs, security issues, and

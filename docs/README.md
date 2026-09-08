@@ -10,6 +10,7 @@ see the top-level [README](../README.md) first.
 | [quickstart.md](quickstart.md) | Fresh clone to a running dashboard on one host — the recommended first read. |
 | [wizard.md](wizard.md) | Field-by-field reference for the guided installer (`install.sh`) and the tag-setup TUI (`teamster setup tags`). |
 | [specs/REMOTE-INSTALL.md](specs/REMOTE-INSTALL.md) | The hub-and-remote model: one host runs the services, others run only the lightweight hook client. |
+| [clone.md](clone.md) | `teamster clone`: stand up a disposable full instance — same commit, a copy of the same data — on a remote host. |
 
 ## Reference
 

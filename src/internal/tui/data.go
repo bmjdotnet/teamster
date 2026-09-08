@@ -127,8 +127,8 @@ type LifecycleTag struct {
 
 // LifecycleTags are the engine-managed tags shown in Screen 7.
 var LifecycleTags = []LifecycleTag{
-	{"phase", "Current lifecycle phase of an entity.", "design, build, test, review, rework"},
+	{"phase", "Current lifecycle phase of an entity.", "design, build, test, review, iterate"},
 	{"work-type", "Nature of the work being done.", "feature, bug, refactor, infra, research, test, docs"},
-	{"resolution", "Terminal outcome when an entity reaches done.", "achieved, abandoned"},
+	{"resolution", "Carries \"achieved\" on a done entity. \"abandoned\" is a legacy value written before v0.3.0 (abandonment is now the abandoned status).", "achieved, abandoned (legacy)"},
 	{"lifecycle", "Archival marker for entities that are no longer active.", "archived"},
 }

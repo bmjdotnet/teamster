@@ -355,8 +355,8 @@ needs to call `reportActivity` or `wms_createOutcome`, opens an HTTP connection
 to the hub's hookd, which serves the MCP. No MCP process on the remote.
 
 **Roster and health MCP endpoints (known gap).** hookd also serves
-`/mcp/roster` (agent roster, 7 tools) and `/mcp/health` (agent health, 4
-tools) over HTTP-MCP, but these are not yet registered on remotes by the
+`/mcp/roster` (agent roster) and `/mcp/health` (agent health) over
+HTTP-MCP, but these are not yet registered on remotes by the
 installer. Adding them follows the same pattern:
 
 ```bash

@@ -181,7 +181,7 @@ func TestClearClassifierPhases_NoSignalCohort(t *testing.T) {
 	}
 }
 
-// TestEarliestClosureByEntity covers the M1 cross-batch rework query: it returns
+// TestEarliestClosureByEntity covers the M1 cross-batch iterate query: it returns
 // each entity's earliest review/done END, omits never-closed entities, and
 // ignores entities not in the key set.
 func TestEarliestClosureByEntity(t *testing.T) {

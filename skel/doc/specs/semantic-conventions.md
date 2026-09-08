@@ -128,8 +128,20 @@ same field:
 
 Both calls write to `_focus` in the JSONL record, so the activity stream
 cannot distinguish them. The critical operating point: **only `wms_setFocus`
-affects cost attribution**. In a solo session, the primary agent must call
-`wms_setFocus` for its work to appear in the Sankey and entity cost tables.
+and a successful `wms_claimWorkUnit` affect cost attribution**. In a solo
+session, the primary agent must call `wms_setFocus` for its work to appear in
+the Sankey and entity cost tables.
+
+**Write-time attribution via claim.** For WU-scoped work, `wms_claimWorkUnit`
+(§4.7) is now the preferred cost-bearing path: on a successful claim that
+performs a real `pending`→`active` transition, hookd auto-opens a focus
+interval off the resulting `WMSStatusChange` event — the agent never needs a
+separate `wms_setFocus` call to attribute its own assignment. This is
+success-gated: a claim that returns `ErrAlreadyClaimed`/`ErrNotClaimable`
+(the loser of a claim race) fires no status-change event and opens no
+interval. `wms_setFocus` remains the fallback for non-WU-scoped work — the
+lead's own focus on the strategic Outcome between dispatches, or an
+ephemeral subagent with no WorkUnit of its own.
 
 ### Notes on `_tool_display` markers
 
@@ -211,8 +223,12 @@ blocks. See `CLAUDE.md`'s Key Conventions for the full mechanism.
   <task_subject>`).
 - `RCAP` is emitted from phantom `SubagentStop` events: Claude Code fires
   `SubagentStop` with no `agent_type` for suggested next prompts (suppressed)
-  and idle recaps (tagged `RCAP`). The heuristic: text starting with an
-  uppercase letter and containing a space is classified as a recap.
+  and idle recaps (tagged `RCAP`). The heuristic (`isRecapText` in
+  `internal/hook/hook.go`): text is classified as a recap only if it starts
+  with an uppercase letter, contains a space, is at least 24 runes long, and
+  ends in terminal punctuation (`.`/`!`/`?`) — a plain uppercase-plus-space
+  check alone matched most well-formed English, including short suggested
+  prompts like "Go ahead".
 - `SubagentStart`/`SubagentStop` fire for Agent-tool (Task tool) subagent
   spawns — Agent Teams teammates do not fire these (see the main repo's
   CLAUDE.md Pitfalls section). `TeammateIdle` (teammate idle transition) and
@@ -263,6 +279,8 @@ Both Outcome and WorkUnit share the same status set:
 | `review` | Work complete, awaiting review |
 | `done` | Terminal — work finished |
 | `blocked` | Progress blocked by external dependency |
+| `on_hold` | Paused — not stuck on a dependency, just not being worked right now. Set by a human choosing to pause, or by the nightly `wms review-sweep` timer parking a stale `review`-state WorkUnit or idle Outcome (§4.8). The two are distinguished by the entity's latest `field='status'` `wms_journal` row's `agent_id`: `wms-review-sweep` means the sweep parked it and it is eligible for later automatic abandonment; anything else means a human parked it and it is never touched by the sweep, at any age. |
+| `abandoned` | Terminal — work was dropped, not finished. A second terminal status alongside `done`, not a `resolution` tag on it. |
 
 ### 4.3 Valid State Transitions
 
@@ -275,9 +293,37 @@ transition rules.
 `review→active`, `review→done`, `review→blocked`,
 `blocked→pending`, `blocked→active`, `blocked→review`, `blocked→done`
 
-WorkUnit completion cascades: when all WorkUnits under an Outcome reach `done`,
-the engine automatically transitions the Outcome to `done`. Outcome-to-Outcome
-parent-child relationships (via dependencies) also cascade upward.
+**`on_hold`** mirrors `blocked`'s position in the graph — reachable from
+`pending`/`active`/`review`/`blocked`, and returns to each of those:
+`pending→on_hold`, `active→on_hold`, `review→on_hold`, `blocked→on_hold`,
+`on_hold→pending`, `on_hold→active`, `on_hold→review`, `on_hold→blocked`.
+
+**`abandoned`** is terminal and reachable one-way from every non-terminal
+status: `pending→abandoned`, `active→abandoned`, `review→abandoned`,
+`blocked→abandoned`, `on_hold→abandoned`. There is no `done→abandoned` or
+`on_hold→done` edge, and no exit from `abandoned` — same as `done` today.
+
+**`done→review`** is the sole reopen edge — the only way back out of a
+terminal status. It reuses `review`'s existing exits (`active`, `done`,
+`blocked`) rather than duplicating them as separate `done→*` edges.
+Creating a WorkUnit under a `done` or `abandoned` Outcome is rejected with
+a message pointing at this edge — the Outcome must be reopened
+deliberately, not extended silently.
+
+**Removed in the WMS hygiene kit (R1):** the engine no longer transitions
+an Outcome to `done` on its own — not when every WorkUnit under it
+finishes, and not when every child Outcome under it finishes. Closing an
+Outcome is a session-based "reason, recommend, ask" step (see
+`session-protocol.md` Step 9) or a deliberate `teamster wms close`/`wms
+gc` action, never an automatic side effect of a WorkUnit or child Outcome
+reaching `done`.
+
+Parentage can also be set or changed after creation with
+`mcp__wms__wms_addOutcomeParent` (parentID, childID) and
+`mcp__wms__wms_removeOutcomeParent` — used to reparent an Outcome under a
+larger initiative once one is recognized (rather than only at creation via
+`parentOutcomeIDs`), and for error recovery when an Outcome was created
+with the wrong parent or as an accidental duplicate.
 
 ### 4.4 WMS Synthetic Event Fields
 
@@ -299,8 +345,227 @@ of `TASK` for a status change event.
 
 | Entity | Terminal statuses |
 |--------|-------------------|
-| outcome | `done` |
-| workunit | `done` |
+| outcome | `done`, `abandoned` |
+| workunit | `done`, `abandoned` |
+
+### 4.6 Typed Relations (`outcome_relations`)
+
+Distinct from the Outcome-DAG parent/child edges in §4.3: a **relation**
+records *why* new work exists relative to **prior delivered work** — not a
+decomposition edge, a correction edge. Every relation carries a `kind` drawn
+from `relation_kinds`, a seeded (not code-enum) vocabulary, so a new kind is
+a migration, not a schema change.
+
+**The vocabulary split this closes.** "Rework" now means exactly one thing
+system-wide:
+
+| Term | Means | Axis | Taxed? |
+|---|---|---|---|
+| **Iteration** | Correction *before* delivery — the build→test→fix loop within a WorkUnit | `phase` (interval column, value `iterate`) | No — the ordinary cost of doing the work |
+| **Rework** | Correction *after* delivery — a new effort because shipped work was wrong | `outcome_relations` (this section) | Yes, for taxable kinds |
+
+**The eight relation kinds** (`relation_kinds` table — `taxable`, `miss_class`,
+and `lineage` are per-kind properties read by the cost-rollup build pass, not
+per-edge choices):
+
+| Kind | Taxable | `miss_class` | Lineage | Meaning |
+|---|---|---|---|---|
+| `remediates` | yes | `code` | yes | Fixes a defect in delivered work — it did not do what it was specified to do. |
+| `addresses-limitation` | yes | `design` | yes | Removes an unintended functional constraint — the work did what was asked, but the result couldn't be used as needed. |
+| `fulfills-realization` | yes | `spec` | yes | Supplies a requirement the delivered work should have had but nobody identified at the time. |
+| `reverts` | yes | `code` | yes | Undoes delivered work because shipping it was itself the error. |
+| `supersedes` | no | — | yes | Replaces delivered work because requirements, scale, or environment changed — the prior work was right for its time. |
+| `follows-up-on` | no | — | yes | A planned continuation of delivered work that was complete and correct. |
+| `discovered-during` | no | — | no | Work surfaced while doing the target, but not a correction of it — provenance only. |
+| `duplicate-of` | no | — | no | The same work tracked twice — an intake error; flags a merge candidate. |
+
+The **taxed set** is `remediates`, `addresses-limitation`,
+`fulfills-realization`, `reverts` — everything else records a relationship
+without charging for it. `lineage=0` kinds (`discovered-during`,
+`duplicate-of`) are excluded from cycle checking and transitive closure —
+they describe circumstance, not derivation.
+
+**Direction.** `from` is the new work, `to` is the prior work — read as a
+sentence: "`from` **remediates** `to`." `to_type='external'` marks an
+antecedent not tracked in WMS (pre-WMS code, work never given its own
+Outcome); `to_id` is then free text rather than an entity ID.
+
+**MCP surface** (`internal/mcp/wms/`): `wms_addRelation` (record an edge at
+intake — `kind`, `fromType`/`fromID`, `toType`/`toID`, optional `note`),
+`wms_removeRelation` (hard delete by identity), `wms_listRelations`
+(`entityType`, `entityID`, optional `direction` — `from`/`to`/`both` — and
+`kind`), `wms_listRelationKinds` (no args — returns `kind`, `taxable`,
+`miss_class`, `description`; call this before picking a kind rather than
+guessing).
+
+### 4.7 Dispatch Package: WorkUnit Claim and Delivery
+
+The dispatch package adds two `WorkUnit` fields, one new table, and two MCP
+tools (`wms_claimWorkUnit`, `wms_deliverResult`) that give an agent a durable,
+atomic claim-and-deliver cycle in place of the voluntary `wms_setFocus` +
+manual status-update pattern.
+
+**New `WorkUnit` fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `brief` | MEDIUMTEXT, nullable | The full dispatch assignment text. Set via `wms_createWorkUnit(brief=...)` at creation, or `UpdateWorkUnitBrief` afterward. Returned only by `wms_claimWorkUnit` and `wms_getWorkUnit` — list tools (`wms_listWorkUnits`, ready-filtered included) omit it to avoid pulling a potentially large value into every list row. |
+| `claimed_at` | DATETIME(6), nullable | Timestamp of the WorkUnit's first successful claim. Set atomically by `wms_claimWorkUnit`; `NULL` until claimed. |
+
+**`wms_claimWorkUnit(id)`.** Agent self-assigns a WorkUnit. The claim and any
+resulting `pending`→`active` transition happen atomically in one store call.
+On success, returns JSON with `brief`, `tags`, `claimed_by`, `claimed_at`, and
+`focus_interval` status — the agent's full assignment payload, not just a
+confirmation string. The claim state matrix:
+
+| WU state | Claim result |
+|---|---|
+| `pending` | claim: set owner + `claimed_at`, → `active` |
+| `active`, `agent_id` empty | adopt: set owner + `claimed_at`, no status change |
+| `active`, owned by caller | idempotent success (safe re-claim after a crash) |
+| `active`, owned by another agent | `ErrAlreadyClaimed{Owner}` |
+| `review`/`done`/`blocked` | `ErrNotClaimable{Status}` |
+| no such id | `ErrNotFound` |
+
+Only the first row is a real status transition — see §2's "write-time
+attribution via claim" for why the other four rows fire no `WMSStatusChange`
+event and open no focus interval.
+
+**`wms_deliverResult(id, summary, result, artifact_paths?)`.** Agent submits
+a deliverable. Inserts an append-only row into `wms_deliverables` (redelivery
+is allowed — a reclaimed WorkUnit can deliver again) and transitions the
+WorkUnit `active`→`review`. Validates ownership: the caller must be the
+WorkUnit's `agent_id`, unless the caller is the lead (no `agent_type`).
+
+**`wms_createWorkUnit`** now accepts an optional `brief` argument, stored at
+creation time alongside `title`/`description`/`outcomeID`.
+
+**`wms_deliverables` table.** Append-only deliverable storage — one row per
+delivery, not per WorkUnit; redelivery adds a new row rather than overwriting
+the prior one.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | PK | Auto-increment row id |
+| `entity_type` | string | Currently always `workunit` |
+| `entity_id` | string | The WorkUnit's ID |
+| `agent_id` | string | Caller's `agent_type` (empty for the lead) |
+| `session_id` | string | Caller's session id |
+| `summary` | TEXT | Headline summary of the result |
+| `result` | MEDIUMTEXT | Full deliverable text |
+| `artifact_paths` | TEXT, nullable | Newline-separated file paths, if any |
+| `created_at` | DATETIME(6) | Row insertion time |
+
+Indexed on `(entity_type, entity_id)` for the `ListDeliverables` read path.
+
+### 4.8 Review sweep (`wms review-sweep`, agent id `wms-review-sweep`)
+
+The nightly `teamster-wms-review-sweep.timer` (03:00, config-gated — see
+`architecture.md`'s Configuration table) runs `teamster wms review-sweep`,
+a store-level command that bypasses the WMS engine entirely — the same
+family as `wms_gc.go` (agent id `wms-gc`) and `wms_close.go` (agent id
+`wms-close (<user>)`). It closes WorkUnits and Outcomes nobody has looked
+at in a long time, deliberately and reversibly first, in two stages:
+
+**Sweep Stage 1 — park (`→ on_hold`).** A WorkUnit sitting in `review`, or
+an Outcome with no live WorkUnit or child Outcome under it (`isLive`: not
+terminal, and not itself a sweep-parked `on_hold`), idle past
+`ReviewSweep.OlderThan` (default 168h/7 days):
+
+| Rule id | Fires on | Disposition |
+|---|---|---|
+| `wu-review-undelivered` | Idle `review` WorkUnit, no `wms_deliverables` row | `status → on_hold` |
+| `wu-review-delivered` | Idle `review` WorkUnit, has a `wms_deliverables` row | `status → done`, `resolution:swept-unreviewed` (never detours through `on_hold` — `done` is already reversible via `done → review`) |
+| `wu-review-skipped` | A `wu-review-*` candidate no longer satisfies the candidacy check when the sweep gets to it (someone acted on it between the list and the write) | no status change; `field='sweep_evaluated', new_value='skipped'` |
+| `outcome-idle` | Idle Outcome, no live direct child, and a full downward descendant-safety walk finds no live descendant Outcome or WorkUnit anywhere in its subtree (a terminal Outcome can still be hiding a live descendant under it — the walk exists for exactly that case) | `status → on_hold` (never `done` — nothing in WMS gives the sweep positive evidence an Outcome, as opposed to a delivered WorkUnit, actually finished) |
+| `outcome-idle-skipped` | The Outcome candidate no longer qualifies at write time, or the walk finds a live/human-parked descendant, or the walk itself can't finish (its own operation-budget backstop or a store error) | no status change; `field='sweep_evaluated', new_value='skipped'` |
+
+**Sweep Stage 2 — abandon (`on_hold → abandoned`), a second and
+independent threshold.** An entity **the sweep itself parked** — never one
+a human parked, at any idle duration — sitting in `on_hold` with no
+journal, interval, or deliverable activity from anyone but the sweep since
+the parking row's own timestamp, for `ReviewSweep.AbandonAfter` (default
+720h/30 days) more:
+
+| Rule id | Fires on | Disposition |
+|---|---|---|
+| `wu-onhold-abandon` | Sweep-parked WorkUnit, untouched past `AbandonAfter` | `status → abandoned` |
+| `outcome-onhold-abandon` | Sweep-parked Outcome, untouched past `AbandonAfter`, interlock and descendant-safety walk re-verified clean at this later point in time | `status → abandoned` |
+| `onhold-evaluated-skipped` | A sweep-parked entity no longer a Stage-2 candidate at disposition time, or (Outcomes only) the re-verified walk finds a live/human-parked descendant or can't finish | no status change; `field='sweep_evaluated', new_value='skipped'` |
+
+Minimum total silence before anything irreversible: 168h + 720h = 37 days,
+and only ever on an entity the sweep itself flagged — `abandoned` remains
+a strict one-way status (§4.3) with no reopen edge; recovering a
+wrongly-abandoned entity is a manual database fix, not an MCP call.
+
+**The `agent_id` discriminator is load-bearing, not just an audit trail.**
+Every write this command makes — status changes and skip records alike —
+journals through `wms.RecordMutation` with `agent_id = "wms-review-sweep"`
+(a positive match, never a not-empty test — `wms-gc` and
+`wms-close (<user>)` also write non-empty, non-sweep `agent_id` values, and
+treating "not empty" as "the sweep did this" would wrongly exempt their
+closes from the interlock too). The Stage-1 interlock, the descendant-safety
+walk, and every Stage-2 candidacy check all read this same field on an
+entity's latest `field='status'` journal row to tell "the sweep parked
+this" from "a human parked this."
+
+**`notes` grammar** — the rule id is always the first token, so
+`SUBSTRING_INDEX(notes, ' ', 1)` gives a rule-level breakdown of
+`wms_journal` with no regex: `<rule-id> (threshold <duration>): <one-clause
+entity-specific detail>`. The threshold text is whatever the run's
+`--older-than`/`--abandon-after` string was — on the unattended timer path
+(no flags passed) that string comes from `time.Duration.String()` on the
+config default, which renders `168h` as `168h0m0s` and `720h` as
+`720h0m0s`, not the bare hour count. A real unattended-run row therefore
+reads `wu-review-undelivered (threshold 168h0m0s): idle 42d, no deliverable
+on file, parked to on_hold` — an operator passing `--older-than=168h` by
+hand gets the shorter form back verbatim instead.
+
+**Notification and interval drain.** Each close (not each skip) posts a
+`WMSStatusChange` to hookd via a standalone `HookObserver`, under the
+fixed identity `AgentName`/`SessionID: "wms-review-sweep"` — never a live
+interactive session's id — so the entity-count gauge stays live without a
+`hookd` restart; `ReviewSweep.NotifyHookd` / `--no-hookd` disables this per
+run. After a run's writes complete, `CloseIntervalsOnTerminalEntities`
+drains any open focus interval on an entity the run just made terminal
+(`done`/`abandoned`) — Stage 1's `on_hold` parking is not terminal, so a
+parked entity's interval, if any, survives until Stage 2 (or a human)
+eventually makes it terminal.
+
+**`StatusSummary` gains `OutcomesOnHold`/`WorkUnitsOnHold`, additive, not a
+redefinition.** `on_hold` already landed in `OutcomesOpen`/`WorkUnitsOpen`
+before this feature (both backends' `GetStatusSummary` bucket every
+non-`done`/non-`abandoned` status into `Open`) and still does — the new
+fields are a breakdown layered on top, so `Open`'s numeric value does not
+change the day Sweep Stage 1 goes live. A caller that wants "genuinely
+active work" rather than "everything non-terminal" now needs
+`Open − OnHold`, not `Open` alone.
+
+**Config** (`teamster.yaml`'s `review-sweep:` block, env overrides, CLI
+flags): see `architecture.md`'s Configuration table for the full key list
+and defaults. `ReviewSweep.Enabled` defaults `false` and gates two
+independent things, not one: `teamster-install` writes the rendered
+`teamster-wms-review-sweep.{service,timer}` files under `$BASEDIR/etc/` on
+*every* install or upgrade regardless of `Enabled` (the same pass that
+materializes `teamster.yaml` itself), but `lib/installrunner.sh` only
+copies those two files into systemd's unit directory and runs `systemctl
+enable --now` on the timer when `Enabled` was already `true` in
+`teamster.yaml` at that install/upgrade — unlike `teamster-sweep`/
+`teamster-backup`, this timer is skipped at the systemd-registration step
+entirely, not merely installed-but-unstarted. So flipping `Enabled` from
+`false` to `true` on an existing hub needs either an installer re-run or a
+manual `sudo install`/`daemon-reload`/`enable --now` of the two
+already-staged unit files — a config edit alone does not register anything
+with systemd. `ReviewSweep.Confirm` defaults `false` and behaves
+differently: once the timer is registered, every run is a dry-run listing
+until an operator flips `Confirm` in `teamster.yaml`, which takes effect on
+the very next scheduled run with no restart or reinstall, because the
+command re-reads config at the start of every run rather than baking the
+flag into the unit at install time. **Do not flip `Confirm`
+on a pre-existing hub before reviewing its current stale-`review`/idle-Outcome
+backlog by hand** — the population this sweep acts on and a one-time legacy
+drain's population overlap heavily, and Stage 1 parks are visible and
+reversible but still worth a first look before automating.
 
 ---
 
@@ -534,17 +799,59 @@ tags. These are orthogonal: recovery touches only the former.
 
 ### 7.3 Close-out warnings
 
-When an Outcome is transitioned to `done` (via `wms_updateStatus`), the WMS
-engine calls `CloseoutWarnings` (`src/internal/wms/closeout.go`) and appends
-advisory text to the success response if either:
+When an Outcome is transitioned to `done` or `abandoned` (via
+`wms_updateStatus` or `ToolUpdateOutcomeStatus` — the protocol's own
+per-entity update tool for Outcomes), the WMS engine calls `CloseoutWarnings`
+(`src/internal/wms/closeout.go`) and appends advisory text to the success
+response if either:
 
-- any child work units are not in a terminal state (pending/active/review); or
-- no `resolution` tag is set on the outcome.
+- any child work units are not in a terminal state (pending/active/review/
+  blocked/on_hold) — applies to both `done` and `abandoned`; or
+- no `resolution` tag is set on the outcome — `done` only. An `abandoned`
+  Outcome needs no `resolution` tag; the status itself carries that
+  meaning.
 
 These warnings are advisory only — the transition succeeds regardless. They
 are the engine's backstop for close-out discipline, surfaced inline so the
 lead doesn't skip bookkeeping. The clean close-out response (no warnings) is
 byte-identical to today's response.
+
+### 7.4 Close-out readiness hint (permanent — not the focus nudge)
+
+**Distinct from the focus nudge** (§2, `docs/terminology.md`'s "Focus nudge"
+entry): the focus nudge is an async `additionalContext` injection on
+`PreToolUse` when an agent has no WMS focus at all. This is a different
+mechanism — a synchronous line appended to the success response of a
+WorkUnit status-change call, with a different trigger and a different
+purpose. Keep the two separate when reading either spec.
+
+**Trigger:** when a WorkUnit's `wms_updateStatus`/`wms_updateWorkUnitStatus`
+call makes every WorkUnit under its Outcome reach a terminal status
+(`done` or `abandoned`) and the Outcome itself is not yet terminal, the
+response gains one line, exact text (`closeoutNudge`,
+`src/internal/mcp/wms/wms.go`): *"all N work units under outcome X are now
+terminal — it does not close automatically; run the close-out consideration
+(session-protocol Step 9b) and call wms_updateOutcomeStatus when ready."*
+
+**Read-only, single-hop.** `closeoutNudge` walks the Outcome's own
+WorkUnits with `wms.IsTerminal`, then checks the Outcome's own status the
+same way — it never calls `deriveOutcomeStatus` (a separate, unrelated
+mechanism in `internal/wms/engine.go` that only feeds an internal log line,
+not this response). The hint never writes anything, never walks up to a
+parent Outcome, and never fires on an Outcome-level transition (only a
+WorkUnit reaching a terminal status can trigger it). It exists purely to
+surface, synchronously, the moment `session-protocol.md` Step 9a's own eager
+trigger (WP8's "reason, recommend, ask") is supposed to fire — the prose
+step and this response text describe the same instant, one from the agent's
+side, one from the engine's.
+
+**Why permanent, not an interim stopgap.** Both cascades that used to close
+an Outcome automatically (§4.3) are gone; this hint is the one machine-side
+signal that survives their removal, and it is a deliberate, permanent
+feature — not scaffolding to delete once the close-out prose exists. It
+reaches an agent regardless of whether the skill prose was read, the same
+enforcement shape the field guide already prefers (tool response over
+skill instruction alone).
 
 ---
 
@@ -604,12 +911,13 @@ sweep catches and classifies anything the classifier can still derive.
 | `feature` | context | single | no | The specific feature being built. Facet of `work-type`; exclusion group `work-scope`. |
 | `bug` | context | single | no | The specific bug being fixed. Facet of `work-type`; exclusion group `work-scope`. |
 | `refactor` | context | single | no | The specific refactoring purpose. Facet of `work-type`; exclusion group `work-scope`. |
+| `polish` | context | single | no | The specific polish/refinement effort. Facet of `work-type`; exclusion group `work-scope`. |
 | `infra` | context | single | no | The specific infrastructure work. Facet of `work-type`; exclusion group `work-scope`. |
 | `docs` | context | single | no | The specific documentation effort. Facet of `work-type`; exclusion group `work-scope`. |
 | `research` | context | single | no | The specific investigation or exploration. Facet of `work-type`; exclusion group `work-scope`. |
 | `test` | context | single | no | The specific validation target. Facet of `work-type`; exclusion group `work-scope`. |
 | `admin` | context | single | no | The specific admin task. Facet of `work-type`; exclusion group `work-scope`. |
-| `component` | context | multi | no | Architectural component touched (e.g. installer, wms, dashboard). |
+| `component` | context | single | no | Architectural component touched (e.g. installer, wms, dashboard). |
 | `product-version` | context | single | no | Version of the product being targeted (e.g. v1.0, v2.0). |
 | `user` | context | single | no | OS user that created the WMS entity. Auto-applied at creation by the wms-mcp handler (source=classifier, best-effort). |
 | `source` | context | single | no | Provenance marker for WMS entities created by automated processes (e.g. `source:synthesized` for LLM-synthesized Outcomes). |
@@ -629,9 +937,9 @@ they agree across WMS entities and telemetry rows.
 
 | Key | Category | Cardinality | Required | Description |
 |-----|----------|-------------|----------|-------------|
-| `work-type` | lifecycle | multi | **yes** | Kind of work being done (feature, bug, refactor, infra, research, docs, test). The primary work classification — set at dispatch time by the lead. |
-| `phase` | lifecycle | single | **yes** | Current execution phase (design, build, test, review, rework, admin). `admin` is the warmup/orientation phase before the session's first `wms_setFocus` — seeded in v37, assigned by `--recover-warmup` via synthetic state-intervals. |
-| `resolution` | lifecycle | single | no | How work concluded (achieved, abandoned). Applied at close-out. |
+| `work-type` | lifecycle | single | **yes** | Kind of work being done (feature, bug, refactor, polish, investigation, research, test, docs, infra, admin, processor). The primary work classification — set at dispatch time by the lead. Fixed to single cardinality in migration v64 (`worktype-cardinality-fix`); had silently been `multi` since v27, letting entities accumulate contradictory work-type values. |
+| `phase` | lifecycle | single | **yes** | Current execution phase (design, build, test, review, iterate, admin). `admin` is the warmup/orientation phase before the session's first `wms_setFocus` — seeded in v37, assigned by `--recover-warmup` via synthetic state-intervals. |
+| `resolution` | lifecycle | single | no | How an *achieved* Outcome concluded, or how a `done` WorkUnit the nightly review sweep closed unreviewed concluded. Two values now written: `achieved` (human close-out, Outcome or WorkUnit) and `swept-unreviewed` (§4.8 — `wms review-sweep` closing a `review`-state WorkUnit that had a deliverable on file, silent on whether the work was good, only that it exists and nobody looked). A dropped Outcome or WorkUnit is recorded via the `abandoned` status itself (§4.2), not this tag; do not write `resolution:abandoned` going forward. A `resolution:abandoned` value on an existing row is a **legacy** artifact from before v0.3.0, when abandonment was `status=done` + this tag — historical entities may still carry it. A `done → review` reopen (§4.3) clears whatever `resolution` value the entity carries, current or legacy, and journals the cleared value with its reason (LF-gfx-1) — a re-closed entity needs a fresh one. |
 | `priority` | lifecycle | single | no | Urgency level (p0, p1, p2, p3). |
 
 ### 9.3 Integration Key Namespaces
@@ -650,7 +958,7 @@ via `teamster setup tags` (TUI wizard with checkboxes per integration).
 ### 9.4 Cardinality
 
 - **single**: at most one value per entity per key. Setting a new value replaces the old one.
-- **multi**: multiple values per entity per key (e.g. `component` can have several values).
+- **multi**: multiple values per entity per key (e.g. `github.issue` can have several values).
 
 ---
 
