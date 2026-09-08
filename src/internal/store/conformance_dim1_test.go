@@ -100,6 +100,7 @@ func TestConformanceDim1_WorkUnit(t *testing.T) {
 			Description: "conformance fixture",
 			Status:      wms.StatusPending,
 			Focus:       "initial",
+			Brief:       "initial dispatch brief",
 		}
 		if err := s.CreateWorkUnit(ctx, want); err != nil {
 			t.Fatalf("CreateWorkUnit: %v", err)
@@ -112,12 +113,38 @@ func TestConformanceDim1_WorkUnit(t *testing.T) {
 			got.Description != want.Description || got.Status != want.Status || got.Focus != want.Focus {
 			t.Fatalf("round-trip mismatch: got %+v, want fields of %+v", got, want)
 		}
+		if got.Brief != want.Brief {
+			t.Fatalf("GetWorkUnit brief = %q, want %q", got.Brief, want.Brief)
+		}
+		if got.ClaimedAt != nil {
+			t.Fatalf("ClaimedAt should be nil before any claim, got %v", got.ClaimedAt)
+		}
+
+		// ListWorkUnits must NOT populate brief — only GetWorkUnit does.
+		list, err := s.ListWorkUnits(ctx, "dim1-wu-o1")
+		if err != nil {
+			t.Fatalf("ListWorkUnits: %v", err)
+		}
+		if len(list) != 1 || list[0].ID != "dim1-wu1" {
+			t.Fatalf("ListWorkUnits = %+v, want the one seeded workunit", list)
+		}
+		if list[0].Brief != "" {
+			t.Fatalf("ListWorkUnits populated brief = %q, want empty", list[0].Brief)
+		}
+
+		if err := s.UpdateWorkUnitBrief(ctx, "dim1-wu1", "revised brief"); err != nil {
+			t.Fatalf("UpdateWorkUnitBrief: %v", err)
+		}
 
 		if err := s.AssignWorkUnit(ctx, "dim1-wu1", "@dim1-agent"); err != nil {
 			t.Fatalf("AssignWorkUnit: %v", err)
 		}
-		if err := s.ClaimWorkUnit(ctx, "dim1-wu1", "@dim1-agent"); err != nil {
+		oldStatus, err := s.ClaimWorkUnit(ctx, "dim1-wu1", "@dim1-agent")
+		if err != nil {
 			t.Fatalf("ClaimWorkUnit: %v", err)
+		}
+		if oldStatus != wms.StatusPending {
+			t.Fatalf("ClaimWorkUnit old status = %q, want %q", oldStatus, wms.StatusPending)
 		}
 		if err := s.UpdateWorkUnitFocus(ctx, "dim1-wu1", "revised"); err != nil {
 			t.Fatalf("UpdateWorkUnitFocus: %v", err)
@@ -132,6 +159,12 @@ func TestConformanceDim1_WorkUnit(t *testing.T) {
 		if got.AgentID != "@dim1-agent" || got.Status != wms.StatusActive || got.Focus != "revised" || got.Title != "revised title" {
 			t.Fatalf("update did not persist: %+v", got)
 		}
+		if got.Brief != "revised brief" {
+			t.Fatalf("GetWorkUnit brief after UpdateWorkUnitBrief = %q, want %q", got.Brief, "revised brief")
+		}
+		if got.ClaimedAt == nil || got.ClaimedAt.IsZero() {
+			t.Fatalf("ClaimedAt not populated after ClaimWorkUnit: %+v", got)
+		}
 
 		// Close.
 		if err := s.UpdateWorkUnitStatus(ctx, "dim1-wu1", wms.StatusDone); err != nil {
@@ -143,6 +176,58 @@ func TestConformanceDim1_WorkUnit(t *testing.T) {
 		}
 		if got.Status != wms.StatusDone {
 			t.Fatalf("close status = %q, want done", got.Status)
+		}
+	})
+}
+
+// TestConformanceDim1_Deliverable round-trips a deliverable: insert two rows
+// for the same entity → ListDeliverables returns both, oldest first, so a
+// caller wanting "the" deliverable (redelivery allowed, last-wins) takes the
+// last element.
+func TestConformanceDim1_Deliverable(t *testing.T) {
+	run(t, func(t *testing.T, s store.Store) {
+		ctx := context.Background()
+		if err := s.CreateOutcome(ctx, &wms.Outcome{ID: "dim1-dlv-o1", Title: "O", Status: wms.StatusActive}); err != nil {
+			t.Fatalf("CreateOutcome: %v", err)
+		}
+		if err := s.CreateWorkUnit(ctx, &wms.WorkUnit{ID: "dim1-dlv-wu", OutcomeID: "dim1-dlv-o1", Title: "W", Status: wms.StatusActive}); err != nil {
+			t.Fatalf("CreateWorkUnit: %v", err)
+		}
+		first := wms.Deliverable{
+			EntityType:    wms.EntityWorkUnit,
+			EntityID:      "dim1-dlv-wu",
+			AgentID:       "@dim1-agent",
+			SessionID:     "dim1-sess",
+			Summary:       "first attempt",
+			Result:        "partial result",
+			ArtifactPaths: "/tmp/a.txt",
+		}
+		if err := s.InsertDeliverable(ctx, first); err != nil {
+			t.Fatalf("InsertDeliverable (first): %v", err)
+		}
+		second := first
+		second.Summary = "redelivered after fix"
+		second.Result = "final result"
+		if err := s.InsertDeliverable(ctx, second); err != nil {
+			t.Fatalf("InsertDeliverable (second): %v", err)
+		}
+
+		got, err := s.ListDeliverables(ctx, wms.EntityWorkUnit, "dim1-dlv-wu", 10)
+		if err != nil {
+			t.Fatalf("ListDeliverables: %v", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("expected 2 deliverables (redelivery allowed), got %d: %+v", len(got), got)
+		}
+		if got[0].Summary != first.Summary || got[1].Summary != second.Summary {
+			t.Fatalf("expected oldest-first ordering, got %+v", got)
+		}
+		last := got[len(got)-1]
+		if last.Result != second.Result || last.ArtifactPaths != second.ArtifactPaths || last.AgentID != second.AgentID {
+			t.Fatalf("last-wins deliverable mismatch: got %+v, want fields of %+v", last, second)
+		}
+		if last.CreatedAt.IsZero() {
+			t.Fatalf("CreatedAt not populated: %+v", last)
 		}
 	})
 }
@@ -242,7 +327,14 @@ func TestConformanceDim1_EventRecord(t *testing.T) {
 }
 
 // TestConformanceDim1_FocusInterval round-trips a kind='focus' interval:
-// open → confirm via HasAnyFocusInterval → close → confirm ended.
+// open → confirm via HasAnyFocusInterval → close → confirm ended → confirm
+// HasAnyFocusInterval now reads false → reopen → confirm it reads true
+// again. The false-after-close/true-after-reopen pair pins the
+// wh2-idle-teammate-exemption semantic change: HasAnyFocusInterval used to
+// mean "has this session ever set focus" (true for a closed row too); it
+// now means "is focus open right now", which the nudge (its sole caller)
+// needs so a teammate whose interval the reaper closed for staleness is
+// nudged to re-focus on wake instead of staying silently unattributed.
 func TestConformanceDim1_FocusInterval(t *testing.T) {
 	run(t, func(t *testing.T, s store.Store) {
 		ctx := context.Background()
@@ -278,6 +370,27 @@ func TestConformanceDim1_FocusInterval(t *testing.T) {
 		}
 		if n != 0 {
 			t.Fatalf("expected 0 intervals still open after CloseFocusInterval, closed %d more", n)
+		}
+
+		has, err = s.HasAnyFocusInterval(ctx, key)
+		if err != nil {
+			t.Fatalf("HasAnyFocusInterval (after close): %v", err)
+		}
+		if has {
+			t.Fatalf("expected no OPEN focus interval after CloseFocusInterval " +
+				"(HasAnyFocusInterval now answers \"is focus open right now\", not " +
+				"\"has this session ever set focus\")")
+		}
+
+		if err := s.OpenFocusInterval(ctx, key, wms.EntityWorkUnit, "dim1-focus-wu-2"); err != nil {
+			t.Fatalf("OpenFocusInterval (reopen): %v", err)
+		}
+		has, err = s.HasAnyFocusInterval(ctx, key)
+		if err != nil {
+			t.Fatalf("HasAnyFocusInterval (after reopen): %v", err)
+		}
+		if !has {
+			t.Fatalf("expected an open focus interval after reopening")
 		}
 	})
 }
@@ -315,6 +428,171 @@ func TestConformanceDim1_Journal(t *testing.T) {
 		}
 		if e.CreatedAt.IsZero() {
 			t.Fatalf("CreatedAt not populated: %+v", e)
+		}
+	})
+}
+
+// TestConformanceDim1_Journal_SameSecondTiebreak covers LF-VER-RR-2:
+// wms_journal.created_at is a whole-second DATETIME, so rows written within
+// the same wall-clock second tie under a bare `ORDER BY created_at DESC`
+// (unspecified return order). GetJournalEntries must break the tie on the
+// monotonic id, newest first — RawExecutor seeds three rows sharing one
+// created_at value to force the tie deterministically rather than relying on
+// two real writes landing in the same second by luck.
+func TestConformanceDim1_Journal_SameSecondTiebreak(t *testing.T) {
+	run(t, func(t *testing.T, s store.Store) {
+		rx, ok := s.(store.RawExecutor)
+		if !ok {
+			t.Skip("backend does not implement store.RawExecutor")
+		}
+		ctx := context.Background()
+		entityID := "dim1-journal-tiebreak-o1"
+		sameSecond := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+
+		var wantIDs []int64
+		for i := 0; i < 3; i++ {
+			res, err := rx.ExecRaw(ctx, `
+				INSERT INTO wms_journal
+					(entity_type, entity_id, field, old_value, new_value, created_at)
+				VALUES (?, ?, ?, ?, ?, ?)`,
+				wms.EntityOutcome, entityID, "status", "pending", "active", sameSecond)
+			if err != nil {
+				t.Fatalf("seed journal row %d: %v", i, err)
+			}
+			id, err := res.LastInsertId()
+			if err != nil {
+				t.Fatalf("LastInsertId row %d: %v", i, err)
+			}
+			wantIDs = append(wantIDs, id)
+		}
+
+		got, err := s.GetJournalEntries(ctx, wms.EntityOutcome, entityID, 10)
+		if err != nil {
+			t.Fatalf("GetJournalEntries: %v", err)
+		}
+		if len(got) != 3 {
+			t.Fatalf("expected 3 journal entries, got %d", len(got))
+		}
+		// All three share the tied created_at, so id DESC alone must decide
+		// the order: newest (largest) id first.
+		for i, e := range got {
+			want := wantIDs[len(wantIDs)-1-i]
+			if e.ID != want {
+				t.Fatalf("row %d: got id %d, want %d (newest-id-first among same-second rows)", i, e.ID, want)
+			}
+		}
+	})
+}
+
+// TestConformanceDim1_Journal_SameSecondTiebreak_LimitBoundary covers the
+// sharper form of LF-VER-RR-2: GetJournalEntries carries a LIMIT, and when
+// the truncation boundary falls inside a same-second tie group the missing
+// tiebreak decides WHICH rows come back, not just their display order.
+// Seeds four same-second rows and reads back with limit=2 — the two entries
+// returned must be the two newest ids, not an arbitrary pair chosen by
+// physical row order.
+func TestConformanceDim1_Journal_SameSecondTiebreak_LimitBoundary(t *testing.T) {
+	run(t, func(t *testing.T, s store.Store) {
+		rx, ok := s.(store.RawExecutor)
+		if !ok {
+			t.Skip("backend does not implement store.RawExecutor")
+		}
+		ctx := context.Background()
+		entityID := "dim1-journal-tiebreak-limit-o1"
+		sameSecond := time.Date(2026, 6, 1, 13, 0, 0, 0, time.UTC)
+
+		var ids []int64
+		for i := 0; i < 4; i++ {
+			res, err := rx.ExecRaw(ctx, `
+				INSERT INTO wms_journal
+					(entity_type, entity_id, field, old_value, new_value, created_at)
+				VALUES (?, ?, ?, ?, ?, ?)`,
+				wms.EntityOutcome, entityID, "status", "pending", "active", sameSecond)
+			if err != nil {
+				t.Fatalf("seed journal row %d: %v", i, err)
+			}
+			id, err := res.LastInsertId()
+			if err != nil {
+				t.Fatalf("LastInsertId row %d: %v", i, err)
+			}
+			ids = append(ids, id)
+		}
+
+		got, err := s.GetJournalEntries(ctx, wms.EntityOutcome, entityID, 2)
+		if err != nil {
+			t.Fatalf("GetJournalEntries: %v", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("expected 2 journal entries (limit), got %d", len(got))
+		}
+		// All four rows tie on created_at; LIMIT 2 must keep the two newest
+		// ids (the last two inserted), not an arbitrary pair.
+		wantNewest := []int64{ids[3], ids[2]}
+		if got[0].ID != wantNewest[0] || got[1].ID != wantNewest[1] {
+			t.Fatalf("got ids [%d, %d], want [%d, %d] (LIMIT must keep the newest ids within a same-second tie group)",
+				got[0].ID, got[1].ID, wantNewest[0], wantNewest[1])
+		}
+	})
+}
+
+// TestConformanceDim1_Journal_OrderAcrossSeconds confirms the id tiebreak
+// never overrides created_at: a row seeded with an earlier created_at but a
+// LARGER id (insertion order reversed relative to event time) must still
+// sort after a row with a later created_at and a smaller id. Guards against
+// an overcorrection to LF-VER-RR-2 that sorted by id instead of tiebreaking
+// with it.
+func TestConformanceDim1_Journal_OrderAcrossSeconds(t *testing.T) {
+	run(t, func(t *testing.T, s store.Store) {
+		rx, ok := s.(store.RawExecutor)
+		if !ok {
+			t.Skip("backend does not implement store.RawExecutor")
+		}
+		ctx := context.Background()
+		entityID := "dim1-journal-order-o1"
+		earlier := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+		later := earlier.Add(10 * time.Second)
+
+		// Inserted first (smaller id) but timestamped LATER.
+		resNewer, err := rx.ExecRaw(ctx, `
+			INSERT INTO wms_journal
+				(entity_type, entity_id, field, old_value, new_value, created_at)
+			VALUES (?, ?, ?, ?, ?, ?)`,
+			wms.EntityOutcome, entityID, "status", "review", "abandoned", later)
+		if err != nil {
+			t.Fatalf("seed newer-time row: %v", err)
+		}
+		newerID, err := resNewer.LastInsertId()
+		if err != nil {
+			t.Fatalf("LastInsertId newer-time row: %v", err)
+		}
+
+		// Inserted second (larger id) but timestamped EARLIER.
+		resOlder, err := rx.ExecRaw(ctx, `
+			INSERT INTO wms_journal
+				(entity_type, entity_id, field, old_value, new_value, created_at)
+			VALUES (?, ?, ?, ?, ?, ?)`,
+			wms.EntityOutcome, entityID, "status", "pending", "active", earlier)
+		if err != nil {
+			t.Fatalf("seed older-time row: %v", err)
+		}
+		olderID, err := resOlder.LastInsertId()
+		if err != nil {
+			t.Fatalf("LastInsertId older-time row: %v", err)
+		}
+		if olderID <= newerID {
+			t.Fatalf("test setup invalid: older-time row's id %d must exceed newer-time row's id %d to prove created_at wins over id", olderID, newerID)
+		}
+
+		got, err := s.GetJournalEntries(ctx, wms.EntityOutcome, entityID, 10)
+		if err != nil {
+			t.Fatalf("GetJournalEntries: %v", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("expected 2 journal entries, got %d", len(got))
+		}
+		if got[0].ID != newerID || got[1].ID != olderID {
+			t.Fatalf("got order [%d, %d], want [%d, %d] (created_at DESC must win over id despite the smaller id being newer)",
+				got[0].ID, got[1].ID, newerID, olderID)
 		}
 	})
 }

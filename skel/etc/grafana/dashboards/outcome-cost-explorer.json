@@ -37,6 +37,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
+      "description": "Fully rolled-up cost: this outcome's own spend plus every workunit, child outcome, and rework underneath it.",
       "fieldConfig": {
         "defaults": {
           "unit": "currencyUSD",
@@ -46,7 +47,7 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 6,
+        "w": 12,
         "x": 0,
         "y": 2
       },
@@ -72,102 +73,10 @@
           },
           "format": "table",
           "refId": "A",
-          "rawSql": "SELECT ROUND(SUM(cost_usd), 2) AS value\nFROM outcome_cost_rollup ocr\nWHERE ocr.bucket_hour BETWEEN $__timeFrom() AND $__timeTo()\n  AND (('${filter_value:raw}' = 'All' OR '${filter_value:raw}' = '\\$__all' OR '${filter_value:raw}' = '') OR EXISTS (SELECT 1 FROM entity_tags ef JOIN tags tf ON tf.id = ef.tag_id WHERE ef.entity_type = 'outcome' AND ef.entity_id = ocr.outcome_id AND tf.tag_key = '${filter_key:raw}' AND tf.tag_value = '${filter_value:raw}'))"
+          "rawSql": "SELECT ROUND(SUM(cost_usd), 2) AS value\nFROM outcome_true_cost_rollup tcr\nWHERE tcr.bucket_hour BETWEEN $__timeFrom() AND $__timeTo()\n  AND (('${filter_value:raw}' = 'All' OR '${filter_value:raw}' = '\\$__all' OR '${filter_value:raw}' = '') OR EXISTS (SELECT 1 FROM entity_tags ef JOIN tags tf ON tf.id = ef.tag_id WHERE ef.entity_type = 'outcome' AND ef.entity_id = tcr.outcome_id AND tf.tag_key = '${filter_key:raw}' AND tf.tag_value = '${filter_value:raw}'))"
         }
       ],
-      "title": "Total Outcome Cost",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "mysql",
-        "uid": "teamster-mysql"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "currencyUSD",
-          "decimals": 2
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 6,
-        "x": 6,
-        "y": 2
-      },
-      "id": 2,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "textMode": "auto"
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "mysql",
-            "uid": "teamster-mysql"
-          },
-          "format": "table",
-          "refId": "A",
-          "rawSql": "SELECT ROUND(SUM(CASE WHEN source_type = 'direct' THEN cost_usd ELSE 0 END), 2) AS value\nFROM outcome_cost_rollup ocr\nWHERE ocr.bucket_hour BETWEEN $__timeFrom() AND $__timeTo()\n  AND (('${filter_value:raw}' = 'All' OR '${filter_value:raw}' = '\\$__all' OR '${filter_value:raw}' = '') OR EXISTS (SELECT 1 FROM entity_tags ef JOIN tags tf ON tf.id = ef.tag_id WHERE ef.entity_type = 'outcome' AND ef.entity_id = ocr.outcome_id AND tf.tag_key = '${filter_key:raw}' AND tf.tag_value = '${filter_value:raw}'))"
-        }
-      ],
-      "title": "Direct (Outcome) Cost",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "mysql",
-        "uid": "teamster-mysql"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "currencyUSD",
-          "decimals": 2
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 6,
-        "x": 12,
-        "y": 2
-      },
-      "id": 3,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "textMode": "auto"
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "mysql",
-            "uid": "teamster-mysql"
-          },
-          "format": "table",
-          "refId": "A",
-          "rawSql": "SELECT ROUND(SUM(CASE WHEN source_type = 'workunit' THEN cost_usd ELSE 0 END), 2) AS value\nFROM outcome_cost_rollup ocr\nWHERE ocr.bucket_hour BETWEEN $__timeFrom() AND $__timeTo()\n  AND (('${filter_value:raw}' = 'All' OR '${filter_value:raw}' = '\\$__all' OR '${filter_value:raw}' = '') OR EXISTS (SELECT 1 FROM entity_tags ef JOIN tags tf ON tf.id = ef.tag_id WHERE ef.entity_type = 'outcome' AND ef.entity_id = ocr.outcome_id AND tf.tag_key = '${filter_key:raw}' AND tf.tag_value = '${filter_value:raw}'))"
-        }
-      ],
-      "title": "WorkUnit Cost",
+      "title": "Outcome Cost",
       "type": "stat"
     },
     {
@@ -183,8 +92,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 6,
-        "x": 18,
+        "w": 12,
+        "x": 12,
         "y": 2
       },
       "id": 4,
@@ -209,7 +118,7 @@
           },
           "format": "table",
           "refId": "A",
-          "rawSql": "SELECT COUNT(DISTINCT ocr.outcome_id) AS value\nFROM outcome_cost_rollup ocr\nWHERE ocr.bucket_hour BETWEEN $__timeFrom() AND $__timeTo()\n  AND (('${filter_value:raw}' = 'All' OR '${filter_value:raw}' = '\\$__all' OR '${filter_value:raw}' = '') OR EXISTS (SELECT 1 FROM entity_tags ef JOIN tags tf ON tf.id = ef.tag_id WHERE ef.entity_type = 'outcome' AND ef.entity_id = ocr.outcome_id AND tf.tag_key = '${filter_key:raw}' AND tf.tag_value = '${filter_value:raw}'))"
+          "rawSql": "SELECT COUNT(DISTINCT tcr.outcome_id) AS value\nFROM outcome_true_cost_rollup tcr\nWHERE tcr.bucket_hour BETWEEN $__timeFrom() AND $__timeTo()\n  AND (('${filter_value:raw}' = 'All' OR '${filter_value:raw}' = '\\$__all' OR '${filter_value:raw}' = '') OR EXISTS (SELECT 1 FROM entity_tags ef JOIN tags tf ON tf.id = ef.tag_id WHERE ef.entity_type = 'outcome' AND ef.entity_id = tcr.outcome_id AND tf.tag_key = '${filter_key:raw}' AND tf.tag_value = '${filter_value:raw}'))"
         }
       ],
       "title": "Outcomes with Cost",
@@ -220,7 +129,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "Cost per outcome, stacked by outcome, binned by the Aggregation selector.",
+      "description": "Total rolled-up cost per outcome, binned by the Aggregation selector. Each series is one outcome's full cost — direct, workunits, children, and rework all summed together.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -274,7 +183,7 @@
           },
           "format": "time_series",
           "refId": "A",
-          "rawSql": "SELECT\n  $__timeGroupAlias(ocr.bucket_hour, $agg),\n  COALESCE(o.title, ocr.outcome_id) AS metric,\n  ROUND(SUM(ocr.cost_usd), 4) AS value\nFROM outcome_cost_rollup ocr\nLEFT JOIN outcomes o ON o.id = ocr.outcome_id\nWHERE ocr.bucket_hour BETWEEN $__timeFrom() AND $__timeTo()\n  AND (('${filter_value:raw}' = 'All' OR '${filter_value:raw}' = '\\$__all' OR '${filter_value:raw}' = '') OR EXISTS (SELECT 1 FROM entity_tags ef JOIN tags tf ON tf.id = ef.tag_id WHERE ef.entity_type = 'outcome' AND ef.entity_id = ocr.outcome_id AND tf.tag_key = '${filter_key:raw}' AND tf.tag_value = '${filter_value:raw}'))\nGROUP BY 1, ocr.outcome_id, o.title\nORDER BY 1"
+          "rawSql": "SELECT\n  $__timeGroupAlias(tcr.bucket_hour, $agg),\n  COALESCE(o.title, tcr.outcome_id) AS metric,\n  ROUND(SUM(tcr.cost_usd), 4) AS value\nFROM outcome_true_cost_rollup tcr\nLEFT JOIN outcomes o ON o.id = tcr.outcome_id\nWHERE tcr.bucket_hour BETWEEN $__timeFrom() AND $__timeTo()\n  AND (('${filter_value:raw}' = 'All' OR '${filter_value:raw}' = '\\$__all' OR '${filter_value:raw}' = '') OR EXISTS (SELECT 1 FROM entity_tags ef JOIN tags tf ON tf.id = ef.tag_id WHERE ef.entity_type = 'outcome' AND ef.entity_id = tcr.outcome_id AND tf.tag_key = '${filter_key:raw}' AND tf.tag_value = '${filter_value:raw}'))\nGROUP BY 1, tcr.outcome_id, o.title\nORDER BY 1"
         }
       ],
       "title": "Cost by Outcome",
@@ -285,145 +194,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "Cost stacked by source (direct outcome vs each workunit), binned by the Aggregation selector.",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "drawStyle": "bars",
-            "fillOpacity": 80,
-            "stacking": {
-              "group": "A",
-              "mode": "normal"
-            },
-            "barAlignment": 0,
-            "lineWidth": 0,
-            "showPoints": "never",
-            "spanNulls": false
-          },
-          "unit": "currencyUSD",
-          "decimals": 2
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 10,
-        "w": 24,
-        "x": 0,
-        "y": 16
-      },
-      "id": 6,
-      "options": {
-        "legend": {
-          "calcs": [
-            "sum"
-          ],
-          "displayMode": "table",
-          "placement": "bottom",
-          "sortBy": "Total",
-          "sortDesc": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "mysql",
-            "uid": "teamster-mysql"
-          },
-          "format": "time_series",
-          "refId": "A",
-          "rawSql": "SELECT\n  $__timeGroupAlias(ocr.bucket_hour, $agg),\n  CASE\n    WHEN ocr.source_type = 'direct' THEN '(direct outcome)'\n    ELSE COALESCE(w.title, ocr.source_id)\n  END AS metric,\n  ROUND(SUM(ocr.cost_usd), 4) AS value\nFROM outcome_cost_rollup ocr\nLEFT JOIN workunits w ON w.id = ocr.source_id AND ocr.source_type = 'workunit'\nWHERE ocr.bucket_hour BETWEEN $__timeFrom() AND $__timeTo()\n  AND (('${filter_value:raw}' = 'All' OR '${filter_value:raw}' = '\\$__all' OR '${filter_value:raw}' = '') OR EXISTS (SELECT 1 FROM entity_tags ef JOIN tags tf ON tf.id = ef.tag_id WHERE ef.entity_type = 'outcome' AND ef.entity_id = ocr.outcome_id AND tf.tag_key = '${filter_key:raw}' AND tf.tag_value = '${filter_value:raw}'))\nGROUP BY 1, ocr.source_type, ocr.source_id, w.title\nORDER BY 1"
-        }
-      ],
-      "title": "Cost Decomposition (Direct + WorkUnits)",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "mysql",
-        "uid": "teamster-mysql"
-      },
-      "description": "Hierarchical breakdown: each outcome with its constituent workunits and direct cost.",
-      "fieldConfig": {
-        "defaults": {
-          "decimals": 2,
-          "custom": {
-            "align": "left",
-            "cellOptions": {
-              "type": "auto"
-            },
-            "inspect": false
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "cost_usd"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "currencyUSD"
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 12,
-        "w": 24,
-        "x": 0,
-        "y": 26
-      },
-      "id": 7,
-      "pluginVersion": "12.1.1",
-      "options": {
-        "showHeader": true,
-        "sortBy": [
-          {
-            "desc": true,
-            "displayName": "cost_usd"
-          }
-        ],
-        "footer": {
-          "enablePagination": false,
-          "show": true,
-          "reducer": [
-            "sum"
-          ],
-          "fields": [
-            "cost_usd"
-          ]
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "mysql",
-            "uid": "teamster-mysql"
-          },
-          "format": "table",
-          "refId": "A",
-          "rawSql": "SELECT\n  COALESCE(o.title, ocr.outcome_id) AS outcome,\n  CASE\n    WHEN ocr.source_type = 'direct' THEN '  \u21b3 (direct)'\n    ELSE CONCAT('  \u21b3 ', COALESCE(w.title, ocr.source_id))\n  END AS source,\n  ocr.source_type,\n  ROUND(SUM(ocr.cost_usd), 2) AS cost_usd,\n  ROUND(SUM(ocr.tokens)) AS tokens\nFROM outcome_cost_rollup ocr\nLEFT JOIN outcomes o ON o.id = ocr.outcome_id\nLEFT JOIN workunits w ON w.id = ocr.source_id AND ocr.source_type = 'workunit'\nWHERE ocr.bucket_hour BETWEEN $__timeFrom() AND $__timeTo()\n  AND (('${filter_value:raw}' = 'All' OR '${filter_value:raw}' = '\\$__all' OR '${filter_value:raw}' = '') OR EXISTS (SELECT 1 FROM entity_tags ef JOIN tags tf ON tf.id = ef.tag_id WHERE ef.entity_type = 'outcome' AND ef.entity_id = ocr.outcome_id AND tf.tag_key = '${filter_key:raw}' AND tf.tag_value = '${filter_value:raw}'))\nGROUP BY ocr.outcome_id, o.title, ocr.source_type, ocr.source_id, w.title\nORDER BY ocr.outcome_id, ocr.source_type DESC, cost_usd DESC"
-        }
-      ],
-      "title": "Outcome \u2192 Source Breakdown",
-      "type": "table"
-    },
-    {
-      "datasource": {
-        "type": "mysql",
-        "uid": "teamster-mysql"
-      },
-      "description": "Top outcomes by total cost in the selected period.",
+      "description": "Every outcome with cost in the selected period, fully rolled up.",
       "fieldConfig": {
         "defaults": {
           "decimals": 2,
@@ -447,42 +218,6 @@
                 "value": "currencyUSD"
               }
             ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "direct_cost"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "currencyUSD"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "workunit_cost"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "currencyUSD"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "direct_pct"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "percentunit"
-              }
-            ]
           }
         ]
       },
@@ -490,7 +225,7 @@
         "h": 12,
         "w": 24,
         "x": 0,
-        "y": 38
+        "y": 16
       },
       "id": 8,
       "pluginVersion": "12.1.1",
@@ -509,9 +244,7 @@
             "sum"
           ],
           "fields": [
-            "total_cost",
-            "direct_cost",
-            "workunit_cost"
+            "total_cost"
           ]
         }
       },
@@ -523,7 +256,7 @@
           },
           "format": "table",
           "refId": "A",
-          "rawSql": "SELECT\n  COALESCE(o.title, ocr.outcome_id) AS outcome,\n  COALESCE(o.status, '') AS status,\n  COUNT(DISTINCT CASE WHEN ocr.source_type = 'workunit' THEN ocr.source_id END) AS workunits,\n  ROUND(SUM(ocr.cost_usd), 2) AS total_cost,\n  ROUND(SUM(CASE WHEN ocr.source_type = 'direct' THEN ocr.cost_usd ELSE 0 END), 2) AS direct_cost,\n  ROUND(SUM(CASE WHEN ocr.source_type = 'workunit' THEN ocr.cost_usd ELSE 0 END), 2) AS workunit_cost,\n  ROUND(SUM(CASE WHEN ocr.source_type = 'direct' THEN ocr.cost_usd ELSE 0 END) / NULLIF(SUM(ocr.cost_usd), 0), 4) AS direct_pct\nFROM outcome_cost_rollup ocr\nLEFT JOIN outcomes o ON o.id = ocr.outcome_id\nWHERE ocr.bucket_hour BETWEEN $__timeFrom() AND $__timeTo()\n  AND (('${filter_value:raw}' = 'All' OR '${filter_value:raw}' = '\\$__all' OR '${filter_value:raw}' = '') OR EXISTS (SELECT 1 FROM entity_tags ef JOIN tags tf ON tf.id = ef.tag_id WHERE ef.entity_type = 'outcome' AND ef.entity_id = ocr.outcome_id AND tf.tag_key = '${filter_key:raw}' AND tf.tag_value = '${filter_value:raw}'))\nGROUP BY ocr.outcome_id, o.title, o.status\nORDER BY total_cost DESC\nLIMIT 100"
+          "rawSql": "SELECT\n  COALESCE(o.title, tcr.outcome_id) AS outcome,\n  COALESCE(o.status, '') AS status,\n  (SELECT COUNT(*) FROM workunits w WHERE w.outcome_id = tcr.outcome_id) AS workunits,\n  ROUND(SUM(tcr.cost_usd), 2) AS total_cost\nFROM outcome_true_cost_rollup tcr\nLEFT JOIN outcomes o ON o.id = tcr.outcome_id\nWHERE tcr.bucket_hour BETWEEN $__timeFrom() AND $__timeTo()\n  AND (('${filter_value:raw}' = 'All' OR '${filter_value:raw}' = '\\$__all' OR '${filter_value:raw}' = '') OR EXISTS (SELECT 1 FROM entity_tags ef JOIN tags tf ON tf.id = ef.tag_id WHERE ef.entity_type = 'outcome' AND ef.entity_id = tcr.outcome_id AND tf.tag_key = '${filter_key:raw}' AND tf.tag_value = '${filter_value:raw}'))\nGROUP BY tcr.outcome_id, o.title, o.status\nORDER BY total_cost DESC\nLIMIT 100"
         }
       ],
       "title": "Outcome Summary",

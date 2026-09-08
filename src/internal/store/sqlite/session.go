@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/bmjdotnet/teamster/internal/store"
+	"github.com/bmjdotnet/teamster/internal/wms"
 )
 
 // --- Sessions ---
@@ -343,6 +344,11 @@ func (s *Store) GetStatusSummary(ctx context.Context) (store.StatusSummary, erro
 				switch status {
 				case "done":
 					sum.OutcomesDone += n
+				case "abandoned":
+					sum.OutcomesAbandoned += n
+				case "on_hold":
+					sum.OutcomesOnHold += n
+					sum.OutcomesOpen += n // on_hold is additive, not a redefinition — Open still counts it (WP3-DESIGN.md §3a)
 				default:
 					sum.OutcomesOpen += n
 				}
@@ -350,7 +356,7 @@ func (s *Store) GetStatusSummary(ctx context.Context) (store.StatusSummary, erro
 			rows.Close() //nolint:errcheck
 			if err := rows.Err(); err != nil {
 				slog.Warn("GetStatusSummary: outcomes iteration", "err", err)
-				sum.OutcomesOpen, sum.OutcomesDone = 0, 0
+				sum.OutcomesOpen, sum.OutcomesDone, sum.OutcomesAbandoned, sum.OutcomesOnHold = 0, 0, 0, 0
 			}
 		}
 	}
@@ -370,6 +376,11 @@ func (s *Store) GetStatusSummary(ctx context.Context) (store.StatusSummary, erro
 				switch status {
 				case "done":
 					sum.WorkUnitsDone += n
+				case "abandoned":
+					sum.WorkUnitsAbandoned += n
+				case "on_hold":
+					sum.WorkUnitsOnHold += n
+					sum.WorkUnitsOpen += n // on_hold is additive, not a redefinition — Open still counts it (WP3-DESIGN.md §3a)
 				default:
 					sum.WorkUnitsOpen += n
 				}
@@ -377,7 +388,7 @@ func (s *Store) GetStatusSummary(ctx context.Context) (store.StatusSummary, erro
 			rows.Close() //nolint:errcheck
 			if err := rows.Err(); err != nil {
 				slog.Warn("GetStatusSummary: workunits iteration", "err", err)
-				sum.WorkUnitsOpen, sum.WorkUnitsDone = 0, 0
+				sum.WorkUnitsOpen, sum.WorkUnitsDone, sum.WorkUnitsAbandoned, sum.WorkUnitsOnHold = 0, 0, 0, 0
 			}
 		}
 	}
@@ -536,7 +547,7 @@ func (s *Store) ListRelatedEntities(ctx context.Context, opts store.ListRelatedO
 		WHERE 1=1`)
 
 	if !opts.IncludeTerminal {
-		sb.WriteString(` AND e.status <> 'done'`)
+		sb.WriteString(` AND e.status NOT IN ('done', 'abandoned')`)
 	}
 
 	if opts.Query != "" {
@@ -680,7 +691,7 @@ func (s *Store) ListRelatedEntities(ctx context.Context, opts store.ListRelatedO
 	// Filter to stale or terminal entities.
 	var out []store.RelatedEntity
 	for _, r := range raw {
-		isTerminal := r.status == "done"
+		isTerminal := wms.IsTerminal(r.entityType, r.status)
 		isStale := r.lastActivity.Before(staleThreshold)
 		if !isTerminal && !isStale {
 			continue

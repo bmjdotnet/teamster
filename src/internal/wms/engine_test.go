@@ -3,7 +3,9 @@ package wms_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -115,8 +117,11 @@ func engineMySQLConnect(dsn string) (*sql.DB, error) {
 	return db, nil
 }
 
-// TestWorkUnitRollup verifies that when all WorkUnits under an Outcome reach
-// done, the Outcome is auto-completed by the engine.
+// TestWorkUnitRollup verifies that WP7 removed the WorkUnit→Outcome rollup:
+// completing every sibling WorkUnit under an Outcome must NOT auto-complete
+// the Outcome. Regression test for a cascade the operator ruled out (R1) —
+// an absent assertion proves nothing about removal, so this proves the
+// Outcome's status is provably unchanged, not merely that nothing panicked.
 func TestWorkUnitRollup(t *testing.T) {
 	eng, s := testEngine(t)
 	ctx := context.Background()
@@ -131,7 +136,7 @@ func TestWorkUnitRollup(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Complete first unit — outcome should NOT auto-complete yet.
+	// Complete first unit.
 	if err := s.UpdateWorkUnitStatus(ctx, "wu1", wms.StatusDone); err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +151,7 @@ func TestWorkUnitRollup(t *testing.T) {
 		t.Fatal("outcome should not be done while wu2 is still active")
 	}
 
-	// Complete second unit — outcome should auto-complete now.
+	// Complete the last sibling too — the Outcome must still NOT auto-complete.
 	if err := s.UpdateWorkUnitStatus(ctx, "wu2", wms.StatusDone); err != nil {
 		t.Fatal(err)
 	}
@@ -157,13 +162,14 @@ func TestWorkUnitRollup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if outcome.Status != wms.StatusDone {
-		t.Fatalf("expected outcome done after all units complete, got %q", outcome.Status)
+	if outcome.Status != wms.StatusActive {
+		t.Fatalf("cascade removed by WP7: outcome must stay %q after all units complete, got %q", wms.StatusActive, outcome.Status)
 	}
 }
 
-// TestOutcomeDAGRollup verifies that a parent Outcome auto-completes when all
-// child Outcomes reach done (the DAG cascade path).
+// TestOutcomeDAGRollup verifies that WP7 removed the Outcome→parent Outcome
+// (DAG) rollup: completing every child Outcome must NOT auto-complete the
+// parent. Regression test for the same R1 removal, DAG-parent shape.
 func TestOutcomeDAGRollup(t *testing.T) {
 	eng, s := testEngine(t)
 	ctx := context.Background()
@@ -200,7 +206,7 @@ func TestOutcomeDAGRollup(t *testing.T) {
 		t.Fatal("parent should not be done while child2 is still active")
 	}
 
-	// Complete child2 — parent should now auto-complete.
+	// Complete child2 too — the parent must still NOT auto-complete.
 	if err := s.UpdateOutcomeStatus(ctx, "child2", wms.StatusDone); err != nil {
 		t.Fatal(err)
 	}
@@ -211,8 +217,8 @@ func TestOutcomeDAGRollup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if parent.Status != wms.StatusDone {
-		t.Fatalf("expected parent outcome done after all children complete, got %q", parent.Status)
+	if parent.Status != wms.StatusActive {
+		t.Fatalf("cascade removed by WP7: parent outcome must stay %q after all children complete, got %q", wms.StatusActive, parent.Status)
 	}
 }
 
@@ -255,6 +261,59 @@ func TestWorkUnitDependencyCascade(t *testing.T) {
 	}
 }
 
+// TestEvaluateUnblock_RecordsJournalEntry verifies WP10 path 4:
+// evaluateUnblock's restore transition (previously a store write with no
+// audit trail at all) now writes a wms_journal row via RecordMutation.
+func TestEvaluateUnblock_RecordsJournalEntry(t *testing.T) {
+	eng, s := testEngine(t)
+	ctx := context.Background()
+
+	if err := s.CreateOutcome(ctx, &wms.Outcome{ID: "o1", Title: "outcome", Status: wms.StatusActive}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateWorkUnit(ctx, &wms.WorkUnit{ID: "wu-blocker", Title: "blocker", OutcomeID: "o1", Status: wms.StatusActive}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateWorkUnit(ctx, &wms.WorkUnit{ID: "wu-blocked", Title: "blocked", OutcomeID: "o1", Status: wms.StatusBlocked}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AddEntityDependency(ctx, &wms.Dependency{
+		BlockerType: wms.EntityWorkUnit, BlockerID: "wu-blocker",
+		BlockedType: wms.EntityWorkUnit, BlockedID: "wu-blocked",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.UpdateWorkUnitStatus(ctx, "wu-blocker", wms.StatusDone); err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.OnStatusChange(ctx, wms.StatusChange{
+		EntityType: wms.EntityWorkUnit, EntityID: "wu-blocker",
+		OldStatus: wms.StatusActive, NewStatus: wms.StatusDone,
+		SessionID: "sess-1", AgentName: "tester", Host: "host-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := s.GetJournalEntries(ctx, wms.EntityWorkUnit, "wu-blocked", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly 1 journal entry for the auto-unblock, got %d: %+v", len(entries), entries)
+	}
+	e := entries[0]
+	if e.OldValue != wms.StatusBlocked || e.NewValue != wms.StatusPending {
+		t.Fatalf("expected blocked→pending, got %s→%s", e.OldValue, e.NewValue)
+	}
+	if !strings.Contains(e.Notes, "auto-unblocked") {
+		t.Fatalf("expected notes to explain the auto-unblock, got %q", e.Notes)
+	}
+	if e.SessionID != "sess-1" || e.AgentID != "tester" || e.Host != "host-1" {
+		t.Fatalf("expected attribution to carry through from the triggering change, got %+v", e)
+	}
+}
+
 type recordingObserver struct {
 	changes []wms.StatusChange
 }
@@ -280,5 +339,305 @@ func TestObserverCalled(t *testing.T) {
 	}
 	if obs.changes[0] != change {
 		t.Fatalf("observer received wrong change: %+v", obs.changes[0])
+	}
+}
+
+// The following tests pin the LF-gfx-1 fix (VERIFY.md addendum §F): the
+// engine clears a stale `resolution` tag on the done→review reopen edge, the
+// sole edge leaving `done` (R2), so a later abandon can never carry a
+// leftover `resolution:achieved`.
+
+// TestClearResolutionOnReopen_Outcome_ClearsTagAndJournalsValue: done (with
+// resolution:achieved) → review clears the tag and journals the cleared
+// value in notes, attributed to the triggering change.
+func TestClearResolutionOnReopen_Outcome_ClearsTagAndJournalsValue(t *testing.T) {
+	eng, s := testEngine(t)
+	ctx := context.Background()
+
+	if err := s.CreateOutcome(ctx, &wms.Outcome{ID: "o-reopen", Title: "reopen me", Status: wms.StatusDone}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.TagEntity(ctx, wms.EntityOutcome, "o-reopen", "resolution", "achieved", "manual", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateOutcomeStatus(ctx, "o-reopen", wms.StatusReview); err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.OnStatusChange(ctx, wms.StatusChange{
+		EntityType: wms.EntityOutcome, EntityID: "o-reopen",
+		OldStatus: wms.StatusDone, NewStatus: wms.StatusReview,
+		SessionID: "sess-1", AgentName: "tester", Host: "host-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	tags, err := s.GetEntityTags(ctx, wms.EntityOutcome, "o-reopen")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tg := range tags {
+		if tg.TagKey == "resolution" {
+			t.Fatalf("resolution tag should have been cleared on reopen, still bound: %+v", tg)
+		}
+	}
+
+	entries, err := s.GetJournalEntries(ctx, wms.EntityOutcome, "o-reopen", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly 1 journal entry for the reopen clear, got %d: %+v", len(entries), entries)
+	}
+	e := entries[0]
+	if e.OldValue != "achieved" || e.NewValue != "" {
+		t.Fatalf("expected achieved→\"\", got %s→%s", e.OldValue, e.NewValue)
+	}
+	if !strings.Contains(e.Notes, "achieved") {
+		t.Fatalf("expected notes to record the cleared value, got %q", e.Notes)
+	}
+	if e.SessionID != "sess-1" || e.AgentID != "tester" || e.Host != "host-1" {
+		t.Fatalf("expected attribution to carry through from the triggering change, got %+v", e)
+	}
+}
+
+// TestClearResolutionOnReopen_JournalOrdering_CauseBeforeEffect pins the
+// adversarial-review fix: the reopen's own "status" journal row (written by
+// JournalObserver, when registered) must be inserted before the resolution
+// tag's "cleared" row it causes, so a reader reconstructing wms_journal by
+// insertion order sees cause before effect. testEngine registers no
+// JournalObserver by default (see other tests in this file, whose "exactly
+// 1 journal entry" assertions depend on that), so this test wires one in
+// explicitly to exercise the interaction the other tests can't see.
+func TestClearResolutionOnReopen_JournalOrdering_CauseBeforeEffect(t *testing.T) {
+	eng, s := testEngine(t)
+	ctx := context.Background()
+	eng.AddObserver(wms.NewJournalObserver(s))
+
+	if err := s.CreateOutcome(ctx, &wms.Outcome{ID: "o-order", Title: "ordering", Status: wms.StatusDone}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.TagEntity(ctx, wms.EntityOutcome, "o-order", "resolution", "achieved", "manual", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateOutcomeStatus(ctx, "o-order", wms.StatusReview); err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.OnStatusChange(ctx, wms.StatusChange{
+		EntityType: wms.EntityOutcome, EntityID: "o-order",
+		OldStatus: wms.StatusDone, NewStatus: wms.StatusReview,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := s.GetJournalEntries(ctx, wms.EntityOutcome, "o-order", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 journal entries (status + resolution clear), got %d: %+v", len(entries), entries)
+	}
+	// GetJournalEntries sorts by created_at DESC (display order, most recent
+	// first) — sort our copy ascending by the monotonic ID so this assertion
+	// is about insertion/causal order, independent of that display choice.
+	sort.Slice(entries, func(i, j int) bool { return entries[i].ID < entries[j].ID })
+	if entries[0].Field != "status" || entries[0].NewValue != wms.StatusReview {
+		t.Fatalf("expected the reopen's own status row to be written first (cause), got %+v", entries[0])
+	}
+	if entries[1].Field != "resolution" {
+		t.Fatalf("expected the resolution clear to be written second (effect), got %+v", entries[1])
+	}
+}
+
+// TestClearResolutionOnReopen_ThenAbandon_TagStaysCleared: the LF-gfx-1
+// repro end to end — done→review clears the tag, and a subsequent
+// review→abandoned never resurrects it. Regression test for the corrupted
+// entity (`abandoned` status still asserting `resolution:achieved`).
+func TestClearResolutionOnReopen_ThenAbandon_TagStaysCleared(t *testing.T) {
+	eng, s := testEngine(t)
+	ctx := context.Background()
+
+	if err := s.CreateOutcome(ctx, &wms.Outcome{ID: "o-reopen-abandon", Title: "reopen then abandon", Status: wms.StatusDone}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.TagEntity(ctx, wms.EntityOutcome, "o-reopen-abandon", "resolution", "achieved", "manual", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.UpdateOutcomeStatus(ctx, "o-reopen-abandon", wms.StatusReview); err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.OnStatusChange(ctx, wms.StatusChange{
+		EntityType: wms.EntityOutcome, EntityID: "o-reopen-abandon",
+		OldStatus: wms.StatusDone, NewStatus: wms.StatusReview,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.UpdateOutcomeStatus(ctx, "o-reopen-abandon", wms.StatusAbandoned); err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.OnStatusChange(ctx, wms.StatusChange{
+		EntityType: wms.EntityOutcome, EntityID: "o-reopen-abandon",
+		OldStatus: wms.StatusReview, NewStatus: wms.StatusAbandoned,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	tags, err := s.GetEntityTags(ctx, wms.EntityOutcome, "o-reopen-abandon")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tg := range tags {
+		if tg.TagKey == "resolution" {
+			t.Fatalf("LF-gfx-1 regression: outcome abandoned via done→review→abandoned still carries resolution:%s", tg.TagValue)
+		}
+	}
+
+	// Still exactly 1 journal row, from the reopen clear — abandon makes no
+	// second attempt since the tag is already gone by then.
+	entries, err := s.GetJournalEntries(ctx, wms.EntityOutcome, "o-reopen-abandon", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly 1 journal entry total, got %d: %+v", len(entries), entries)
+	}
+}
+
+// TestClearResolutionOnReopen_NoTag_NoOp: done (no resolution tag) → review
+// writes no untag journal row — a no-op stays silent, no journal noise.
+func TestClearResolutionOnReopen_NoTag_NoOp(t *testing.T) {
+	eng, s := testEngine(t)
+	ctx := context.Background()
+
+	if err := s.CreateOutcome(ctx, &wms.Outcome{ID: "o-no-tag", Title: "never tagged", Status: wms.StatusDone}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateOutcomeStatus(ctx, "o-no-tag", wms.StatusReview); err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.OnStatusChange(ctx, wms.StatusChange{
+		EntityType: wms.EntityOutcome, EntityID: "o-no-tag",
+		OldStatus: wms.StatusDone, NewStatus: wms.StatusReview,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := s.GetJournalEntries(ctx, wms.EntityOutcome, "o-no-tag", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected no journal row when there was no resolution tag to clear, got %d: %+v", len(entries), entries)
+	}
+}
+
+// TestClearResolutionOnReopen_WorkUnit_ClearsTagAndJournals: a WorkUnit
+// reopen behaves identically to an Outcome reopen.
+func TestClearResolutionOnReopen_WorkUnit_ClearsTagAndJournals(t *testing.T) {
+	eng, s := testEngine(t)
+	ctx := context.Background()
+
+	if err := s.CreateOutcome(ctx, &wms.Outcome{ID: "o-wu-reopen", Title: "parent", Status: wms.StatusActive}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateWorkUnit(ctx, &wms.WorkUnit{ID: "wu-reopen", OutcomeID: "o-wu-reopen", Title: "unit", Status: wms.StatusDone}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.TagEntity(ctx, wms.EntityWorkUnit, "wu-reopen", "resolution", "achieved", "manual", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateWorkUnitStatus(ctx, "wu-reopen", wms.StatusReview); err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.OnStatusChange(ctx, wms.StatusChange{
+		EntityType: wms.EntityWorkUnit, EntityID: "wu-reopen",
+		OldStatus: wms.StatusDone, NewStatus: wms.StatusReview,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	tags, err := s.GetEntityTags(ctx, wms.EntityWorkUnit, "wu-reopen")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tg := range tags {
+		if tg.TagKey == "resolution" {
+			t.Fatalf("resolution tag should have been cleared on reopen, still bound: %+v", tg)
+		}
+	}
+
+	entries, err := s.GetJournalEntries(ctx, wms.EntityWorkUnit, "wu-reopen", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly 1 journal entry for the reopen clear, got %d: %+v", len(entries), entries)
+	}
+	if entries[0].OldValue != "achieved" || entries[0].NewValue != "" {
+		t.Fatalf("expected achieved→\"\", got %s→%s", entries[0].OldValue, entries[0].NewValue)
+	}
+}
+
+// failOnDeleteEntityTag wraps a wms.Store and fails DeleteEntityTag with an
+// injected error, passing every other call straight through via interface
+// embedding (same pattern as internal/mcp/wms's failOnGetOutcome).
+type failOnDeleteEntityTag struct {
+	wms.Store
+	injectedErr error
+}
+
+func (f *failOnDeleteEntityTag) DeleteEntityTag(_ context.Context, _, _, _, _ string) error {
+	return f.injectedErr
+}
+
+// TestClearResolutionOnReopen_UntagFailureNeverBlocksReopen pins the
+// swallow-and-log posture: a failed DeleteEntityTag must never surface as an
+// OnStatusChange error, and must never write a journal row claiming a clear
+// that didn't happen.
+func TestClearResolutionOnReopen_UntagFailureNeverBlocksReopen(t *testing.T) {
+	_, s := testEngine(t)
+	ctx := context.Background()
+
+	if err := s.CreateOutcome(ctx, &wms.Outcome{ID: "o-untag-fail", Title: "fails to untag", Status: wms.StatusDone}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.TagEntity(ctx, wms.EntityOutcome, "o-untag-fail", "resolution", "achieved", "manual", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateOutcomeStatus(ctx, "o-untag-fail", wms.StatusReview); err != nil {
+		t.Fatal(err)
+	}
+
+	failing := &failOnDeleteEntityTag{Store: s, injectedErr: errors.New("injected: delete failed")}
+	eng := wms.NewEngine(failing, nil)
+
+	if err := eng.OnStatusChange(ctx, wms.StatusChange{
+		EntityType: wms.EntityOutcome, EntityID: "o-untag-fail",
+		OldStatus: wms.StatusDone, NewStatus: wms.StatusReview,
+	}); err != nil {
+		t.Fatalf("OnStatusChange must not fail when the tag clear fails, got: %v", err)
+	}
+
+	tags, err := s.GetEntityTags(ctx, wms.EntityOutcome, "o-untag-fail")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, tg := range tags {
+		if tg.TagKey == "resolution" && tg.TagValue == "achieved" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("resolution tag should still be bound since DeleteEntityTag was injected to fail")
+	}
+
+	entries, err := s.GetJournalEntries(ctx, wms.EntityOutcome, "o-untag-fail", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected no journal row for a failed clear, got %d: %+v", len(entries), entries)
 	}
 }

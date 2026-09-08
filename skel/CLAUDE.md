@@ -30,6 +30,7 @@ workflow enforcement, and work management for Claude Code Agent Teams.
 | `teamster wms drain` | Close dangling focus intervals |
 | `teamster wms list` | List open outcomes and work units |
 | `teamster wms close` | Close an outcome or work unit |
+| `teamster wms review-sweep` | Nightly lifecycle-hygiene sweep: parks stale `review` work units/idle outcomes to `on_hold`, later abandons only what it parked itself. Off and dry-run by default (`review-sweep:` in `teamster.yaml`). |
 | `teamster backup` / `list` / `status` | Take a backup, list backups, show timer status |
 | `teamster restore <path>` | Restore from a backup directory |
 | `feed` | Real-time terminal activity stream |
@@ -43,7 +44,7 @@ workflow enforcement, and work management for Claude Code Agent Teams.
 | `wms-mcp` | MCP server: outcome/work-unit CRUD, rename, tags, focus, dependencies. |
 | `feed` | Terminal activity viewer (tails JSONL, colorizes). |
 | `rollup` | Cost-attribution pipeline. Allocates token spend to WMS entities. Runs on a systemd timer. |
-| `classify` | Phase and work-type classifier. Derives tags from activity signals. Runs every 5 minutes. |
+| `classify` | Phase and work-type classifier. Derives tags from activity signals. Runs every 10 minutes. |
 | `codex-scraper` | Codex cost/ledger tailer. Reads Codex CLI rollout JSONL and writes Codex token/session data via hookd's `/telemetry` and `/session` endpoints. Runs on a systemd timer (every 10 min) here on the hub; present only when Codex is installed. A pure-Python port of this same tailer runs on remotes/client-mode installs via cron (Linux) or launchd (macOS), on the same 10-minute cadence — see `doc/specs/CODEX-INSTALL.md`'s Remote Codex support section. |
 | `health-collector` | Agent health gauge collector. Hub daemon, 15s poll interval. Reads `token_ledger` for per-agent token usage, computes context-window fill, writes `agent_health_gauge` rows. |
 | `backup` | Backup engine. Snapshots MySQL, OTel config, and teamster state to timestamped directories. Runs on systemd timer. |
@@ -78,9 +79,13 @@ Confirm the Grafana datasource points at the correct MySQL instance. Run
 `teamster status` to verify store connectivity.
 
 **Cost not attributed?**
-Make sure you call `wms_setFocus` at the start of each work session. Without
-a focus interval, token spend lands in `unallocated`. Run `teamster wms drain`
-to close stale intervals.
+For work scoped to a WorkUnit, call `wms_claimWorkUnit` at the start of each
+work session — it requests a focus interval as part of the claim, though the
+open itself is asynchronous and best-effort (call `wms_setFocus` yourself if
+it doesn't land). `wms_setFocus` is also the fallback for work that isn't
+WU-scoped. Without a focus interval, token spend lands in `unallocated`. Run
+`teamster wms drain` to close stale
+intervals.
 
 **Feed showing wrong tags or a generic `[TOOL]`?**
 The activity feed's tags and display text come from `etc/interceptors.yaml`.

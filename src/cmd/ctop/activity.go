@@ -196,8 +196,7 @@ func (m *activityModel) View(width, height int, focused, colorize bool) string {
 	window := entries[start:end]
 
 	var body []string
-	for i := len(window) - 1; i >= 0; i-- {
-		e := window[i]
+	for _, e := range window {
 		teamFor := func(sid string) string { return e.teamSnap[sid] }
 		lines := render.FormatLine(e.rec, nil, m.agentWidth, m.sessionWidth, teamFor)
 		for _, l := range lines {
@@ -205,7 +204,7 @@ func (m *activityModel) View(width, height int, focused, colorize bool) string {
 		}
 	}
 	if len(body) > bodyH {
-		body = body[len(body)-bodyH:]
+		body = body[:bodyH]
 	}
 	body = padRows(body, bodyH)
 

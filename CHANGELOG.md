@@ -3,6 +3,60 @@
 All notable changes to Teamster are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## v0.3.0 (unreleased)
+
+### Added
+- **`teamster clone`.** `teamster clone <user>@<host>` stands up a disposable Teamster instance on a remote host — same commit, copy of the same data — without touching the source. See [docs/clone.md](docs/clone.md).
+- **Nightly review sweep** (`teamster wms review-sweep`, issue #11). Parks stale `review`-state WorkUnits and idle Outcomes to `on_hold`, closes delivered-but-unreviewed WorkUnits, and abandons only what it parked itself after a second grace period. Dry-run by default; `--confirm` on the command line is the only way to execute for real. Off until enabled — drain your existing backlog by hand first (see the quickstart burn-in section).
+- **Sweep Report dashboard** — what the review sweep parked, closed, and is still waiting on a human for.
+- **Outcome decomposition.** Outcomes can now be nested under parent Outcomes, so sessions can record their work as part of a larger deliverable.
+- **True cost rollup.** Parent Outcomes now include the cost of all descendants, not just direct costs.
+- **Rework tracking.** Typed relations record why post-delivery work exists (bug escape, design gap, revert), enabling prevention-lever reporting.
+- **Claim system.** Mechanized work assignment and delivery as core WMS functionality (`wms_claimWorkUnit`, `wms_deliverResult`, `wms_listDeliverables`). Cost attribution for dispatched work is now automatic.
+- **Dispatch feedback.** Protocol violations now reach the agent that caused them, not just the activity log.
+- **MCP tool-call ledger** (`mcp-scraper`) — tails hookd's event log into an `mcp_tool_calls` table for per-tool usage reporting. Off until enabled in `teamster.yaml`.
+- **Model x Phase Cost Matrix** on the Usage & Effectiveness dashboard, for spotting model-fit issues by pipeline stage.
+- **Work-type vocabulary consolidation.** 18 values → 11. Removed duplicates and ambiguous categories; added `polish` for post-delivery refinements.
+- Status changes can carry a reason (`notes`) that lands in the journal; CLI closes record host and command automatically.
+- `wms_createOutcome` / `wms_createWorkUnit` accept multiple values per tag key inline.
+
+### Changed
+- **otelcol, prometheus and grafana now run under their own systemd units** and survive a reboot. Supervisor mode is unchanged.
+- **Outcomes no longer auto-close** when their last WorkUnit or child Outcome finishes. Closing an Outcome is a deliberate step in the session close-out.
+- **New statuses `on_hold` and `abandoned`.** Written-off work no longer counts as `done`. `done → review` is the single reopen edge, and reopening clears the entity's `resolution` tag.
+- **Focus intervals no longer close at every turn boundary.** They close on handoff, on terminal status, or when a session goes stale (`TEAMSTER_GC_STALE_HOURS`, default 2). An idle teammate whose lead is still connected is never reaped.
+- `wms gc --confirm` now requires typing `yes` at a terminal and refuses to run non-interactively; the ignored `--dry-run` flag is gone. gc also closes the intervals of what it abandons.
+- `teamster wms close` validates the transition before writing and names the remedy when it refuses.
+- Creating a WorkUnit under a `done` or `abandoned` Outcome is rejected.
+- Pre-delivery correction phase renamed from `rework` to `iterate`. "Rework" now refers exclusively to post-delivery relation tracking.
+- Phase tags and interval phase columns are now kept in sync automatically.
+- `wms_setPhase` enforces a closed vocabulary (design, build, test, review, iterate, admin).
+- Upgrades now always ship the current `interceptors.yaml` instead of preserving operator customizations. The prior version is backed up as `interceptors-<version>.yaml.bak`.
+- `teamster status` shows abandoned and sweep-parked (`on_hold`) counts.
+- `ctop` activity log now shows newest messages at the top (issue #21).
+- Schema migrations on upgrade seed new rows only, no table alters. Older binaries refuse the upgraded database, so upgrade every host that shares it.
+
+### Fixed
+- Fixed the hook event log never rotating; the relay and feed viewer now survive rotation.
+- Fixed hook events being attributed by a truncated session id, which made repaired intervals permanently unallocatable.
+- Fixed hookd not being enabled at install, so it did not survive a reboot.
+- Fixed the installer unmasking systemd units on upgrade, which silently restarted the paid sweep on clone targets.
+- Fixed `teamster stop` killing systemd-managed components behind systemd's back.
+- Fixed `wms_claimWorkUnit` never opening a focus interval, so claimed work went unattributed.
+- Fixed the close-out required-tags check ignoring tags inherited from the parent Outcome, so it warned on nearly every close.
+- Fixed a tag manifest bug that returned inconsistent metadata depending on database row ordering.
+- Fixed a cardinality bug allowing multiple work-types to be assigned to a single entity.
+- Fixed a bug where ~11% of teammate cost was silently unattributed due to long agent names overflowing an internal limit.
+- Fixed a race condition where concurrent MCP calls could mis-attribute one agent's identity to another.
+- Fixed a bug where bundled scout/reviewer agents could not attribute their own cost.
+- Fixed a bug where the fleet view showed agents under the wrong parent in the hierarchy.
+- Fixed a bug where ghost agents lingered indefinitely in the fleet view and activity log.
+- Fixed a bug where agent names in ctop and fleet view didn't use consistent colors (issue #20).
+- Fixed journal history returning same-second rows in arbitrary order.
+- MCP tools now report what they actually did (`wms_claimWorkUnit` focus status, `wms_setPhase` errors, redelivery while in review) instead of silently succeeding.
+- Silent attribution failures and failed hookd notifications are now logged.
+- Documentation overhaul: status vocabulary, review sweep, supervisor units, clone masking, and burn-in recipes.
+
 ## v0.2.6 (2026-08-13)
 
 ### Added

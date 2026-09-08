@@ -62,11 +62,16 @@ func main() {
 
 	offset := seekStart(f, *history)
 	client := &http.Client{Timeout: 5 * time.Second}
-	reader := &chunkReader{f: f}
+	reader := newChunkReader(f, *source)
 	var forwarded, errCount int64
 	var consecFails int
 
 	for {
+		if newOffset, rotated := reader.checkRotation(offset); rotated {
+			log.Warn("source file rotated or truncated, resuming from new head", "old_offset", offset, "new_offset", newOffset)
+			offset = newOffset
+		}
+
 		line, newOffset, ok := reader.readLine(offset)
 		if ok {
 			offset = newOffset
@@ -136,11 +141,73 @@ func seekStart(f *os.File, history int) int64 {
 const chunkSize = 8192
 
 // chunkReader buffers file reads in 8KB chunks to avoid per-byte syscalls.
+// It also tracks the source path and inode so checkRotation can detect both
+// an in-place truncation (logrotate's copytruncate, which this file is
+// configured for) and a replacement (a rename/create-style rotation, which
+// copytruncate isn't, but the check costs nothing extra and any operator
+// could switch the stanza later) — without either, a rotation stalls the
+// relay permanently: ReadAt past the new, smaller EOF returns loaded==0 and
+// readLine returns ok=false forever, with no error and no log line
+// explaining why forwarding stopped.
 type chunkReader struct {
 	f      *os.File
+	path   string
+	ino    uint64
 	buf    [chunkSize]byte
 	start  int64 // file offset where buf[0] was read from
 	loaded int   // valid bytes in buf
+}
+
+func newChunkReader(f *os.File, path string) *chunkReader {
+	return &chunkReader{f: f, path: path, ino: inodeOf(f)}
+}
+
+// inodeOf returns f's inode, or 0 if it can't be determined (e.g. a
+// platform whose Stat().Sys() isn't a *syscall.Stat_t) — checkRotation
+// treats 0 as "unknown," never as "matches," so a platform where this can't
+// be read simply never detects a rename-style rotation, only a truncation.
+func inodeOf(f *os.File) uint64 {
+	info, err := f.Stat()
+	if err != nil {
+		return 0
+	}
+	if sys, ok := info.Sys().(*syscall.Stat_t); ok {
+		return sys.Ino
+	}
+	return 0
+}
+
+// checkRotation re-stats the path (not the open fd, which no longer sees a
+// replaced file's new content) and, if the on-disk file was replaced or has
+// shrunk below the current offset, reopens or resets so the tail resumes
+// from the new head instead of stalling. Returns the offset to continue
+// from and whether anything changed.
+func (cr *chunkReader) checkRotation(offset int64) (int64, bool) {
+	info, err := os.Stat(cr.path)
+	if err != nil {
+		return offset, false
+	}
+
+	if sys, ok := info.Sys().(*syscall.Stat_t); ok && cr.ino != 0 && sys.Ino != cr.ino {
+		newF, err := os.Open(cr.path)
+		if err != nil {
+			// Transient — e.g. mid-rename. Keep the old fd and try again
+			// next pass rather than losing the source entirely.
+			return offset, false
+		}
+		cr.f.Close()
+		cr.f = newF
+		cr.ino = sys.Ino
+		cr.start, cr.loaded = 0, 0
+		return 0, true
+	}
+
+	if info.Size() < offset {
+		cr.start, cr.loaded = 0, 0
+		return 0, true
+	}
+
+	return offset, false
 }
 
 // fill reads a chunk from the file starting at the given offset.

@@ -115,6 +115,8 @@ func runWMSBackfill(args []string) int {
 	errCount := 0
 	for _, p := range plan {
 		if p.skip {
+			fmt.Fprintf(os.Stderr, "  skip: %s %s (id=%d): %s\n",
+				p.orphan.EntityType, p.orphan.EntityID, p.orphan.ID, p.skipReason)
 			continue
 		}
 		if err := applyBackfill(ctx, s, p); err != nil {
@@ -247,7 +249,16 @@ func parseJSONL(path string) (*parsedEvents, error) {
 			}
 		}
 
-		session, _ := raw["session"].(string)
+		// Prefer the untruncated session_full field (WP11 §1); fall back to
+		// the 12-char session field for legacy JSONL lines written before
+		// that fix shipped. The buildBackfillPlan skip-gate below refuses to
+		// write a resolved id that still looks truncated rather than
+		// silently poisoning wms_intervals.session_id with a value the
+		// allocation join (exact-string session_id match) can never match.
+		session, _ := raw["session_full"].(string)
+		if session == "" {
+			session, _ = raw["session"].(string)
+		}
 		if session != "" {
 			if prev, ok := p.lastEventBySession[session]; !ok || ts.After(prev) {
 				p.lastEventBySession[session] = ts
@@ -497,6 +508,29 @@ func buildBackfillPlan(orphans []store.Interval, p *parsedEvents) []backfillActi
 			} else {
 				action.skipReason = "matched event but no session_id available"
 			}
+			plan = append(plan, action)
+			continue
+		}
+
+		// A resolved id of exactly 12 or 64 chars sits on one of buildRecord's
+		// two truncation boundaries (server.go: `session` capped at 12,
+		// `session_full` capped at 64 — see the comment there, which names
+		// this dependency back). Real session ids today are 36-char UUIDs,
+		// well under both, so neither length is known to occur legitimately;
+		// this gate cannot tell a genuinely-that-length id from a truncated
+		// one, and errs toward refusing rather than writing a value the
+		// allocation join's exact-string session_id match can never find
+		// (permanently unallocatable and indistinguishable from a normal
+		// row). The interval is left exactly as found: still orphaned
+		// (session_id empty), and if it was also still open, its ended_at
+		// stays unrepaired too — this skip runs before the close-time search
+		// below, so a doubly-broken orphan will be reported again on every
+		// future run until it's resolved some other way.
+		if l := len(action.sessionID); l == 12 || l == 64 {
+			action.skip = true
+			action.skipReason = fmt.Sprintf(
+				"resolved session id %q is exactly %d chars — sits on buildRecord's truncation boundary and cannot be confirmed genuine; refusing to write a value the allocation join can never match (interval stays orphaned, ended_at unrepaired if open, and will be re-reported next run)",
+				action.sessionID, l)
 			plan = append(plan, action)
 			continue
 		}

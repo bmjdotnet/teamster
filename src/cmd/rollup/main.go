@@ -422,7 +422,10 @@ func runSweep(ctx context.Context, st store.Store, r *rollup.Runner, cfg config.
 		}
 
 		staleThreshold := time.Now().UTC().Add(-24 * time.Hour)
-		n, err = st.CloseIntervalsForStaleSessions(ctx, staleThreshold)
+		// ExceptLiveLead: an in-process teammate whose own session went
+		// quiet while idle must not have its interval closed while its
+		// lead session is plainly still connected (wh2-idle-teammate-exemption).
+		n, err = st.CloseIntervalsForStaleSessionsExceptLiveLead(ctx, staleThreshold)
 		if err != nil {
 			logger.Error("sweep: drain stale sessions failed", "error", err)
 			return 1

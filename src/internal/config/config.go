@@ -124,13 +124,36 @@ type Config struct {
 	LogLevel string
 
 	// GCStaleHours is the reaper's Phase 3 threshold: sessions with no events
-	// in this many hours are considered stale and their intervals are closed.
-	// Default 0 disables Phase 3 entirely (only Phases 1+2 run).
+	// in this many hours are considered stale, so their intervals are closed
+	// and the session is marked closed. 0 disables Phase 3 entirely.
+	//
+	// Phase 3 is how intervals terminate now that Stop no longer closes them
+	// (Stop is a turn boundary, not a session boundary). The default trades
+	// two failure modes that are NOT symmetric: closing too early only sends
+	// cost to the unallocated bucket, which is visible and which the
+	// transcript recovery pass reclaims; closing too late lets a resumed
+	// session attach NEW work to the previous entity's still-open interval,
+	// which is silent misattribution and is not recoverable. So the default
+	// is deliberately short — long enough to span any plausible within-task
+	// pause, short enough that an overnight or next-day --resume, where
+	// "different work" is most likely, lands outside it.
 	GCStaleHours int
 
 	// ReaperInterval is the cadence for the interval reaper goroutine.
 	// Default 15 minutes.
 	ReaperInterval time.Duration
+
+	// ReviewSweep configures `teamster wms review-sweep`
+	// (WP3-DESIGN.md, Operator Decision 4): read at the START of every run,
+	// not baked into the systemd unit at install time, so flipping Confirm
+	// after burn-in is a one-line teamster.yaml edit that takes effect on
+	// the next scheduled run — no restart, no reinstall.
+	ReviewSweep ReviewSweepConfig
+
+	// MCPScraper configures the mcp-scraper tailer (WP11-TAILER-DESIGN.md
+	// §7): whether the systemd timer's oneshot run actually ledgers rows.
+	// Same yaml < env < flags precedence as every other Config field.
+	MCPScraper MCPScraperConfig
 
 	// Solo is single-agent mode: TEAMSTER_SOLO=1. When set, the hook client
 	// suppresses team-mandate ceremony (the Agent-Teams dispatch instruction,
@@ -156,6 +179,50 @@ type Config struct {
 	// still serving /event, reads, SSE, and dashboards. TEAMSTER_HOOKD_READ_ONLY=1
 	// or --read-only flag on hookd.
 	ReadOnly bool
+}
+
+// ReviewSweepConfig is `teamster wms review-sweep`'s config surface
+// (WP3-DESIGN.md §8). Defaults are the safe, do-nothing state: Enabled is
+// false, so a fresh install's timer (once wired) is a config-gated no-op
+// even if somehow enabled at the systemd level (AC4 — "config default is
+// inert", checked at both the install-time gate and this run-time one).
+type ReviewSweepConfig struct {
+	// Enabled gates the whole command, checked first and unconditionally —
+	// not a flag, since the timer must never run destructively just because
+	// a fresh install's unit happens to be enabled.
+	Enabled bool
+	// OlderThan is Sweep Stage 1's idle threshold (§2a/§2b) — applies to
+	// both the review-WorkUnit and stale-Outcome populations.
+	OlderThan time.Duration
+	// AbandonAfter is Sweep Stage 2's rescue-window threshold (§2c,
+	// Operator Decision 10), measured from the sweep's own parking journal
+	// row, independent of OlderThan.
+	AbandonAfter time.Duration
+	// Confirm, when false, forces dry-run regardless of the command's
+	// --confirm flag — config is the source of truth for the unattended
+	// (timer-driven) path (Operator Decision 4).
+	Confirm bool
+	// NotifyHookd gates the HookObserver/gauge-notification path (§5).
+	// Default true — a real install always wants the gauge to stay live.
+	// Explicit opt-out only: yaml `review-sweep.notify_hookd: false`,
+	// TEAMSTER_REVIEW_SWEEP_NOTIFY_HOOKD=0, or the command's --no-hookd
+	// flag. Exists specifically so a test/dev harness can disable hookd
+	// notification outright rather than relying on an unreachable URL
+	// alone — cfg.HookServerURL is never actually empty (Default() always
+	// constructs one), so "empty URL means off" (wms-mcp's own raw-env
+	// pattern) is not available to this config-driven command; this field
+	// is the equivalent explicit lever.
+	NotifyHookd bool
+}
+
+// MCPScraperConfig is the mcp-scraper tailer's config surface
+// (WP11-TAILER-DESIGN.md §7).
+type MCPScraperConfig struct {
+	// Enabled gates the whole binary, checked first and unconditionally —
+	// a fresh install's timer (once wired) must stay a config-gated no-op
+	// even if somehow enabled at the systemd level. Same defense-in-depth
+	// shape as ReviewSweepConfig.Enabled.
+	Enabled bool
 }
 
 // Default returns a Config with all defaults populated.
@@ -213,8 +280,18 @@ func Default() Config {
 		GrafanaMode:          "install",
 		CcusageMode:          "install",
 		LogLevel:             "info",
-		GCStaleHours:         0,
+		GCStaleHours:         2,
 		ReaperInterval:       15 * time.Minute,
+		ReviewSweep: ReviewSweepConfig{
+			Enabled:      false,
+			OlderThan:    168 * time.Hour,
+			AbandonAfter: 720 * time.Hour,
+			Confirm:      false,
+			NotifyHookd:  true,
+		},
+		MCPScraper: MCPScraperConfig{
+			Enabled: false,
+		},
 	}
 }
 
@@ -294,6 +371,28 @@ func Load() (Config, error) {
 	}
 	if fc.TokenScraper.Mode != "" {
 		cfg.CcusageMode = fc.TokenScraper.Mode
+	}
+	if fc.ReviewSweep.Enabled {
+		cfg.ReviewSweep.Enabled = true
+	}
+	if fc.ReviewSweep.OlderThan != "" {
+		if d, err := time.ParseDuration(fc.ReviewSweep.OlderThan); err == nil {
+			cfg.ReviewSweep.OlderThan = d
+		}
+	}
+	if fc.ReviewSweep.AbandonAfter != "" {
+		if d, err := time.ParseDuration(fc.ReviewSweep.AbandonAfter); err == nil {
+			cfg.ReviewSweep.AbandonAfter = d
+		}
+	}
+	if fc.ReviewSweep.Confirm {
+		cfg.ReviewSweep.Confirm = true
+	}
+	if fc.ReviewSweep.NotifyHookd != nil {
+		cfg.ReviewSweep.NotifyHookd = *fc.ReviewSweep.NotifyHookd
+	}
+	if fc.MCPScraper.Enabled {
+		cfg.MCPScraper.Enabled = true
 	}
 
 	if v := os.Getenv("TEAMSTER_BASEDIR"); v != "" {
@@ -443,6 +542,42 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("TEAMSTER_REAPER_INTERVAL: %w", err)
 		}
 		cfg.ReaperInterval = d
+	}
+	// ReviewSweep env overrides — a secondary path alongside teamster.yaml
+	// (Load's yaml-seed pass above), same yaml < env < flags precedence as
+	// every other Config field. teamster.yaml is still the intended
+	// unattended-flip mechanism (Operator Decision 4); these exist for
+	// parity with the rest of Config and for a host with no yaml section
+	// written yet.
+	if os.Getenv("TEAMSTER_REVIEW_SWEEP_ENABLED") == "1" {
+		cfg.ReviewSweep.Enabled = true
+	}
+	if v := os.Getenv("TEAMSTER_REVIEW_SWEEP_OLDER_THAN"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("TEAMSTER_REVIEW_SWEEP_OLDER_THAN: %w", err)
+		}
+		cfg.ReviewSweep.OlderThan = d
+	}
+	if v := os.Getenv("TEAMSTER_REVIEW_SWEEP_ABANDON_AFTER"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("TEAMSTER_REVIEW_SWEEP_ABANDON_AFTER: %w", err)
+		}
+		cfg.ReviewSweep.AbandonAfter = d
+	}
+	if os.Getenv("TEAMSTER_REVIEW_SWEEP_CONFIRM") == "1" {
+		cfg.ReviewSweep.Confirm = true
+	}
+	if os.Getenv("TEAMSTER_REVIEW_SWEEP_NOTIFY_HOOKD") == "0" {
+		cfg.ReviewSweep.NotifyHookd = false
+	}
+	// MCPScraper env override — a secondary path alongside teamster.yaml
+	// (Load's yaml-seed pass above), same yaml < env < flags precedence as
+	// every other Config field, and for parity with ReviewSweep's own
+	// TEAMSTER_REVIEW_SWEEP_ENABLED.
+	if os.Getenv("TEAMSTER_MCP_SCRAPER_ENABLED") == "1" {
+		cfg.MCPScraper.Enabled = true
 	}
 
 	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {

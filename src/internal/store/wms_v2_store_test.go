@@ -263,8 +263,12 @@ func TestClaimWorkUnit_Success(t *testing.T) {
 	if err := st.CreateWorkUnit(ctx, &wms.WorkUnit{ID: "wu1", OutcomeID: "o1", Title: "W", Status: wms.StatusPending}); err != nil {
 		t.Fatalf("CreateWorkUnit: %v", err)
 	}
-	if err := st.ClaimWorkUnit(ctx, "wu1", "@agent-A"); err != nil {
+	oldStatus, err := st.ClaimWorkUnit(ctx, "wu1", "@agent-A")
+	if err != nil {
 		t.Fatalf("ClaimWorkUnit: %v", err)
+	}
+	if oldStatus != wms.StatusPending {
+		t.Errorf("ClaimWorkUnit old status = %q, want %q", oldStatus, wms.StatusPending)
 	}
 	wu, err := st.GetWorkUnit(ctx, "wu1")
 	if err != nil {
@@ -278,8 +282,11 @@ func TestClaimWorkUnit_Success(t *testing.T) {
 	}
 }
 
-// TestClaimWorkUnit_NotPending verifies that claiming a non-pending WorkUnit
-// returns an error and leaves the row unchanged.
+// TestClaimWorkUnit_NotPending exercises the claim-state matrix's terminal
+// row: a WorkUnit in a closed-off status (review/done/blocked) is never
+// claimable. An active-but-unowned WorkUnit is NOT this case — see
+// TestConformanceDim4_ClaimStateMatrix's "adopt" row, which is deliberately
+// a success, not an error.
 func TestClaimWorkUnit_NotPending(t *testing.T) {
 	st := openScratchStore(t)
 	ctx := context.Background()
@@ -287,11 +294,11 @@ func TestClaimWorkUnit_NotPending(t *testing.T) {
 	if err := st.CreateOutcome(ctx, &wms.Outcome{ID: "o1", Title: "O", Status: wms.StatusPending}); err != nil {
 		t.Fatalf("CreateOutcome: %v", err)
 	}
-	if err := st.CreateWorkUnit(ctx, &wms.WorkUnit{ID: "wu1", OutcomeID: "o1", Title: "W", Status: wms.StatusActive}); err != nil {
+	if err := st.CreateWorkUnit(ctx, &wms.WorkUnit{ID: "wu1", OutcomeID: "o1", Title: "W", Status: wms.StatusDone}); err != nil {
 		t.Fatalf("CreateWorkUnit: %v", err)
 	}
-	if err := st.ClaimWorkUnit(ctx, "wu1", "@agent-B"); err == nil {
-		t.Error("expected error claiming non-pending workunit, got nil")
+	if _, err := st.ClaimWorkUnit(ctx, "wu1", "@agent-B"); err == nil {
+		t.Error("expected error claiming a done (terminal, not-claimable) workunit, got nil")
 	}
 }
 

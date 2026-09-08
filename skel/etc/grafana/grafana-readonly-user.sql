@@ -73,6 +73,10 @@ GRANT SELECT ON `__STORE_DB__`.`wms_journal`           TO '__GRAFANA_DB_USER__'@
 -- Outcome cost hierarchy (v42 migration). Materialized by rollup binary.
 GRANT SELECT ON `__STORE_DB__`.`outcome_cost_rollup`   TO '__GRAFANA_DB_USER__'@'%';
 
+-- True-cost rollup (WP3 stage 1, v65 migration). Materialized by rollup
+-- binary alongside outcome_cost_rollup above; feeds outcome-true-cost.json.
+GRANT SELECT ON `__STORE_DB__`.`outcome_true_cost_rollup` TO '__GRAFANA_DB_USER__'@'%';
+
 -- Recovery-pass evidence tables (migrations v35/v37/v38/v39). Audit trail for
 -- the attribution recovery passes; the "Last Sweep Activity" panel reads these.
 GRANT SELECT ON `__STORE_DB__`.`recovery_evidence`     TO '__GRAFANA_DB_USER__'@'%';
@@ -83,5 +87,15 @@ GRANT SELECT ON `__STORE_DB__`.`gap_evidence`          TO '__GRAFANA_DB_USER__'@
 -- Job heartbeat table (migration v62). The "Classify Freshness" panel reads
 -- last_run_at to show staleness of the classify pass.
 GRANT SELECT ON `__STORE_DB__`.`job_heartbeats`        TO '__GRAFANA_DB_USER__'@'%';
+
+-- Typed relations (WP3 stage 2, migrations v67/v68): relation_kinds is the
+-- seeded vocabulary, outcome_relations the edges. Both feed the rework-tax
+-- panels on outcome-true-cost.json.
+GRANT SELECT ON `__STORE_DB__`.`relation_kinds`        TO '__GRAFANA_DB_USER__'@'%';
+GRANT SELECT ON `__STORE_DB__`.`outcome_relations`     TO '__GRAFANA_DB_USER__'@'%';
+
+-- WP2 migration audit trail (v66 migration). Readable for diagnostic panels
+-- tracing the phase/work-type vocabulary weed's per-entity remaps.
+GRANT SELECT ON `__STORE_DB__`.`wp2_migration_audit`   TO '__GRAFANA_DB_USER__'@'%';
 
 FLUSH PRIVILEGES;

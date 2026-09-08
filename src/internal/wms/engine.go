@@ -55,12 +55,19 @@ func (e *EngineImpl) AddObserver(o Observer) {
 }
 
 // OnStatusChange is called after a status change has been persisted. It
-// cascades unblocks to dependents, rolls up workunit completion to outcomes,
-// computes advisory outcome status, and notifies all registered observers.
+// unblocks dependents on a terminal transition, computes an advisory
+// derived outcome status (log-only, never a write), clears a stale
+// `resolution` tag on a done→review reopen (LF-gfx-1), and notifies all
+// registered observers. It does NOT close an Outcome when its WorkUnits (or
+// child Outcomes) finish — that auto-close cascade was removed by WP7/R1;
+// closing an Outcome is now always a deliberate act.
 //
 // ctx    — request context.
 // change — describes the entity type, ID, and old/new status.
-// Returns nil in all non-fatal cases; store errors are propagated.
+// Returns nil always: every store error along the way here is logged and
+// swallowed, not propagated, so a read/write failure in any of these
+// best-effort steps never fails the caller's status transition (which has
+// already been persisted by the time this runs).
 func (e *EngineImpl) OnStatusChange(ctx context.Context, change StatusChange) error {
 	// 1. Dependency cascade: if terminal, evaluate all dependents for unblocking.
 	if IsTerminal(change.EntityType, change.NewStatus) {
@@ -76,123 +83,7 @@ func (e *EngineImpl) OnStatusChange(ctx context.Context, change StatusChange) er
 		}
 	}
 
-	// 2. WorkUnit→Outcome rollup: when a workunit completes, check all siblings.
-	if change.EntityType == EntityWorkUnit && change.NewStatus == StatusDone {
-		wu, err := e.store.GetWorkUnit(ctx, change.EntityID)
-		if err != nil {
-			slog.Warn("wms engine: get workunit for rollup", "id", change.EntityID, "err", err)
-			goto notifyObservers
-		}
-		if wu.OutcomeID == "" {
-			goto notifyObservers
-		}
-
-		siblings, err := e.store.ListWorkUnits(ctx, wu.OutcomeID)
-		if err != nil {
-			slog.Warn("wms engine: list siblings for rollup", "outcome", wu.OutcomeID, "err", err)
-			goto notifyObservers
-		}
-
-		allDone := len(siblings) > 0
-		for _, s := range siblings {
-			if s.Status != StatusDone {
-				allDone = false
-				break
-			}
-		}
-
-		if allDone {
-			outcome, err := e.store.GetOutcome(ctx, wu.OutcomeID)
-			if err != nil {
-				slog.Warn("wms engine: get outcome for rollup", "id", wu.OutcomeID, "err", err)
-				goto notifyObservers
-			}
-			if outcome.Status != StatusDone {
-				oldStatus := outcome.Status
-				if err := e.store.UpdateOutcomeStatus(ctx, outcome.ID, StatusDone); err != nil {
-					slog.Warn("wms engine: auto-complete outcome", "id", outcome.ID, "err", err)
-					goto notifyObservers
-				}
-				if err := e.store.TransitionEventRecord(ctx, EntityOutcome, outcome.ID, StatusDone, change.SessionID, change.AgentName, change.Host); err != nil {
-					slog.Warn("wms engine: transition event for outcome rollup", "id", outcome.ID, "err", err)
-				}
-				outcomeChange := StatusChange{
-					EntityType: EntityOutcome,
-					EntityID:   outcome.ID,
-					OldStatus:  oldStatus,
-					NewStatus:  StatusDone,
-					SessionID:  change.SessionID,
-					AgentName:  change.AgentName,
-					Host:       change.Host,
-				}
-				if recurseErr := e.OnStatusChange(ctx, outcomeChange); recurseErr != nil {
-					slog.Warn("wms engine: recurse on outcome rollup", "id", outcome.ID, "err", recurseErr)
-				}
-			}
-		}
-		goto notifyObservers
-	}
-
-	// 2c. Outcome→parent Outcome rollup (DAG): when an outcome completes, advance parents.
-	if change.EntityType == EntityOutcome && change.NewStatus == StatusDone {
-		parentIDs, err := e.store.GetOutcomeParents(ctx, change.EntityID)
-		if err != nil {
-			slog.Warn("wms engine: get outcome parents for rollup", "id", change.EntityID, "err", err)
-			goto notifyObservers
-		}
-		for _, parentID := range parentIDs {
-			childIDs, err := e.store.GetOutcomeChildren(ctx, parentID)
-			if err != nil {
-				slog.Warn("wms engine: get outcome children for rollup", "parent", parentID, "err", err)
-				continue
-			}
-			allChildrenDone := len(childIDs) > 0
-			for _, childID := range childIDs {
-				child, err := e.store.GetOutcome(ctx, childID)
-				if err != nil {
-					slog.Warn("wms engine: get child outcome", "id", childID, "err", err)
-					allChildrenDone = false
-					break
-				}
-				if child.Status != StatusDone {
-					allChildrenDone = false
-					break
-				}
-			}
-			if allChildrenDone {
-				parent, err := e.store.GetOutcome(ctx, parentID)
-				if err != nil {
-					slog.Warn("wms engine: get parent outcome for rollup", "id", parentID, "err", err)
-					continue
-				}
-				if parent.Status != StatusDone {
-					oldStatus := parent.Status
-					if err := e.store.UpdateOutcomeStatus(ctx, parentID, StatusDone); err != nil {
-						slog.Warn("wms engine: auto-complete parent outcome", "id", parentID, "err", err)
-						continue
-					}
-					if err := e.store.TransitionEventRecord(ctx, EntityOutcome, parentID, StatusDone, change.SessionID, change.AgentName, change.Host); err != nil {
-						slog.Warn("wms engine: transition event for parent rollup", "id", parentID, "err", err)
-					}
-					parentChange := StatusChange{
-						EntityType: EntityOutcome,
-						EntityID:   parentID,
-						OldStatus:  oldStatus,
-						NewStatus:  StatusDone,
-						SessionID:  change.SessionID,
-						AgentName:  change.AgentName,
-						Host:       change.Host,
-					}
-					if recurseErr := e.OnStatusChange(ctx, parentChange); recurseErr != nil {
-						slog.Warn("wms engine: recurse on parent outcome rollup", "id", parentID, "err", recurseErr)
-					}
-				}
-			}
-		}
-		// Fall through to notify observers
-	}
-
-	// 3. WorkUnit→Outcome advisory: derive outcome status and warn if it differs.
+	// 2. WorkUnit→Outcome advisory: derive outcome status and warn if it differs.
 	if change.EntityType == EntityWorkUnit {
 		wu, err := e.store.GetWorkUnit(ctx, change.EntityID)
 		if err != nil {
@@ -223,10 +114,20 @@ func (e *EngineImpl) OnStatusChange(ctx context.Context, change StatusChange) er
 	}
 
 notifyObservers:
-	// 4. Notify all registered observers.
+	// 3. Notify all registered observers. JournalObserver, if registered,
+	// writes this transition's own "status" journal row here — step 4 below
+	// must run after this loop so the audit trail records cause (the
+	// reopen) before effect (the tag clear it causes).
 	for _, o := range e.observers {
 		o.OnStatusChange(change)
 	}
+
+	// 4. Reopen tag cleanup (LF-gfx-1, R2): done→review is the sole edge
+	// leaving `done`. See clearResolutionOnReopen for why this one place is
+	// sufficient to cover every later abandon. Runs last so its journal row
+	// (if any) is never older than the status-change row that caused it.
+	clearResolutionOnReopen(ctx, e.store, change)
+
 	return nil
 }
 
@@ -256,7 +157,7 @@ func (e *EngineImpl) evaluateUnblock(ctx context.Context, entityType, entityID, 
 	if err != nil {
 		return err
 	}
-	if status != "blocked" {
+	if status != StatusBlocked {
 		return nil
 	}
 
@@ -277,6 +178,15 @@ func (e *EngineImpl) evaluateUnblock(ctx context.Context, entityType, entityID, 
 		if err := e.store.TransitionEventRecord(ctx, EntityOutcome, entityID, restore, sessionID, agentName, host); err != nil {
 			return err
 		}
+		entry := JournalEntry{
+			EntityType: EntityOutcome, EntityID: entityID,
+			Field: "status", OldValue: StatusBlocked, NewValue: restore,
+			Notes: "auto-unblocked: all blockers reached a terminal status",
+			SessionID: sessionID, AgentID: agentName, Host: host,
+		}
+		if err := RecordMutation(ctx, e.store, entry); err != nil {
+			slog.Warn("wms engine: record mutation for auto-unblock", "id", entityID, "err", err)
+		}
 
 	case EntityWorkUnit:
 		wu, err := e.store.GetWorkUnit(ctx, entityID)
@@ -293,6 +203,15 @@ func (e *EngineImpl) evaluateUnblock(ctx context.Context, entityType, entityID, 
 		}
 		if err := e.store.TransitionEventRecord(ctx, EntityWorkUnit, entityID, restore, sessionID, agentName, host); err != nil {
 			return err
+		}
+		entry := JournalEntry{
+			EntityType: EntityWorkUnit, EntityID: entityID,
+			Field: "status", OldValue: StatusBlocked, NewValue: restore,
+			Notes: "auto-unblocked: all blockers reached a terminal status",
+			SessionID: sessionID, AgentID: agentName, Host: host,
+		}
+		if err := RecordMutation(ctx, e.store, entry); err != nil {
+			slog.Warn("wms engine: record mutation for auto-unblock", "id", entityID, "err", err)
 		}
 		if e.notify != nil && wu.AgentID != "" {
 			e.notify(wu.AgentID, "unblocked: "+entityID)
@@ -328,22 +247,29 @@ func (e *EngineImpl) getEntityStatus(ctx context.Context, entityType, entityID s
 }
 
 // deriveOutcomeStatus computes the expected outcome status from its workunits:
-//   - All done → "done"
+//   - All terminal (done/abandoned), at least one done → "done"
+//   - All terminal, none done → "abandoned"
 //   - Any active or review → "active"
 //   - Any blocked, none active/review → "blocked"
 //   - All pending → "pending"
+//   - Any on_hold, none active or blocked, and not all pending → "on_hold"
 //   - No units or mixed → ""
 func deriveOutcomeStatus(units []*WorkUnit) string {
 	if len(units) == 0 {
 		return ""
 	}
-	allDone := true
+	allTerminal := true // done or abandoned
+	anyDone := false
 	anyActive := false
 	anyBlocked := false
+	anyOnHold := false
 	allPending := true
 	for _, u := range units {
-		if u.Status != StatusDone {
-			allDone = false
+		if u.Status != StatusDone && u.Status != StatusAbandoned {
+			allTerminal = false
+		}
+		if u.Status == StatusDone {
+			anyDone = true
 		}
 		if u.Status == StatusActive || u.Status == StatusReview {
 			anyActive = true
@@ -351,19 +277,26 @@ func deriveOutcomeStatus(units []*WorkUnit) string {
 		if u.Status == StatusBlocked {
 			anyBlocked = true
 		}
+		if u.Status == StatusOnHold {
+			anyOnHold = true
+		}
 		if u.Status != StatusPending {
 			allPending = false
 		}
 	}
 	switch {
-	case allDone:
-		return StatusDone
+	case allTerminal && anyDone:
+		return StatusDone // everything that could finish, finished
+	case allTerminal:
+		return StatusAbandoned // every WU is abandoned, none done
 	case anyActive:
 		return StatusActive
 	case anyBlocked:
 		return StatusBlocked
 	case allPending:
 		return StatusPending
+	case anyOnHold:
+		return StatusOnHold // nothing active/blocked/pending; rest are paused
 	default:
 		return ""
 	}

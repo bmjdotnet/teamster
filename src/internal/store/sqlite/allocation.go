@@ -274,6 +274,118 @@ func (s *Store) BuildOutcomeCostRollup(ctx context.Context) error {
 	})
 }
 
+// BuildOutcomeTrueCostRollup implements store.AllocationStore (WP3 stage 2).
+// Mirrors the mysql backend's query: same anchor + DAG leg + rework leg
+// recursive CTE, same nodes set-collapse against fan-in double counting
+// (DAG diamond, rework fan-in, or a mix of the two). Dialect differences
+// only: CONCAT(...) becomes `||`, and the anchor leg's string literals need
+// no width-limited CAST — SQLite columns are dynamically typed (type
+// affinity, not a fixed width), unlike MySQL's recursive CTEs, which type a
+// column from the anchor row and then overflow when a later leg's value is
+// wider (this backend's cycle-detection precedent, AddOutcomeEdge in
+// store_v2.go, needed no such cast either). SUM(ocr.tokens) is still cast to
+// INTEGER, matching BuildOutcomeCostRollup's existing convention here.
+//
+// A non-anchor node reachable BOTH as a DAG descendant and via a rework
+// edge is labelled child_outcome, not rework — via_rework is guarded with
+// `AND is_child = 0` in the final CASE, matching §5.3's prose and §11's
+// mixed-diamond acceptance test (conservative direction: under-report the
+// tax rather than inflate it, same reasoning as the is_self priority).
+//
+// rel_kind/miss pick the taxable kind/miss_class from the lowest-depth
+// rework hop that reached a node, same intent as the mysql backend's
+// SUBSTRING_INDEX(GROUP_CONCAT(... ORDER BY depth), ',', 1) — but SQLite has
+// no SUBSTRING_INDEX (a MySQL-only function; stock SQLite offers substr()/
+// instr() instead), so the aggregation is split across two CTEs: `nodes_raw`
+// computes GROUP_CONCAT(... ORDER BY depth) once per column (SQLite's
+// GROUP_CONCAT also skips NULLs and supports the same ORDER BY-in-aggregate
+// syntax — this driver bundles a SQLite new enough to have it, added
+// upstream in 3.44), then `nodes` takes the substring before the first comma
+// in that already-ordered-by-depth concatenation via instr()/substr(), or
+// the whole (single-element) string when there is no comma. Both aggregates
+// come back NULL for a node reached only via the anchor/DAG legs, which
+// instr()/substr() pass through as NULL — COALESCE'd to '' in the final
+// SELECT.
+//
+// The final SELECT's computed columns are aliased out_source_type/
+// out_source_id, not source_type/source_id — mirrors the mysql backend's fix
+// for a real bug there (MySQL's GROUP BY resolution prefers a same-named
+// FROM-list column, here outcome_cost_rollup.source_type/source_id, over a
+// SELECT-list alias, so grouping by "source_type" silently grouped by the
+// pre-CASE raw column instead of the intended post-CASE collapse). SQLite
+// does not enforce only_full_group_by the way MySQL does, so this was not
+// independently reproduced against sqlite, but the same column-name
+// collision exists in this query too — kept aliased identically for defense
+// in depth and so the two backends stay a verbatim mirror. relation_kind/
+// miss_class need no such rename: neither `nodes` nor outcome_cost_rollup
+// has a real column by either name.
+func (s *Store) BuildOutcomeTrueCostRollup(ctx context.Context) error {
+	return s.AtomicReplace(ctx, "outcome_true_cost_rollup", func(ctx context.Context, into string) error {
+		_, err := s.db.ExecContext(ctx, `
+			INSERT INTO `+into+`
+				(bucket_day, bucket_hour, outcome_id, source_type, source_id,
+				 relation_kind, miss_class, depth, model, agent_name, tokens, cost_usd)
+			WITH RECURSIVE closure (anchor, node, reason, rel_kind, miss, depth, path) AS (
+				SELECT o.id, o.id, 'direct', '', '', 0, '/' || o.id || '/'
+				  FROM outcomes o
+				UNION ALL
+				SELECT c.anchor, oe.child_id, 'child_outcome', c.rel_kind, c.miss,
+				       c.depth + 1, c.path || oe.child_id || '/'
+				  FROM closure c
+				  JOIN outcome_edges oe ON oe.parent_id = c.node
+				 WHERE c.depth < 20
+				   AND c.path NOT LIKE '%/' || oe.child_id || '/%'
+				UNION ALL
+				SELECT c.anchor, r.from_id, 'rework', r.kind, k.miss_class,
+				       c.depth + 1, c.path || r.from_id || '/'
+				  FROM closure c
+				  JOIN outcome_relations r
+				    ON r.to_type = 'outcome' AND r.to_id = c.node AND r.from_type = 'outcome'
+				  JOIN relation_kinds k ON k.kind = r.kind AND k.taxable = 1
+				 WHERE c.depth < 20
+				   AND c.path NOT LIKE '%/' || r.from_id || '/%'
+			),
+			nodes_raw AS (
+				SELECT anchor, node,
+				       MIN(depth) AS depth,
+				       MAX(reason = 'direct')        AS is_self,
+				       MAX(reason = 'child_outcome') AS is_child,
+				       MAX(reason = 'rework')        AS via_rework,
+				       GROUP_CONCAT(CASE WHEN reason = 'rework' THEN rel_kind END
+				                    ORDER BY depth) AS rel_kind_concat,
+				       GROUP_CONCAT(CASE WHEN reason = 'rework' THEN miss END
+				                    ORDER BY depth) AS miss_concat
+				  FROM closure
+				 GROUP BY anchor, node
+			),
+			nodes AS (
+				SELECT anchor, node, depth, is_self, is_child, via_rework,
+				       CASE WHEN instr(rel_kind_concat, ',') = 0 THEN rel_kind_concat
+				            ELSE substr(rel_kind_concat, 1, instr(rel_kind_concat, ',') - 1) END AS rel_kind,
+				       CASE WHEN instr(miss_concat, ',') = 0 THEN miss_concat
+				            ELSE substr(miss_concat, 1, instr(miss_concat, ',') - 1) END AS miss
+				  FROM nodes_raw
+			)
+			SELECT
+				ocr.bucket_day, ocr.bucket_hour,
+				n.anchor AS outcome_id,
+				CASE WHEN n.is_self = 1                       THEN ocr.source_type
+				     WHEN n.via_rework = 1 AND n.is_child = 0 THEN 'rework'
+				     ELSE 'child_outcome' END                                        AS out_source_type,
+				CASE WHEN n.is_self = 1 THEN ocr.source_id ELSE n.node END           AS out_source_id,
+				COALESCE(n.rel_kind, '')                                             AS relation_kind,
+				COALESCE(n.miss, '')                                                 AS miss_class,
+				n.depth,
+				ocr.model, ocr.agent_name,
+				CAST(SUM(ocr.tokens) AS INTEGER), SUM(ocr.cost_usd)
+			FROM nodes n
+			JOIN outcome_cost_rollup ocr ON ocr.outcome_id = n.node
+			GROUP BY ocr.bucket_day, ocr.bucket_hour, n.anchor, out_source_type, out_source_id,
+			         relation_kind, miss_class, n.depth, ocr.model, ocr.agent_name`)
+		return err
+	})
+}
+
 // Reconcile implements store.AllocationStore. otelCosts is the caller's
 // already-fetched Prometheus session-cost map (SQLite cannot reach
 // Prometheus itself, mirroring the mysql backend's identical signature

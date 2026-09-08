@@ -31,6 +31,11 @@ BASEDIR="${HOME}/teamster"
 BUILDDIR="$REPO/build"
 GO_MIN_MINOR=22
 
+# Where systemd unit files live. Not a CLI flag — no real install ever wants
+# a different value — just an override point so unit_is_masked (below) is
+# testable against a temp directory without sudo or a running systemd.
+SYSTEMD_UNIT_DIR="${SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
+
 # --- Round 0 debug-log tracing (locked format with install.sh) ---
 # Line shape: "<RFC3339-UTC> <LEVEL5> <component> <msg>[ k=v ...]"
 # Levels: TRACE DEBUG INFO  WARN  ERROR (all 5 chars; INFO and WARN pad with one space).
@@ -120,6 +125,7 @@ BASEDIR_EXPLICIT=0
 # Per-service mode flags
 HOOKD_MODE=""         # --hookd-mode=systemd|supervisor|external
 STORE_MODE=""         # --store-mode=install|external|managed
+STORE_ENGINE=""       # --store-engine=mariadb|mysql-8.4 (only valid with --store-mode=install; default mariadb — today's default-mysql-server behavior, unchanged for every existing caller)
 OTELCOL_MODE=""       # --otelcol-mode=install|external|managed|none
 PROMETHEUS_MODE=""    # --prometheus-mode=install|external|managed|none
 GRAFANA_MODE=""       # --grafana-mode=install|external|managed|none
@@ -185,6 +191,8 @@ while [[ $# -gt 0 ]]; do
         --hookd-mode)           require_value "$1" "${2-}"; HOOKD_MODE="$2"; shift 2 ;;
         --store-mode=*)         STORE_MODE="${1#--store-mode=}"; shift ;;
         --store-mode)           require_value "$1" "${2-}"; STORE_MODE="$2"; shift 2 ;;
+        --store-engine=*)       STORE_ENGINE="${1#--store-engine=}"; shift ;;
+        --store-engine)         require_value "$1" "${2-}"; STORE_ENGINE="$2"; shift 2 ;;
         --otelcol-mode=*)       OTELCOL_MODE="${1#--otelcol-mode=}"; shift ;;
         --otelcol-mode)         require_value "$1" "${2-}"; OTELCOL_MODE="$2"; shift 2 ;;
         --prometheus-mode=*)    PROMETHEUS_MODE="${1#--prometheus-mode=}"; shift ;;
@@ -254,6 +262,7 @@ while [[ $# -gt 0 ]]; do
             echo "Per-service mode flags:"
             echo "  --hookd-mode=MODE        hookd mode: systemd (default) | supervisor | external"
             echo "  --store-mode=MODE        store mode: managed (default) | install | external"
+            echo "  --store-engine=ENGINE    store engine (only with --store-mode=install): mariadb (default) | mysql-8.4"
             echo "  --otelcol-mode=MODE      otelcol mode: install (default) | external | managed | none"
             echo "  --prometheus-mode=MODE   prometheus mode: install (default) | external | managed | none"
             echo "  --grafana-mode=MODE      grafana mode: none (default) | install | external | managed"
@@ -319,6 +328,7 @@ dlog INFO install.parse "parsed flags" \
     "wire=$WIRE" \
     "hookd_mode=$HOOKD_MODE" \
     "store_mode=$STORE_MODE" \
+    "store_engine=$STORE_ENGINE" \
     "otelcol_mode=$OTELCOL_MODE" \
     "prometheus_mode=$PROMETHEUS_MODE" \
     "grafana_mode=$GRAFANA_MODE" \
@@ -339,6 +349,10 @@ dlog INFO install.parse "parsed flags" \
 # --- Validation ---
 [[ "$STORE_MODE" == "external" || "$STORE_MODE" == "managed" ]] && [[ -z "$STORE_DSN" ]] \
     && die "--store-mode=$STORE_MODE requires --store-dsn"
+[[ -n "$STORE_ENGINE" ]] && [[ "$STORE_ENGINE" != "mariadb" && "$STORE_ENGINE" != "mysql-8.4" ]] \
+    && die "--store-engine must be 'mariadb' or 'mysql-8.4', got '$STORE_ENGINE'"
+[[ -n "$STORE_ENGINE" ]] && [[ "$STORE_MODE" != "install" ]] \
+    && die "--store-engine is only valid with --store-mode=install (there is no engine to provision when the DSN points at something this installer doesn't manage)"
 [[ "$HOOKD_MODE" == "external" ]] && [[ -z "$HOOKD_ENDPOINT" ]] \
     && die "--hookd-mode=external requires --hookd-endpoint"
 [[ "$OTELCOL_MODE" == "external" ]] && [[ -z "$OTELCOL_ENDPOINT" ]] \
@@ -512,11 +526,127 @@ install_otelcol() {
 }
 
 # install_mysql installs MySQL/MariaDB and creates the teamster database and user.
+# install_mysql_84 provisions genuine MySQL 8.4 LTS via Oracle's apt repo,
+# invoked only when --store-engine=mysql-8.4 is passed (clone-specific,
+# R5/R5a/R5b — not the new default for ordinary --store-mode=install
+# callers, which keep today's default-mysql-server/MariaDB behavior via
+# install_mysql()'s own package-install branch). Only provisions the server
+# package; DSN parsing, database/user creation, and grants are shared with
+# the MariaDB path via install_mysql()'s common tail.
+#
+# 8.4 is native utf8mb4_0900_ai_ci (no collation rewrite needed vs the
+# hub's 8.0), apt-installable on trixie (unlike 8.0, whose Packages index is a
+# confirmed 0-byte file there), and keeps every .deb postinst benefit
+# (systemd unit, socket-auth root, data-dir init) a hand-rolled tarball
+# install would have to reproduce from scratch.
+install_mysql_84() {
+    echo ""
+    printf -- "${C_BOLD_CYAN}--- Installing MySQL 8.4 LTS (store-engine=mysql-8.4) ---${C_RESET}\n"
+
+    # gpg is needed to dearmor Oracle's signing key below. A fresh minimal
+    # trixie image may not have it — ensure it before using it.
+    if ! command -v gpg &>/dev/null; then
+        sudo apt-get install -y gnupg >/dev/null 2>&1 \
+            || die "failed to install gnupg (needed for MySQL keyring setup)"
+    fi
+
+    # apt-key is fully removed on Debian 13 — Oracle's own quick-guide still
+    # instructs it, which would `command not found` on this exact platform.
+    # signed-by= + a dearmored standalone keyring is the modern replacement:
+    # no system-wide trusted keyring, no apt-key binary needed.
+    local _key_url="https://repo.mysql.com/RPM-GPG-KEY-mysql-2025"
+    local _key_tmp
+    _key_tmp="$(mktemp)"
+    curl -fsSL "$_key_url" -o "$_key_tmp" \
+        || die "failed to download MySQL's signing key from $_key_url"
+
+    # Runtime expiry check: Oracle's dated key exports go stale on their own
+    # schedule (this exact URL's predecessor, RPM-GPG-KEY-mysql-2023, was
+    # already expired when this design was written). Fail loudly and
+    # specifically here rather than let a future re-staling surface as an
+    # opaque `apt-get update` failure. R13: an unsigned/unverified source is
+    # an acceptable fallback for the CLONE TARGET only — warn and proceed
+    # rather than die, since the operator has already ruled this acceptable.
+    # This never applies to the source hub; its MySQL trust chain stays Canonical's.
+    local _key_expiry
+    _key_expiry="$(gpg --show-keys --with-colons "$_key_tmp" 2>/dev/null | awk -F: '/^pub/ {print $7; exit}' || true)"
+    if [[ -n "$_key_expiry" ]] && [[ "$_key_expiry" -lt "$(date +%s)" ]]; then
+        printf -- "${C_YELLOW}  WARN: MySQL's signing key (%s, fingerprint BCA43417C3B485DD128EC6D4B7B3B788A8D3785C) expired on %s — Oracle has likely re-issued a fresh export under a new dated URL; check https://dev.mysql.com/doc/mysql-apt-repo-quick-guide/en/ for the current one and update this function's key URL. Proceeding with an expired-but-otherwise-valid key per R13 (clone target only).${C_RESET}\n" \
+            "$_key_url" "$(date -d "@${_key_expiry}" '+%Y-%m-%d' 2>/dev/null || echo "unknown")"
+    fi
+
+    sudo gpg --dearmor -o /usr/share/keyrings/mysql.gpg "$_key_tmp"
+    rm -f "$_key_tmp"
+    sudo tee /etc/apt/sources.list.d/mysql.list >/dev/null <<EOF
+deb [signed-by=/usr/share/keyrings/mysql.gpg] http://repo.mysql.com/apt/debian/ trixie mysql-8.4-lts
+EOF
+    sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq \
+        || die "apt-get update failed after adding MySQL's repo — check network/repo reachability"
+
+    # Install MySQL 8.x from Oracle's apt repo — no version pin, takes
+    # whatever is latest in the 8.x LTS train.
+    #
+    # debconf-set-selections preseeds the root-password prompt to avoid
+    # interactive hang. The password itself doesn't matter — we switch root
+    # to auth_socket immediately after install (see below).
+    local _root_pass
+    _root_pass="$(openssl rand -hex 16 2>/dev/null || head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    echo "mysql-community-server mysql-community-server/root-pass password ${_root_pass}" | sudo debconf-set-selections
+    echo "mysql-community-server mysql-community-server/re-root-pass password ${_root_pass}" | sudo debconf-set-selections
+
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        mysql-community-server mysql-community-client \
+        || die "mysql-community-server install failed — check repo reachability and apt sources"
+
+    sudo systemctl start mysql 2>/dev/null || sudo systemctl start mysqld 2>/dev/null
+
+    # Switch root@localhost to auth_socket so `sudo mysql` works passwordlessly
+    # for the rest of the installer — matching MariaDB's unix_socket default.
+    # Oracle's 8.4 .deb on trixie uses --initialize-insecure and no credential
+    # actually authenticates as root afterward (empty, preseeded, or bare — all
+    # produce ACCESS DENIED). The only reliable path: restart with
+    # --skip-grant-tables, alter root, restart normally.
+    # Oracle's MySQL 8.4 does not auto-load auth_socket (MariaDB's unix_socket
+    # is built in). Load the plugin first — || true since it may already exist.
+    local _auth_socket_sql="INSTALL PLUGIN auth_socket SONAME 'auth_socket.so'"
+    local _alter_sql="ALTER USER 'root'@'localhost' IDENTIFIED WITH auth_socket; FLUSH PRIVILEGES;"
+    if ! sudo mysql -u root --password= -e "${_auth_socket_sql}; ${_alter_sql}" 2>/dev/null \
+    && ! sudo mysql -u root -p"${_root_pass}" -e "${_auth_socket_sql}; ${_alter_sql}" 2>/dev/null; then
+        echo "  root auth failed — using --skip-grant-tables fallback"
+        sudo systemctl stop mysql
+        sudo mysqld --skip-grant-tables --skip-networking --user=mysql &
+        local _mgpid=$!
+        local _tries=0
+        while ! mysql -u root -e "SELECT 1" &>/dev/null && [[ $_tries -lt 30 ]]; do
+            sleep 1
+            _tries=$((_tries + 1))
+        done
+        # All three statements must run in ONE session: FLUSH PRIVILEGES
+        # re-enables auth, so any subsequent NEW connection would need a
+        # credential — which we don't have (that's why we're here).
+        mysql -u root <<'SQL' 2>/dev/null \
+            || { kill "$_mgpid" 2>/dev/null; die "auth_socket setup failed under --skip-grant-tables"; }
+FLUSH PRIVILEGES;
+INSTALL PLUGIN auth_socket SONAME 'auth_socket.so';
+ALTER USER 'root'@'localhost' IDENTIFIED WITH auth_socket;
+SQL
+        kill "$_mgpid" 2>/dev/null
+        wait "$_mgpid" 2>/dev/null || true
+        sudo systemctl start mysql
+    fi
+
+    local _mysql_ver
+    _mysql_ver="$(mysql --version 2>/dev/null | head -1 || echo "unknown")"
+    printf -- "${C_GREEN}  MySQL 8.x LTS installed (%s)${C_RESET}\n" "$_mysql_ver"
+}
+
 install_mysql() {
     local dsn="$1"
 
     if command -v mysql &>/dev/null && (systemctl is-active --quiet mysql 2>/dev/null || systemctl is-active --quiet mysqld 2>/dev/null || systemctl is-active --quiet mariadb 2>/dev/null); then
         echo "  MySQL already installed and running — skipping package install"
+    elif [[ "${STORE_ENGINE:-mariadb}" == "mysql-8.4" ]]; then
+        install_mysql_84
     else
         echo ""
         printf -- "${C_BOLD_CYAN}--- Installing MySQL ---${C_RESET}\n"
@@ -548,7 +678,57 @@ install_mysql() {
         printf "CREATE USER '%s'@'localhost' IDENTIFIED BY '%s';\n" "$_user" "$_pass" \
             | sudo mysql 2>/dev/null
     fi
+    # ALTER USER unconditionally applies the DSN password even when CREATE USER
+    # IF NOT EXISTS was a no-op — e.g. after `teamster clone`, where the account
+    # already exists from a prior install but teamster.yaml carries a freshly
+    # generated password. Without this, the account silently keeps its old
+    # password and every subsequent connection fails with access denied. Same
+    # CREATE USER IF NOT EXISTS + ALTER USER pattern as provision_grafana_ro /
+    # provision_clone_verify_ro below.
+    printf "ALTER USER '%s'@'localhost' IDENTIFIED BY '%s';\n" "$_user" "$_pass" \
+        | sudo mysql 2>/dev/null
     sudo mysql -e "GRANT ALL PRIVILEGES ON \`$_db\`.* TO '$_user'@'localhost'; FLUSH PRIVILEGES;" 2>/dev/null
+
+    # No install path creates claude_telemetry — it's populated externally
+    # (otelcol, on a normal hub) but nothing here provisions the database
+    # itself, so a fresh target has nowhere for a restored dump to land.
+    # Unconditional: benefits every --store-mode=install user, not just
+    # clone. GRANT ALL makes the SELECT/LOCK TABLES/SHOW VIEW/TRIGGER loop
+    # below redundant for claude_telemetry specifically — left in place
+    # since it still matters if that loop ever grows a second database.
+    sudo mysql -e "CREATE DATABASE IF NOT EXISTS \`claude_telemetry\` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;" 2>/dev/null \
+        || sudo mysql -e "CREATE DATABASE IF NOT EXISTS \`claude_telemetry\` CHARACTER SET utf8mb4;" 2>/dev/null
+    sudo mysql -e "GRANT ALL PRIVILEGES ON \`claude_telemetry\`.* TO '$_user'@'localhost'; FLUSH PRIVILEGES;" 2>/dev/null
+
+    # mcp_tool_calls (mcp-scraper's ledger, WP11-TAILER-DESIGN.md §3) is
+    # created here, unconditionally on every install and clone target, NOT
+    # lazily by the binary — so it exists identically on every host
+    # regardless of mcp-scraper.enabled or whether its timer has ever
+    # polled. Otherwise `teamster clone`'s verifyRowCounts (which SHOW
+    # TABLES-enumerates claude_telemetry on both sides) sees an asymmetric
+    # table that exists only on whichever side ran the tailer. The binary's
+    # own CREATE TABLE IF NOT EXISTS is a defensive no-op, not the primary
+    # mechanism.
+    sudo mysql -e "CREATE TABLE IF NOT EXISTS \`claude_telemetry\`.\`mcp_tool_calls\` (
+      id                BIGINT AUTO_INCREMENT PRIMARY KEY,
+      ts                DATETIME NOT NULL,
+      session_id        VARCHAR(64) NOT NULL,
+      agent_name        VARCHAR(64) NOT NULL,
+      host              VARCHAR(128) NOT NULL,
+      tool              VARCHAR(128) NOT NULL,
+      model             VARCHAR(128) NOT NULL,
+      source_generation INT NOT NULL,
+      source_offset     BIGINT NOT NULL,
+      KEY idx_session (session_id), KEY idx_tool (tool), KEY idx_ts (ts),
+      UNIQUE KEY uq_source_pos (source_generation, source_offset)
+    );" 2>/dev/null
+
+    # Restoring a mysqldump with DEFINER= clauses (views, routines, triggers)
+    # requires SET_ANY_DEFINER + SYSTEM_USER (MySQL 8.2+) when the definer
+    # is a system user (like root). Both are global-only privileges. Without
+    # them, `teamster restore` fails on the first definer-bearing object.
+    # || true: these privileges don't exist on MariaDB or older MySQL.
+    sudo mysql -e "GRANT SET_ANY_DEFINER, SYSTEM_USER ON *.* TO '$_user'@'localhost';" 2>/dev/null || true
 
     # The backup config lists databases beyond the DSN database (e.g.
     # claude_telemetry). Grant the minimum privileges mysqldump needs so
@@ -696,6 +876,88 @@ provision_grafana_ro() {
         return 0
     else
         _ro_fail
+        return 1
+    fi
+}
+
+# provision_clone_verify_ro creates the least-privilege read-only MySQL user
+# (clone_verify_ro) `teamster clone`'s own source-side verification queries
+# connect as — I7 (DESIGN.md §6, WP3-data-leg.md §4). Near-identical to
+# provision_grafana_ro immediately above (same socket-root admin path, same
+# idempotent CREATE USER IF NOT EXISTS + ALTER USER + additive-GRANT
+# pattern, same password-file-is-the-success-marker discipline) — it exists
+# on every install that can locally administer MySQL, not just clone
+# targets, because the user this control protects is always the SOURCE of a
+# future clone, and there's no way to know in advance which install that
+# will be. A host that never runs `teamster clone` simply never uses it.
+#
+# Unlike grafana_ro (host '%', serves a remote Grafana datasource),
+# clone_verify_ro is scoped to 'localhost' — clone's source-side queries
+# always run locally on the source host itself (R9).
+#
+# Password ownership lives HERE, same as grafana_ro: generated once,
+# persisted 0600 to <basedir>/var/clone/clone_verify_ro_password, reused on
+# re-run so an already-working credential isn't rotated out from under
+# anything holding it. Args: $1=store DSN, $2=basedir.
+provision_clone_verify_ro() {
+    local dsn="$1" basedir="$2"
+    local _db _ro_user="clone_verify_ro"
+    _db=$(echo "$dsn" | sed -n 's|mysql://[^/]*/\([^?]*\).*|\1|p')
+
+    local sql_tmpl="$basedir/etc/clone-verify-ro-user.sql"
+    local pw_dir="$basedir/var/clone"
+    local pw_file="$pw_dir/clone_verify_ro_password"
+
+    # Same discipline as grafana_ro's _ro_fail: clear the marker ONLY on a
+    # confirmed failure (SQL ran, GRANT errored) — never on an early bail
+    # that doesn't disprove an earlier successful provisioning.
+    _clone_ro_fail() {
+        rm -f "$pw_file"
+        printf -- "${C_YELLOW}    clone_verify_ro provisioning FAILED — 'teamster clone' will have no I7 read-only credential for source-side verification.${C_RESET}\n"
+        printf -- "${C_YELLOW}    Apply manually as a DB admin: %s (substitute placeholders).${C_RESET}\n" "$sql_tmpl"
+        dlog WARN install.clone-verify-ro "grant failed — cleared stale password marker" "db=$_db"
+    }
+
+    if [[ -z "$_db" ]]; then
+        printf -- "${C_YELLOW}    WARN: could not parse store DB from DSN — skipping clone_verify_ro provisioning${C_RESET}\n"
+        dlog WARN install.clone-verify-ro "no db parsed from dsn"
+        return 1
+    fi
+    if [[ ! -f "$sql_tmpl" ]]; then
+        printf -- "${C_YELLOW}    WARN: %s not found — skipping clone_verify_ro provisioning${C_RESET}\n" "$sql_tmpl"
+        dlog WARN install.clone-verify-ro "sql template missing" "path=$sql_tmpl"
+        return 1
+    fi
+
+    if ! sudo mysql -e "SELECT 1" >/dev/null 2>&1; then
+        printf -- "${C_YELLOW}    clone_verify_ro not provisioned — MySQL is not locally administrable from this host.${C_RESET}\n"
+        printf -- "${C_YELLOW}    'teamster clone' will have no I7 read-only credential until you apply, as a DB admin:${C_RESET}\n"
+        printf -- "${C_YELLOW}      %s  (substitute clone_verify_ro user/password/db placeholders first)${C_RESET}\n" "$sql_tmpl"
+        dlog WARN install.clone-verify-ro "mysql not locally administrable — manual step required" "db=$_db"
+        return 1
+    fi
+
+    local _pw
+    if [[ -s "$pw_file" ]]; then
+        _pw=$(tr -d '\n' < "$pw_file")
+    else
+        _pw=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
+    fi
+
+    local _pw_esc
+    _pw_esc=$(sed_escape_replacement "$_pw")
+    if sed -e "s|__CLONE_VERIFY_RO_USER__|$_ro_user|g" \
+           -e "s|__CLONE_VERIFY_RO_PASSWORD__|$_pw_esc|g" \
+           -e "s|__STORE_DB__|$_db|g" "$sql_tmpl" \
+       | sudo mysql >/dev/null 2>&1; then
+        mkdir -p "$pw_dir"
+        printf '%s' "$_pw" > "$pw_file"
+        chmod 600 "$pw_file"
+        printf -- "${C_GREEN}    clone_verify_ro read-only DB user provisioned (db '%s')${C_RESET}\n" "$_db"
+        dlog INFO install.clone-verify-ro "provisioned" "user=$_ro_user" "db=$_db"
+        return 0
+    else
+        _clone_ro_fail
         return 1
     fi
 }
@@ -1197,6 +1459,18 @@ restore_hookd_if_needed() {
     esac
 }
 trap restore_hookd_if_needed EXIT
+# Ctrl-C/SIGTERM during the stop-hookd/upgrade/restart window must not leave
+# hookd down silently. Bash only runs the EXIT trap on an untrapped fatal
+# signal in some configurations (e.g. while blocked on a foreground external
+# command, job-control semantics can deliver SIGINT straight to the child and
+# leave the shell's own disposition ambiguous) — relying on that implicitly is
+# fragile, so INT/TERM are trapped explicitly and call the same recovery
+# function before exiting with the conventional 128+signal code. `trap - EXIT`
+# first prevents the ensuing `exit` from firing restore_hookd_if_needed a
+# second time (harmless — the recovery calls are idempotent — but it would
+# print the "attempting recovery" banner twice).
+trap 'restore_hookd_if_needed; trap - EXIT; exit 130' INT
+trap 'restore_hookd_if_needed; trap - EXIT; exit 143' TERM
 
 # hookd_unit_basedir echoes the basedir baked into an installed
 # teamster-hookd.service unit's ExecStart= line (skel/etc/teamster-hookd.service.tmpl
@@ -1232,6 +1506,90 @@ hookd_unit_matches_basedir() {
     local unit_basedir
     unit_basedir=$(hookd_unit_basedir) || return 1
     [[ "$unit_basedir" == "$BASEDIR" ]]
+}
+
+# unit_is_masked reports, via exit code, whether the named systemd unit is
+# masked — a symlink to /dev/null at its unit-file path. `teamster clone`
+# masks teamster-sweep.timer/teamster-backup.timer/teamster-wms-review-sweep.timer
+# on a disposable target so it never fires paid `claude --print` calls, takes
+# backups, or autonomously parks/abandons entities forever (R11,
+# maskDisposableTimers in cmd/teamster/clone_install.go); an in-place upgrade
+# must not silently undo that by reinstalling the unit over the mask. Reads
+# $SYSTEMD_UNIT_DIR (above) rather than the literal path, so it's testable
+# against a temp directory without sudo.
+unit_is_masked() {
+    local unit="$1"
+    local path="$SYSTEMD_UNIT_DIR/$unit"
+    [[ -L "$path" ]] && [[ "$(readlink "$path")" == "/dev/null" ]]
+}
+
+# masked_unit_notice prints and logs that <unit> is masked and the
+# installer is leaving it alone — shared text so all eleven call sites say
+# the same thing. A mask is an instruction from whoever set it (`teamster
+# clone`'s R11 floor for three specific units — maskDisposableTimers in
+# cmd/teamster/clone_install.go — or an operator's own `systemctl mask` for
+# any other unit); an installer that reinstalls over a /dev/null symlink
+# silently countermands it either way, which is why the guard and this
+# message apply to every unit, not only the three R11 happens to mask today.
+masked_unit_notice() {
+    local component="$1" unit="$2"
+    echo "    left masked: $unit (masked on this host; the installer never unmasks)"
+    dlog INFO "$component" "left masked" "unit=$unit"
+}
+
+# install_and_enable_unit installs one systemd unit (a bare service, or a
+# service+timer pair) and enables it. Callers check unit_is_masked
+# themselves and call masked_unit_notice + skip this entirely when it's
+# true (see every call site below) — the masking decision must not live
+# inside a function invoked in an `||`/`&&` context, because bash disables
+# `set -e` for a function's *entire* body for the duration of such a call,
+# not just its own return value. An earlier version of this function did
+# its own masked check and returned 1, and every call site wrapped it in
+# `|| true` to survive that return — which also silently swallowed a real
+# `sudo install` failure inside the function on every OTHER call too,
+# turning a real installer error into a false "installed" dlog line
+# instead of aborting the way the unguarded original code did. Caught in
+# review before shipping (see the diff history in this WU); the call sites
+# below are bare specifically so `set -e` still protects them normally.
+#
+# install_and_enable_unit <log-component> <banner> <enable-unit> <now:0|1> <success-msg> <src-file>...
+#   log-component  dlog component tag, e.g. install.sweep-timer
+#   banner         "--- Syncing ... ---" text, or "" to print nothing
+#   enable-unit    the unit name passed to `systemctl enable [--now]`
+#   now            1 for `enable --now`, 0 for a plain `enable`
+#   success-msg    the full text echoed on success (e.g. "enabled X")
+#   src-file...    one or two source paths; each is installed to
+#                  $SYSTEMD_UNIT_DIR/<basename>
+install_and_enable_unit() {
+    local component="$1" banner="$2" enable_unit="$3" now="$4" success_msg="$5"; shift 5
+    [[ -n "$banner" ]] && printf -- "${C_BOLD_CYAN}%s${C_RESET}\n" "$banner"
+    local src
+    for src in "$@"; do
+        sudo install -m 0644 "$src" "$SYSTEMD_UNIT_DIR/$(basename "$src")"
+    done
+    sudo systemctl daemon-reload
+    if [[ "$now" -eq 1 ]]; then
+        sudo systemctl enable --now "$enable_unit" 2>/dev/null \
+            && echo "    $success_msg" \
+            || printf -- "${C_YELLOW}    WARN: could not enable %s${C_RESET}\n" "$enable_unit"
+    else
+        sudo systemctl enable "$enable_unit" 2>/dev/null \
+            && echo "    $success_msg" \
+            || printf -- "${C_YELLOW}    WARN: could not enable %s${C_RESET}\n" "$enable_unit"
+    fi
+    # One "src=<path>" pair per file, not a single space-joined value — the
+    # file's own debug-log grammar (Round 0, top of file) is locked at
+    # "<msg>[ k=v ...]", and a value containing spaces is ambiguous to any
+    # parser splitting the trailer on whitespace. Per-block dlog lines
+    # before this function existed used named keys (svc=/timer=/src=); this
+    # generic version uses one "src=" per positional arg instead, which
+    # keeps every pair's value space-free without needing to know how many
+    # files a given unit installs.
+    local install_log_kv=()
+    for src in "$@"; do
+        install_log_kv+=("src=$src")
+    done
+    dlog INFO "$component" "installed" "${install_log_kv[@]}"
 }
 
 if [[ "$WIRE" -eq 1 ]]; then
@@ -1298,16 +1656,23 @@ mkdir -p "$BUILDDIR"
 # The `|| true` is required: git describe exits 128 ("No names found") on a
 # tagless tree, which under `set -euo pipefail` would otherwise abort the install.
 # Stamped into internal/version via -ldflags -X so every binary reports the same build.
-TEAMSTER_VERSION="$(cd "$REPO" && git describe --tags --dirty 2>/dev/null || true)"
+# TEAMSTER_VERSION/TEAMSTER_COMMIT respect a pre-set environment variable
+# before falling back to git derivation — required for `teamster clone`,
+# which ships via `git archive` (no .git in the extracted tree, so the git
+# derivation below would silently degrade to "none"/the bare VERSION floor)
+# and exports the values it already resolved at the source instead. Unset
+# for every other caller, so `${VAR:-...}` falls straight through to the
+# original derivation — byte-for-byte unchanged behavior.
+TEAMSTER_VERSION="${TEAMSTER_VERSION:-$(cd "$REPO" && git describe --tags --dirty 2>/dev/null || true)}"
 [[ -z "$TEAMSTER_VERSION" ]] && TEAMSTER_VERSION="$(cat "$REPO/VERSION" 2>/dev/null || echo dev)"
-TEAMSTER_COMMIT="$(cd "$REPO" && git rev-parse --short HEAD 2>/dev/null || echo none)"
+TEAMSTER_COMMIT="${TEAMSTER_COMMIT:-$(cd "$REPO" && git rev-parse --short HEAD 2>/dev/null || echo none)}"
 TEAMSTER_BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 _vpkg="github.com/bmjdotnet/teamster/internal/version"
 LDFLAGS="-X ${_vpkg}.Version=${TEAMSTER_VERSION} -X ${_vpkg}.Commit=${TEAMSTER_COMMIT} -X ${_vpkg}.BuildTime=${TEAMSTER_BUILD_TIME}"
 dlog INFO install.compile "version" "version=$TEAMSTER_VERSION" "commit=$TEAMSTER_COMMIT" "build_time=$TEAMSTER_BUILD_TIME"
 
 cd "$REPO/src"
-for _target in teamster hookd feed ctop activity-mcp wms-mcp roster-mcp health-mcp teamster-install token-scraper codex-scraper rollup classify demogen relay backup health-collector; do
+for _target in teamster hookd feed ctop activity-mcp wms-mcp roster-mcp health-mcp teamster-install token-scraper codex-scraper mcp-scraper rollup classify demogen relay backup health-collector; do
     if go build -trimpath -ldflags "$LDFLAGS" -o "$BUILDDIR/$_target" "./cmd/$_target"; then
         dlog INFO install.compile "built" "target=$_target" "rc=0"
     else
@@ -1535,8 +1900,10 @@ fi
 # Skipped in stage-only mode (WIRE=0) or supervisor mode (hookd managed by supervisor, not systemd).
 if [[ "$WIRE" -eq 1 ]] && [[ "$HOOKD_MODE" != "supervisor" ]] && [[ "$HOOKD_MODE" != "external" ]] && command -v systemctl &>/dev/null; then
     SRC_UNIT="$BASEDIR/etc/teamster-hookd.service"
-    DST_UNIT="/etc/systemd/system/teamster-hookd.service"
-    if [[ -f "$SRC_UNIT" ]] && ! sudo cmp -s "$SRC_UNIT" "$DST_UNIT" 2>/dev/null; then
+    DST_UNIT="$SYSTEMD_UNIT_DIR/teamster-hookd.service"
+    if unit_is_masked teamster-hookd.service; then
+        masked_unit_notice install.unit-sync teamster-hookd.service
+    elif [[ -f "$SRC_UNIT" ]] && ! sudo cmp -s "$SRC_UNIT" "$DST_UNIT" 2>/dev/null; then
         echo ""
         printf -- "${C_BOLD_CYAN}--- Syncing systemd unit ---${C_RESET}\n"
         if [[ -f "$DST_UNIT" ]]; then
@@ -1562,14 +1929,13 @@ if [[ "$WIRE" -eq 1 ]] && [[ "$HOOKD_READ_ONLY" -eq 0 ]] && [[ "$HOOKD_MODE" != 
     ROLLUP_SVC_SRC="$BASEDIR/etc/teamster-rollup.service"
     ROLLUP_TIMER_SRC="$BASEDIR/etc/teamster-rollup.timer"
     if [[ -f "$ROLLUP_SVC_SRC" ]] && [[ -f "$ROLLUP_TIMER_SRC" ]]; then
-        printf -- "${C_BOLD_CYAN}--- Syncing rollup timer ---${C_RESET}\n"
-        sudo install -m 0644 "$ROLLUP_SVC_SRC" /etc/systemd/system/teamster-rollup.service
-        sudo install -m 0644 "$ROLLUP_TIMER_SRC" /etc/systemd/system/teamster-rollup.timer
-        sudo systemctl daemon-reload
-        sudo systemctl enable --now teamster-rollup.timer 2>/dev/null \
-            && echo "    enabled teamster-rollup.timer" \
-            || printf -- "${C_YELLOW}    WARN: could not enable teamster-rollup.timer${C_RESET}\n"
-        dlog INFO install.rollup-timer "installed" "svc=$ROLLUP_SVC_SRC" "timer=$ROLLUP_TIMER_SRC"
+        if unit_is_masked teamster-rollup.timer; then
+            masked_unit_notice install.rollup-timer teamster-rollup.timer
+        else
+            install_and_enable_unit install.rollup-timer "--- Syncing rollup timer ---" \
+                teamster-rollup.timer 1 "enabled teamster-rollup.timer" \
+                "$ROLLUP_SVC_SRC" "$ROLLUP_TIMER_SRC"
+        fi
     else
         dlog WARN install.rollup-timer "src units not present" "svc=$ROLLUP_SVC_SRC"
     fi
@@ -1582,14 +1948,13 @@ if [[ "$WIRE" -eq 1 ]] && [[ "$HOOKD_READ_ONLY" -eq 0 ]] && [[ "$HOOKD_MODE" != 
     CLASSIFY_SVC_SRC="$BASEDIR/etc/teamster-classify.service"
     CLASSIFY_TIMER_SRC="$BASEDIR/etc/teamster-classify.timer"
     if [[ -f "$CLASSIFY_SVC_SRC" ]] && [[ -f "$CLASSIFY_TIMER_SRC" ]]; then
-        printf -- "${C_BOLD_CYAN}--- Syncing classify timer ---${C_RESET}\n"
-        sudo install -m 0644 "$CLASSIFY_SVC_SRC" /etc/systemd/system/teamster-classify.service
-        sudo install -m 0644 "$CLASSIFY_TIMER_SRC" /etc/systemd/system/teamster-classify.timer
-        sudo systemctl daemon-reload
-        sudo systemctl enable --now teamster-classify.timer 2>/dev/null \
-            && echo "    enabled teamster-classify.timer" \
-            || printf -- "${C_YELLOW}    WARN: could not enable teamster-classify.timer${C_RESET}\n"
-        dlog INFO install.classify-timer "installed" "svc=$CLASSIFY_SVC_SRC" "timer=$CLASSIFY_TIMER_SRC"
+        if unit_is_masked teamster-classify.timer; then
+            masked_unit_notice install.classify-timer teamster-classify.timer
+        else
+            install_and_enable_unit install.classify-timer "--- Syncing classify timer ---" \
+                teamster-classify.timer 1 "enabled teamster-classify.timer" \
+                "$CLASSIFY_SVC_SRC" "$CLASSIFY_TIMER_SRC"
+        fi
     else
         dlog WARN install.classify-timer "src units not present" "svc=$CLASSIFY_SVC_SRC"
     fi
@@ -1605,14 +1970,13 @@ if [[ "$WIRE" -eq 1 ]] && [[ "$HOOKD_READ_ONLY" -eq 0 ]] && [[ "$HOOKD_MODE" != 
     CODEX_SCRAPER_SVC_SRC="$BASEDIR/etc/teamster-codex-scraper.service"
     CODEX_SCRAPER_TIMER_SRC="$BASEDIR/etc/teamster-codex-scraper.timer"
     if [[ -f "$CODEX_SCRAPER_SVC_SRC" ]] && [[ -f "$CODEX_SCRAPER_TIMER_SRC" ]]; then
-        printf -- "${C_BOLD_CYAN}--- Syncing codex-scraper timer ---${C_RESET}\n"
-        sudo install -m 0644 "$CODEX_SCRAPER_SVC_SRC" /etc/systemd/system/teamster-codex-scraper.service
-        sudo install -m 0644 "$CODEX_SCRAPER_TIMER_SRC" /etc/systemd/system/teamster-codex-scraper.timer
-        sudo systemctl daemon-reload
-        sudo systemctl enable --now teamster-codex-scraper.timer 2>/dev/null \
-            && echo "    enabled teamster-codex-scraper.timer" \
-            || printf -- "${C_YELLOW}    WARN: could not enable teamster-codex-scraper.timer${C_RESET}\n"
-        dlog INFO install.codex-scraper-timer "installed" "svc=$CODEX_SCRAPER_SVC_SRC" "timer=$CODEX_SCRAPER_TIMER_SRC"
+        if unit_is_masked teamster-codex-scraper.timer; then
+            masked_unit_notice install.codex-scraper-timer teamster-codex-scraper.timer
+        else
+            install_and_enable_unit install.codex-scraper-timer "--- Syncing codex-scraper timer ---" \
+                teamster-codex-scraper.timer 1 "enabled teamster-codex-scraper.timer" \
+                "$CODEX_SCRAPER_SVC_SRC" "$CODEX_SCRAPER_TIMER_SRC"
+        fi
     else
         dlog WARN install.codex-scraper-timer "src units not present" "svc=$CODEX_SCRAPER_SVC_SRC"
     fi
@@ -1625,16 +1989,107 @@ if [[ "$WIRE" -eq 1 ]] && [[ "$HOOKD_READ_ONLY" -eq 0 ]] && [[ "$HOOKD_MODE" != 
     SWEEP_SVC_SRC="$BASEDIR/etc/teamster-sweep.service"
     SWEEP_TIMER_SRC="$BASEDIR/etc/teamster-sweep.timer"
     if [[ -f "$SWEEP_SVC_SRC" ]] && [[ -f "$SWEEP_TIMER_SRC" ]]; then
-        printf -- "${C_BOLD_CYAN}--- Syncing sweep timer ---${C_RESET}\n"
-        sudo install -m 0644 "$SWEEP_SVC_SRC" /etc/systemd/system/teamster-sweep.service
-        sudo install -m 0644 "$SWEEP_TIMER_SRC" /etc/systemd/system/teamster-sweep.timer
-        sudo systemctl daemon-reload
-        sudo systemctl enable --now teamster-sweep.timer 2>/dev/null \
-            && echo "    enabled teamster-sweep.timer" \
-            || printf -- "${C_YELLOW}    WARN: could not enable teamster-sweep.timer${C_RESET}\n"
-        dlog INFO install.sweep-timer "installed" "svc=$SWEEP_SVC_SRC" "timer=$SWEEP_TIMER_SRC"
+        if unit_is_masked teamster-sweep.timer; then
+            masked_unit_notice install.sweep-timer teamster-sweep.timer
+        else
+            install_and_enable_unit install.sweep-timer "--- Syncing sweep timer ---" \
+                teamster-sweep.timer 1 "enabled teamster-sweep.timer" \
+                "$SWEEP_SVC_SRC" "$SWEEP_TIMER_SRC"
+        fi
     else
         dlog WARN install.sweep-timer "src units not present" "svc=$SWEEP_SVC_SRC"
+    fi
+fi
+
+# Sync the WMS review-sweep service + timer (nightly proactive review:
+# parks stale review WorkUnits/Outcomes to on_hold, later abandons
+# sweep-parked entities past a rescue window) into systemd. Same guards as
+# the other oneshot timers, PLUS one this timer alone needs: it is the first
+# timer install block with its own opt-in config flag
+# (ReviewSweep.Enabled in teamster.yaml, Operator Decision 4), checked here
+# by grepping the freshly-written teamster.yaml's review-sweep: block rather
+# than adding a new parsing mechanism (WP3-DESIGN.md §9's own instruction).
+# Default false (WP3-DESIGN.md AC4 "config default is inert") — a fresh
+# install must never enable a timer that autonomously closes WMS entities
+# without the operator opting in first, so unlike sweep/backup this one is
+# skipped entirely, not merely installed-but-unstarted, when the flag reads
+# false. The command's own run-time gate (§8) is a second, independent
+# check for the same property, in case this timer is ever enabled by hand.
+if [[ "$WIRE" -eq 1 ]] && [[ "$HOOKD_READ_ONLY" -eq 0 ]] && [[ "$HOOKD_MODE" != "supervisor" ]] && [[ "$HOOKD_MODE" != "external" ]] && command -v systemctl &>/dev/null; then
+    REVIEW_SWEEP_SVC_SRC="$BASEDIR/etc/teamster-wms-review-sweep.service"
+    REVIEW_SWEEP_TIMER_SRC="$BASEDIR/etc/teamster-wms-review-sweep.timer"
+    REVIEW_SWEEP_YAML="$BASEDIR/etc/teamster.yaml"
+    REVIEW_SWEEP_ENABLED=0
+    if [[ -f "$REVIEW_SWEEP_YAML" ]]; then
+        # The review-sweep: block runs to the next top-level (unindented) key
+        # or EOF; grep within just that slice so an unrelated "enabled:" key
+        # elsewhere in the file (none exist today, but this is the same
+        # discipline the kit's own §6b names — check the actual condition,
+        # not "does this string appear anywhere in the file").
+        if sed -n '/^review-sweep:/,/^[^[:space:]]/p' "$REVIEW_SWEEP_YAML" \
+            | grep -v '^review-sweep:' \
+            | grep -qE '^[[:space:]]*enabled:[[:space:]]*true[[:space:]]*$'; then
+            REVIEW_SWEEP_ENABLED=1
+        fi
+    fi
+    if [[ -f "$REVIEW_SWEEP_SVC_SRC" ]] && [[ -f "$REVIEW_SWEEP_TIMER_SRC" ]]; then
+        if unit_is_masked teamster-wms-review-sweep.timer; then
+            # Masking is checked FIRST, before ReviewSweep.Enabled: a clone
+            # target's mask is the R11 floor against the sweep autonomously
+            # parking/abandoning entities in its restored copy of
+            # production-shaped WMS data, and must hold regardless of what
+            # the cloned teamster.yaml says.
+            masked_unit_notice install.wms-review-sweep-timer teamster-wms-review-sweep.timer
+        elif [[ "$REVIEW_SWEEP_ENABLED" -eq 1 ]]; then
+            install_and_enable_unit install.wms-review-sweep-timer \
+                "--- Syncing WMS review-sweep timer (ReviewSweep.Enabled=true) ---" \
+                teamster-wms-review-sweep.timer 1 "enabled teamster-wms-review-sweep.timer" \
+                "$REVIEW_SWEEP_SVC_SRC" "$REVIEW_SWEEP_TIMER_SRC"
+        else
+            dlog INFO install.wms-review-sweep-timer "skipped: ReviewSweep.Enabled=false in teamster.yaml" "yaml=$REVIEW_SWEEP_YAML"
+        fi
+    else
+        dlog WARN install.wms-review-sweep-timer "src units not present" "svc=$REVIEW_SWEEP_SVC_SRC"
+    fi
+fi
+
+# Sync the mcp-scraper service + timer (events.jsonl -> claude_telemetry.
+# mcp_tool_calls tailer, WP11-TAILER-DESIGN.md §9) into systemd and enable
+# the timer. Same guards as the other oneshot timers, plus the same
+# mask-first-then-yaml-check gating as the WMS review-sweep timer above
+# (mcp-scraper.enabled in teamster.yaml, §7): a fresh install must never
+# enable a timer without the operator opting in first, same doctrine as
+# review-sweep, even though mcp-scraper is additive/non-destructive rather
+# than autonomous — masking is checked FIRST, before MCPScraper.Enabled, so
+# a clone target's mask (measurement integrity: a clone must not ledger its
+# own local traffic as if it were the hub's) holds regardless of what the
+# cloned teamster.yaml says.
+if [[ "$WIRE" -eq 1 ]] && [[ "$HOOKD_READ_ONLY" -eq 0 ]] && [[ "$HOOKD_MODE" != "supervisor" ]] && \
+   [[ "$HOOKD_MODE" != "external" ]] && command -v systemctl &>/dev/null; then
+    MCP_SCRAPER_SVC_SRC="$BASEDIR/etc/teamster-mcp-scraper.service"
+    MCP_SCRAPER_TIMER_SRC="$BASEDIR/etc/teamster-mcp-scraper.timer"
+    MCP_SCRAPER_YAML="$BASEDIR/etc/teamster.yaml"
+    MCP_SCRAPER_ENABLED=0
+    if [[ -f "$MCP_SCRAPER_YAML" ]]; then
+        if sed -n '/^mcp-scraper:/,/^[^[:space:]]/p' "$MCP_SCRAPER_YAML" \
+            | grep -v '^mcp-scraper:' \
+            | grep -qE '^[[:space:]]*enabled:[[:space:]]*true[[:space:]]*$'; then
+            MCP_SCRAPER_ENABLED=1
+        fi
+    fi
+    if [[ -f "$MCP_SCRAPER_SVC_SRC" ]] && [[ -f "$MCP_SCRAPER_TIMER_SRC" ]]; then
+        if unit_is_masked teamster-mcp-scraper.timer; then
+            masked_unit_notice install.mcp-scraper-timer teamster-mcp-scraper.timer
+        elif [[ "$MCP_SCRAPER_ENABLED" -eq 1 ]]; then
+            install_and_enable_unit install.mcp-scraper-timer \
+                "--- Syncing mcp-scraper timer (mcp-scraper.enabled=true) ---" \
+                teamster-mcp-scraper.timer 1 "enabled teamster-mcp-scraper.timer" \
+                "$MCP_SCRAPER_SVC_SRC" "$MCP_SCRAPER_TIMER_SRC"
+        else
+            dlog INFO install.mcp-scraper-timer "skipped: mcp-scraper.enabled not true in teamster.yaml" "yaml=$MCP_SCRAPER_YAML"
+        fi
+    else
+        dlog WARN install.mcp-scraper-timer "src units not present" "svc=$MCP_SCRAPER_SVC_SRC"
     fi
 fi
 
@@ -1645,16 +2100,17 @@ if [[ "$WIRE" -eq 1 ]] && [[ "$HOOKD_READ_ONLY" -eq 0 ]] && [[ "$HOOKD_MODE" != 
     BACKUP_SVC_SRC="$BASEDIR/etc/teamster-backup.service"
     BACKUP_TIMER_SRC="$BASEDIR/etc/teamster-backup.timer"
     if [[ -f "$BACKUP_SVC_SRC" ]] && [[ -f "$BACKUP_TIMER_SRC" ]]; then
-        printf -- "${C_BOLD_CYAN}--- Syncing backup timer ---${C_RESET}\n"
-        sudo install -m 0644 "$BACKUP_SVC_SRC" /etc/systemd/system/teamster-backup.service
-        sudo install -m 0644 "$BACKUP_TIMER_SRC" /etc/systemd/system/teamster-backup.timer
-        sudo systemctl daemon-reload
-        # The timer is enabled but NOT started yet — the operator must set
-        # backup_dir in $BASEDIR/etc/teamster.yaml (backup.backup_dir) first.
-        sudo systemctl enable teamster-backup.timer 2>/dev/null \
-            && echo "    enabled teamster-backup.timer (edit $BASEDIR/etc/teamster.yaml to set backup.backup_dir, then: sudo systemctl start teamster-backup.timer)" \
-            || printf -- "${C_YELLOW}    WARN: could not enable teamster-backup.timer${C_RESET}\n"
-        dlog INFO install.backup-timer "installed" "svc=$BACKUP_SVC_SRC" "timer=$BACKUP_TIMER_SRC"
+        if unit_is_masked teamster-backup.timer; then
+            masked_unit_notice install.backup-timer teamster-backup.timer
+        else
+            # The timer is enabled but NOT started yet — the operator must
+            # set backup_dir in $BASEDIR/etc/teamster.yaml (backup.backup_dir)
+            # first.
+            install_and_enable_unit install.backup-timer "--- Syncing backup timer ---" \
+                teamster-backup.timer 0 \
+                "enabled teamster-backup.timer (edit $BASEDIR/etc/teamster.yaml to set backup.backup_dir, then: sudo systemctl start teamster-backup.timer)" \
+                "$BACKUP_SVC_SRC" "$BACKUP_TIMER_SRC"
+        fi
     else
         dlog WARN install.backup-timer "src units not present" "svc=$BACKUP_SVC_SRC"
     fi
@@ -1668,13 +2124,13 @@ fi
 if [[ "$WIRE" -eq 1 ]] && [[ "$HOOKD_READ_ONLY" -eq 0 ]] && [[ "$HOOKD_MODE" != "supervisor" ]] && [[ "$HOOKD_MODE" != "external" ]] && command -v systemctl &>/dev/null; then
     HEALTH_COLLECTOR_SVC_SRC="$BASEDIR/etc/teamster-health-collector.service"
     if [[ -f "$HEALTH_COLLECTOR_SVC_SRC" ]]; then
-        printf -- "${C_BOLD_CYAN}--- Syncing health-collector service ---${C_RESET}\n"
-        sudo install -m 0644 "$HEALTH_COLLECTOR_SVC_SRC" /etc/systemd/system/teamster-health-collector.service
-        sudo systemctl daemon-reload
-        sudo systemctl enable --now teamster-health-collector.service 2>/dev/null \
-            && echo "    enabled + started teamster-health-collector.service" \
-            || printf -- "${C_YELLOW}    WARN: could not enable teamster-health-collector.service${C_RESET}\n"
-        dlog INFO install.health-collector "installed" "src=$HEALTH_COLLECTOR_SVC_SRC"
+        if unit_is_masked teamster-health-collector.service; then
+            masked_unit_notice install.health-collector teamster-health-collector.service
+        else
+            install_and_enable_unit install.health-collector "--- Syncing health-collector service ---" \
+                teamster-health-collector.service 1 "enabled + started teamster-health-collector.service" \
+                "$HEALTH_COLLECTOR_SVC_SRC"
+        fi
     else
         dlog WARN install.health-collector "src unit not present" "svc=$HEALTH_COLLECTOR_SVC_SRC"
     fi
@@ -1704,15 +2160,83 @@ if [[ "$WIRE" -eq 1 ]] && [[ "$HOOKD_READ_ONLY" -eq 0 ]] && [[ "$HOOKD_MODE" != 
     fi
     TOKEN_SCRAPER_SVC_SRC="$BASEDIR/etc/teamster-token-scraper.service"
     if [[ -f "$TOKEN_SCRAPER_SVC_SRC" ]]; then
-        printf -- "${C_BOLD_CYAN}--- Syncing token-scraper service ---${C_RESET}\n"
-        sudo install -m 0644 "$TOKEN_SCRAPER_SVC_SRC" /etc/systemd/system/teamster-token-scraper.service
-        sudo systemctl daemon-reload
-        sudo systemctl enable --now teamster-token-scraper.service 2>/dev/null \
-            && echo "    enabled + started teamster-token-scraper.service" \
-            || printf -- "${C_YELLOW}    WARN: could not enable teamster-token-scraper.service${C_RESET}\n"
-        dlog INFO install.token-scraper "installed" "src=$TOKEN_SCRAPER_SVC_SRC"
+        if unit_is_masked teamster-token-scraper.service; then
+            masked_unit_notice install.token-scraper teamster-token-scraper.service
+        else
+            install_and_enable_unit install.token-scraper "--- Syncing token-scraper service ---" \
+                teamster-token-scraper.service 1 "enabled + started teamster-token-scraper.service" \
+                "$TOKEN_SCRAPER_SVC_SRC"
+        fi
     else
         dlog WARN install.token-scraper "src unit not present" "svc=$TOKEN_SCRAPER_SVC_SRC"
+    fi
+fi
+
+# Sync the otelcol/prometheus/grafana supervisor-group services into systemd
+# and enable them (wh2-supervisor-systemd-units): the group previously had no
+# systemd unit at all and did not survive a reboot. Same guards as
+# health-collector/token-scraper, plus each component's own install-mode flag
+# — unlike health-collector/token-scraper, these three can legitimately be
+# external/managed/none. No orphan-kill step here (unlike token-scraper's
+# block above): "$BASEDIR/bin/teamster stop", already run earlier in this
+# script (Step 1, before this binary is even replaced), already kills all
+# three via their existing PID files unconditionally — they have been in
+# supervisorStop's allComponents list all along, unlike token-scraper, which
+# never was. Type=simple daemon (no timer); ExecStart is a self-contained
+# exec-wrapper (`teamster start --exec=<name>`) that renders its own config
+# and execs the real binary, so no component-specific value is baked into the
+# unit file at all.
+# otelcol supervisor-group unit (anchor for scripts/test-installrunner-masking.sh)
+if [[ "$WIRE" -eq 1 ]] && [[ "$HOOKD_READ_ONLY" -eq 0 ]] && [[ "$HOOKD_MODE" != "supervisor" ]] && \
+   [[ "$HOOKD_MODE" != "external" ]] && [[ "${OTELCOL_MODE:-install}" == "install" ]] && \
+   command -v systemctl &>/dev/null; then
+    OTELCOL_SVC_SRC="$BASEDIR/etc/teamster-otelcol.service"
+    if [[ -f "$OTELCOL_SVC_SRC" ]]; then
+        if unit_is_masked teamster-otelcol.service; then
+            masked_unit_notice install.otelcol teamster-otelcol.service
+        else
+            install_and_enable_unit install.otelcol "--- Syncing otelcol service ---" \
+                teamster-otelcol.service 1 "enabled + started teamster-otelcol.service" \
+                "$OTELCOL_SVC_SRC"
+        fi
+    else
+        dlog WARN install.otelcol "src unit not present" "svc=$OTELCOL_SVC_SRC"
+    fi
+fi
+
+# prometheus supervisor-group unit (anchor for scripts/test-installrunner-masking.sh)
+if [[ "$WIRE" -eq 1 ]] && [[ "$HOOKD_READ_ONLY" -eq 0 ]] && [[ "$HOOKD_MODE" != "supervisor" ]] && \
+   [[ "$HOOKD_MODE" != "external" ]] && [[ "${PROMETHEUS_MODE:-install}" == "install" ]] && \
+   command -v systemctl &>/dev/null; then
+    PROMETHEUS_SVC_SRC="$BASEDIR/etc/teamster-prometheus.service"
+    if [[ -f "$PROMETHEUS_SVC_SRC" ]]; then
+        if unit_is_masked teamster-prometheus.service; then
+            masked_unit_notice install.prometheus teamster-prometheus.service
+        else
+            install_and_enable_unit install.prometheus "--- Syncing prometheus service ---" \
+                teamster-prometheus.service 1 "enabled + started teamster-prometheus.service" \
+                "$PROMETHEUS_SVC_SRC"
+        fi
+    else
+        dlog WARN install.prometheus "src unit not present" "svc=$PROMETHEUS_SVC_SRC"
+    fi
+fi
+
+# grafana supervisor-group unit (anchor for scripts/test-installrunner-masking.sh)
+if [[ "$WIRE" -eq 1 ]] && [[ "$HOOKD_READ_ONLY" -eq 0 ]] && [[ "$HOOKD_MODE" != "supervisor" ]] && \
+   [[ "$HOOKD_MODE" != "external" ]] && [[ "${GRAFANA_MODE:-install}" == "install" ]] && \
+   command -v systemctl &>/dev/null; then
+    GRAFANA_SVC_SRC="$BASEDIR/etc/teamster-grafana.service"
+    if [[ -f "$GRAFANA_SVC_SRC" ]]; then
+        if unit_is_masked teamster-grafana.service; then
+            masked_unit_notice install.grafana teamster-grafana.service
+        else
+            install_and_enable_unit install.grafana "--- Syncing grafana service ---" \
+                teamster-grafana.service 1 "enabled + started teamster-grafana.service" \
+                "$GRAFANA_SVC_SRC"
+        fi
+    else
+        dlog WARN install.grafana "src unit not present" "svc=$GRAFANA_SVC_SRC"
     fi
 fi
 
@@ -1754,22 +2278,31 @@ if [[ "${RELAY_MODE:-none}" == "install" ]]; then
     fi
 
     if [[ "$WIRE" -eq 1 ]] && command -v systemctl &>/dev/null; then
-        printf -- "${C_BOLD_CYAN}--- Syncing relay services ---${C_RESET}\n"
+        # Banner printed once, on whichever call actually proceeds (checked
+        # via unit_is_masked before deciding, not by a return code) — so if
+        # relay is masked but repl-push isn't, repl-push still gets one
+        # banner rather than zero.
+        _relay_banner="--- Syncing relay services ---"
         if [[ -f "$RELAY_SVC_SRC" ]]; then
-            sudo install -m 0644 "$RELAY_SVC_SRC" /etc/systemd/system/teamster-relay.service
-            dlog INFO install.relay "installed" "src=$RELAY_SVC_SRC"
+            if unit_is_masked teamster-relay.service; then
+                masked_unit_notice install.relay teamster-relay.service
+            else
+                install_and_enable_unit install.relay "$_relay_banner" \
+                    teamster-relay.service 1 "enabled + started teamster-relay.service" \
+                    "$RELAY_SVC_SRC"
+                _relay_banner=""
+            fi
         fi
         if [[ -f "$REPL_PUSH_SVC_SRC" ]]; then
-            sudo install -m 0644 "$REPL_PUSH_SVC_SRC" /etc/systemd/system/teamster-repl-push.service
-            dlog INFO install.repl-push "installed" "src=$REPL_PUSH_SVC_SRC"
+            if unit_is_masked teamster-repl-push.service; then
+                masked_unit_notice install.repl-push teamster-repl-push.service
+            else
+                install_and_enable_unit install.repl-push "$_relay_banner" \
+                    teamster-repl-push.service 1 "enabled + started teamster-repl-push.service" \
+                    "$REPL_PUSH_SVC_SRC"
+            fi
         fi
-        sudo systemctl daemon-reload
-        sudo systemctl enable --now teamster-relay.service 2>/dev/null \
-            && echo "    enabled + started teamster-relay.service" \
-            || printf -- "${C_YELLOW}    WARN: could not enable teamster-relay.service${C_RESET}\n"
-        sudo systemctl enable --now teamster-repl-push.service 2>/dev/null \
-            && echo "    enabled + started teamster-repl-push.service" \
-            || printf -- "${C_YELLOW}    WARN: could not enable teamster-repl-push.service${C_RESET}\n"
+        unset _relay_banner
     fi
 fi
 
@@ -1810,9 +2343,31 @@ if [[ "$WIRE" -eq 0 ]]; then
     echo "    To wire this install (touches systemd + ~/.claude/settings.json):"
     echo "      $0 --basedir='$BASEDIR' --wire"
     echo ""
+    # Printed advice, not executed code — 2f59a23's unit_is_masked guard
+    # covers every EXECUTED install/enable site, but this stage-only help
+    # text is a separate, human-followed path that guard never touches.
+    # Found by @sextant during wh2-docs-train2-residuals review: an operator
+    # on a host with a hand-masked hookd who follows the unconditional
+    # "sudo install" below overwrites the /dev/null symlink the mask exists
+    # to protect. unit_is_masked itself needs no sudo (a symlink readlink),
+    # so it's safe to call here even in stage-only mode to decide what to
+    # print. Deliberately not masked_unit_notice's shared one-line text: this
+    # is advice for a human who hasn't wired anything yet, so it adds the
+    # unmask remedy and then still prints the manual recipe below (the
+    # operator may run it right after unmasking) — masked_unit_notice's
+    # callers, by contrast, are past the point of no return on an EXECUTED
+    # skip and have nothing further to print (wh2-installrunner-wire-help-mask
+    # round 2, @astrolabe NOTE-2).
+    if unit_is_masked teamster-hookd.service; then
+        echo "    teamster-hookd.service is masked on this host — the installer never"
+        echo "    unmasks it, and wiring manually shouldn't either. To wire anyway, first:"
+        echo "      sudo systemctl unmask teamster-hookd"
+        echo "    then the steps below."
+        echo ""
+    fi
     echo "    Or wire manually:"
     echo "      sudo install -m 0644 '$BASEDIR'/etc/teamster-hookd.service /etc/systemd/system/teamster-hookd.service"
-    echo "      sudo systemctl daemon-reload && sudo systemctl restart teamster-hookd"
+    echo "      sudo systemctl daemon-reload && sudo systemctl enable --now teamster-hookd"
     echo "      # Then merge '$BASEDIR'/etc/settings.fragment.json into ~/.claude/settings.json"
     echo "      # and register MCP servers via: claude mcp add-json --scope user ..."
 else
@@ -1833,16 +2388,24 @@ except Exception:
 
 case "$RUNNING_MODE" in
     systemd)
-        printf -- "${C_BOLD_WHITE}--> Starting teamster-hookd via systemd...${C_RESET}\n"
-        dlog INFO install.hookd "start" "mode=systemd"
-        sudo systemctl start teamster-hookd
-        sleep 1
-        if curl -fsS "http://localhost:${HOOKD_PORT}/health" >/dev/null; then
-            printf -- "${C_GREEN}    hookd healthy (port %s)${C_RESET}\n" "$HOOKD_PORT"
-            dlog INFO install.hookd "health ok" "mode=systemd" "port=$HOOKD_PORT"
+        if unit_is_masked teamster-hookd.service; then
+            masked_unit_notice install.hookd teamster-hookd.service
         else
-            printf -- "${C_YELLOW}    WARN: health check failed — check: sudo systemctl status teamster-hookd${C_RESET}\n"
-            dlog WARN install.hookd "health failed" "mode=systemd" "port=$HOOKD_PORT"
+            printf -- "${C_BOLD_WHITE}--> Starting teamster-hookd via systemd...${C_RESET}\n"
+            dlog INFO install.hookd "start" "mode=systemd"
+            # `enable --now`, not a plain `start`: this was the only one of
+            # eleven systemd-managed units never enabled anywhere in the
+            # codebase, so it did not survive a reboot (wh2-hookd-enable-on-install).
+            # Idempotent — a no-op on a host where it's already enabled/active.
+            sudo systemctl enable --now teamster-hookd
+            sleep 1
+            if curl -fsS "http://localhost:${HOOKD_PORT}/health" >/dev/null; then
+                printf -- "${C_GREEN}    hookd healthy (port %s)${C_RESET}\n" "$HOOKD_PORT"
+                dlog INFO install.hookd "health ok" "mode=systemd" "port=$HOOKD_PORT"
+            else
+                printf -- "${C_YELLOW}    WARN: health check failed — check: sudo systemctl status teamster-hookd${C_RESET}\n"
+                dlog WARN install.hookd "health failed" "mode=systemd" "port=$HOOKD_PORT"
+            fi
         fi
         RESTORE_HOOKD=0
         ;;
@@ -1867,7 +2430,18 @@ case "$RUNNING_MODE" in
         ;;
     none)
         echo "    Note: hookd was not running before install."
-        echo "    Start via: sudo systemctl start teamster-hookd"
+        # Same printed-advice gap as the WIRE=0 block above: mask-aware, not
+        # executed, since 2f59a23's guard only covers executed sites. Bespoke
+        # text rather than masked_unit_notice here too, same reason: this
+        # branch still prints the non-systemd manual fallback either way
+        # (below), which masked_unit_notice's own callers never need to.
+        if unit_is_masked teamster-hookd.service; then
+            echo "    teamster-hookd.service is masked on this host — the installer never"
+            echo "    unmasks it. Unmask first if you want systemd to manage it:"
+            echo "      sudo systemctl unmask teamster-hookd"
+        else
+            echo "    Start via: sudo systemctl enable --now teamster-hookd"
+        fi
         echo "    Or manually: $BASEDIR/bin/hookd &"
         dlog INFO install.hookd "not previously running"
         ;;
@@ -1931,6 +2505,19 @@ if [[ "$GRAFANA_MODE" == "install" || "$GRAFANA_MODE" == "external" ]] && [[ -n 
     echo ""
     printf -- "${C_BOLD_WHITE}--> Provisioning Grafana read-only DB user...${C_RESET}\n"
     provision_grafana_ro "$MIGRATE_DSN" "$BASEDIR" || true
+fi
+
+# Provision the clone_verify_ro read-only DB user (I7) unconditionally — not
+# gated on grafana mode. Every install is a potential future clone SOURCE, so
+# `teamster clone`'s source-side verification queries always need this
+# credential available locally, regardless of what this particular host's
+# Grafana mode is. Same locally-administrable-MySQL requirement as
+# grafana_ro (socket-root `sudo mysql`), so it's non-fatal on a managed/
+# remote DB this host can't administer.
+if [[ -n "${MIGRATE_DSN:-}" ]] && [[ "$WIRE" -eq 1 ]]; then
+    echo ""
+    printf -- "${C_BOLD_WHITE}--> Provisioning clone_verify_ro read-only DB user (I7)...${C_RESET}\n"
+    provision_clone_verify_ro "$MIGRATE_DSN" "$BASEDIR" || true
 fi
 
 # Deploy Grafana dashboard provisioning if Grafana is running on this host.
@@ -2099,7 +2686,24 @@ echo ""
 printf -- "${C_BOLD_CYAN}=== Install complete ===${C_RESET}\n"
 
 # --- Next steps guide ---
-GRAFANA_PORT="${GRAFANA_PORT:-3000}"
+# install-mode Grafana's port isn't fixed: teamster-install picks a free port
+# starting at 3100 (internal/config/config.go's GrafanaPort default) and
+# records it as TEAMSTER_GRAFANA_PORT in settings.json — read it back rather
+# than assuming a port. managed-mode Grafana's port isn't known to this script
+# at all (no --grafana-port flag; GRAFANA_ENDPOINT isn't required there), so
+# it falls back to a generic pointer instead of guessing.
+GRAFANA_PORT=""
+if [[ "$GRAFANA_MODE" == "install" ]]; then
+    GRAFANA_PORT=$(python3 -c "
+import json
+try:
+    s = json.load(open('$HOME/.claude/settings.json'))
+    print(s.get('env', {}).get('TEAMSTER_GRAFANA_PORT', ''))
+except Exception:
+    print('')
+" 2>/dev/null)
+    [[ -z "$GRAFANA_PORT" ]] && GRAFANA_PORT="3100"
+fi
 SHORT_HOST="${SHORT_HOST:-$(hostname -s 2>/dev/null || hostname)}"
 echo ""
 printf -- "${C_BOLD_GREEN}━━━ Next Steps ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}\n"
@@ -2111,8 +2715,12 @@ printf -- "     It sets up cost tracking and picks team vs solo mode.\n"
 echo ""
 if [[ "$GRAFANA_MODE" == "install" || "$GRAFANA_MODE" == "managed" ]]; then
     printf -- "${C_BOLD_WHITE}  3. View your dashboards${C_RESET} at:\n"
-    printf -- "     ${C_CYAN}http://${SHORT_HOST}:${GRAFANA_PORT}/dashboards${C_RESET}\n"
-    printf -- "     Login with ${C_BOLD_WHITE}admin/admin${C_RESET} — change the password on first login.\n"
+    if [[ -n "$GRAFANA_PORT" ]]; then
+        printf -- "     ${C_CYAN}http://${SHORT_HOST}:${GRAFANA_PORT}/dashboards${C_RESET}\n"
+        printf -- "     Login with ${C_BOLD_WHITE}admin/admin${C_RESET} — change the password on first login.\n"
+    else
+        printf -- "     ${C_CYAN}Your Grafana instance${C_RESET} → Dashboards → Teamster\n"
+    fi
     printf -- "     ${C_YELLOW}Note:${C_RESET} dashboards will be empty until Teamster captures session data.\n"
     echo ""
 fi

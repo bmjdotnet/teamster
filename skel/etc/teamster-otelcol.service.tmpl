@@ -1,0 +1,14 @@
+[Unit]
+Description=Teamster OpenTelemetry collector
+After=network.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__BASEDIR__
+ExecStart=__BASEDIR__/bin/teamster start --exec=otelcol
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

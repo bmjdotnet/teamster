@@ -21,11 +21,29 @@ describes what it should become.
 ## Data model reference
 
 ```
-Outcome  (pending → active → review → done | blocked)
-  └─ WorkUnit  (pending → active → review → done | blocked)
+Outcome  (pending → active → review → done | abandoned, blocked/on_hold as detours)
+  └─ WorkUnit  (pending → active → review → done | abandoned, blocked/on_hold as detours)
 ```
 
-Both entity types share the same status set. `done` is the sole terminal status.
+Both entity types share the same status set. `done` and `abandoned` are
+both terminal; `done → review` is the sole reopen edge. Closing an Outcome
+is a deliberate act, not something the engine does on its own when its
+WorkUnits (or child Outcomes) finish.
+
+**Not yet reflected below, flagged for whoever builds this spec next:** the
+nightly `teamster wms review-sweep` timer now sets `on_hold` on stale
+WorkUnits/Outcomes and later `abandoned` on the ones it itself parked
+(`semantic-conventions.md` §4.8). `StatusSummary` already carries
+`OutcomesOnHold`/`WorkUnitsOnHold`, additive over the existing
+`OutcomesOpen`/`WorkUnitsOpen` counts, so this dashboard can distinguish
+"genuinely active" from "sweep-parked, awaiting Stage 2" without a schema
+change. A sweep-parked `on_hold` entity is a real, visible queue — an
+"at risk of eventual abandonment, N of `AbandonAfter` days elapsed" panel —
+and must never read the same as a human's deliberate pause, which the
+dashboard should never suggest is "at risk" of anything. Distinguishing the
+two requires reading `wms_journal`'s `agent_id` on the entity's latest
+`field='status'` row (`wms-review-sweep` vs. anything else), not just its
+current status.
 Each entity has: ID, title, description, status, prior_status, focus (free text),
 origin_host, origin_session, origin_agent, timestamps.
 WorkUnits have: outcome_id, agent_id.
@@ -125,7 +143,7 @@ and listens for WMS events. When a `WMSStatusChange` event arrives:
 1. Find the affected entity card in the DOM
 2. Update its status badge, progress counters, and icon
 3. Flash the card briefly (subtle highlight animation)
-4. If a task auto-completed (rollup), cascade the visual update to its parent goal and project
+4. If an Outcome just closed (deliberately — see `session-protocol.md` Step 9, or a `teamster wms close` call), cascade the visual update to its parent Outcome(s) too
 
 Use htmx SSE extension for the connection. The event HTML from SSE already
 contains the entity type and ID in the display text — parse it client-side
@@ -237,7 +255,9 @@ as feed uses, but output as CSS hex).
 - Use session explorer to launch Claude, create WMS entities via MCP tools
 - Open `/wms` in a second session (curl or browser)
 - Verify entities appear and status badges are correct
-- Trigger a rollup (complete all work units under an outcome)
+- Complete all work units under an outcome, then close the outcome
+  deliberately (Step 9 / `teamster wms close`) — closing no longer happens
+  on its own
 - Verify the outcome status updates live on the dashboard
 
 ## Implemented pages (beyond this spec)
@@ -258,7 +278,7 @@ and metadata. Dark-terminal aesthetic consistent with the activity stream.
 
 ### Grafana dashboards
 
-Ten provisioned dashboards in `skel/etc/grafana/dashboards/` (see
+The provisioned dashboards in `skel/etc/grafana/dashboards/` (see
 architecture.md for the full list). Key analytical dashboards:
 
 - **Entity Cost Explorer** — per-entity cost table with status, model
@@ -267,6 +287,13 @@ architecture.md for the full list). Key analytical dashboards:
 - **Tag Stack Explorer** — composable drill-down by any tag keys. Template
   variables let you pick your analysis axes (e.g. product → feature → phase).
 - **Cost by Tag Value** — cost breakdown by tag value across entities.
+- **Sweep Report** — the review-sweep visibility this spec's "Not yet
+  reflected below" note above calls for: open WorkUnit/Outcome backlog, the
+  nightly sweep's disposition breakdown by rule id, day-by-day activity
+  history, and the sweep-parked `on_hold` queue awaiting Stage 2 —
+  discriminated from a human's deliberate pause the same way this spec
+  requires (`wms_journal`'s `agent_id`, not just current status). Answers
+  the open question this spec left for "whoever builds this next."
 
 ## What this spec does NOT cover
 

@@ -41,6 +41,16 @@ func OtelcolPort(cfg config.Config) int {
 	return cfg.OtelGRPCPort
 }
 
+// otelcolArgs computes otelcol-contrib's CLI argv from cfgPath. Shared by
+// StartOtelcol (supervisor mode) and prepareComponentExec (start.go's
+// systemd exec-wrapper, wh2-supervisor-systemd-units) so there is exactly
+// one construction of the command line — same reasoning as prometheusArgs
+// and grafanaArgs (wh2-otelcol-argv-builder, follow-up to
+// wh2-supervisor-systemd-units).
+func otelcolArgs(cfgPath string) []string {
+	return []string{"--config", cfgPath}
+}
+
 // renderOtelcolConfig renders otelcol.yaml.tmpl using cfg and writes the
 // result to destPath.
 func renderOtelcolConfig(cfg config.Config, tmplPath, destPath string) error {
@@ -96,7 +106,7 @@ func StartOtelcol(ctx context.Context, cfg config.Config) (*exec.Cmd, error) {
 		return nil, fmt.Errorf("open otelcol log %s: %w", logPath, err)
 	}
 
-	cmd := exec.CommandContext(ctx, binPath, "--config", cfgPath)
+	cmd := exec.CommandContext(ctx, binPath, otelcolArgs(cfgPath)...)
 	cmd.Dir = basedir
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile

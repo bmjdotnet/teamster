@@ -129,6 +129,9 @@ func (r *Runner) Run(ctx context.Context, reallocate bool) error {
 	if err := r.alloc.BuildOutcomeCostRollup(ctx); err != nil {
 		return fmt.Errorf("outcome_cost_rollup: %w", err)
 	}
+	if err := r.alloc.BuildOutcomeTrueCostRollup(ctx); err != nil {
+		return fmt.Errorf("outcome_true_cost_rollup: %w", err)
+	}
 	r.log.Info("rollup pass complete", "messages_allocated", allocated, "intervals_costed", intervals)
 
 	if r.otel != nil {

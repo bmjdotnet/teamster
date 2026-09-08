@@ -189,6 +189,16 @@ func collectLoop(ctx context.Context, st store.Store, gs gauge.GaugeStore, engin
 				} else if n > 0 {
 					slog.Info("swept offline gauge rows", "deleted", n)
 				}
+				// Same cutoff, same rationale: a roster entry's updated_at
+				// stops advancing once its session stops producing hook
+				// events (UpsertRosterEntry is called on every one), so this
+				// naturally ages a dead session's roster entry out in
+				// lockstep with its gauge row.
+				if n, err := st.SweepStaleRoster(ctx, cutoff); err != nil {
+					slog.Warn("roster sweep", "error", err)
+				} else if n > 0 {
+					slog.Info("swept stale roster entries", "deleted", n)
+				}
 				lastSweep = time.Now()
 			}
 		}

@@ -151,3 +151,19 @@ func (m *mysqlMigrator) Steps() []store.Migration {
 	}
 	return out
 }
+
+// MaxSchemaVersion returns the highest version number among this binary's
+// known migrations — the same value store.RunMigrations computes internally
+// (via mysqlMigrator.Steps) to refuse opening a schema newer than the binary
+// knows. Exported so a caller that needs this number without opening a store
+// (clone's pre-restore schema assertion, WP3-data-leg.md §3) shares the
+// identical source of truth rather than re-walking migrations independently.
+func MaxSchemaVersion() int {
+	max := 0
+	for _, step := range migrations {
+		if step.Version > max {
+			max = step.Version
+		}
+	}
+	return max
+}

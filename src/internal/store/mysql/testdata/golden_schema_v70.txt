@@ -58,10 +58,12 @@ TABLE agent_roster
   COLUMN runtime type=varchar(16) null=NO default= extra=
   COLUMN session_id type=varchar(64) null=YES default=<NULL> extra=
   COLUMN team_name type=varchar(64) null=NO default= extra=
+  COLUMN updated_at type=datetime(6) null=NO default=CURRENT_TIMESTAMP(6) extra=DEFAULT_GENERATED on update CURRENT_TIMESTAMP(6)
   INDEX idx_roster_agent_id nonunique (session_id,agent_id)
   INDEX idx_roster_bus_team nonunique (bus_team)
   INDEX idx_roster_host nonunique (host)
   INDEX idx_roster_parent nonunique (parent_ref)
+  INDEX idx_roster_updated nonunique (updated_at)
   INDEX PRIMARY unique (roster_id)
   INDEX uq_roster_identity unique (session_id,agent_name)
 TABLE agent_tokens
@@ -270,6 +272,39 @@ TABLE outcome_edges
   COLUMN parent_id type=varchar(64) null=NO default=<NULL> extra=
   INDEX idx_oe_child nonunique (child_id)
   INDEX PRIMARY unique (parent_id,child_id)
+TABLE outcome_relations
+  COLUMN created_at type=datetime(6) null=NO default=<NULL> extra=
+  COLUMN created_by type=varchar(64) null=NO default= extra=
+  COLUMN from_id type=varchar(64) null=NO default=<NULL> extra=
+  COLUMN from_type type=varchar(32) null=NO default=<NULL> extra=
+  COLUMN id type=bigint unsigned null=NO default=<NULL> extra=auto_increment
+  COLUMN kind type=varchar(32) null=NO default=<NULL> extra=
+  COLUMN note type=varchar(255) null=NO default= extra=
+  COLUMN source type=varchar(16) null=NO default=manual extra=
+  COLUMN to_id type=varchar(191) null=NO default=<NULL> extra=
+  COLUMN to_type type=varchar(32) null=NO default=<NULL> extra=
+  INDEX idx_rel_created nonunique (created_at)
+  INDEX idx_rel_from nonunique (kind,from_type,from_id)
+  INDEX idx_rel_to nonunique (kind,to_type,to_id)
+  INDEX PRIMARY unique (id)
+  INDEX uq_rel unique (kind,from_type,from_id,to_type,to_id)
+TABLE outcome_true_cost_rollup
+  COLUMN agent_name type=varchar(128) null=NO default= extra=
+  COLUMN bucket_day type=date null=NO default=<NULL> extra=
+  COLUMN bucket_hour type=datetime null=NO default=<NULL> extra=
+  COLUMN cost_usd type=decimal(14,6) null=NO default=0.000000 extra=
+  COLUMN depth type=smallint null=NO default=0 extra=
+  COLUMN miss_class type=varchar(16) null=NO default= extra=
+  COLUMN model type=varchar(128) null=NO default= extra=
+  COLUMN outcome_id type=varchar(64) null=NO default=<NULL> extra=
+  COLUMN relation_kind type=varchar(32) null=NO default= extra=
+  COLUMN source_id type=varchar(128) null=NO default= extra=
+  COLUMN source_type type=varchar(32) null=NO default=<NULL> extra=
+  COLUMN tokens type=bigint unsigned null=NO default=0 extra=
+  INDEX idx_tcr_day nonunique (bucket_day)
+  INDEX idx_tcr_kind nonunique (relation_kind)
+  INDEX idx_tcr_outcome nonunique (outcome_id)
+  INDEX PRIMARY unique (bucket_hour,outcome_id,source_type,source_id,relation_kind,model,agent_name)
 TABLE outcomes
   COLUMN created_at type=datetime(6) null=NO default=<NULL> extra=
   COLUMN description type=text null=NO default=<NULL> extra=
@@ -292,6 +327,14 @@ TABLE recovery_evidence
   COLUMN setfocus_at type=datetime(6) null=NO default=<NULL> extra=
   INDEX idx_re_entity nonunique (entity_type,entity_id)
   INDEX PRIMARY unique (message_id)
+TABLE relation_kinds
+  COLUMN description type=varchar(255) null=NO default= extra=
+  COLUMN is_seed type=tinyint(1) null=NO default=1 extra=
+  COLUMN kind type=varchar(32) null=NO default=<NULL> extra=
+  COLUMN lineage type=tinyint(1) null=NO default=1 extra=
+  COLUMN miss_class type=varchar(16) null=NO default= extra=
+  COLUMN taxable type=tinyint(1) null=NO default=0 extra=
+  INDEX PRIMARY unique (kind)
 TABLE schema_version
   COLUMN applied_at type=datetime(6) null=NO default=<NULL> extra=
   COLUMN name type=varchar(128) null=NO default=<NULL> extra=
@@ -422,6 +465,18 @@ TABLE warmup_evidence
   COLUMN warmup_start type=datetime(6) null=NO default=<NULL> extra=
   INDEX idx_we_entity nonunique (entity_type,entity_id)
   INDEX PRIMARY unique (message_id)
+TABLE wms_deliverables
+  COLUMN agent_id type=varchar(128) null=NO default=<NULL> extra=
+  COLUMN artifact_paths type=text null=YES default=<NULL> extra=
+  COLUMN created_at type=datetime(6) null=NO default=<NULL> extra=
+  COLUMN entity_id type=varchar(128) null=NO default=<NULL> extra=
+  COLUMN entity_type type=varchar(32) null=NO default=<NULL> extra=
+  COLUMN id type=bigint unsigned null=NO default=<NULL> extra=auto_increment
+  COLUMN result type=mediumtext null=NO default=<NULL> extra=
+  COLUMN session_id type=varchar(128) null=NO default=<NULL> extra=
+  COLUMN summary type=text null=NO default=<NULL> extra=
+  INDEX idx_deliverables_entity nonunique (entity_type,entity_id)
+  INDEX PRIMARY unique (id)
 TABLE wms_intervals
   COLUMN agent_name type=varchar(64) null=NO default= extra=
   COLUMN assembled_at type=datetime(6) null=YES default=<NULL> extra=
@@ -468,6 +523,8 @@ TABLE wms_journal
   INDEX PRIMARY unique (id)
 TABLE workunits
   COLUMN agent_id type=varchar(64) null=NO default= extra=
+  COLUMN brief type=mediumtext null=YES default=<NULL> extra=
+  COLUMN claimed_at type=datetime(6) null=YES default=<NULL> extra=
   COLUMN created_at type=datetime(6) null=NO default=<NULL> extra=
   COLUMN description type=text null=NO default=<NULL> extra=
   COLUMN focus type=varchar(255) null=NO default= extra=
@@ -483,6 +540,16 @@ TABLE workunits
   INDEX idx_wu_agent nonunique (agent_id)
   INDEX idx_wu_outcome nonunique (outcome_id)
   INDEX idx_wu_status nonunique (status)
+  INDEX PRIMARY unique (id)
+TABLE wp2_migration_audit
+  COLUMN entity_id type=varchar(128) null=NO default=<NULL> extra=
+  COLUMN entity_type type=varchar(32) null=NO default=<NULL> extra=
+  COLUMN id type=bigint unsigned null=NO default=<NULL> extra=auto_increment
+  COLUMN migrated_at type=datetime(6) null=NO default=<NULL> extra=
+  COLUMN new_value type=varchar(128) null=NO default=<NULL> extra=
+  COLUMN old_value type=varchar(128) null=NO default=<NULL> extra=
+  COLUMN tag_key type=varchar(64) null=NO default=<NULL> extra=
+  INDEX idx_wp2audit_entity nonunique (entity_type,entity_id)
   INDEX PRIMARY unique (id)
 FK activity_events.agent_name -> sessions.agent_name [fk_activity_session]
 FK activity_events.session_id -> sessions.session_id [fk_activity_session]

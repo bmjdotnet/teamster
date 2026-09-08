@@ -1,0 +1,654 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "WMS review-sweep (issue #11/#17) visibility: open WorkUnit/Outcome backlog, the nightly sweep's disposition breakdown by rule id, day-by-day activity history (closed vs skipped, calendar-day buckets), the sweep-parked on_hold queue awaiting Stage 2, and freshness. See semantic-conventions.md §4.8 for the agent_id/rule-id grammar and the on_hold/abandoned reopen semantics.",
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 2
+      },
+      "id": 1,
+      "panels": [],
+      "title": "Open Backlog",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "teamster-mysql"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 0,
+        "y": 3
+      },
+      "id": 2,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "teamster-mysql"
+          },
+          "format": "table",
+          "rawSql": "SELECT COUNT(*) AS open_workunits FROM workunits WHERE status NOT IN ('done','abandoned')",
+          "refId": "A"
+        }
+      ],
+      "title": "Open WorkUnits",
+      "type": "stat",
+      "description": "status NOT IN ('done','abandoned') — matches GetStatusSummary's Open bucket (internal/store/mysql/status.go, internal/store/sqlite/session.go): every non-done/non-abandoned status, including on_hold, counts as open."
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "teamster-mysql"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 8,
+        "y": 3
+      },
+      "id": 3,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "teamster-mysql"
+          },
+          "format": "table",
+          "rawSql": "SELECT COUNT(*) AS open_outcomes FROM outcomes WHERE status NOT IN ('done','abandoned')",
+          "refId": "A"
+        }
+      ],
+      "title": "Open Outcomes",
+      "type": "stat",
+      "description": "status NOT IN ('done','abandoned') — matches GetStatusSummary's Open bucket. Same predicate as Open WorkUnits, outcomes table."
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "teamster-mysql"
+      },
+      "description": "Hours since the last wms_journal row written by agent_id='wms-review-sweep' (either sweep stage). The nightly timer runs once every ~24h; green < 27h, yellow < 30h, red >= 30h (kit AC4: a sweep silent for >~30h should read as stale, not healthy).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 1,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "yellow",
+                "value": 27
+              },
+              {
+                "color": "red",
+                "value": 30
+              }
+            ]
+          },
+          "unit": "h"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 16,
+        "y": 3
+      },
+      "id": 4,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/^hours_since_sweep$/",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "teamster-mysql"
+          },
+          "format": "table",
+          "rawSql": "SELECT ROUND(TIMESTAMPDIFF(MINUTE, MAX(created_at), NOW()) / 60.0, 1) AS hours_since_sweep\nFROM wms_journal\nWHERE agent_id = 'wms-review-sweep'",
+          "refId": "A"
+        }
+      ],
+      "title": "Last Review-Sweep Activity",
+      "type": "stat"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 7
+      },
+      "id": 10,
+      "panels": [],
+      "title": "Sweep Disposition — by Rule and by Day",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "teamster-mysql"
+      },
+      "description": "Every wms_journal row agent_id='wms-review-sweep' wrote on the sweep's most recent calendar day (DATE(created_at) bucketing, not a discrete run — several hand invocations on the same day, e.g. burn-in or a dry-run followed minutes later by a --confirm run, merge into this one bucket), grouped by the rule id that is always the first token of notes (WP3-DESIGN.md §4). Covers all eight rule ids across both Sweep Stage 1 (wu-review-undelivered, wu-review-delivered, wu-review-skipped, outcome-idle, outcome-idle-skipped) and Sweep Stage 2 (wu-onhold-abandon, outcome-onhold-abandon, onhold-evaluated-skipped) — not just closes, so a night that mostly parks/skips does not read as \"no sweep activity.\"",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": false,
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "rule_id"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Rule"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "count"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Count"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "id": 11,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "enablePagination": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": true
+        },
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "Count"
+          }
+        ]
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "teamster-mysql"
+          },
+          "format": "table",
+          "rawSql": "SELECT SUBSTRING_INDEX(notes, ' ', 1) AS rule_id, COUNT(*) AS count\nFROM wms_journal\nWHERE agent_id = 'wms-review-sweep'\n  AND DATE(created_at) = (\n        SELECT MAX(DATE(created_at)) FROM wms_journal WHERE agent_id = 'wms-review-sweep'\n      )\nGROUP BY rule_id\nORDER BY count DESC",
+          "refId": "A"
+        }
+      ],
+      "title": "Sweep Activity by Rule (latest day)",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "teamster-mysql"
+      },
+      "description": "Grouped by calendar day (DATE(created_at)) -- same bucketing as the panel above, not a discrete-run history; multiple hand invocations on one day merge into a single row. closed counts field='status' rows whose new_value is on_hold, done, or abandoned — every real disposition Sweep Stage 1 or Stage 2 can write, not just 'done' (a done-only filter undercounts by construction: parks and abandons are the more common dispositions). skipped counts field='sweep_evaluated' AND new_value='skipped' rows (all three skip rule ids share this shape).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": false,
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "run_day"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Day"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "closed"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Closed"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "skipped"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Skipped"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "id": 12,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "enablePagination": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "Day"
+          }
+        ]
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "teamster-mysql"
+          },
+          "format": "table",
+          "rawSql": "SELECT\n  DATE(created_at) AS run_day,\n  SUM(CASE WHEN field = 'status' AND new_value IN ('on_hold','done','abandoned') THEN 1 ELSE 0 END) AS closed,\n  SUM(CASE WHEN field = 'sweep_evaluated' AND new_value = 'skipped' THEN 1 ELSE 0 END) AS skipped\nFROM wms_journal\nWHERE agent_id = 'wms-review-sweep'\nGROUP BY run_day\nORDER BY run_day DESC\nLIMIT 30",
+          "refId": "A"
+        }
+      ],
+      "title": "Sweep Activity History (by day)",
+      "type": "table"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 18
+      },
+      "id": 20,
+      "panels": [],
+      "title": "Sweep-Parked Queue — Awaiting Stage 2",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "teamster-mysql"
+      },
+      "description": "Entities currently on_hold whose latest field='status' wms_journal row was written by agent_id='wms-review-sweep' -- i.e. the sweep parked them, not a human (semantic-conventions.md §4.8; WP3-DESIGN.md §2b's own discriminator, same shape). A human-set on_hold entity's latest status row has a different agent_id (or empty) and is correctly excluded -- it is never at risk of Stage 2 and this dashboard must not suggest otherwise (WP3-DESIGN.md §3a). idle_days is days since the parking row, for comparison against whatever ReviewSweep.AbandonAfter is configured to on this install; sorted oldest-parked first.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": true,
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "entity_type"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Type"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "entity_id"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "ID"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "title"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Title"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "rule_id"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Rule"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "parked_at"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Parked At"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "idle_days"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Idle Days"
+              },
+              {
+                "id": "unit",
+                "value": "d"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 19
+      },
+      "id": 22,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": true,
+          "enablePagination": false,
+          "fields": "",
+          "reducer": [
+            "count"
+          ],
+          "show": true
+        },
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "Idle Days"
+          }
+        ]
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "teamster-mysql"
+          },
+          "format": "table",
+          "rawSql": "SELECT entity_type, entity_id, title, rule_id, parked_at,\n       DATEDIFF(NOW(), parked_at) AS idle_days\nFROM (\n  SELECT 'workunit' AS entity_type, w.id AS entity_id, w.title AS title,\n         (SELECT SUBSTRING_INDEX(j.notes, ' ', 1) FROM wms_journal j\n            WHERE j.entity_type = 'workunit' AND j.entity_id = w.id AND j.field = 'status'\n            ORDER BY j.created_at DESC, j.id DESC LIMIT 1) AS rule_id,\n         (SELECT j.created_at FROM wms_journal j\n            WHERE j.entity_type = 'workunit' AND j.entity_id = w.id AND j.field = 'status'\n            ORDER BY j.created_at DESC, j.id DESC LIMIT 1) AS parked_at\n  FROM workunits w\n  WHERE w.status = 'on_hold'\n    AND (SELECT j.agent_id FROM wms_journal j\n           WHERE j.entity_type = 'workunit' AND j.entity_id = w.id AND j.field = 'status'\n           ORDER BY j.created_at DESC, j.id DESC LIMIT 1) = 'wms-review-sweep'\n\n  UNION ALL\n\n  SELECT 'outcome' AS entity_type, o.id AS entity_id, o.title AS title,\n         (SELECT SUBSTRING_INDEX(j.notes, ' ', 1) FROM wms_journal j\n            WHERE j.entity_type = 'outcome' AND j.entity_id = o.id AND j.field = 'status'\n            ORDER BY j.created_at DESC, j.id DESC LIMIT 1) AS rule_id,\n         (SELECT j.created_at FROM wms_journal j\n            WHERE j.entity_type = 'outcome' AND j.entity_id = o.id AND j.field = 'status'\n            ORDER BY j.created_at DESC, j.id DESC LIMIT 1) AS parked_at\n  FROM outcomes o\n  WHERE o.status = 'on_hold'\n    AND (SELECT j.agent_id FROM wms_journal j\n           WHERE j.entity_type = 'outcome' AND j.entity_id = o.id AND j.field = 'status'\n           ORDER BY j.created_at DESC, j.id DESC LIMIT 1) = 'wms-review-sweep'\n) sweep_parked\nORDER BY idle_days DESC",
+          "refId": "A"
+        }
+      ],
+      "title": "Sweep-Parked Entities Awaiting Stage 2",
+      "type": "table"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 27
+      },
+      "id": 30,
+      "panels": [],
+      "title": "Scope",
+      "type": "row"
+    },
+    {
+      "type": "text",
+      "title": "Reopen Semantics — What This Dashboard's Numbers Do and Don't Mean",
+      "gridPos": {
+        "h": 5,
+        "w": 24,
+        "x": 0,
+        "y": 28
+      },
+      "id": 21,
+      "options": {
+        "mode": "markdown",
+        "content": "A **`wu-review-delivered`** close (`review → done`, tagged `resolution: swept-unreviewed`) **is** reopenable — `done → review` is a real, standing edge, so a human can walk it back at any time.\n\nA **Sweep Stage 2 abandon** (`on_hold → abandoned`, rule `wu-onhold-abandon` or `outcome-onhold-abandon`) **is not** reopenable by any MCP call. `abandoned` is a strict one-way status with no outbound edge in `transitions.go`. Recovering a wrongly-abandoned entity is a manual database fix (`UPDATE ... SET status = 'review' WHERE status = 'abandoned'`, plus a corrective journal row written by hand) — see `semantic-conventions.md` §4.3/§4.8 and `WP3-DESIGN.md` §3a. A `wu-review-undelivered` or `outcome-idle` park to `on_hold` is fully reversible with an ordinary status-update call and carries no such risk — only what actually reaches `abandoned` is a one-way door.",
+        "code": {
+          "language": "plaintext",
+          "showLineNumbers": false,
+          "showMiniMap": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "transparent": true
+    }
+  ],
+  "preload": false,
+  "refresh": "5m",
+  "schemaVersion": 41,
+  "tags": [
+    "teamster",
+    "admin",
+    "wms"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "utc",
+  "title": "06 - Sweep Report",
+  "uid": "sweep-report"
+}

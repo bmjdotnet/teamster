@@ -1419,7 +1419,7 @@
             "uid": "teamster-mysql"
           },
           "format": "table",
-          "rawSql": "SELECT\n  wu.id,\n  wu.title,\n  GROUP_CONCAT(DISTINCT req.tag_key ORDER BY req.tag_key SEPARATOR ', ') AS missing_tags,\n  ROUND(COALESCE((SELECT SUM(cf.cost_usd) FROM cost_facts cf WHERE cf.entity_type='workunit' AND cf.entity_id=wu.id AND cf.timestamp BETWEEN $__timeFrom() AND $__timeTo()), 0), 2) AS cost\nFROM workunits wu\nCROSS JOIN (SELECT 'product' AS tag_key UNION ALL SELECT 'work-type' UNION ALL SELECT 'phase') req\nWHERE wu.status NOT IN ('done')\n  AND NOT EXISTS (\n    SELECT 1 FROM entity_tags_resolved etr\n    JOIN tags t ON t.id = etr.tag_id AND t.tag_key = req.tag_key\n    WHERE etr.entity_type = 'workunit' AND etr.entity_id = wu.id\n  )\nGROUP BY wu.id, wu.title\nORDER BY cost DESC\nLIMIT 25",
+          "rawSql": "SELECT\n  wu.id,\n  wu.title,\n  GROUP_CONCAT(DISTINCT req.tag_key ORDER BY req.tag_key SEPARATOR ', ') AS missing_tags,\n  ROUND(COALESCE((SELECT SUM(cf.cost_usd) FROM cost_facts cf WHERE cf.entity_type='workunit' AND cf.entity_id=wu.id AND cf.timestamp BETWEEN $__timeFrom() AND $__timeTo()), 0), 2) AS cost\nFROM workunits wu\nCROSS JOIN (SELECT 'product' AS tag_key UNION ALL SELECT 'work-type' UNION ALL SELECT 'phase') req\nWHERE wu.status NOT IN ('done','abandoned')\n  AND NOT EXISTS (\n    SELECT 1 FROM entity_tags_resolved etr\n    JOIN tags t ON t.id = etr.tag_id AND t.tag_key = req.tag_key\n    WHERE etr.entity_type = 'workunit' AND etr.entity_id = wu.id\n  )\nGROUP BY wu.id, wu.title\nORDER BY cost DESC\nLIMIT 25",
           "refId": "A"
         }
       ],
@@ -1819,7 +1819,7 @@
             "uid": "teamster-mysql"
           },
           "format": "table",
-          "rawSql": "SELECT\n  o.id,\n  o.title,\n  o.status,\n  DATEDIFF(NOW(), o.created_at) AS age_days,\n  ROUND(COALESCE((SELECT SUM(cf.cost_usd) FROM cost_facts cf WHERE cf.entity_type='outcome' AND cf.entity_id=o.id), 0), 2) AS cost\nFROM outcomes o\nWHERE o.status NOT IN ('done')\nORDER BY age_days DESC\nLIMIT 15",
+          "rawSql": "SELECT\n  o.id,\n  o.title,\n  o.status,\n  DATEDIFF(NOW(), o.created_at) AS age_days,\n  ROUND(COALESCE((SELECT SUM(cf.cost_usd) FROM cost_facts cf WHERE cf.entity_type='outcome' AND cf.entity_id=o.id), 0), 2) AS cost\nFROM outcomes o\nWHERE o.status NOT IN ('done','abandoned')\nORDER BY age_days DESC\nLIMIT 15",
           "refId": "A"
         }
       ],
@@ -1827,12 +1827,85 @@
       "type": "table"
     },
     {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "teamster-prometheus"
+      },
+      "description": "Share of outcomes attached to the outcome_edges DAG via at least one parent edge (wms_addOutcomeParent). Low adoption means large outcomes aren't being decomposed into a parent/child structure.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 1,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": 0
+              },
+              {
+                "color": "yellow",
+                "value": 10
+              },
+              {
+                "color": "green",
+                "value": 30
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 24,
+        "x": 0,
+        "y": 53
+      },
+      "id": 35,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "teamster-prometheus"
+          },
+          "expr": "100 * teamster_wms_outcome_decomposition{kind=\"parented_outcomes\"} / (teamster_wms_outcome_decomposition{kind=\"root_outcomes\"} + teamster_wms_outcome_decomposition{kind=\"parented_outcomes\"})",
+          "legendFormat": "parented %",
+          "refId": "A"
+        }
+      ],
+      "title": "Outcome Decomposition Adoption (% parented)",
+      "type": "stat"
+    },
+    {
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 53
+        "y": 56
       },
       "id": 40,
       "panels": [],
@@ -1853,7 +1926,7 @@
         "h": 14,
         "w": 24,
         "x": 0,
-        "y": 54
+        "y": 57
       },
       "id": 41,
       "options": {

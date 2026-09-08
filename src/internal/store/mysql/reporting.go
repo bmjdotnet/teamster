@@ -77,6 +77,21 @@ func (s *Store) DependencyCounts(ctx context.Context) (blockers, blocked int64, 
 	return blockers, blocked, err
 }
 
+// OutcomeDecompositionCounts reports outcome_edges DAG adoption: how many
+// outcomes are root-level (no parent edge) vs parented (have at least one
+// parent edge), plus the total edge count. All three come from one round
+// trip via subqueries rather than three separate queries.
+func (s *Store) OutcomeDecompositionCounts(ctx context.Context) (rootCount, parentedCount, edgeCount int64, err error) {
+	err = s.db.QueryRowContext(ctx, `
+		SELECT
+			(SELECT COUNT(*) FROM outcomes o WHERE NOT EXISTS (
+				SELECT 1 FROM outcome_edges oe WHERE oe.child_id = o.id)),
+			(SELECT COUNT(DISTINCT child_id) FROM outcome_edges),
+			(SELECT COUNT(*) FROM outcome_edges)`).
+		Scan(&rootCount, &parentedCount, &edgeCount)
+	return rootCount, parentedCount, edgeCount, err
+}
+
 // IntervalCostByPhase sums the conserved per-interval cost_usd on
 // wms_intervals (kind='state'), grouped by (entity_type, phase). NULL phase
 // collapses to "unclassified".

@@ -25,6 +25,7 @@ type Metrics struct {
 	StoreQueryDuration    *prometheus.HistogramVec
 	StoreDualWriteErrors  *prometheus.CounterVec
 	ActiveSessionsPruned  *prometheus.CounterVec
+	BuildInfo             *prometheus.GaugeVec
 }
 
 // NewMetrics registers all standard Vec metrics on reg and returns them.
@@ -86,6 +87,19 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 			Name: "teamster_active_sessions_pruned_total",
 			Help: "Sessions pruned from the active tracker by reason.",
 		}, []string{"reason"}),
+
+		// BuildInfo: always value 1, all information carried in labels — the
+		// standard *_build_info convention. A second, independent-in-transport
+		// disclosure channel alongside /health (WP1 §6, R7): /health's commit
+		// field turned out to be silently broken in production (git
+		// archive-shipped installs baked in "none"), so verification gets a
+		// second serving path rather than exactly one. Set once at hookd
+		// startup — a build's version is fixed for the process lifetime, no
+		// polling loop needed.
+		BuildInfo: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "teamster_build_info",
+			Help: "Build information. Always 1; version/commit/build_time carried in labels.",
+		}, []string{"version", "commit", "build_time"}),
 	}
 
 	reg.MustRegister(
@@ -100,6 +114,7 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 		m.StoreQueryDuration,
 		m.StoreDualWriteErrors,
 		m.ActiveSessionsPruned,
+		m.BuildInfo,
 	)
 	return m
 }

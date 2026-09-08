@@ -145,10 +145,23 @@ type IntervalStore interface {
 	// methods, which keep only the last-write-wins current pointer on sessions.
 	OpenFocusInterval(ctx context.Context, key SessionKey, entityType, entityID string) error
 
-	// HasAnyFocusInterval returns true when (session, agent) has any kind='focus'
-	// interval row, open or closed. Answers "has this session ever set focus?"
-	// rather than "is focus open right now?" — intervals are closed at turn end
-	// so an ended interval still means the agent legitimately called setFocus.
+	// HasAnyFocusInterval returns true when (session, agent) has a kind='focus'
+	// interval row that is currently OPEN (ended_at IS NULL). Answers "is
+	// focus open right now?" — the question its sole caller, the focus
+	// nudge, actually asks.
+	//
+	// Was "open or closed" before wh2-idle-teammate-exemption: under the old
+	// per-turn Stop-drain every interval closed at every turn end regardless
+	// of staleness, so a closed row still proved "this agent legitimately
+	// called wms_setFocus" and required the "any" reading to avoid nudging
+	// on every turn. Now that Stop closes nothing and only a handoff, a
+	// terminal entity, or reaper/sweep staleness ends an interval, a closed
+	// row can mean "this agent's cost is not attributed to anything right
+	// now" — exactly the state a teammate wakes into after its interval was
+	// closed by staleness while it sat idle, and exactly the state the
+	// nudge exists to catch. The name is not renamed to match (it would
+	// require touching internal/server/server.go's nudge call site, which
+	// is a different WU's file grant); this doc is the correction.
 	HasAnyFocusInterval(ctx context.Context, key SessionKey) (bool, error)
 
 	// CloseFocusInterval ends the currently-open focus interval for (session,
@@ -183,6 +196,68 @@ type IntervalStore interface {
 	// affects sessions that are not already closed. Returns the number of
 	// rows closed.
 	CloseIntervalsForStaleSessions(ctx context.Context, staleThreshold time.Time) (int64, error)
+
+	// MarkStaleSessionsClosed marks every session whose last_seen is older
+	// than the given threshold as closed. Returns the number of session rows
+	// updated.
+	//
+	// Paired with CloseIntervalsForStaleSessions in the reaper's phase 3, and
+	// ORDER MATTERS: close the intervals FIRST, then call this. That method's
+	// own predicate skips sessions already marked closed, so marking first
+	// would leave their intervals open until a later pass.
+	//
+	// This is the only writer of SessionStatusClosed now that the per-turn
+	// Stop-time close is gone. Without it the roster's "closed" liveness tier
+	// becomes unreachable, because ComputeLiveness derives that tier from
+	// sessions.status alone.
+	//
+	// Has no production caller as of wh2-idle-teammate-exemption — the
+	// reaper switched to MarkStaleSessionsClosedExceptLiveLead below, and
+	// neither manual drain ever called this method for session-marking
+	// (only for the unexempted interval close, CloseIntervalsForStaleSessions
+	// above). Kept in the interface as the correct primitive for a manual
+	// session-close tool, should one exist later, mirroring how the
+	// unexempted interval-close method remains the manual drains' contract.
+	MarkStaleSessionsClosed(ctx context.Context, staleThreshold time.Time) (int64, error)
+
+	// CloseIntervalsForStaleSessionsExceptLiveLead is the sweep-scoped
+	// variant of CloseIntervalsForStaleSessions, for the three automatic
+	// stale-session sweeps only: the in-process reaper phase 3, `rollup
+	// --sweep` step 1, and `wms gc`. It closes the same rows EXCEPT a
+	// named-agent (teammate) row whose lead row — same session_id,
+	// agent_name == "" — is itself NOT stale (lead.last_seen >=
+	// staleThreshold). An in-process teammate's own session timestamp only
+	// advances on tool/prompt events (TeammateIdle fires once at the idle
+	// transition, not periodically), so an idle-but-working teammate would
+	// otherwise have its interval closed out from under it while its lead
+	// is plainly still connected — the protocol's normal steady state, not
+	// a hung or abandoned session (wh2-idle-teammate-exemption).
+	//
+	// Deliberately NOT used by the two manual drains (`wms drain
+	// --older-than`, `POST /wms/api/drain` scope=older-than): an operator
+	// reaches for those specifically because automatic policy already
+	// failed, so a silent exemption there would countermand the
+	// instruction. Those keep calling CloseIntervalsForStaleSessions.
+	//
+	// A named row with no lead row anywhere in its session — macOS remotes,
+	// where each Agent-Teams teammate is its own top-level session with no
+	// lead row — is never exempted: the lookup simply finds nothing, so it
+	// stale-closes exactly as CloseIntervalsForStaleSessions would.
+	CloseIntervalsForStaleSessionsExceptLiveLead(ctx context.Context, staleThreshold time.Time) (int64, error)
+
+	// MarkStaleSessionsClosedExceptLiveLead is the sweep-scoped variant of
+	// MarkStaleSessionsClosed, carrying the identical lead-liveness
+	// exemption as CloseIntervalsForStaleSessionsExceptLiveLead above and
+	// for a reason specific to this pairing: the in-process reaper is the
+	// only automatic caller of MarkStaleSessionsClosed today (`rollup
+	// --sweep` and `wms gc` close stale intervals but never mark sessions
+	// closed), and if it marked an exempted teammate's session closed
+	// anyway, reaper phase 2 (CloseIntervalsForClosedSessions, which acts on
+	// status='closed' alone with no staleness check) would close that same
+	// just-exempted interval on the very next sweep — quietly defeating the
+	// exemption one reaper interval later. The ordering contract with the
+	// interval-closing call is unchanged: intervals first, then this.
+	MarkStaleSessionsClosedExceptLiveLead(ctx context.Context, staleThreshold time.Time) (int64, error)
 
 	// WriteFocusInterval is the remote_scraper path: atomically closes the
 	// open focus interval for (session, agent) and opens a new one at `at`,
@@ -304,6 +379,34 @@ type RelatedStore interface {
 	// new work — dangling (adoptable) or terminal (potential rework linkage).
 	// Used by wms_listRelated to detect overlap at session startup.
 	ListRelatedEntities(ctx context.Context, opts ListRelatedOpts) ([]RelatedEntity, error)
+}
+
+// RelationStore manages typed outcome/workunit relations (WP3 stage 2,
+// outcome_relations): the primitive "A <kind> B" needs — rework, supersession,
+// lineage — distinct from entity_dependencies' blocker→blocked semantics. See
+// WP3-relations-reporting.md §3.1 for why this is a new table rather than a
+// kind column bolted onto entity_dependencies.
+type RelationStore interface {
+	// AddRelation records "fromType/fromID <kind> toType/toID". Validates, in
+	// order: kind is a known relation_kinds row; no self-loop; fromID exists
+	// (toID must exist too, unless toType is "external", in which case toID is
+	// free text and must be non-empty); for lineage=1 kinds, the edge would not
+	// close a cycle; for taxable kinds, from/to are not already connected in
+	// outcome_edges (either direction) — a child outcome reworking its own
+	// parent is pre-delivery iteration, not post-delivery rework. Idempotent:
+	// re-adding an identical edge (same kind, from, to) is a no-op.
+	AddRelation(ctx context.Context, kind, fromType, fromID, toType, toID, createdBy, source, note string) error
+	// RemoveRelation is a hard delete keyed on the same five identity fields
+	// AddRelation used. Idempotent: removing a relation that does not exist
+	// succeeds as a no-op.
+	RemoveRelation(ctx context.Context, kind, fromType, fromID, toType, toID string) error
+	// ListRelations returns relations touching (entityType, entityID).
+	// direction is "from" (entity is the new work), "to" (entity is the prior
+	// work), or "both" (default). kind, if non-empty, filters to that kind.
+	ListRelations(ctx context.Context, entityType, entityID, direction, kind string) ([]Relation, error)
+	// ListRelationKinds returns the seeded relation_kinds vocabulary a
+	// Relation.Kind must belong to.
+	ListRelationKinds(ctx context.Context) ([]RelationKind, error)
 }
 
 // ClassifierStore is the B4 phase/work-type classifier's persistence surface:
@@ -450,6 +553,7 @@ type ReportingStore interface {
 	UnattributedBacklogDepth(ctx context.Context) (int64, error)
 	CostByEntityLast30Days(ctx context.Context) ([]CostRow, error)
 	DependencyCounts(ctx context.Context) (blockers, blocked int64, err error)
+	OutcomeDecompositionCounts(ctx context.Context) (rootCount, parentedCount, edgeCount int64, err error)
 	IntervalCostByPhase(ctx context.Context) ([]PhaseCostRow, error)
 	TagBindingCounts(ctx context.Context) ([]TagCountRow, error)
 	DailyTokenUsage(ctx context.Context) (UsageSnapshot, error)
@@ -625,6 +729,14 @@ type AllocationStore interface {
 	// outcome rollup.
 	BuildCostRollup(ctx context.Context) error
 	BuildOutcomeCostRollup(ctx context.Context) error
+	// BuildOutcomeTrueCostRollup rebuilds outcome_true_cost_rollup: for every
+	// outcome, the cost of itself, its workunits, and its transitive DAG
+	// descendants via outcome_edges (WP3 stage 1 — child_outcome legs only).
+	// Stage 2 adds a rework leg over outcome_relations; this method's
+	// signature does not change. Read-only with respect to
+	// usage_attribution/cost_rollup/outcome_cost_rollup — a projection,
+	// never a re-attribution. Uses AtomicReplace, same as BuildOutcomeCostRollup.
+	BuildOutcomeTrueCostRollup(ctx context.Context) error
 	// Reconcile is cited in 01-interfaces.md with no way to receive OTel data
 	// (MySQL cannot reach Prometheus itself; only the Go rollup service holds
 	// an OTelSource) — flagged to the lead, proceeding with otelCosts (keyed
@@ -814,6 +926,56 @@ type TagVocabRow struct {
 	Key, Value, FacetSource string
 }
 
+// ReviewSweepStore backs `teamster wms review-sweep` (WP3-DESIGN.md §10).
+// Deliberately NOT named alongside SweepStore above — that interface is the
+// unrelated LLM cost-attribution sweep (`rollup --sweep`); sharing a name
+// would recreate the exact "teamster-sweep" vs "teamster-wms-review-sweep"
+// naming collision the design's own §9 has to disambiguate for the timers.
+//
+// All four methods take threshold as a bind parameter — a Go-computed
+// time.Time, never a server-side NOW()/UTC_TIMESTAMP() call inside the SQL
+// (MINOR-2: removes the session-time-zone hazard by construction rather than
+// by picking the right SQL clock function).
+type ReviewSweepStore interface {
+	// ListReviewSweepCandidates returns review-status WorkUnits idle past
+	// threshold (§2a, Sweep Stage 1's WorkUnit population), oldest first.
+	ListReviewSweepCandidates(ctx context.Context, threshold time.Time) ([]*wms.WorkUnit, error)
+
+	// ListStaleOutcomeCandidates returns the §2b candidacy-filter population:
+	// non-terminal, non-on_hold Outcomes idle past threshold with no live
+	// direct WorkUnit or child Outcome (the sweep-parked exemption applies to
+	// both interlock clauses — a human-on_hold child still blocks, a
+	// sweep-parked one does not), oldest first. NOT sufficient alone to
+	// park anything — the caller must still run the descendant-safety walk
+	// (outcomeHasLiveDescendant, composed in wms_review_sweep.go from
+	// GetOutcomeChildren/GetOutcome/ListWorkUnits, per §10's note that this
+	// stays out of the Store interface deliberately, so there is exactly one
+	// implementation of the walk instead of one per backend). Must NOT be
+	// built on ListOutcomes(ctx, "", ...) — an empty parentOutcomeID there
+	// means "root outcomes only," not "no filter" (store_v2.go's own
+	// ListOutcomes; the same bug WP6's kit text found the hard way).
+	ListStaleOutcomeCandidates(ctx context.Context, threshold time.Time) ([]*wms.Outcome, error)
+
+	// ListOnHoldAbandonCandidateWorkUnits returns the §2c Sweep Stage 2
+	// population for WorkUnits: on_hold, sweep-parked (latest field="status"
+	// wms_journal row has agent_id="wms-review-sweep"), no non-sweep
+	// journal/interval/deliverable activity since that row's created_at (T),
+	// and T at least threshold in the past. A human-parked on_hold entity
+	// never has a sweep-authored parking row, so it can never appear here —
+	// the ruling's central safety property (a human-set on_hold is never
+	// touched by Sweep Stage 2, at any idle duration) holds by construction,
+	// not by an extra filter.
+	ListOnHoldAbandonCandidateWorkUnits(ctx context.Context, threshold time.Time) ([]*wms.WorkUnit, error)
+
+	// ListOnHoldAbandonCandidateOutcomes mirrors the WorkUnit version, minus
+	// the wms_deliverables check (Outcomes never receive one — §14).
+	// Candidacy here is necessary but not sufficient: the caller must re-run
+	// the candidacy filter's interlock and the descendant-safety walk against
+	// every returned row before abandoning it — state can change during the
+	// rescue window, so this method only narrows the pool.
+	ListOnHoldAbandonCandidateOutcomes(ctx context.Context, threshold time.Time) ([]*wms.Outcome, error)
+}
+
 // RosterEntry is one agent_roster row — the identity/credential anchor for
 // a registered agent, potentially unbound (session_id nil) until a spawned
 // peer completes self-registration.
@@ -831,6 +993,14 @@ type RosterEntry struct {
 	AgentID      string
 	CreatedAt    time.Time
 	BoundAt      *time.Time
+	// UpdatedAt is stamped by the store on every Create/Upsert/Bind — a
+	// heartbeat driven by the same auto-registration calls that fire on
+	// every hook event for an active session. A session that stops
+	// producing events simply stops advancing this value, which is what
+	// lets ListRosterEntries' UpdatedSince filter and SweepStaleRoster age
+	// a dead session's entry out without any explicit close signal —
+	// mirrors GaugeStore.SweepOffline's updated_at cutoff.
+	UpdatedAt time.Time
 }
 
 // AgentToken is one agent_tokens row — the credential record for a roster entry.
@@ -850,6 +1020,9 @@ type RosterFilter struct {
 	BusTeam      string
 	Runtime      string
 	Relationship string
+	// UpdatedSince, when set, excludes entries whose UpdatedAt is older than
+	// this time — the roster-side equivalent of GaugeFilter.MinUpdatedAt.
+	UpdatedSince *time.Time
 }
 
 // RosterStore is agent-roster identity and bearer-token persistence:
@@ -867,6 +1040,10 @@ type RosterStore interface {
 	RevokeToken(ctx context.Context, rosterID string) error
 	RevokeTokenCascade(ctx context.Context, rosterID string) (int64, error)
 	TouchTokenLastUsed(ctx context.Context, tokenHash string) error
+	// SweepStaleRoster deletes roster entries whose UpdatedAt is older than
+	// cutoff, returning the number of rows deleted. Mirrors
+	// gauge.GaugeStore.SweepOffline.
+	SweepStaleRoster(ctx context.Context, cutoff time.Time) (int64, error)
 }
 
 // Store is the full persistence surface implemented by every backend. It is
@@ -881,12 +1058,14 @@ type Store interface {
 	ActivityStore
 	StatusStore
 	RelatedStore
+	RelationStore
 	ClassifierStore
 	TagAdminStore
 	TelemetryStore
 	AllocationStore
 	RecoveryStore
 	SweepStore
+	ReviewSweepStore
 	ReportingStore
 	RosterStore
 	Prober
@@ -899,10 +1078,21 @@ type Store interface {
 // StatusSummary is a snapshot of system health metrics returned by GetStatusSummary.
 type StatusSummary struct {
 	// WMS entities
-	OutcomesOpen  int
-	OutcomesDone  int
-	WorkUnitsOpen int
-	WorkUnitsDone int
+	OutcomesOpen      int
+	OutcomesDone      int
+	OutcomesAbandoned int
+	// OutcomesOnHold is a strictly additive breakdown of OutcomesOpen — an
+	// on_hold Outcome is counted in BOTH fields (WP3-DESIGN.md §3a round 5:
+	// a bare `case "on_hold":` inserted before the existing `default` would
+	// silently divert it OUT of Open, since a Go switch has no fallthrough;
+	// every GetStatusSummary implementation must increment both in the same
+	// branch so Open's "everything non-terminal" meaning never changes).
+	OutcomesOnHold     int
+	WorkUnitsOpen      int
+	WorkUnitsDone      int
+	WorkUnitsAbandoned int
+	// WorkUnitsOnHold mirrors OutcomesOnHold for WorkUnits — see above.
+	WorkUnitsOnHold int
 
 	// Sessions
 	ActiveSessions int
@@ -1011,4 +1201,32 @@ type RelatedEntity struct {
 	SessionID     string            `json:"session_id"`
 	SessionStatus string            `json:"session_status"`
 	IsTerminal    bool              `json:"is_terminal"`
+}
+
+// Relation is one row from outcome_relations: a typed edge "from <kind> to",
+// read as a sentence — "from remediates to". See RelationStore.
+type Relation struct {
+	ID        int64     `json:"id"`
+	Kind      string    `json:"kind"`
+	FromType  string    `json:"from_type"`
+	FromID    string    `json:"from_id"`
+	ToType    string    `json:"to_type"`
+	ToID      string    `json:"to_id"`
+	CreatedAt time.Time `json:"created_at"`
+	CreatedBy string    `json:"created_by"`
+	Source    string    `json:"source"`
+	Note      string    `json:"note"`
+}
+
+// RelationKind is one row from relation_kinds: the seeded vocabulary a
+// Relation.Kind must belong to. Taxable kinds count toward the rework tax;
+// MissClass ('code'|'design'|'spec') names the prevention lever; Lineage
+// gates cycle-checking and transitive closure.
+type RelationKind struct {
+	Kind        string `json:"kind"`
+	Taxable     bool   `json:"taxable"`
+	MissClass   string `json:"miss_class"`
+	Lineage     bool   `json:"lineage"`
+	IsSeed      bool   `json:"is_seed"`
+	Description string `json:"description"`
 }

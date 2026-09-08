@@ -164,12 +164,131 @@ func TestConformanceDim4_ErrPrecondition(t *testing.T) {
 		if err := s.CreateWorkUnit(ctx, &wms.WorkUnit{ID: "dim4-precond-wu", OutcomeID: "dim4-precond-o1", Title: "W", Status: wms.StatusPending}); err != nil {
 			t.Fatalf("CreateWorkUnit: %v", err)
 		}
-		if err := s.ClaimWorkUnit(ctx, "dim4-precond-wu", "@dim4-a"); err != nil {
+		if _, err := s.ClaimWorkUnit(ctx, "dim4-precond-wu", "@dim4-a"); err != nil {
 			t.Fatalf("first ClaimWorkUnit: %v", err)
 		}
-		err := s.ClaimWorkUnit(ctx, "dim4-precond-wu", "@dim4-b")
+		_, err := s.ClaimWorkUnit(ctx, "dim4-precond-wu", "@dim4-b")
 		if !errors.Is(err, store.ErrPrecondition) {
 			t.Fatalf("second ClaimWorkUnit (already active) err = %v, want ErrPrecondition", err)
+		}
+	})
+}
+
+// TestConformanceDim4_ClaimStateMatrix provokes every row of ClaimWorkUnit's
+// claim-state matrix through real store calls and asserts the typed error
+// (or success) each row must produce, including that the new
+// AlreadyClaimed/NotClaimable errors still satisfy errors.Is(err,
+// store.ErrPrecondition) for callers that only know the coarser sentinel.
+// It also asserts the returned pre-claim status on every successful row —
+// callers (the MCP handler) need it to tell a real pending->active
+// transition from an adopt/idempotent-reclaim that left status unchanged,
+// so they never fire a phantom OnStatusChange event.
+func TestConformanceDim4_ClaimStateMatrix(t *testing.T) {
+	run(t, func(t *testing.T, s store.Store) {
+		ctx := context.Background()
+		if err := s.CreateOutcome(ctx, &wms.Outcome{ID: "dim4-matrix-o1", Title: "O", Status: wms.StatusActive}); err != nil {
+			t.Fatalf("CreateOutcome: %v", err)
+		}
+
+		// Row: pending -> claim (owner + claimed_at set, -> active). Old
+		// status returned must be "pending" — the only row with a real
+		// status transition.
+		if err := s.CreateWorkUnit(ctx, &wms.WorkUnit{ID: "dim4-matrix-pending", OutcomeID: "dim4-matrix-o1", Title: "W", Status: wms.StatusPending}); err != nil {
+			t.Fatalf("CreateWorkUnit(pending): %v", err)
+		}
+		oldStatus, err := s.ClaimWorkUnit(ctx, "dim4-matrix-pending", "@dim4-a")
+		if err != nil {
+			t.Fatalf("ClaimWorkUnit(pending): %v", err)
+		}
+		if oldStatus != wms.StatusPending {
+			t.Fatalf("ClaimWorkUnit(pending) old status = %q, want %q", oldStatus, wms.StatusPending)
+		}
+		got, err := s.GetWorkUnit(ctx, "dim4-matrix-pending")
+		if err != nil {
+			t.Fatalf("GetWorkUnit(pending after claim): %v", err)
+		}
+		if got.Status != wms.StatusActive || got.AgentID != "@dim4-a" || got.ClaimedAt == nil {
+			t.Fatalf("claim from pending did not set owner/status/claimed_at: %+v", got)
+		}
+
+		// Row: active, owned by caller -> idempotent success. Old status
+		// returned must be "active" — status was already active, unchanged.
+		oldStatus, err = s.ClaimWorkUnit(ctx, "dim4-matrix-pending", "@dim4-a")
+		if err != nil {
+			t.Fatalf("ClaimWorkUnit(idempotent re-claim by owner): %v", err)
+		}
+		if oldStatus != wms.StatusActive {
+			t.Fatalf("ClaimWorkUnit(idempotent re-claim) old status = %q, want %q", oldStatus, wms.StatusActive)
+		}
+		got2, err := s.GetWorkUnit(ctx, "dim4-matrix-pending")
+		if err != nil {
+			t.Fatalf("GetWorkUnit(after idempotent re-claim): %v", err)
+		}
+		if got2.Status != wms.StatusActive || got2.AgentID != "@dim4-a" {
+			t.Fatalf("idempotent re-claim changed state: %+v", got2)
+		}
+
+		// Row: active, agent_id empty -> adopt (owner + claimed_at set,
+		// status unchanged). Old status returned must be "active".
+		if err := s.CreateWorkUnit(ctx, &wms.WorkUnit{ID: "dim4-matrix-adopt", OutcomeID: "dim4-matrix-o1", Title: "W", Status: wms.StatusActive}); err != nil {
+			t.Fatalf("CreateWorkUnit(active, unowned): %v", err)
+		}
+		oldStatus, err = s.ClaimWorkUnit(ctx, "dim4-matrix-adopt", "@dim4-b")
+		if err != nil {
+			t.Fatalf("ClaimWorkUnit(adopt): %v", err)
+		}
+		if oldStatus != wms.StatusActive {
+			t.Fatalf("ClaimWorkUnit(adopt) old status = %q, want %q", oldStatus, wms.StatusActive)
+		}
+		gotAdopt, err := s.GetWorkUnit(ctx, "dim4-matrix-adopt")
+		if err != nil {
+			t.Fatalf("GetWorkUnit(after adopt): %v", err)
+		}
+		if gotAdopt.Status != wms.StatusActive || gotAdopt.AgentID != "@dim4-b" || gotAdopt.ClaimedAt == nil {
+			t.Fatalf("adopt did not set owner/claimed_at or changed status: %+v", gotAdopt)
+		}
+
+		// Row: active, owned by another -> AlreadyClaimedError, still Is(ErrPrecondition).
+		_, err = s.ClaimWorkUnit(ctx, "dim4-matrix-adopt", "@dim4-c")
+		if !errors.Is(err, store.ErrAlreadyClaimed) {
+			t.Fatalf("ClaimWorkUnit(owned by other) err = %v, want ErrAlreadyClaimed", err)
+		}
+		if !errors.Is(err, store.ErrPrecondition) {
+			t.Fatalf("ClaimWorkUnit(owned by other) err = %v, want also Is(ErrPrecondition)", err)
+		}
+		var already *store.AlreadyClaimedError
+		if !errors.As(err, &already) {
+			t.Fatalf("ClaimWorkUnit(owned by other) err = %v, want errors.As *AlreadyClaimedError", err)
+		}
+		if already.Owner != "@dim4-b" {
+			t.Fatalf("AlreadyClaimedError.Owner = %q, want %q", already.Owner, "@dim4-b")
+		}
+
+		// Row: review/done/blocked -> NotClaimableError, still Is(ErrPrecondition).
+		for _, status := range []string{wms.StatusReview, wms.StatusDone, wms.StatusBlocked} {
+			id := "dim4-matrix-" + status
+			if err := s.CreateWorkUnit(ctx, &wms.WorkUnit{ID: id, OutcomeID: "dim4-matrix-o1", Title: "W", Status: status}); err != nil {
+				t.Fatalf("CreateWorkUnit(%s): %v", status, err)
+			}
+			_, err := s.ClaimWorkUnit(ctx, id, "@dim4-d")
+			if !errors.Is(err, store.ErrNotClaimable) {
+				t.Fatalf("ClaimWorkUnit(%s) err = %v, want ErrNotClaimable", status, err)
+			}
+			if !errors.Is(err, store.ErrPrecondition) {
+				t.Fatalf("ClaimWorkUnit(%s) err = %v, want also Is(ErrPrecondition)", status, err)
+			}
+			var notClaimable *store.NotClaimableError
+			if !errors.As(err, &notClaimable) {
+				t.Fatalf("ClaimWorkUnit(%s) err = %v, want errors.As *NotClaimableError", status, err)
+			}
+			if notClaimable.Status != status {
+				t.Fatalf("NotClaimableError.Status = %q, want %q", notClaimable.Status, status)
+			}
+		}
+
+		// Row: no such id -> ErrNotFound.
+		if _, err := s.ClaimWorkUnit(ctx, "dim4-matrix-no-such-id", "@dim4-e"); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("ClaimWorkUnit(missing) err = %v, want ErrNotFound", err)
 		}
 	})
 }

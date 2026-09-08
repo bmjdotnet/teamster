@@ -65,3 +65,41 @@ func TestRunSQLStmt_Formatting(t *testing.T) {
 		}
 	})
 }
+
+// TestCheckReadOnlyStmt covers I7's --read-only allowlist (WP3-data-leg.md
+// §4): SELECT/SHOW/EXPLAIN/DESCRIBE in any case pass; anything else — most
+// importantly the write verbs a bug could construct — is rejected before any
+// DB call is made.
+func TestCheckReadOnlyStmt(t *testing.T) {
+	cases := []struct {
+		name    string
+		stmt    string
+		wantErr bool
+	}{
+		{"select upper", "SELECT 1", false},
+		{"select lower", "select 1", false},
+		{"select leading whitespace", "   SELECT 1", false},
+		{"show", "SHOW TABLES", false},
+		{"show lower", "show tables", false},
+		{"explain", "EXPLAIN SELECT 1", false},
+		{"describe", "DESCRIBE teamster", false},
+		{"desc", "DESC teamster", false},
+		{"update rejected", "UPDATE t SET x=1", true},
+		{"delete rejected", "DELETE FROM t", true},
+		{"drop rejected", "DROP TABLE t", true},
+		{"insert rejected", "INSERT INTO t VALUES (1)", true},
+		{"empty rejected", "", true},
+		{"semicolon-smuggled select+drop still starts with select", "SELECT 1; DROP TABLE t", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkReadOnlyStmt(tc.stmt)
+			if tc.wantErr && err == nil {
+				t.Errorf("checkReadOnlyStmt(%q) = nil, want error", tc.stmt)
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("checkReadOnlyStmt(%q) = %v, want nil", tc.stmt, err)
+			}
+		})
+	}
+}

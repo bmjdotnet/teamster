@@ -58,11 +58,25 @@ After approval:
 > **Solo session.** This whole step is team-only. In a solo session
 > (`TEAMSTER_SOLO=1`) there is no one to spawn or assign to — `wms_assignWorkUnit`
 > and the `agent_id` it sets are inert with a single agent. Skip Step 6: keep the
-> WMS entities from Step 5, set focus on the work unit you're starting
-> (`wms_setFocus`), and do the work yourself, spawning an ephemeral subagent only
-> for a bounded sub-task like a fresh-context review. See `/teamster:solo`.
+> WMS entities from Step 5, claim the work unit you're starting
+> (`wms_claimWorkUnit`, falling back to `wms_setFocus` for non-WU-scoped work),
+> and do the work yourself, spawning an ephemeral subagent only for a bounded
+> sub-task like a fresh-context review. See `/teamster:solo`.
 
 1. Spawn each approved agent via the Agent tool with a descriptive `name`
-2. Assign work units via `mcp__wms__wms_assignWorkUnit` or SendMessage
-3. Brief each agent on its domain and which files it owns
-4. Tell each agent who else is working in parallel (shared-worktree rule)
+2. Store the full assignment as the WorkUnit's `brief` (pass it to
+   `wms_createWorkUnit` in Step 5) rather than only in the SendMessage that
+   follows — `wms_claimWorkUnit` hands this brief back to the agent when it
+   claims the unit.
+3. Send a short pointer via SendMessage: the WorkUnit id, and the
+   instruction "your FIRST action is `wms_claimWorkUnit('<id>')`" — this
+   returns the brief and transitions the unit to `active` atomically, and
+   requests a focus interval alongside it (hookd opens it asynchronously,
+   best-effort; it may decline). Point the agent at
+   `../bootstrap/references/implementation-pack/teammate-guide.md` for the
+   rest of the protocol that applies to it.
+4. Tell each agent who else is working in parallel and which files they own
+   (shared-worktree rule)
+
+See `bootstrap/SKILL.md`'s "Dispatch protocol" for the full claim/deliver
+cycle, including how the agent reports back (`mcp__wms__wms_deliverResult`).

@@ -22,6 +22,8 @@ func runWMS(args []string) int {
 		return runWMSAdopt(args[1:])
 	case "gc":
 		return runWMSGC(args[1:])
+	case "review-sweep":
+		return runWMSReviewSweep(args[1:])
 	case "backfill":
 		return runWMSBackfill(args[1:])
 	case "-h", "--help", "help":
@@ -41,6 +43,9 @@ subcommands:
   close <entity-id>     transition entity to done + close intervals
   adopt <entity-id>     guidance for adopting an entity in a new session
   gc                    garbage collect: drain + close stale entities (dry-run by default)
+  review-sweep          nightly proactive review: park stale review WorkUnits/Outcomes to on_hold,
+                        abandon sweep-parked entities past the rescue window (dry-run by default,
+                        config-gated: ReviewSweep.Enabled must be true in teamster.yaml)
   backfill              recover session_id and close timestamps from JSONL (dry-run by default)
 
 flags (list):
@@ -61,6 +66,11 @@ flags (gc):
   --older-than <dur>    stale threshold for closing entities (default: 7d)
   --dry-run             preview what would be collected (default)
   --confirm             actually execute the gc
+
+flags (review-sweep):
+  --older-than <dur>    Sweep Stage 1 idle threshold (default: ReviewSweep.OlderThan, else 168h)
+  --abandon-after <dur> Sweep Stage 2 rescue-window threshold (default: ReviewSweep.AbandonAfter, else 720h)
+  --confirm             actually execute (default: dry-run preview; must always be passed explicitly — ReviewSweep.Confirm in teamster.yaml no longer gates this)
 
 flags (backfill):
   --events <path>       path to events.jsonl (default: auto-detect)

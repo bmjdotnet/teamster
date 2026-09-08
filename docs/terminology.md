@@ -24,7 +24,9 @@ Teamster's work management system (WMS) uses a two-level hierarchy:
 | **Work Unit** | A concrete, bounded piece of work under an Outcome. Assigned to an agent. Tracks status, focus, and cost. Created via `wms_createWorkUnit`; title changed via `wms_renameWorkUnit` (no state-machine validation). |
 | **Claude Task** | Claude Code's built-in flat task item (via TaskCreate). Separate from WMS — no hierarchy, no cost attribution, no rollup. |
 
-Status transitions follow a state machine: `pending` -> `active` -> `review` -> `done` (with `blocked` as an alternative). `abandoned` is a resolution tag (applied via `wms_tagEntity` with key `resolution`), not a status. Status changes cascade: completing the last Work Unit under an Outcome can trigger the Outcome's status to advance.
+Status transitions follow a state machine: `pending` -> `active` -> `review` -> `done` (with `blocked` and `on_hold` as alternatives). `abandoned` is a terminal status in its own right, not a resolution tag — an Outcome or Work Unit that was dropped rather than finished moves to `abandoned` directly, so it never counts as `done` in completion metrics. `done` has one legal way back: `done -> review` — which also clears any `resolution` tag the entity carried, current or legacy (see `semantic-conventions.md` §9.2). Closing an Outcome is a deliberate act (the lead reasons about it and the operator confirms, or the operator runs `teamster wms close`) — the engine no longer advances an Outcome's status automatically when its Work Units finish.
+
+The one exception is the nightly `teamster wms review-sweep` timer: a stale `review`-state Work Unit with an unreviewed deliverable goes straight to `done` + `resolution:swept-unreviewed`; everything else it acts on (an undelivered stale Work Unit, or an idle Outcome) is parked to `on_hold` first, reversibly, and only abandoned later if nobody reactivates it — never a `done` shortcut for an Outcome. See the Review sweep entry below and `semantic-conventions.md` §4.8.
 
 ---
 
@@ -37,6 +39,7 @@ Status transitions follow a state machine: `pending` -> `active` -> `review` -> 
 | **`/goal`** | Claude Code's built-in condition-based evaluation gate. A pass/fail predicate ("all tests pass"), NOT a focus declaration. Completely different concept. |
 | **Focus interval** | A time range during which an agent was focused on a specific WMS entity. Used by the cost allocator to attribute token spend. |
 | **Focus nudge** | When hookd detects an agent without a WMS focus, it injects an `additionalContext` reminder (up to 3 times) prompting the agent to call `wms_setFocus`. |
+| **Close-out readiness hint** | Not the focus nudge above — a different mechanism. A line appended to a WorkUnit status-change response when that change makes every sibling under its Outcome terminal (`done`/`abandoned`) and the Outcome is still open. Read-only, single-hop, permanent (see `semantic-conventions.md` §7.4). |
 
 ---
 
@@ -59,13 +62,27 @@ carries a `method` describing how it was derived:
 
 ## Sweep
 
-The `rollup --sweep` command chains all recovery passes into a single run
-(driven by the `teamster-rollup.timer` systemd timer). It runs entity hygiene
-(drain, reclassify), then the full attribution pipeline (allocate,
-recover-focus, recover-warmup, recover-gaps), then aggregation and
-reconciliation. A separate `teamster-sweep.timer` gates LLM-assisted synthesis
-(`claude --print /teamster:sweep`) on whether orphan sessions exist, skipping
-the LLM invocation when there is nothing to process.
+Three unrelated systemd-timer-driven jobs share the word "sweep" — they do
+not touch the same data and are not variants of each other:
+
+- **Cost-attribution sweep** (`rollup --sweep`, driven by
+  `teamster-rollup.timer`) chains all recovery passes into a single run: entity
+  hygiene (drain, reclassify), then the full attribution pipeline (allocate,
+  recover-focus, recover-warmup, recover-gaps), then aggregation and
+  reconciliation.
+- **LLM-assisted synthesis sweep** (`teamster-sweep.timer`, `claude --print
+  /teamster:sweep`) is gated on whether orphan sessions exist, skipping the
+  LLM invocation when there is nothing to process.
+- **Review sweep** (`teamster wms review-sweep`, driven by
+  `teamster-wms-review-sweep.timer`, nightly at 03:00) is a WMS *lifecycle-hygiene*
+  sweep, not a cost-attribution one: it parks a stale `review`-state Work Unit
+  or an idle Outcome to `on_hold` (Sweep Stage 1), then abandons only what it
+  itself parked if nobody reactivates it within a second, longer window
+  (Sweep Stage 2). Disabled by default (`ReviewSweep.Enabled=false`) and
+  dry-run by default even when enabled (`ReviewSweep.Confirm=false`) — see
+  `skel/doc/specs/architecture.md`'s Configuration table for every
+  `review-sweep:` key and `semantic-conventions.md` §4.8 for the full
+  disposition-rule table.
 
 ---
 

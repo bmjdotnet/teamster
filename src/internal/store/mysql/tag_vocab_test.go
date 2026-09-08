@@ -115,8 +115,11 @@ func TestV18_TagVocabPrune(t *testing.T) {
 	if got := cardOf("priority"); got != "single" {
 		t.Errorf("priority cardinality = %q, want single", got)
 	}
-	if got := cardOf("work-type"); got != "multi" {
-		t.Errorf("work-type cardinality = %q, want multi (default)", got)
+	// v18 leaves work-type at the multi default; v64 later fixes it to single
+	// (v27 covered phase/resolution/lifecycle but omitted work-type), so a
+	// fully migrated schema carries work-type as single.
+	if got := cardOf("work-type"); got != "single" {
+		t.Errorf("work-type cardinality = %q, want single (v64 worktype-cardinality-fix)", got)
 	}
 	// v18 leaves phase at the multi default; v27 later forces phase/resolution/
 	// lifecycle single, so a fully migrated schema carries phase as single.
@@ -177,20 +180,22 @@ func TestTagEntity_SingleValueReplace_CreateOnApply(t *testing.T) {
 	}
 }
 
-// Test #4: multi-value keys accumulate — the guard does not fire.
+// Test #4: multi-value keys accumulate — the guard does not fire. Uses "team"
+// (never forced single) rather than work-type, which v64
+// (worktype-cardinality-fix) made single-cardinality.
 func TestTagEntity_MultiValueCoexist(t *testing.T) {
 	s, oid := newTestStore(t)
 	ctx := context.Background()
 
-	if err := s.TagEntity(ctx, wms.EntityOutcome, oid, "work-type", "feature", "classifier", ""); err != nil {
-		t.Fatalf("tag feature: %v", err)
+	if err := s.TagEntity(ctx, wms.EntityOutcome, oid, "team", "alpha", "manual", ""); err != nil {
+		t.Fatalf("tag alpha: %v", err)
 	}
-	if err := s.TagEntity(ctx, wms.EntityOutcome, oid, "work-type", "experiment", "classifier", ""); err != nil {
-		t.Fatalf("tag experiment: %v", err)
+	if err := s.TagEntity(ctx, wms.EntityOutcome, oid, "team", "beta", "manual", ""); err != nil {
+		t.Fatalf("tag beta: %v", err)
 	}
-	got := boundValues(t, s, wms.EntityOutcome, oid, "work-type")
+	got := boundValues(t, s, wms.EntityOutcome, oid, "team")
 	if len(got) != 2 {
-		t.Errorf("work-type bindings = %v, want 2 values (multi-value coexist)", got)
+		t.Errorf("team bindings = %v, want 2 values (multi-value coexist)", got)
 	}
 }
 
@@ -350,15 +355,16 @@ func TestDefineTag_RefusesSystemKeys(t *testing.T) {
 	}); err == nil {
 		t.Errorf("DefineTag(work-type) should error — system-managed key")
 	}
-	// work-type:feature stays lifecycle + multi (not flipped to the spec's context/single).
+	// work-type:feature stays lifecycle + single (v64 worktype-cardinality-fix;
+	// not flipped to the spec's context/single by the refused DefineTag call).
 	var category, cardinality string
 	if err := s.db.QueryRowContext(ctx,
 		`SELECT category, cardinality FROM tags WHERE tag_key = 'work-type' AND tag_value = 'feature'`,
 	).Scan(&category, &cardinality); err != nil {
 		t.Fatalf("read work-type:feature: %v", err)
 	}
-	if category != "lifecycle" || cardinality != "multi" {
-		t.Errorf("work-type:feature = (%s,%s), want (lifecycle,multi) — refused DefineTag must not write", category, cardinality)
+	if category != "lifecycle" || cardinality != "single" {
+		t.Errorf("work-type:feature = (%s,%s), want (lifecycle,single) — refused DefineTag must not write", category, cardinality)
 	}
 }
 
@@ -370,20 +376,21 @@ func TestReconcileVocabulary_SkipsSystemKeyDrift(t *testing.T) {
 	ctx := context.Background()
 
 	if err := s.ReconcileVocabulary(ctx, []wms.TagSpec{
-		{Key: "work-type", Category: "context", Cardinality: "single"}, // drift attempt — must be skipped
-		{Key: "project", Category: "context", Cardinality: "single"},   // valid — must reconcile
+		{Key: "work-type", Category: "context", Cardinality: "multi"}, // drift attempt — must be skipped
+		{Key: "project", Category: "context", Cardinality: "single"},  // valid — must reconcile
 	}); err != nil {
 		t.Fatalf("reconcile (with skipped system key) should not error: %v", err)
 	}
-	// work-type unchanged.
+	// work-type unchanged: still lifecycle + single (v64 worktype-cardinality-fix),
+	// not flipped to the drifted spec's context/multi.
 	var category, cardinality string
 	if err := s.db.QueryRowContext(ctx,
 		`SELECT category, cardinality FROM tags WHERE tag_key = 'work-type' LIMIT 1`,
 	).Scan(&category, &cardinality); err != nil {
 		t.Fatalf("read work-type: %v", err)
 	}
-	if category != "lifecycle" || cardinality != "multi" {
-		t.Errorf("work-type = (%s,%s), want (lifecycle,multi) — drift must be skipped", category, cardinality)
+	if category != "lifecycle" || cardinality != "single" {
+		t.Errorf("work-type = (%s,%s), want (lifecycle,single) — drift must be skipped", category, cardinality)
 	}
 	// project reconciled (seeded single).
 	var pcard string

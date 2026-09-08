@@ -20,6 +20,7 @@ import (
 	"github.com/bmjdotnet/teamster/internal/config"
 	"github.com/bmjdotnet/teamster/internal/installbackup"
 	"github.com/bmjdotnet/teamster/internal/redact"
+	"github.com/bmjdotnet/teamster/internal/version"
 	"gopkg.in/yaml.v3"
 )
 
@@ -416,7 +417,7 @@ func run() error {
 	}
 
 	// 2. Copy runtime binaries (not teamster-install itself).
-	for _, b := range []string{"teamster", "hookd", "feed", "ctop", "activity-mcp", "wms-mcp", "roster-mcp", "health-mcp", "token-scraper", "codex-scraper", "rollup", "classify", "demogen", "relay", "backup", "health-collector"} {
+	for _, b := range []string{"teamster", "hookd", "feed", "ctop", "activity-mcp", "wms-mcp", "roster-mcp", "health-mcp", "token-scraper", "codex-scraper", "mcp-scraper", "rollup", "classify", "demogen", "relay", "backup", "health-collector"} {
 		src := filepath.Join(*buildDir, b)
 		dst := filepath.Join(*basedir, "bin", b)
 		if err := copyFile(src, dst, 0o755); err != nil {
@@ -475,9 +476,11 @@ func run() error {
 	}
 
 	// 3. Copy skel/ contents into basedir (lib/, doc/, etc/).
-	// Preserve user-customized files across upgrades: save before the
-	// blanket skel copy, restore after. Fresh installs (no prior file) get
-	// the skel version. Also write a .default alongside for diffing.
+	// CLAUDE.md is preserved across upgrades (save before the blanket skel
+	// copy, restore after); interceptors.yaml is NOT — it always takes the
+	// shipped default (see below), since a preserved copy silently falls
+	// behind newly-added MCP tool rules with no warning. Fresh installs (no
+	// prior file) get the skel version either way.
 	skelDir := filepath.Join(*repoDir, "skel")
 	claudeMDBasedir := filepath.Join(*basedir, "CLAUDE.md")
 	var priorClaudeMD []byte
@@ -510,18 +513,29 @@ func run() error {
 			dlog("INFO", "teamster-install.copytree", "preserved existing CLAUDE.md")
 		}
 	}
+	// copyTreeCounting already overwrote interceptorsPath with the shipped
+	// default — that's the desired end state, so it is NOT restored here.
+	// A prior file is instead backed up under a version-stamped name so an
+	// operator can recover any customizations.
 	if priorInterceptors != nil {
-		if err := os.WriteFile(interceptorsPath, priorInterceptors, 0o644); err != nil {
-			dlog("WARN", "teamster-install.copytree", "restore interceptors.yaml failed", "err", err.Error())
-		} else {
-			dlog("INFO", "teamster-install.copytree", "preserved existing interceptors.yaml")
+		// Worktree git-describe tags contain "/" which breaks the filename.
+		backupVersion := version.Version
+		if strings.Contains(backupVersion, "/") {
+			backupVersion = "v" + version.Commit
 		}
-		if skelData, err := os.ReadFile(filepath.Join(skelDir, "etc", "interceptors.yaml")); err == nil {
-			if err := os.WriteFile(interceptorsPath+".default", skelData, 0o644); err != nil {
-				dlog("WARN", "teamster-install.copytree", "write interceptors.yaml.default failed", "err", err.Error())
-			}
+		backupPath := filepath.Join(*basedir, "etc", fmt.Sprintf("interceptors-%s.yaml.bak", backupVersion))
+		if err := os.WriteFile(backupPath, priorInterceptors, 0o644); err != nil {
+			dlog("WARN", "teamster-install.copytree", "backup interceptors.yaml failed", "err", err.Error())
+		} else {
+			dlog("INFO", "teamster-install.copytree", fmt.Sprintf("backed up existing interceptors.yaml to %s", filepath.Base(backupPath)))
 		}
 	}
+	if skelData, err := os.ReadFile(filepath.Join(skelDir, "etc", "interceptors.yaml")); err == nil {
+		if err := os.WriteFile(interceptorsPath+".default", skelData, 0o644); err != nil {
+			dlog("WARN", "teamster-install.copytree", "write interceptors.yaml.default failed", "err", err.Error())
+		}
+	}
+	dlog("INFO", "teamster-install.copytree", "interceptors.yaml updated to shipped default")
 
 	// 3b. Prune orphan dashboard JSONs. copyTreeCounting copies skel over the top
 	// of BASEDIR but never removes BASEDIR files that skel no longer ships, so a
@@ -752,6 +766,36 @@ func run() error {
 		}
 	}
 
+	// 5c3. Materialize the mcp-scraper service + timer (MCP tool-call telemetry
+	// tailer — reads events.jsonl, ledgers completed mcp__* calls into
+	// claude_telemetry.mcp_tool_calls; see WP11-TAILER-DESIGN.md §3). Needs
+	// the store DSN like classify/rollup — it connects directly to the
+	// sibling claude_telemetry database, not via hookd. Config-gated at
+	// run/enable time only (mcp-scraper.enabled in teamster.yaml,
+	// WP11-TAILER-DESIGN.md §7): materializing here does NOT enable it —
+	// lib/installrunner.sh's own block (a separate file, out of this
+	// stanza's scope) decides that.
+	mcpScraperSvcTmpl := filepath.Join(*basedir, "etc", "teamster-mcp-scraper.service.tmpl")
+	mcpScraperSvcOut := filepath.Join(*basedir, "etc", "teamster-mcp-scraper.service")
+	if data, err := os.ReadFile(mcpScraperSvcTmpl); err == nil {
+		user := currentUsername()
+		m := strings.ReplaceAll(string(data), "__BASEDIR__", *basedir)
+		m = strings.ReplaceAll(m, "__USER__", user)
+		if effectiveDSN != "" {
+			m = strings.TrimRight(m, "\n") + "\n" + dsnEnvLine(secretsPath)
+		}
+		if werr := os.WriteFile(mcpScraperSvcOut, []byte(m), 0o644); werr != nil {
+			fmt.Fprintf(os.Stderr, "warning: writing mcp-scraper service unit: %v\n", werr)
+		}
+	}
+	mcpScraperTimerTmpl := filepath.Join(*basedir, "etc", "teamster-mcp-scraper.timer.tmpl")
+	mcpScraperTimerOut := filepath.Join(*basedir, "etc", "teamster-mcp-scraper.timer")
+	if data, err := os.ReadFile(mcpScraperTimerTmpl); err == nil {
+		if werr := os.WriteFile(mcpScraperTimerOut, data, 0o644); werr != nil {
+			fmt.Fprintf(os.Stderr, "warning: writing mcp-scraper timer unit: %v\n", werr)
+		}
+	}
+
 	// 5d. Materialize the sweep service + timer (deep-clean attribution
 	// pipeline). Like rollup it needs the store DSN.
 	// Both are written inside basedir/etc/; install.sh syncs them into
@@ -775,6 +819,40 @@ func run() error {
 	if data, err := os.ReadFile(sweepTimerTmpl); err == nil {
 		if werr := os.WriteFile(sweepTimerOut, data, 0o644); werr != nil {
 			fmt.Fprintf(os.Stderr, "warning: writing sweep timer unit: %v\n", werr)
+		}
+	}
+
+	// 5d2. Materialize the WMS review-sweep service + timer (nightly proactive
+	// review: parks stale review WorkUnits/Outcomes to on_hold, abandons
+	// sweep-parked entities past the rescue window). Needs the store DSN like
+	// rollup/classify — it connects directly, not via hookd's hook-event
+	// pipeline. Config-gated (ReviewSweep.Enabled, read at run time from
+	// teamster.yaml, Operator Decision 4): materializing the unit here does
+	// NOT enable it — WP3-DESIGN.md §9 flags the actual `systemctl enable
+	// --now` gate as a lib/installrunner.sh addition (mirroring its existing
+	// sweep-timer block, with a ReviewSweep.Enabled check added before the
+	// enable line), which is a separate file from this one and out of this
+	// change's file grant — materializing here is a necessary but not
+	// sufficient step; the timer is not actually installed/enabled until
+	// that installrunner.sh addition lands.
+	reviewSweepSvcTmpl := filepath.Join(*basedir, "etc", "teamster-wms-review-sweep.service.tmpl")
+	reviewSweepSvcOut := filepath.Join(*basedir, "etc", "teamster-wms-review-sweep.service")
+	if data, err := os.ReadFile(reviewSweepSvcTmpl); err == nil {
+		user := currentUsername()
+		m := strings.ReplaceAll(string(data), "__BASEDIR__", *basedir)
+		m = strings.ReplaceAll(m, "__USER__", user)
+		if effectiveDSN != "" {
+			m = strings.TrimRight(m, "\n") + "\n" + dsnEnvLine(secretsPath)
+		}
+		if werr := os.WriteFile(reviewSweepSvcOut, []byte(m), 0o644); werr != nil {
+			fmt.Fprintf(os.Stderr, "warning: writing wms-review-sweep service unit: %v\n", werr)
+		}
+	}
+	reviewSweepTimerTmpl := filepath.Join(*basedir, "etc", "teamster-wms-review-sweep.timer.tmpl")
+	reviewSweepTimerOut := filepath.Join(*basedir, "etc", "teamster-wms-review-sweep.timer")
+	if data, err := os.ReadFile(reviewSweepTimerTmpl); err == nil {
+		if werr := os.WriteFile(reviewSweepTimerOut, data, 0o644); werr != nil {
+			fmt.Fprintf(os.Stderr, "warning: writing wms-review-sweep timer unit: %v\n", werr)
 		}
 	}
 
@@ -858,6 +936,30 @@ func run() error {
 		m = strings.ReplaceAll(m, "__USER__", user)
 		if werr := os.WriteFile(tokenScraperSvcOut, []byte(m), 0o644); werr != nil {
 			fmt.Fprintf(os.Stderr, "warning: writing token-scraper service unit: %v\n", werr)
+		}
+	}
+
+	// 5i. Materialize the otelcol/prometheus/grafana supervisor-group services
+	// (wh2-supervisor-systemd-units — reboot survival for the group that
+	// previously had no systemd unit at all). Each unit's ExecStart runs
+	// `teamster start --exec=<name>`, an exec-wrapper that loads config,
+	// renders it, and syscall.Execs the real binary in place — so, unlike
+	// hookd's own unit, no port/retention/etc. values are baked in here at
+	// all: every component-specific value is computed fresh in Go at exec
+	// time, from the same cfg this installer itself reads. Materialisation
+	// here is therefore just __BASEDIR__/__USER__, identical in shape for all
+	// three, and unconditional like every other unit — lib/installrunner.sh
+	// decides whether to install/enable, mask-aware, per unit_is_masked.
+	for _, name := range []string{"otelcol", "prometheus", "grafana"} {
+		svcTmpl := filepath.Join(*basedir, "etc", "teamster-"+name+".service.tmpl")
+		svcOut := filepath.Join(*basedir, "etc", "teamster-"+name+".service")
+		if data, err := os.ReadFile(svcTmpl); err == nil {
+			user := currentUsername()
+			m := strings.ReplaceAll(string(data), "__BASEDIR__", *basedir)
+			m = strings.ReplaceAll(m, "__USER__", user)
+			if werr := os.WriteFile(svcOut, []byte(m), 0o644); werr != nil {
+				fmt.Fprintf(os.Stderr, "warning: writing %s service unit: %v\n", name, werr)
+			}
 		}
 	}
 

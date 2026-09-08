@@ -80,6 +80,15 @@ func usageSummary(usage map[string]interface{}) string {
 
 // SessionLabel returns the display label and its color for the session column.
 // If a team is mapped for the session, uses "#team" with session-salted color.
+//
+// Known-remaining inconsistency (issue #20, not fixed by this convention pass):
+// this salts on the "#"-prefixed label with the session id, while every ctop
+// team-coloring site agrees on a different convention — un-prefixed team name,
+// empty salt (agents.go's teamTintRGB and renderRow's "#team" branch,
+// fleet_view.go's fleetHeaderTintRGB and renderTeamHeaderRow). This file is
+// the lone outlier, not one side of a tie. The conventions were left to
+// diverge deliberately rather than papered over — reconciling them is out of
+// scope for this pass since it needs its own call on which one is "correct".
 func SessionLabel(r Record, teamFor func(string) string) (label string, color [3]int) {
 	if team := teamFor(r.Session); team != "" {
 		label = "#" + team
