@@ -3,7 +3,7 @@
 All notable changes to Teamster are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
-## v0.3.0 (unreleased)
+## v0.3.0 (2026-09-08)
 
 ### Added
 - **`teamster clone`.** `teamster clone <user>@<host>` stands up a disposable Teamster instance on a remote host — same commit, copy of the same data — without touching the source. See [docs/clone.md](docs/clone.md).
