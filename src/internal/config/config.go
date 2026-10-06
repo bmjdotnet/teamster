@@ -34,9 +34,10 @@ type StoreDSN struct {
 // Config holds all runtime configuration for Teamster components.
 type Config struct {
 	// Hook server settings
-	HookServerURL  string
-	HookServerPort int
-	HookServerBind string
+	HookServerURL     string
+	HookServerPort    int
+	HealthMetricsPort int
+	HookServerBind    string
 
 	// Data storage paths
 	DataDir    string
@@ -255,6 +256,7 @@ func Default() Config {
 	return Config{
 		HookServerURL:        fmt.Sprintf("http://%s:9125/event", host),
 		HookServerPort:       9125,
+		HealthMetricsPort:    9126,
 		HookServerBind:       "0.0.0.0",
 		DataDir:              dataDir,
 		LogFile:              filepath.Join(dataDir, "events.jsonl"),

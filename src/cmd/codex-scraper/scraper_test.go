@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,6 +12,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/bmjdotnet/teamster/internal/pricing"
 	"github.com/bmjdotnet/teamster/internal/store"
 )
 
@@ -35,13 +38,15 @@ func (c *captureServer) handler(w http.ResponseWriter, r *http.Request) {
 // fakeUpserter records every UpsertSession call so a test can assert the
 // tailer's session-ownership behavior without a real store connection.
 type fakeUpserter struct {
-	mu    sync.Mutex
-	calls []store.Session
+	mu     sync.Mutex
+	calls  []store.Session
+	idents []sessionIdentity
 }
 
-func (f *fakeUpserter) UpsertSession(_ context.Context, s store.Session) error {
+func (f *fakeUpserter) UpsertSession(_ context.Context, s store.Session, ident sessionIdentity) error {
 	f.mu.Lock()
 	f.calls = append(f.calls, s)
+	f.idents = append(f.idents, ident)
 	f.mu.Unlock()
 	return nil
 }
@@ -54,6 +59,7 @@ func newTestScraper(t *testing.T) (*scraper, *captureServer, *fakeUpserter) {
 	up := &fakeUpserter{}
 	return &scraper{
 		client:       ts.Client(),
+		resolver:     pricing.NewResolver(nil),
 		telemetryURL: ts.URL,
 		host:         "testhost",
 		username:     "testuser",
@@ -208,8 +214,8 @@ func TestProcessFile_SubagentThreadBooksUnderParentSession(t *testing.T) {
 	if row.MessageID != "codex:"+threadID+":000000" {
 		t.Errorf("MessageID = %q, want keyed by thread id %q, not the parent session id", row.MessageID, threadID)
 	}
-	if row.AgentName != "@explorer" {
-		t.Errorf("AgentName = %q, want \"@explorer\" (role-based, matching wms-mcp's existing focus-interval identity) — NOT \"@Mencius\" (nickname)", row.AgentName)
+	if row.AgentName != "@Mencius" {
+		t.Errorf("AgentName = %q, want \"@Mencius\" (nickname-first per DESIGN D2) — NOT \"@explorer\" (role)", row.AgentName)
 	}
 
 	if len(up.calls) != 1 {
@@ -219,8 +225,8 @@ func TestProcessFile_SubagentThreadBooksUnderParentSession(t *testing.T) {
 	if sess.SessionID != parentID {
 		t.Errorf("session upsert SessionID = %q, want parent id %q", sess.SessionID, parentID)
 	}
-	if sess.AgentName != "@explorer" {
-		t.Errorf("session upsert AgentName = %q, want \"@explorer\"", sess.AgentName)
+	if sess.AgentName != "@Mencius" {
+		t.Errorf("session upsert AgentName = %q, want \"@Mencius\"", sess.AgentName)
 	}
 }
 
@@ -266,7 +272,7 @@ func TestProcessFile_PreThreadSpawnSessionMetaFallsBackToID(t *testing.T) {
 // seq-0 row and the subagent's seq-0 row would both produce
 // "codex:<parentID>:000000" and the DB's uq_message upsert would silently
 // swallow one of them. Also asserts exactly one sessions row is upserted for
-// the parent (agent_name="") and one for the subagent (agent_name="@worker") —
+// the parent (agent_name="") and one for the subagent (agent_name="@Dirac") —
 // same SessionID, different AgentName, matching the Claude Code Agent Teams
 // sessions convention (one row per (session_id, agent_name) pair).
 func TestProcessFile_ParentAndSubagentNoMessageIDCollision(t *testing.T) {
@@ -320,8 +326,8 @@ func TestProcessFile_ParentAndSubagentNoMessageIDCollision(t *testing.T) {
 	if s, ok := byAgent[""]; !ok || s.SessionID != parentID {
 		t.Errorf("missing/wrong parent session upsert (agent_name=\"\"): %+v", byAgent[""])
 	}
-	if s, ok := byAgent["@worker"]; !ok || s.SessionID != parentID {
-		t.Errorf("missing/wrong subagent session upsert (agent_name=\"@worker\"): %+v", byAgent["@worker"])
+	if s, ok := byAgent["@Dirac"]; !ok || s.SessionID != parentID {
+		t.Errorf("missing/wrong subagent session upsert (agent_name=\"@Dirac\"): %+v", byAgent["@Dirac"])
 	}
 }
 
@@ -389,6 +395,192 @@ func TestProcessLine_IgnoresCodexAutoReviewModelSentinel(t *testing.T) {
 	for i, row := range cap.rows {
 		if row.Model != "gpt-5.5" {
 			t.Errorf("row %d: model = %q, want gpt-5.5 (codex-auto-review sentinel must not overwrite it)", i, row.Model)
+		}
+	}
+}
+
+// TestProcessFile_TokenUsageRecordFixture runs a sanitized rollout shaped like
+// a live Codex 0.159.3 file (real token figures for its first three
+// responses): every response emits a top-level token_usage_record AND a legacy
+// event_msg:token_count with identical usage. Exactly one ledger row per
+// response must result (not two), priced through the gpt-6-luna entry —
+// before this fix the model priced at $0 and the records were ignored.
+func TestProcessFile_TokenUsageRecordFixture(t *testing.T) {
+	s, cap, up := newTestScraper(t)
+	path, err := filepath.Abs("testdata/codex-0.159.3-token-usage-record.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.processFile(context.Background(), path); err != nil {
+		t.Fatalf("processFile: %v", err)
+	}
+
+	const threadID = "019f0000-0000-7000-8000-000000159a30"
+	// Raw usage (input, cached, output) per response; cost at gpt-6-luna's
+	// $0.10 / $0.01 cached / $0.50 per Mtok.
+	wants := []struct {
+		input, cacheRead, output int64
+		cost                     float64
+	}{
+		{20389 - 11008, 11008, 166, 9381*1e-7 + 166*5e-7 + 11008*1e-8},
+		{23731 - 20224, 20224, 73, 3507*1e-7 + 73*5e-7 + 20224*1e-8},
+		{27227 - 23296, 23296, 79, 3931*1e-7 + 79*5e-7 + 23296*1e-8},
+	}
+	if len(cap.rows) != len(wants) {
+		t.Fatalf("expected %d rows (one per response, record+token_count pair must not double), got %d: %+v",
+			len(wants), len(cap.rows), cap.rows)
+	}
+	for i, row := range cap.rows {
+		w := wants[i]
+		if row.MessageID != fmt.Sprintf("codex:%s:%06d", threadID, i) {
+			t.Errorf("row %d: message_id = %q, want contiguous seq keyed by thread id", i, row.MessageID)
+		}
+		if row.Model != "gpt-6-luna" || row.Runtime != "codex" {
+			t.Errorf("row %d: model/runtime = %q/%q, want gpt-6-luna/codex", i, row.Model, row.Runtime)
+		}
+		if row.InputTokens != w.input || row.CacheReadTokens != w.cacheRead || row.OutputTokens != w.output {
+			t.Errorf("row %d: got input=%d cache_read=%d output=%d, want %d/%d/%d",
+				i, row.InputTokens, row.CacheReadTokens, row.OutputTokens, w.input, w.cacheRead, w.output)
+		}
+		if row.CostUSD == 0 {
+			t.Errorf("row %d: cost_usd = 0, gpt-6-luna must be priced", i)
+		}
+		if math.Abs(row.CostUSD-w.cost) > 1e-9 {
+			t.Errorf("row %d: cost_usd = %.9f, want %.9f", i, row.CostUSD, w.cost)
+		}
+	}
+	if len(up.calls) != 1 || up.calls[0].Model != "gpt-6-luna" || up.calls[0].CliVersion != "0.159.3" {
+		t.Errorf("session upsert = %+v, want one call with model gpt-6-luna, cli_version 0.159.3", up.calls)
+	}
+}
+
+// TestProcessFile_TokenUsageRecordWithoutLegacy covers the anticipated future
+// where Codex drops the legacy token_count: token_usage_record alone must
+// still ledger one row per response.
+func TestProcessFile_TokenUsageRecordWithoutLegacy(t *testing.T) {
+	s, cap, _ := newTestScraper(t)
+	path := filepath.Join(t.TempDir(), "rollout-record-only.jsonl")
+	writeLines(t, path, []string{
+		sessionMetaLine("sess-record-only", "/tmp", "codex_exec", "0.159.3"),
+		turnContextLine("gpt-6-luna"),
+		tokenUsageRecordLine(100, 10, 40, 5),
+		tokenUsageRecordLine(200, 20, 80, 0),
+	})
+	if err := s.processFile(context.Background(), path); err != nil {
+		t.Fatalf("processFile: %v", err)
+	}
+	if len(cap.rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d: %+v", len(cap.rows), cap.rows)
+	}
+	if cap.rows[0].InputTokens != 60 || cap.rows[0].CacheReadTokens != 40 || cap.rows[0].OutputTokens != 10 ||
+		cap.rows[0].ReasoningOutputTokens != 5 {
+		t.Errorf("row 0 = %+v, want input=60 cache_read=40 output=10 reasoning=5 (same subset semantics as token_count)", cap.rows[0])
+	}
+}
+
+// TestProcessFile_EmptyUsageRecordDoesNotSuppressTokenCount mirrors the Python
+// test_record_without_usage_is_skipped: a token_usage_record with an empty
+// payload must not set SeenUsageRecord (which would permanently suppress all
+// subsequent token_count events from this file).
+func TestProcessFile_EmptyUsageRecordDoesNotSuppressTokenCount(t *testing.T) {
+	s, cap, _ := newTestScraper(t)
+	path := filepath.Join(t.TempDir(), "rollout-empty-record.jsonl")
+
+	emptyRecord, _ := json.Marshal(map[string]any{
+		"timestamp": "2026-10-01T19:47:36.748Z",
+		"type":      "token_usage_record",
+		"payload":   map[string]any{},
+	})
+	writeLines(t, path, []string{
+		sessionMetaLine("sess-empty-record", "/tmp", "codex_exec", "0.159.3"),
+		turnContextLine("gpt-6-luna"),
+		string(emptyRecord),
+		tokenCountLine(100, 10, 0, 0),
+	})
+	if err := s.processFile(context.Background(), path); err != nil {
+		t.Fatalf("processFile: %v", err)
+	}
+	if len(cap.rows) != 1 {
+		t.Fatalf("expected 1 row (empty record skipped, token_count not suppressed), got %d", len(cap.rows))
+	}
+	cursor := s.cursors[path]
+	if cursor.SeenUsageRecord {
+		t.Error("SeenUsageRecord should be false after an empty record")
+	}
+}
+
+// TestProcessFile_UsageRecordDedupSurvivesRestart pins the reason
+// SeenUsageRecord is persisted: codex-scraper is a oneshot timer, so a poll
+// boundary can fall between a record and its paired token_count. The cursor
+// is round-tripped through its on-disk JSON between passes, exactly as two
+// separate invocations would; a transient flag would let the first pass's
+// orphaned token_count through as a duplicate row.
+func TestProcessFile_UsageRecordDedupSurvivesRestart(t *testing.T) {
+	s, cap, _ := newTestScraper(t)
+	dir := t.TempDir()
+	s.cursorPath = filepath.Join(dir, "cursors.json")
+	path := filepath.Join(dir, "rollout-restart.jsonl")
+
+	head := []string{
+		sessionMetaLine("sess-restart", "/tmp", "codex-tui", "0.159.3"),
+		turnContextLine("gpt-6-luna"),
+		tokenUsageRecordLine(100, 10, 0, 0), // poll boundary falls here: its token_count has not been written yet
+	}
+	writeLines(t, path, head)
+	if err := s.processFile(context.Background(), path); err != nil {
+		t.Fatalf("first pass: %v", err)
+	}
+	if err := s.saveCursors(); err != nil {
+		t.Fatal(err)
+	}
+	s.cursors = make(map[string]*cursorEntry)
+	if err := s.loadCursors(); err != nil {
+		t.Fatal(err)
+	}
+
+	writeLines(t, path, append(head,
+		tokenCountLine(100, 10, 0, 0),
+		tokenUsageRecordLine(200, 20, 0, 0),
+		tokenCountLine(200, 20, 0, 0),
+	))
+	if err := s.processFile(context.Background(), path); err != nil {
+		t.Fatalf("second pass: %v", err)
+	}
+	if len(cap.rows) != 2 {
+		t.Fatalf("expected 2 rows across the restart (one per response), got %d: %+v", len(cap.rows), cap.rows)
+	}
+}
+
+// TestProcessFile_ResumedAcrossCodexUpgrade covers a rollout file started on a
+// pre-record Codex (legacy token_count only) and resumed on 0.159.x, which
+// appends record+token_count pairs to the same file. Legacy-only history is
+// ledgered from token_count; once records begin, they take over and their
+// twin token_counts are skipped — one row per response, contiguous seq.
+func TestProcessFile_ResumedAcrossCodexUpgrade(t *testing.T) {
+	s, cap, _ := newTestScraper(t)
+	path := filepath.Join(t.TempDir(), "rollout-upgrade.jsonl")
+	writeLines(t, path, []string{
+		sessionMetaLine("sess-upgrade", "/tmp", "codex_exec", "0.142.5"),
+		turnContextLine("gpt-5.5"),
+		tokenCountLine(100, 10, 0, 0), // legacy-only era
+		turnContextLine("gpt-6-luna"),
+		tokenUsageRecordLine(200, 20, 0, 0),
+		tokenCountLine(200, 20, 0, 0), // twin: skipped
+		tokenUsageRecordLine(300, 30, 0, 0),
+		tokenCountLine(300, 30, 0, 0), // twin: skipped
+	})
+	if err := s.processFile(context.Background(), path); err != nil {
+		t.Fatalf("processFile: %v", err)
+	}
+	if len(cap.rows) != 3 {
+		t.Fatalf("expected 3 rows (1 legacy + 2 records), got %d: %+v", len(cap.rows), cap.rows)
+	}
+	for i, wantOut := range []int64{10, 20, 30} {
+		if cap.rows[i].OutputTokens != wantOut {
+			t.Errorf("row %d: output = %d, want %d", i, cap.rows[i].OutputTokens, wantOut)
+		}
+		if cap.rows[i].MessageID != fmt.Sprintf("codex:sess-upgrade:%06d", i) {
+			t.Errorf("row %d: message_id = %q, want contiguous seq", i, cap.rows[i].MessageID)
 		}
 	}
 }
@@ -624,6 +816,29 @@ func turnContextLine(model string) string {
 		"type":      "turn_context",
 		"payload": map[string]any{
 			"model": model,
+		},
+	})
+	return string(b)
+}
+
+// tokenUsageRecordLine builds a synthetic top-level token_usage_record line
+// (Codex 0.159.x+) with the same subset semantics as tokenCountLine.
+func tokenUsageRecordLine(input, output, cachedInput, reasoningOutput int64) string {
+	usage := func(mult int64) map[string]any {
+		return map[string]any{
+			"input_tokens": input * mult, "output_tokens": output * mult,
+			"cached_input_tokens": cachedInput * mult, "reasoning_output_tokens": reasoningOutput * mult,
+			"cache_write_input_tokens": 0,
+			"total_tokens":             (input + output) * mult,
+		}
+	}
+	b, _ := json.Marshal(map[string]any{
+		"timestamp": "2026-10-01T00:00:02.000Z",
+		"type":      "token_usage_record",
+		"payload": map[string]any{
+			"usage":              usage(1),
+			"turn_token_usage":   usage(100), // cumulative views, always ignored by the tailer
+			"thread_token_usage": usage(100),
 		},
 	})
 	return string(b)

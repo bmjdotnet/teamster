@@ -1,0 +1,13 @@
+[Unit]
+Description=Teamster Codex context subscriber (Codex app-server context fill to hookd /context)
+After=network.target teamster-hookd.service
+
+[Service]
+Type=simple
+User=__USER__
+ExecStart=/usr/bin/env python3 __BASEDIR__/lib/scripts/codex-context-subscriber.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

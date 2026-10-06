@@ -616,3 +616,45 @@ func TestCloseIntervalsForStaleSessions(t *testing.T) {
 		}
 	})
 }
+
+func TestUpsertSessionRetainsWMSAndTeamOnEmpty(t *testing.T) {
+	run(t, func(t *testing.T, s store.Store) {
+		ctx := context.Background()
+		key := store.SessionKey{SessionID: "S-keep", AgentName: "@scout"}
+		first := store.Session{
+			SessionID: key.SessionID, AgentName: key.AgentName, Host: "h",
+			TeamName: "T", ProjectID: "P", GoalID: "G", TaskID: "K", WorkitemID: "W", Focus: "F",
+		}
+		if err := s.UpsertSession(ctx, first); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.UpsertSession(ctx, store.Session{SessionID: key.SessionID, AgentName: key.AgentName, Host: "h"}); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.GetSession(ctx, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.TeamName != "T" || got.ProjectID != "P" || got.GoalID != "G" ||
+			got.TaskID != "K" || got.WorkitemID != "W" || got.Focus != "F" {
+			t.Fatalf("empty upsert clobbered fields: %+v", got)
+		}
+		if err := s.UpsertSession(ctx, store.Session{SessionID: key.SessionID, AgentName: key.AgentName, Host: "h", TeamName: "T2"}); err != nil {
+			t.Fatal(err)
+		}
+		got, err = s.GetSession(ctx, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.TeamName != "T2" || got.Focus != "F" {
+			t.Fatalf("non-empty upsert: team=%q focus=%q, want T2/F", got.TeamName, got.Focus)
+		}
+		if err := s.SetSessionTeam(ctx, key.SessionID, ""); err != nil {
+			t.Fatal(err)
+		}
+		got, _ = s.GetSession(ctx, key)
+		if got.TeamName != "" {
+			t.Fatalf("SetSessionTeam(\"\") did not clear: %q", got.TeamName)
+		}
+	})
+}

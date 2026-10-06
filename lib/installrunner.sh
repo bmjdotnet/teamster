@@ -1982,6 +1982,26 @@ if [[ "$WIRE" -eq 1 ]] && [[ "$HOOKD_READ_ONLY" -eq 0 ]] && [[ "$HOOKD_MODE" != 
     fi
 fi
 
+# Sync the codex-context-subscriber service (Codex app-server listener that
+# reports per-thread context-window fill to hookd's /context) into systemd and
+# enable it. Type=simple daemon (no timer): enable --now starts it directly,
+# same shape as token-scraper. Graceful on a host with no Codex daemon: it
+# backs off until the control socket appears.
+if [[ "$WIRE" -eq 1 ]] && [[ "$HOOKD_READ_ONLY" -eq 0 ]] && [[ "$HOOKD_MODE" != "supervisor" ]] && [[ "$HOOKD_MODE" != "external" ]] && [[ "$CODEX_MODE" != "none" ]] && command -v systemctl &>/dev/null; then
+    CODEX_CTX_SVC_SRC="$BASEDIR/etc/teamster-codex-context-subscriber.service"
+    if [[ -f "$CODEX_CTX_SVC_SRC" ]]; then
+        if unit_is_masked teamster-codex-context-subscriber.service; then
+            masked_unit_notice install.codex-context-subscriber teamster-codex-context-subscriber.service
+        else
+            install_and_enable_unit install.codex-context-subscriber "--- Syncing codex-context-subscriber service ---" \
+                teamster-codex-context-subscriber.service 1 "enabled + started teamster-codex-context-subscriber.service" \
+                "$CODEX_CTX_SVC_SRC"
+        fi
+    else
+        dlog WARN install.codex-context-subscriber "src unit not present" "svc=$CODEX_CTX_SVC_SRC"
+    fi
+fi
+
 # Sync the sweep service + timer (deep-clean attribution pipeline) into
 # systemd and enable the timer. Same guards as the rollup unit: only when wiring
 # locally-managed systemd. The service is Type=oneshot driven by the timer.
@@ -2466,6 +2486,15 @@ if systemctl is-active --quiet teamster-token-scraper 2>/dev/null; then
     sudo systemctl restart teamster-token-scraper 2>/dev/null \
         && echo "    restarted teamster-token-scraper.service" \
         || printf -- "${C_YELLOW}    WARN: could not restart teamster-token-scraper.service${C_RESET}\n"
+fi
+
+# Restart codex-context-subscriber if it's running under systemd — the script
+# on disk was just replaced and enable --now does not restart a running unit.
+if systemctl is-active --quiet teamster-codex-context-subscriber 2>/dev/null; then
+    printf -- "${C_BOLD_CYAN}--- Restarting codex-context-subscriber ---${C_RESET}\n"
+    sudo systemctl restart teamster-codex-context-subscriber 2>/dev/null \
+        && echo "    restarted teamster-codex-context-subscriber.service" \
+        || printf -- "${C_YELLOW}    WARN: could not restart teamster-codex-context-subscriber.service${C_RESET}\n"
 fi
 
 # Run MySQL migrations when store backend is MySQL or dual+MySQL.

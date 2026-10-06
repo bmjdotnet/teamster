@@ -38,6 +38,18 @@ Note: CC currently blocks `name` from teammate-spawned agents; hookd
 auto-numbers same-type siblings (`@Explore`, `@Explore-2`, etc.) to ensure
 unique identities regardless.
 
+Always pass a meaningful `description` on every Agent tool call — hookd
+stores it on the roster (health API `description`), and ctop shows it as a
+dim label after the name on subagent rows (Agent-tool spawns — not
+Agent-Teams teammates, which have their own names):
+`@Explore-4  Scout macOS identity pipeline`. For sub-subagents, which cannot
+be named, it is the operator's only label for what the child is doing.
+
+```
+WRONG:  Agent(description="task")             → @Explore-2  task
+RIGHT:  Agent(description="Scout hook parser") → @Explore-2  Scout hook parser
+```
+
 **III. Thou shalt route work by affinity.**
 
 Ask: "which agent already touched these files?" Send the task to that agent via

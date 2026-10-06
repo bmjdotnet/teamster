@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/bmjdotnet/teamster/internal/agenthealth/gauge"
+	"github.com/bmjdotnet/teamster/internal/store"
 )
 
 // longContextThreshold is the boundary above which a statusLine-reported
@@ -49,6 +50,11 @@ type contextReportRequest struct {
 	// status (subagent). Rendered by dashboards when present, same as
 	// composition_json/tool_call_counts_json.
 	StatuslineJSON string `json:"statusline_json"`
+	// Runtime and ContextSource are set only by non-Claude reporters (the
+	// Codex context subscriber). Absent on a Claude statusline post, which
+	// then means runtime "claude_code" / source "statusline".
+	Runtime       string `json:"runtime"`
+	ContextSource string `json:"context_source"`
 }
 
 // handleContextReport accepts POST /context: an authoritative, Claude-Code-
@@ -94,6 +100,37 @@ func (s *Server) handleContextReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	switch req.Runtime {
+	case "", store.RateRuntimeClaudeCode, store.RateRuntimeCodex:
+	default:
+		http.Error(w, "unknown runtime", http.StatusBadRequest)
+		return
+	}
+	switch req.ContextSource {
+	case "", gauge.ContextSourceStatusline, gauge.ContextSourceCodexAppserver:
+	default:
+		http.Error(w, "unknown context_source", http.StatusBadRequest)
+		return
+	}
+	isCodex := req.Runtime == store.RateRuntimeCodex
+	if isCodex != (req.ContextSource == gauge.ContextSourceCodexAppserver) {
+		http.Error(w, "runtime codex and context_source codex_appserver must be set together", http.StatusBadRequest)
+		return
+	}
+	// Window sanity and percentage clamping apply only to codex reports; the
+	// Claude statusline path is unchanged.
+	if isCodex {
+		if req.ContextWindowSize <= 0 {
+			http.Error(w, "invalid context window", http.StatusBadRequest)
+			return
+		}
+		if req.UsedPercentage < 0 {
+			req.UsedPercentage = 0
+		} else if req.UsedPercentage > 100 {
+			req.UsedPercentage = 100
+		}
+	}
+
 	ctx := context.Background()
 	key := gauge.GaugeKey{Host: shortHostname(req.Host), SessionID: req.SessionID, AgentName: req.AgentName}
 
@@ -109,12 +146,18 @@ func (s *Server) handleContextReport(w http.ResponseWriter, r *http.Request) {
 		// model/tokens_in_total/tokens_out_total/pressure_level on its next
 		// tick, preserving whatever context fields we set below since it
 		// checks context_source before recomputing the heuristic.
+		runtime := req.Runtime
+		if runtime == "" {
+			runtime = store.RateRuntimeClaudeCode
+		}
 		row = gauge.GaugeRow{
 			Host:      req.Host,
 			SessionID: req.SessionID,
 			AgentName: req.AgentName,
-			Runtime:   "claude_code",
+			Runtime:   runtime,
 		}
+	} else if req.Runtime != "" {
+		row.Runtime = req.Runtime
 	}
 
 	contextUsed := req.TotalInputTokens
@@ -127,8 +170,11 @@ func (s *Server) handleContextReport(w http.ResponseWriter, r *http.Request) {
 	row.ContextTokensUsed = contextUsed
 	row.ContextTokensFree = free
 	row.ContextFillPct = req.UsedPercentage / 100.0
-	row.LongContextActive = req.ContextWindowSize > longContextThreshold
+	row.LongContextActive = !isCodex && req.ContextWindowSize > longContextThreshold
 	row.ContextSource = gauge.ContextSourceStatusline
+	if req.ContextSource != "" {
+		row.ContextSource = req.ContextSource
+	}
 	now := time.Now().UTC()
 	row.ContextReportedAt = &now
 	if req.Model != "" {

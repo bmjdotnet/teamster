@@ -44,6 +44,7 @@ type TelemetryRow struct {
 	// ReasoningOutputTokens is Codex-only (OpenAI's reasoning token count).
 	Runtime               string `json:"runtime"`
 	ReasoningOutputTokens int64  `json:"reasoning_output_tokens"`
+	RateID                int64  `json:"rate_id,omitempty"`
 }
 
 // telemetryQueue holds the channel and fallback path for the telemetry writer.
@@ -187,8 +188,8 @@ func (s *Server) resolveAgentForTelemetry(sessionID string) string {
 
 // telemetryColumnsPerRow is the placeholder count of one VALUES group below.
 // MySQL caps a prepared statement at 65535 placeholders; maxTelemetryRowsPerInsert
-// keeps every chunk well under that ceiling (1000*21 = 21000).
-const telemetryColumnsPerRow = 21
+// keeps every chunk well under that ceiling (1000*24 = 24000).
+const telemetryColumnsPerRow = 24
 const maxTelemetryRowsPerInsert = 1000
 
 // flushTelemetryBatch inserts batch in chunks of maxTelemetryRowsPerInsert and
@@ -221,6 +222,7 @@ func (s *Server) flushTelemetryBatch(batch []TelemetryRow) error {
 
 func (s *Server) insertTelemetryChunk(chunk []TelemetryRow) error {
 	rows := make([]store.TelemetryRow, 0, len(chunk))
+	sentinels := map[string]int64{}
 
 	for _, row := range chunk {
 		// agent_id (CC's per-instance identifier) resolves to the roster's
@@ -250,6 +252,15 @@ func (s *Server) insertTelemetryChunk(chunk []TelemetryRow) error {
 			runtime = "claude_code"
 		}
 
+		if row.RateID == store.RateIDEmbeddedFallback {
+			id, ok := sentinels[runtime]
+			if !ok {
+				id = s.embeddedFallbackRateID(runtime)
+				sentinels[runtime] = id
+			}
+			row.RateID = id
+		}
+
 		rows = append(rows, store.TelemetryRow{
 			SessionID:             row.SessionID,
 			MessageID:             row.MessageID,
@@ -274,6 +285,7 @@ func (s *Server) insertTelemetryChunk(chunk []TelemetryRow) error {
 			Timestamp:             ts.UTC(),
 			Runtime:               runtime,
 			ReasoningOutputTokens: row.ReasoningOutputTokens,
+			RateID:                row.RateID,
 		})
 	}
 
@@ -283,6 +295,23 @@ func (s *Server) insertTelemetryChunk(chunk []TelemetryRow) error {
 
 	_, err := s.obsStore.UpsertTelemetryBatch(context.Background(), rows)
 	return err
+}
+
+// embeddedFallbackRateID returns the runtime's sentinel rate row id, or 0
+// (stored as NULL) when the row cannot be found.
+func (s *Server) embeddedFallbackRateID(runtime string) int64 {
+	rates, err := s.obsStore.ListRates(context.Background(), store.RateFilter{Runtime: runtime})
+	if err != nil {
+		slog.Warn("telemetry: embedded-fallback sentinel lookup failed; rate_id left NULL", "runtime", runtime, "error", err)
+		return 0
+	}
+	for _, r := range rates {
+		if r.ModelKey == store.EmbeddedFallbackKey {
+			return r.ID
+		}
+	}
+	slog.Warn("telemetry: embedded-fallback sentinel row missing; rate_id left NULL", "runtime", runtime)
+	return 0
 }
 
 func (s *Server) drainTelemetryFallback(ctx context.Context) {

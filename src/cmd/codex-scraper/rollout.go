@@ -5,7 +5,7 @@ import (
 )
 
 // envelope is the outer shape of every line in a Codex rollout JSONL file:
-// {"timestamp":"...","type":"session_meta|turn_context|event_msg|response_item","payload":{...}}
+// {"timestamp":"...","type":"session_meta|turn_context|event_msg|response_item|token_usage_record","payload":{...}}
 type envelope struct {
 	Timestamp string          `json:"timestamp"`
 	Type      string          `json:"type"`
@@ -28,11 +28,8 @@ type envelope struct {
 // 0.142.x (session_id == id) behave identically either way.
 //
 // AgentRole/AgentNickname are only present on subagent files (e.g. "explorer"/
-// "Mencius") — same fields as state_5.sqlite's threads table. Verified live
-// that wms-mcp's existing identity handling already opens focus intervals for
-// subagent work under agent_name "@"+role (e.g. "@explorer") — matching that
-// exactly (role, not nickname) is what lets rollup's temporal_join attribute
-// subagent spend precisely instead of falling back to the lead's own focus.
+// "Mencius"). They feed the agent_name ("@"+nickname) that must match the
+// context subscriber's; attribution itself keys on session_id.
 type sessionMetaPayload struct {
 	ID             string `json:"id"`
 	SessionID      string `json:"session_id"`
@@ -42,6 +39,7 @@ type sessionMetaPayload struct {
 	CliVersion     string `json:"cli_version"`
 	AgentRole      string `json:"agent_role"`
 	AgentNickname  string `json:"agent_nickname"`
+	ThreadSource   string `json:"thread_source"` // "user" | "subagent" (0.160.0+)
 }
 
 // turnContextPayload carries the model in effect for the turn that follows.
@@ -83,9 +81,22 @@ type tokenCountInfo struct {
 type tokenUsage struct {
 	InputTokens           int64 `json:"input_tokens"`
 	CachedInputTokens     int64 `json:"cached_input_tokens"`
+	CacheWriteInputTokens int64 `json:"cache_write_input_tokens"`
 	OutputTokens          int64 `json:"output_tokens"`
 	ReasoningOutputTokens int64 `json:"reasoning_output_tokens"`
 	TotalTokens           int64 `json:"total_tokens"`
+}
+
+// tokenUsageRecordPayload is the payload of a top-level token_usage_record
+// envelope (Codex 0.159.x+), one per model response. Usage carries the same
+// per-response figures as the legacy event_msg:token_count's last_token_usage
+// (verified field-for-field against a live 0.159.3 rollout, where each record
+// is followed within a few lines by a token_count with identical values), and
+// the same non-disjoint-bucket semantics apply. turn_token_usage and
+// thread_token_usage are cumulative views and are ignored for the same reason
+// total_token_usage is.
+type tokenUsageRecordPayload struct {
+	Usage tokenUsage `json:"usage"`
 }
 
 // mcpInvocation is the payload.invocation of an mcp_tool_call_end event_msg.

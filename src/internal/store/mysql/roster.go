@@ -8,8 +8,6 @@ import (
 	"strings"
 	"time"
 
-	mysqldriver "github.com/go-sql-driver/mysql"
-
 	"github.com/bmjdotnet/teamster/internal/store"
 )
 
@@ -21,13 +19,13 @@ func (s *Store) CreateRosterEntry(ctx context.Context, entry store.RosterEntry) 
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO agent_roster (
 			roster_id, session_id, agent_name, host, runtime, model,
-			relationship, team_name, bus_team, parent_ref, created_at, bound_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			relationship, team_name, bus_team, parent_ref, description, created_at, bound_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		entry.RosterID, entry.SessionID, entry.AgentName, entry.Host,
 		entry.Runtime, entry.Model, entry.Relationship, entry.TeamName,
-		entry.BusTeam, entry.ParentRef, entry.CreatedAt.UTC(), nullableTime(entry.BoundAt), now)
+		entry.BusTeam, entry.ParentRef, store.SanitizeRosterDescription(entry.Description), entry.CreatedAt.UTC(), nullableTime(entry.BoundAt), now)
 	if err != nil {
-		return classifyRosterConflict("CreateRosterEntry", err)
+		return classifyDuplicateKey("CreateRosterEntry", err)
 	}
 	return nil
 }
@@ -65,7 +63,7 @@ func (s *Store) BindRosterSession(ctx context.Context, rosterID, sessionID strin
 		 WHERE roster_id = ? AND session_id IS NULL`,
 		sessionID, now, now, rosterID)
 	if err != nil {
-		return classifyRosterConflict("BindRosterSession", err)
+		return classifyDuplicateKey("BindRosterSession", err)
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
@@ -77,7 +75,7 @@ func (s *Store) BindRosterSession(ctx context.Context, rosterID, sessionID strin
 func (s *Store) GetRosterEntry(ctx context.Context, rosterID string) (store.RosterEntry, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT roster_id, session_id, agent_name, host, runtime, model,
-		       relationship, team_name, bus_team, parent_ref, created_at, bound_at, updated_at
+		       relationship, team_name, bus_team, parent_ref, agent_id, description, created_at, bound_at, updated_at
 		FROM agent_roster WHERE roster_id = ?`, rosterID)
 	var e store.RosterEntry
 	if err := scanRosterEntry(row, &e); err != nil {
@@ -105,7 +103,7 @@ func (s *Store) ResolveRosterID(ctx context.Context, sessionID, agentName string
 
 func (s *Store) ListRosterEntries(ctx context.Context, filter store.RosterFilter) ([]store.RosterEntry, error) {
 	q := `SELECT roster_id, session_id, agent_name, host, runtime, model,
-	             relationship, team_name, bus_team, parent_ref, created_at, bound_at, updated_at
+	             relationship, team_name, bus_team, parent_ref, agent_id, description, created_at, bound_at, updated_at
 	      FROM agent_roster`
 	var where []string
 	var args []any
@@ -178,8 +176,8 @@ func (s *Store) UpsertRosterEntry(ctx context.Context, entry store.RosterEntry) 
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO agent_roster (
 			roster_id, session_id, agent_name, host, runtime, model,
-			relationship, team_name, bus_team, parent_ref, agent_id, created_at, bound_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			relationship, team_name, bus_team, parent_ref, agent_id, description, created_at, bound_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON DUPLICATE KEY UPDATE
 			host = VALUES(host),
 			runtime = VALUES(runtime),
@@ -187,16 +185,45 @@ func (s *Store) UpsertRosterEntry(ctx context.Context, entry store.RosterEntry) 
 			relationship = VALUES(relationship),
 			team_name = COALESCE(NULLIF(VALUES(team_name), ''), team_name),
 			bus_team = VALUES(bus_team),
-			parent_ref = VALUES(parent_ref),
+			parent_ref = COALESCE(NULLIF(VALUES(parent_ref), ''), parent_ref),
 			agent_id = COALESCE(NULLIF(VALUES(agent_id), ''), agent_id),
+			description = COALESCE(NULLIF(VALUES(description), ''), description),
 			updated_at = VALUES(updated_at)`,
 		entry.RosterID, entry.SessionID, entry.AgentName, entry.Host,
 		entry.Runtime, entry.Model, entry.Relationship, entry.TeamName,
-		entry.BusTeam, entry.ParentRef, entry.AgentID, entry.CreatedAt.UTC(), nullableTime(entry.BoundAt), now)
+		entry.BusTeam, entry.ParentRef, entry.AgentID, store.SanitizeRosterDescription(entry.Description), entry.CreatedAt.UTC(), nullableTime(entry.BoundAt), now)
 	if err != nil {
 		return fmt.Errorf("UpsertRosterEntry: %w", err)
 	}
 	return nil
+}
+
+// SetRosterDescription overwrites only the description of one roster row.
+func (s *Store) SetRosterDescription(ctx context.Context, rosterID, description string) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE agent_roster SET description = ?, updated_at = ? WHERE roster_id = ?`,
+		store.SanitizeRosterDescription(description), time.Now().UTC(), rosterID)
+	if err != nil {
+		return fmt.Errorf("SetRosterDescription: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return store.NotFound("SetRosterDescription", "roster", rosterID)
+	}
+	return nil
+}
+
+// ClaimRosterAgentID atomically stamps agentID onto a roster row that has none
+// yet. claimed is false when the row already carries an agent_id (including
+// this one), so exactly one of several racing claimants wins.
+func (s *Store) ClaimRosterAgentID(ctx context.Context, rosterID, agentID string) (bool, error) {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE agent_roster SET agent_id = ?, updated_at = ? WHERE roster_id = ? AND agent_id = ''`,
+		agentID, time.Now().UTC(), rosterID)
+	if err != nil {
+		return false, fmt.Errorf("ClaimRosterAgentID: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n == 1, nil
 }
 
 // ResolveByAgentID maps CC's per-instance agent_id (stable across turn-resumes,
@@ -206,7 +233,7 @@ func (s *Store) UpsertRosterEntry(ctx context.Context, entry store.RosterEntry) 
 func (s *Store) ResolveByAgentID(ctx context.Context, sessionID, agentID string) (string, error) {
 	var name string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT agent_name FROM agent_roster WHERE session_id = ? AND agent_id = ? LIMIT 1`,
+		`SELECT agent_name FROM agent_roster WHERE session_id = ? AND agent_id = ? ORDER BY created_at, roster_id LIMIT 1`,
 		sessionID, agentID).Scan(&name)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -228,7 +255,7 @@ func (s *Store) CreateToken(ctx context.Context, token store.AgentToken) error {
 		nullableTime(token.ExpiresAt), nullableTime(token.RevokedAt),
 		nullableTime(token.LastUsedAt))
 	if err != nil {
-		return classifyRosterConflict("CreateToken", err)
+		return classifyDuplicateKey("CreateToken", err)
 	}
 	return nil
 }
@@ -361,14 +388,6 @@ func (s *Store) TouchTokenLastUsed(ctx context.Context, tokenHash string) error 
 
 // --- helpers ---
 
-func classifyRosterConflict(op string, err error) error {
-	var myErr *mysqldriver.MySQLError
-	if errors.As(err, &myErr) && myErr.Number == 1062 {
-		return store.Conflict(op, err)
-	}
-	return fmt.Errorf("%s: %w", op, err)
-}
-
 func nullableTime(t *time.Time) any {
 	if t == nil {
 		return nil
@@ -385,7 +404,7 @@ func scanRosterEntry(row rosterScanner, e *store.RosterEntry) error {
 	var boundAt sql.NullTime
 	err := row.Scan(
 		&e.RosterID, &sessionID, &e.AgentName, &e.Host, &e.Runtime, &e.Model,
-		&e.Relationship, &e.TeamName, &e.BusTeam, &parentRef, &e.CreatedAt, &boundAt, &e.UpdatedAt)
+		&e.Relationship, &e.TeamName, &e.BusTeam, &parentRef, &e.AgentID, &e.Description, &e.CreatedAt, &boundAt, &e.UpdatedAt)
 	if err != nil {
 		return err
 	}

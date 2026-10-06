@@ -3,6 +3,31 @@
 All notable changes to Teamster are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## v0.3.1
+
+### Added
+- **Store-backed model pricing.** Rates are now externalized configuration (`model_pricing` table) instead of compiled-in Go constants. Rate changes take effect without a recompile; each rate carries an effective-date range so history prices against the rate that was active at the time. GET `/rates` endpoint exposes the rate card to processes without a store connection.
+- **Reprice tooling.** `rollup --reprice` detects rows whose stored cost no longer matches the current rate card; `--reprice-backfill` stamps historical rows that predate the rate system with their resolved rate; `--reprice-apply` corrects drift (dry-run by default, requires `--reprice-reason`). All changes journaled to `reprice_journal`. See [docs/pricing-runbook.md](docs/pricing-runbook.md).
+- **Pricing Prometheus metrics** — unknown-model counter, refresh-error counter, and loaded-rates gauge, exposed via the health-collector's optional `--metrics-addr`.
+- **Codex subagent visibility.** Codex subagent threads now appear in ctop with proper identity, parent linkage, and cost attribution — previously invisible because the scraper booked all subagent spend under the root session.
+- **Agent roster description labels.** The `description` from Agent tool calls is captured on roster rows and displayed in ctop and the health API, giving unnamed sub-subagents a human-readable label.
+- **Remote Codex context subscriber.** Remote hosts with Codex now run the context subscriber daemon, reporting thread context-window fill to the hub in real time. Previously, remote Codex sessions showed no context gauge updates until the next scraper run (up to 10 minutes).
+- **Rate card Grafana panel** on the cost explorer dashboard.
+- **OTel cost verification.** Every rollup pass now cross-checks per-session ledger cost against Claude Code's OTel cost counters and records a verdict, surfacing discrepancies before they compound.
+- **`teamster pricing` CLI** — `list`, `add`, and `close` subcommands for managing the rate card without touching SQL directly. See [docs/pricing-runbook.md](docs/pricing-runbook.md).
+
+### Changed
+- **ctop groups agents by lineage** (parent_ref chain) instead of team name. Sessions that reuse the same team name across projects no longer merge into one group.
+- **Python scrapers fetch rates from the hub** via the `/rates` endpoint instead of using hardcoded pricing tables. The embedded tables remain as a fallback when the hub is unreachable.
+
+### Fixed
+- **Codex token ingestion** (issue #29). Both Go (hub) and Python (remote) scrapers now handle the `token_usage_record` event introduced in Codex CLI 0.159.x, with persisted dedup against the legacy `event_msg:token_count`. Added pricing for gpt-6-luna, gpt-6-astra, gpt-6.1-sol and gpt-6-sol (including cache-write rates). Reads `cache_write_input_tokens` from rollout data.
+- **Agent identity on respawn** (issue #27). A respawned teammate no longer inherits the dead predecessor's roster row, health gauge, and cost — it gets its own row, so gauges and cost stay with the instance that earned them.
+- **Blank upserts wiping session metadata.** Codex context-subscriber heartbeats (and any re-post that omits WMS/team/focus fields) no longer overwrite populated values with blanks.
+- **Teammate transcript resolution.** The health-collector now resolves teammate transcripts by agent_id instead of name + newest-mtime, which broke when auto-numbered names (`@name-2`) didn't match the sidecar's original name.
+- **Haiku 4.5 pricing.** Corrected from Haiku 3.5's $0.80/$4 to the published Haiku 4.5 rate ($1/$5) — about 20% undercounted since the model launched.
+- **Sonnet 5 pricing.** Updated to the permanent $2/$10 rate (the planned rise to $3/$15 was cancelled). Added entries for Sonnet 5.5, Opus 5, Opus 5.5, and Fable 5.1.
+
 ## v0.3.0 (2026-09-08)
 
 ### Added

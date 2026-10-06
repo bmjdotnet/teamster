@@ -13,7 +13,7 @@ or decide how to decompose a batch, so they don't need
 
 | File | What it's for |
 |------|---------------|
-| `teammate-guide.md` | Distilled, self-contained guidance for a teammate: which Eight Rules apply directly (IV, VI, VIII), set-focus-first, how to run an execution-loop phase if assigned one, direct peer communication, and which field-guide lessons apply to hands-on work (6, 7, 9, 10–24). |
+| `teammate-guide.md` | Distilled, self-contained guidance for a teammate: which Eight Rules apply directly (IV, VI, VIII), set-focus-first, how to run an execution-loop phase if assigned one, direct peer communication, and which field-guide lessons apply to hands-on work (6, 7, 9, 10–25). |
 
 ## Why a distillation instead of full copies
 

@@ -16,7 +16,20 @@ parent_ref pointing to the spawning teammate (not the lead), enabling
 ctop's fleet view to render a nested tree. CC currently blocks `name` from
 teammate-spawned Agent tool calls, so these sub-subagents would otherwise
 collide on identity; hookd auto-numbers same-type siblings (`@Explore`,
-`@Explore-2`, etc.) to keep roster identities unique regardless.
+`@Explore-2`, etc.) to keep roster identities unique regardless. The Agent
+tool's `description` is stored on the roster (health API `description`),
+and ctop shows it as a dim label after the name on subagent rows (Agent-tool
+spawns — not Agent-Teams teammates, which have their own names), so a
+sub-subagent appears as `@<type>-N  <description>`
+(`@Explore-4  Scout macOS identity pipeline`).
+
+A respawned teammate that reuses a dead predecessor's name gets a fresh
+auto-numbered identity (`@redteam-2`) with fresh gauges, rather than
+inheriting the old agent's context fill and tool counts. Expect the
+numbering after a crash/respawn, or use a distinct name. Fleet grouping
+follows parent_ref lineage; a team name reused across sessions is shown as
+`#name·<prefix8>` (first 8 chars of the lead's session id) so dead sessions
+don't merge into the live tree.
 
 **Health** — per-agent context-window usage, token totals, last activity,
 and pressure level. Updated by the health-collector daemon every 15 seconds.

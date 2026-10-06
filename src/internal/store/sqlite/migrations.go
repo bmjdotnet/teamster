@@ -1427,4 +1427,104 @@ var migrations = []store.Migration{
 				('resolution', 'swept-unreviewed', 1, 'lifecycle', 'single', 'WorkUnit closed by the nightly wms-review-sweep timer: a wms_deliverables row existed, so the sweep closed it done rather than abandoned, but no human reviewed the result. Deliberately silent on whether the delivered work was good — only that it exists and nobody looked.')`,
 		},
 	},
+	{
+		// Mirrors mysql v73 "model-pricing" (pricing kit WP2): see that
+		// migration's comment for the full rationale. Numbered 72, not 73:
+		// this list has run one version behind mysql's since mysql v61
+		// (gauge-session-total-cost is mysql-only), and the mirror
+		// relationship is by Name, not by number. DECIMAL(12,6) per-Mtok
+		// rates become REAL here (see the dialect notes above); model_key is
+		// plain TEXT, whose default BINARY collation is already the
+		// case-sensitive match the mysql side forces with utf8mb4_bin. Seed
+		// rows come from the same frozen store.ModelPricingSeedV1 table.
+		Version: 72,
+		Name:    "model-pricing",
+		SQL: []string{
+			`CREATE TABLE IF NOT EXISTS model_pricing (
+				id                      INTEGER PRIMARY KEY,
+				runtime                 TEXT NOT NULL,
+				match_kind              TEXT NOT NULL,
+				model_key               TEXT NOT NULL,
+				variant                 TEXT NOT NULL DEFAULT 'base',
+				input_per_mtok          REAL NOT NULL,
+				output_per_mtok         REAL NOT NULL,
+				cache_read_per_mtok     REAL NOT NULL,
+				cache_write_5m_per_mtok REAL NOT NULL,
+				cache_write_1h_per_mtok REAL NOT NULL,
+				valid_from              DATETIME NOT NULL,
+				valid_to                DATETIME,
+				source_url              TEXT NOT NULL,
+				fetched_at              DATETIME NOT NULL,
+				notes                   TEXT
+			)`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS uq_model_pricing_key ON model_pricing(runtime, match_kind, model_key, variant, valid_from)`,
+			`CREATE INDEX IF NOT EXISTS idx_model_pricing_runtime ON model_pricing(runtime, model_key)`,
+		},
+		Func: seedModelPricing,
+	},
+	{
+		// Mirrors mysql v74 "cost-verification" (pricing kit WP4A): see that
+		// migration's comment for the full rationale. Numbered 73 for the same
+		// reason model-pricing is numbered 72. DECIMAL(12,6) USD becomes REAL
+		// (see the dialect notes above) and details stays plain TEXT.
+		Version: 73,
+		Name:    "cost-verification",
+		SQL: []string{
+			`CREATE TABLE IF NOT EXISTS cost_verification (
+				id           INTEGER PRIMARY KEY,
+				session_id   TEXT NOT NULL,
+				runtime      TEXT NOT NULL DEFAULT 'claude_code',
+				hub_usd      REAL NOT NULL DEFAULT 0,
+				vendor_usd   REAL NOT NULL DEFAULT 0,
+				delta_usd    REAL NOT NULL DEFAULT 0,
+				verdict      TEXT NOT NULL,
+				converged_at DATETIME,
+				evaluated_at DATETIME NOT NULL,
+				details      TEXT
+			)`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS uq_cv_session ON cost_verification(session_id, runtime)`,
+			`CREATE INDEX IF NOT EXISTS idx_cv_verdict ON cost_verification(verdict)`,
+			`CREATE INDEX IF NOT EXISTS idx_cv_evaluated ON cost_verification(evaluated_at)`,
+		},
+	},
+	{
+		// Mirrors mysql v75 "token-ledger-rate-id"; numbered 74 for the same
+		// reason cost-verification is numbered 73.
+		Version: 74,
+		Name:    "token-ledger-rate-id",
+		SQL: []string{
+			`ALTER TABLE token_ledger ADD COLUMN rate_id INTEGER`,
+			`CREATE INDEX IF NOT EXISTS idx_token_ledger_rate_id ON token_ledger (rate_id)`,
+			`CREATE TABLE IF NOT EXISTS reprice_journal (
+				id           INTEGER PRIMARY KEY,
+				session_id   TEXT NOT NULL,
+				message_id   TEXT NOT NULL,
+				old_cost_usd REAL NOT NULL,
+				new_cost_usd REAL NOT NULL,
+				old_rate_id  INTEGER,
+				new_rate_id  INTEGER,
+				reason       TEXT NOT NULL,
+				operator     TEXT NOT NULL,
+				repriced_at  DATETIME NOT NULL
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_reprice_journal_session ON reprice_journal(session_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_reprice_journal_time ON reprice_journal(repriced_at)`,
+		},
+	}, {
+		// Mirrors mysql v76 "embedded-fallback-sentinel"; numbered 75 for the
+		// same reason token-ledger-rate-id is numbered 74.
+		Version: 75,
+		Name:    "embedded-fallback-sentinel",
+		SQL:     []string{},
+		Func:    seedEmbeddedFallbackSentinels,
+	},
+	{
+		// Mirrors mysql v77 "roster-description"; numbered 76 for the same
+		// reason embedded-fallback-sentinel is numbered 75.
+		Version: 76,
+		Name:    "roster-description",
+		SQL: []string{
+			`ALTER TABLE agent_roster ADD COLUMN description TEXT NOT NULL DEFAULT ''`,
+		},
+	},
 }

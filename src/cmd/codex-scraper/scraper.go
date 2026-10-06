@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/bmjdotnet/teamster/internal/pricing"
@@ -23,8 +24,17 @@ import (
 // Defined locally (rather than depending on the full store.SessionStore
 // interface, which has a dozen other WMS-pointer methods irrelevant here) so
 // tests can fake it with a single method.
+// store.Session has no relationship/agent_id fields, so those travel in
+// sessionIdentity (consumed by the live HTTP path, httpSessionUpserter).
 type sessionUpserter interface {
-	UpsertSession(ctx context.Context, s store.Session) error
+	UpsertSession(ctx context.Context, s store.Session, ident sessionIdentity) error
+}
+
+// sessionIdentity carries the subagent registration fields of POST /session.
+// The zero value (root thread) omits both on the wire.
+type sessionIdentity struct {
+	Relationship string // "subagent" for a subagent thread, else ""
+	AgentID      string // the thread's own id, subagent threads only
 }
 
 // cursorEntry tracks read progress and cached session identity for one
@@ -57,8 +67,19 @@ type sessionUpserter interface {
 // double up on this one and risk double-attribution — this scraper-time
 // resolution is the only place child→parent mapping may happen.
 //
-// Seq is the number of token_count events already ledgered from this file.
-// Codex's token_count events carry no content-derived unique id (unlike
+// SeenUsageRecord is set the first time a token_usage_record envelope
+// (Codex 0.159.x+) is ledgered from this file, after which the legacy
+// event_msg:token_count that Codex still emits right behind every record is
+// skipped — both carry the same per-response usage, so ledgering both would
+// double-count. It is persisted (unlike dirty) because this binary is a
+// oneshot timer: a poll boundary can fall between a record and its paired
+// token_count, and a transient flag would be lost across that restart and let
+// the token_count through as a duplicate row. Files from older Codex versions
+// never set it and keep ledgering from token_count.
+//
+// Seq is the number of usage events (token_usage_record, or token_count on
+// files without records) already ledgered from this file.
+// Codex's usage events carry no content-derived unique id (unlike
 // Claude's message.id+requestId), so the tailer manufactures one from
 // (ThreadID, Seq) — stable because rollout files are strictly append-only:
 // re-scanning the same bytes from offset 0 (e.g. after an archive-triggered
@@ -70,11 +91,14 @@ type cursorEntry struct {
 	Seq        int64  `json:"seq"`
 	SessionID  string `json:"session_id"`
 	ThreadID   string `json:"thread_id"`
-	AgentName  string `json:"agent_name"` // "@"+agent_role for a subagent thread, else ""
+	AgentName  string `json:"agent_name"`         // subagentName() ("@"+nickname||role||id[:8], whitespace -> "-") for a subagent thread, else ""
+	Subagent   bool   `json:"subagent,omitempty"` // parent_thread_id set or thread_source=="subagent"
 	Cwd        string `json:"cwd"`
 	Originator string `json:"originator"`
 	CliVersion string `json:"cli_version"`
 	Model      string `json:"model"` // last-known model, updated per turn_context
+
+	SeenUsageRecord bool `json:"seen_usage_record,omitempty"`
 
 	// dirty is set by processLine when it updates an identity field above, so
 	// processFile knows to upsert the sessions row once at the end of a scan
@@ -94,6 +118,9 @@ type sessionRow struct {
 	Model      string `json:"model"`
 	Originator string `json:"originator"`
 	CliVersion string `json:"cli_version"`
+
+	Relationship string `json:"relationship,omitempty"` // "subagent" for subagent threads; omitted for root threads
+	AgentID      string `json:"agent_id,omitempty"`     // the subagent thread's own id
 }
 
 // telemetryRow matches hookd's server.TelemetryRow wire format.
@@ -109,6 +136,7 @@ type telemetryRow struct {
 	CacheReadTokens       int64   `json:"cache_read_tokens"`
 	CacheWriteTokens      int64   `json:"cache_write_tokens"`
 	CostUSD               float64 `json:"cost_usd"`
+	RateID                int64   `json:"rate_id,omitempty"`
 	Timestamp             string  `json:"timestamp"`
 	Runtime               string  `json:"runtime"`
 	ReasoningOutputTokens int64   `json:"reasoning_output_tokens"`
@@ -120,6 +148,7 @@ type telemetryRow struct {
 // (hookd's /telemetry never touches sessions — see package doc in main.go).
 type scraper struct {
 	client       *http.Client
+	resolver     *pricing.Resolver
 	telemetryURL string
 	host         string
 	username     string
@@ -271,6 +300,28 @@ func (s *scraper) processFile(ctx context.Context, path string) error {
 	return nil
 }
 
+// identityWS is the explicit ASCII whitespace class shared byte for byte with
+// the Python scraper and context subscriber (not unicode.IsSpace).
+const identityWS = " \t\n\r\f\v"
+
+// subagentName derives the agent_name for a subagent thread: "@" + nickname,
+// falling back to role, then the first 8 chars of the thread id. Each
+// candidate is trimmed before falling back; whitespace runs collapse to "-".
+func subagentName(p sessionMetaPayload) string {
+	name := strings.Trim(p.AgentNickname, identityWS)
+	if name == "" {
+		name = strings.Trim(p.AgentRole, identityWS)
+	}
+	if name == "" {
+		name = p.ID
+		if len(name) > 8 {
+			name = name[:8]
+		}
+	}
+	parts := strings.FieldsFunc(name, func(r rune) bool { return strings.ContainsRune(identityWS, r) })
+	return "@" + strings.Join(parts, "-")
+}
+
 func (s *scraper) processLine(ctx context.Context, raw []byte, cursor *cursorEntry, path string) error {
 	var env envelope
 	if err := json.Unmarshal(raw, &env); err != nil {
@@ -294,8 +345,11 @@ func (s *scraper) processLine(ctx context.Context, raw []byte, cursor *cursorEnt
 			} else {
 				cursor.SessionID = p.ID
 			}
-			if p.AgentRole != "" {
-				cursor.AgentName = "@" + p.AgentRole
+			cursor.Subagent = p.ParentThreadID != "" || p.ThreadSource == "subagent"
+			if cursor.Subagent {
+				cursor.AgentName = subagentName(p)
+			} else {
+				cursor.AgentName = ""
 			}
 			cursor.Cwd = p.Cwd
 			cursor.Originator = p.Originator
@@ -311,7 +365,7 @@ func (s *scraper) processLine(ctx context.Context, raw []byte, cursor *cursorEnt
 		// Upstream bug (openai/codex#20981): some internal Codex sub-tasks
 		// (e.g. an auto-review pass) report the literal model string
 		// "codex-auto-review" instead of the real underlying model. That
-		// string is not a billable model ID and pricing.ComputeCost would
+		// string is not a billable model ID and the pricing resolver would
 		// just log a loud unknown-model warning and price it at 0 — instead,
 		// ignore the sentinel and keep whichever real model was last seen,
 		// which is a much better cost approximation for that turn.
@@ -327,10 +381,12 @@ func (s *scraper) processLine(ctx context.Context, raw []byte, cursor *cursorEnt
 		}
 		switch p.Type {
 		case "token_count":
-			if p.Info == nil {
+			// Legacy twin of token_usage_record; once a record has been seen
+			// in this file it is a duplicate (see cursorEntry).
+			if p.Info == nil || cursor.SeenUsageRecord {
 				return nil
 			}
-			return s.emitLedgerRow(env.Timestamp, p.Info.LastTokenUsage, cursor)
+			return s.emitLedgerRow(ctx, env.Timestamp, p.Info.LastTokenUsage, cursor)
 		case "mcp_tool_call_end":
 			// Branch on result.Ok vs result.Err (non-negotiable: a
 			// cancelled/denied call is an Err, same event type as a
@@ -344,6 +400,17 @@ func (s *scraper) processLine(ctx context.Context, raw []byte, cursor *cursorEnt
 			}
 		}
 
+	case "token_usage_record":
+		var p tokenUsageRecordPayload
+		if err := json.Unmarshal(env.Payload, &p); err != nil {
+			return fmt.Errorf("parse token_usage_record: %w", err)
+		}
+		if (p.Usage == tokenUsage{}) {
+			return nil
+		}
+		cursor.SeenUsageRecord = true
+		return s.emitLedgerRow(ctx, env.Timestamp, p.Usage, cursor)
+
 	case "response_item":
 		// function_call/function_call_output (non-MCP tool calls, e.g.
 		// exec_command) — schema understood, not consumed in v1 (no ledger
@@ -353,10 +420,11 @@ func (s *scraper) processLine(ctx context.Context, raw []byte, cursor *cursorEnt
 	return nil
 }
 
-// emitLedgerRow builds and posts one telemetry row from a token_count event's
-// last_token_usage. Ledger derivation rule (binding, redteam m4): use
-// last_token_usage only, never total_token_usage (cumulative — summing it
-// double-counts).
+// emitLedgerRow builds and posts one telemetry row from one response's usage:
+// a token_usage_record's usage, or a legacy token_count event's
+// last_token_usage. Ledger derivation rule (binding, redteam m4): use the
+// per-response figures only, never total_token_usage / turn_token_usage /
+// thread_token_usage (cumulative — summing them double-counts).
 //
 // Token bucket derivation (corrected 2026-07-07 — the first version of this
 // function wrongly treated cached_input_tokens/reasoning_output_tokens as
@@ -365,16 +433,17 @@ func (s *scraper) processLine(ctx context.Context, raw []byte, cursor *cursorEnt
 // live evidence (surface-map.md and this package's own resumed-rollout
 // fixture): total_tokens == input_tokens + output_tokens exactly, with
 // cached_input never adding to that sum. So:
-//   - uncached input (billed at the full input rate) = input_tokens - cached_input_tokens
+//   - uncached input (billed at the full input rate) = input_tokens - cached_input_tokens - cache_write_input_tokens
 //   - cache-read tokens (billed at the cheaper cache-read rate) = cached_input_tokens
 //   - output tokens, as-is (reasoning_output_tokens is already inside this
 //     number — OpenAI bills it at the output rate by inclusion, not by adding
 //     it again)
-//   - cache-write is always 0 (no Codex/OpenAI equivalent)
+//   - cache-write tokens, as-is (billed at 1.25x input for gpt-6 family;
+//     0 in all observed rollouts as of 2026-10-03, but priced for completeness)
 //
 // This differs from Claude Code's transcript semantics, where input_tokens
 // already excludes cache reads — do not copy that assumption here.
-func (s *scraper) emitLedgerRow(timestamp string, u tokenUsage, cursor *cursorEntry) error {
+func (s *scraper) emitLedgerRow(ctx context.Context, timestamp string, u tokenUsage, cursor *cursorEntry) error {
 	seq := cursor.Seq
 	cursor.Seq++
 
@@ -393,14 +462,13 @@ func (s *scraper) emitLedgerRow(timestamp string, u tokenUsage, cursor *cursorEn
 			"total", u.TotalTokens)
 	}
 
-	uncachedInput := u.InputTokens - u.CachedInputTokens
+	uncachedInput := u.InputTokens - u.CachedInputTokens - u.CacheWriteInputTokens
 	if uncachedInput < 0 {
-		slog.Warn("codex-scraper: cached_input_tokens exceeds input_tokens, clamping to 0",
-			"session_id", cursor.SessionID, "input", u.InputTokens, "cached_input", u.CachedInputTokens)
+		slog.Warn("codex-scraper: cached+cache_write input exceeds input_tokens, clamping to 0",
+			"session_id", cursor.SessionID, "input", u.InputTokens,
+			"cached_input", u.CachedInputTokens, "cache_write_input", u.CacheWriteInputTokens)
 		uncachedInput = 0
 	}
-	// OpenAI/Codex has no cache-write concept — both TTL buckets are 0.
-	costUSD := pricing.ComputeCost(cursor.Model, uncachedInput, u.OutputTokens, u.CachedInputTokens, 0, 0)
 
 	ts, err := time.Parse(time.RFC3339Nano, timestamp)
 	if err != nil {
@@ -411,18 +479,31 @@ func (s *scraper) emitLedgerRow(timestamp string, u tokenUsage, cursor *cursorEn
 		}
 	}
 
+	priced := s.resolver.Price(ctx, store.RateRuntimeCodex, cursor.Model, ts, pricing.Tokens{
+		Input:        uncachedInput,
+		Output:       u.OutputTokens,
+		CacheRead:    u.CachedInputTokens,
+		CacheWrite5m: u.CacheWriteInputTokens,
+	})
+	costUSD := priced.CostUSD
+	rateID := priced.RateID
+	if priced.Source == pricing.SourceFallback {
+		rateID = store.RateIDEmbeddedFallback
+	}
+
 	row := telemetryRow{
 		MessageID:             messageID,
 		SessionID:             cursor.SessionID,
-		AgentName:             cursor.AgentName, // "" for direct/parent spend, "@"+role for a subagent thread
+		AgentName:             cursor.AgentName, // "" for direct/parent spend, "@"+nickname for a subagent thread
 		Host:                  s.host,
 		Username:              s.username,
 		Model:                 cursor.Model,
 		InputTokens:           uncachedInput,
 		OutputTokens:          u.OutputTokens,
 		CacheReadTokens:       u.CachedInputTokens,
-		CacheWriteTokens:      0,
+		CacheWriteTokens:      u.CacheWriteInputTokens,
 		CostUSD:               costUSD,
+		RateID:                rateID,
 		Timestamp:             ts.UTC().Format(time.RFC3339Nano),
 		Runtime:               "codex",
 		ReasoningOutputTokens: u.ReasoningOutputTokens,
@@ -474,9 +555,13 @@ func (s *scraper) upsertCodexSession(ctx context.Context, cursor *cursorEntry) {
 		return
 	}
 	now := time.Now().UTC()
+	var ident sessionIdentity
+	if cursor.Subagent {
+		ident = sessionIdentity{Relationship: "subagent", AgentID: cursor.ThreadID}
+	}
 	err := s.st.UpsertSession(ctx, store.Session{
 		SessionID:  cursor.SessionID,
-		AgentName:  cursor.AgentName, // "" for the parent/direct-spend row, "@"+role for a subagent thread's own row
+		AgentName:  cursor.AgentName, // "" for the parent/direct-spend row, "@"+nickname for a subagent thread's own row
 		Host:       s.host,
 		Username:   s.username,
 		FirstSeen:  now,
@@ -487,7 +572,7 @@ func (s *scraper) upsertCodexSession(ctx context.Context, cursor *cursorEntry) {
 		Model:      cursor.Model,
 		Originator: cursor.Originator,
 		CliVersion: cursor.CliVersion,
-	})
+	}, ident)
 	if err != nil {
 		slog.Error("codex-scraper: session upsert failed", "session_id", cursor.SessionID, "error", err)
 	}
@@ -506,7 +591,7 @@ type httpSessionUpserter struct {
 	sessionURL string
 }
 
-func (u *httpSessionUpserter) UpsertSession(_ context.Context, sess store.Session) error {
+func (u *httpSessionUpserter) UpsertSession(_ context.Context, sess store.Session, ident sessionIdentity) error {
 	data, err := json.Marshal(sessionRow{
 		SessionID:  sess.SessionID,
 		AgentName:  sess.AgentName,
@@ -517,6 +602,9 @@ func (u *httpSessionUpserter) UpsertSession(_ context.Context, sess store.Sessio
 		Model:      sess.Model,
 		Originator: sess.Originator,
 		CliVersion: sess.CliVersion,
+
+		Relationship: ident.Relationship,
+		AgentID:      ident.AgentID,
 	})
 	if err != nil {
 		return err

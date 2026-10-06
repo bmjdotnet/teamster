@@ -294,6 +294,26 @@ func buildStatusRows(cfg config.Config) []statusRow {
 		endpoint: scraperEndpoint,
 	})
 
+	// ── codex-context-subscriber ──────────────────────────────────────────────
+	// Long-running systemd daemon (Codex app-server context fill → hookd
+	// /context); systemd-only: shown when cfg.HookdMode is "systemd" (the unit is never
+	// installed under supervisor/external).
+	if cfg.HookdMode == "systemd" {
+		ccsStatus := checkStatus(checkParams{
+			mode:       cfg.HookdMode,
+			systemdSvc: "teamster-codex-context-subscriber",
+			// no port: subscriber is a client daemon, not a server
+			cfg:     cfg,
+			timeout: timeout,
+		})
+		rows = append(rows, statusRow{
+			label:    "Codex Context Subscriber",
+			status:   ccsStatus,
+			mode:     displayMode(cfg.HookdMode),
+			endpoint: "—",
+		})
+	}
+
 	// ── health-collector ───────────────────────────────────────────────────────
 	// No install-mode flag of its own (unlike token-scraper) — its lifecycle
 	// tracks cfg.HookdMode: systemd unit under "systemd", supervisor-managed

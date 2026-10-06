@@ -2,11 +2,15 @@ package main
 
 import (
 	"context"
+	"math"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/bmjdotnet/teamster/internal/agenthealth/gauge"
 	"github.com/bmjdotnet/teamster/internal/agenthealth/notify"
+	"github.com/bmjdotnet/teamster/internal/pricing"
 	"github.com/bmjdotnet/teamster/internal/store"
 	"github.com/bmjdotnet/teamster/internal/store/sqlite"
 )
@@ -117,6 +121,20 @@ func insertLedgerRowWithTotalInput(t *testing.T, st store.Store, sessionID, agen
 	}
 }
 
+// insertLedgerRowWithRuntime is insertLedgerRow with an explicit runtime and
+// model, for tests exercising runtime-scoped pricing.
+func insertLedgerRowWithRuntime(t *testing.T, st store.Store, sessionID, agentName, messageID, runtime, model string, inputTokens, outputTokens int64, ts time.Time) {
+	t.Helper()
+	rx := st.(store.RawExecutor)
+	_, err := rx.ExecRaw(context.Background(),
+		`INSERT INTO token_ledger (session_id, message_id, agent_name, runtime, model, input_tokens, output_tokens, timestamp, cost_usd)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		sessionID, messageID, agentName, runtime, model, inputTokens, outputTokens, ts, 0.0)
+	if err != nil {
+		t.Fatalf("insert token_ledger row: %v", err)
+	}
+}
+
 func newTickCollaborators() (*notify.Engine, *compositionTracker, *teammateContextTracker, *bool) {
 	engine := notify.NewEngine(notify.DefaultThresholdConfig())
 	compTracker := newCompositionTracker()
@@ -166,10 +184,11 @@ func TestCollectTick_RestartDoesNotDoubleCountTokens(t *testing.T) {
 	tokensOutTotals := make(map[string]int64)
 	rosterIDs := make(map[string]string)
 	teamNames := make(map[string]string)
+	agentIDs := make(map[string]string)
 	engine, compTracker, teammateTracker, promWarned := newTickCollaborators()
 
-	collectTick(context.Background(), st, gs, engine, compTracker, teammateTracker, nil, promWarned, "test-host",
-		highWater, prevContext, costTotals, tokensInTotals, tokensOutTotals, rosterIDs, teamNames)
+	collectTick(context.Background(), st, pricing.NewResolver(st), gs, engine, compTracker, teammateTracker, nil, promWarned, "test-host",
+		highWater, prevContext, costTotals, tokensInTotals, tokensOutTotals, rosterIDs, teamNames, agentIDs)
 
 	row, found, err := gs.Get(context.Background(), preRestartKey)
 	if err != nil || !found {
@@ -191,10 +210,11 @@ func TestCollectTick_RestartDoesNotDoubleCountTokens(t *testing.T) {
 	tokensOutTotals2 := make(map[string]int64)
 	rosterIDs2 := make(map[string]string)
 	teamNames2 := make(map[string]string)
+	agentIDs2 := make(map[string]string)
 	engine2, compTracker2, teammateTracker2, promWarned2 := newTickCollaborators()
 
-	collectTick(context.Background(), st, gs, engine2, compTracker2, teammateTracker2, nil, promWarned2, "test-host",
-		highWater2, prevContext2, costTotals2, tokensInTotals2, tokensOutTotals2, rosterIDs2, teamNames2)
+	collectTick(context.Background(), st, pricing.NewResolver(st), gs, engine2, compTracker2, teammateTracker2, nil, promWarned2, "test-host",
+		highWater2, prevContext2, costTotals2, tokensInTotals2, tokensOutTotals2, rosterIDs2, teamNames2, agentIDs2)
 
 	row, found, err = gs.Get(context.Background(), preRestartKey)
 	if err != nil || !found {
@@ -227,10 +247,11 @@ func TestCollectTick_AccumulatesAcrossTicksWithoutRestart(t *testing.T) {
 	tokensOutTotals := make(map[string]int64)
 	rosterIDs := make(map[string]string)
 	teamNames := make(map[string]string)
+	agentIDs := make(map[string]string)
 	engine, compTracker, teammateTracker, promWarned := newTickCollaborators()
 
-	collectTick(context.Background(), st, gs, engine, compTracker, teammateTracker, nil, promWarned, "test-host",
-		highWater, prevContext, costTotals, tokensInTotals, tokensOutTotals, rosterIDs, teamNames)
+	collectTick(context.Background(), st, pricing.NewResolver(st), gs, engine, compTracker, teammateTracker, nil, promWarned, "test-host",
+		highWater, prevContext, costTotals, tokensInTotals, tokensOutTotals, rosterIDs, teamNames, agentIDs)
 
 	key := gauge.GaugeKey{Host: "test-host", SessionID: sessionID, AgentName: ""}
 	row, _, _ := gs.Get(context.Background(), key)
@@ -241,8 +262,8 @@ func TestCollectTick_AccumulatesAcrossTicksWithoutRestart(t *testing.T) {
 	// New activity arrives; same collector process, maps carried forward.
 	insertLedgerRow(t, st, sessionID, "", "c2", 500, 100, base.Add(time.Minute))
 
-	collectTick(context.Background(), st, gs, engine, compTracker, teammateTracker, nil, promWarned, "test-host",
-		highWater, prevContext, costTotals, tokensInTotals, tokensOutTotals, rosterIDs, teamNames)
+	collectTick(context.Background(), st, pricing.NewResolver(st), gs, engine, compTracker, teammateTracker, nil, promWarned, "test-host",
+		highWater, prevContext, costTotals, tokensInTotals, tokensOutTotals, rosterIDs, teamNames, agentIDs)
 
 	row, _, _ = gs.Get(context.Background(), key)
 	if row.TokensInTotal != 1500 || row.TokensOutTotal != 300 {
@@ -273,10 +294,11 @@ func TestCollectTick_TeammateFallsBackToTokenLedgerWhenNoTranscript(t *testing.T
 	tokensOutTotals := make(map[string]int64)
 	rosterIDs := make(map[string]string)
 	teamNames := make(map[string]string)
+	agentIDs := make(map[string]string)
 	engine, compTracker, teammateTracker, promWarned := newTickCollaborators()
 
-	collectTick(context.Background(), st, gs, engine, compTracker, teammateTracker, nil, promWarned, "test-host",
-		highWater, prevContext, costTotals, tokensInTotals, tokensOutTotals, rosterIDs, teamNames)
+	collectTick(context.Background(), st, pricing.NewResolver(st), gs, engine, compTracker, teammateTracker, nil, promWarned, "test-host",
+		highWater, prevContext, costTotals, tokensInTotals, tokensOutTotals, rosterIDs, teamNames, agentIDs)
 
 	key := gauge.GaugeKey{Host: "test-host", SessionID: sessionID, AgentName: "@collector"}
 	row, found, err := gs.Get(context.Background(), key)
@@ -318,10 +340,11 @@ func TestCollectTick_TeammateWithTranscript_StillPrefersTranscript(t *testing.T)
 	tokensOutTotals := make(map[string]int64)
 	rosterIDs := make(map[string]string)
 	teamNames := make(map[string]string)
+	agentIDs := make(map[string]string)
 	engine, compTracker, teammateTracker, promWarned := newTickCollaborators()
 
-	collectTick(context.Background(), st, gs, engine, compTracker, teammateTracker, nil, promWarned, "test-host",
-		highWater, prevContext, costTotals, tokensInTotals, tokensOutTotals, rosterIDs, teamNames)
+	collectTick(context.Background(), st, pricing.NewResolver(st), gs, engine, compTracker, teammateTracker, nil, promWarned, "test-host",
+		highWater, prevContext, costTotals, tokensInTotals, tokensOutTotals, rosterIDs, teamNames, agentIDs)
 
 	key := gauge.GaugeKey{Host: "test-host", SessionID: sessionID, AgentName: "@collector"}
 	row, found, err := gs.Get(context.Background(), key)
@@ -330,5 +353,281 @@ func TestCollectTick_TeammateWithTranscript_StillPrefersTranscript(t *testing.T)
 	}
 	if row.ContextSource != gauge.ContextSourceTranscript {
 		t.Fatalf("ContextSource = %q, want %q (transcript must win over token_ledger fallback)", row.ContextSource, gauge.ContextSourceTranscript)
+	}
+}
+
+// TestCollectTick_SessionCostComesFromStoreRates proves the resolver built over
+// the store reaches the gauge: an exact-match rate row far from the embedded
+// tables prices the row, so the asserted cost can only come from model_pricing.
+func TestCollectTick_SessionCostComesFromStoreRates(t *testing.T) {
+	st, gs := newCollectTickHarness(t)
+	const sessionID = "sess-cost"
+	insertSession(t, st, sessionID, "")
+
+	ts := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	if _, err := st.UpsertRate(context.Background(), store.ModelRate{
+		Runtime: store.RateRuntimeClaudeCode, MatchKind: store.RateMatchExact, ModelKey: "claude-opus-4-6",
+		Variant: store.RateVariantBase, InputPerMtok: 100, OutputPerMtok: 200,
+		ValidFrom: ts.Add(-time.Hour), SourceURL: "https://example.test/pricing", FetchedAt: ts,
+	}); err != nil {
+		t.Fatalf("upsert rate: %v", err)
+	}
+	insertLedgerRow(t, st, sessionID, "", "m1", 1_000_000, 100_000, ts)
+
+	engine, compTracker, teammateTracker, promWarned := newTickCollaborators()
+	collectTick(context.Background(), st, pricing.NewResolver(st), gs, engine, compTracker, teammateTracker, nil, promWarned, "test-host",
+		map[string]time.Time{}, map[string]int64{}, map[string]float64{}, map[string]int64{}, map[string]int64{}, map[string]string{}, map[string]string{}, map[string]string{})
+
+	row, found, err := gs.Get(context.Background(), gauge.GaugeKey{Host: "test-host", SessionID: sessionID})
+	if err != nil || !found {
+		t.Fatalf("expected gauge row, found=%v err=%v", found, err)
+	}
+	// 1M input at $100/Mtok + 100k output at $200/Mtok.
+	if want := 100.0 + 20.0; math.Abs(row.SessionCostUSD-want) > 1e-6 {
+		t.Errorf("SessionCostUSD = %v, want %v (priced from the store's model_pricing row)", row.SessionCostUSD, want)
+	}
+	if row.Runtime != store.RateRuntimeClaudeCode {
+		t.Errorf("gauge Runtime = %q, want %q", row.Runtime, store.RateRuntimeClaudeCode)
+	}
+}
+
+// TestCollectTick_CodexSessionPricedUnderCodexRuntime is the regression for the
+// Codex $0 bug: the collector priced every ledger row under claude_code, so a
+// Codex model (rates only under runtime=codex) cost $0 and its gauge row was
+// labelled claude_code. The rate here exists only under codex, so only a
+// runtime-correct lookup can find it.
+func TestCollectTick_CodexSessionPricedUnderCodexRuntime(t *testing.T) {
+	st, gs := newCollectTickHarness(t)
+	const sessionID = "sess-codex"
+	insertSession(t, st, sessionID, "")
+
+	ts := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	if _, err := st.UpsertRate(context.Background(), store.ModelRate{
+		Runtime: store.RateRuntimeCodex, MatchKind: store.RateMatchExact, ModelKey: "gpt-6.1-sol",
+		Variant: store.RateVariantBase, InputPerMtok: 100, OutputPerMtok: 200,
+		ValidFrom: ts.Add(-time.Hour), SourceURL: "https://example.test/pricing", FetchedAt: ts,
+	}); err != nil {
+		t.Fatalf("upsert rate: %v", err)
+	}
+	insertLedgerRowWithRuntime(t, st, sessionID, "", "cx1", store.RateRuntimeCodex, "gpt-6.1-sol", 1_000_000, 100_000, ts)
+
+	engine, compTracker, teammateTracker, promWarned := newTickCollaborators()
+	collectTick(context.Background(), st, pricing.NewResolver(st), gs, engine, compTracker, teammateTracker, nil, promWarned, "test-host",
+		map[string]time.Time{}, map[string]int64{}, map[string]float64{}, map[string]int64{}, map[string]int64{}, map[string]string{}, map[string]string{}, map[string]string{})
+
+	row, found, err := gs.Get(context.Background(), gauge.GaugeKey{Host: "test-host", SessionID: sessionID})
+	if err != nil || !found {
+		t.Fatalf("expected gauge row, found=%v err=%v", found, err)
+	}
+	if want := 100.0 + 20.0; math.Abs(row.SessionCostUSD-want) > 1e-6 {
+		t.Errorf("SessionCostUSD = %v, want %v (Codex model must price under runtime=codex, not $0)", row.SessionCostUSD, want)
+	}
+	if row.Runtime != store.RateRuntimeCodex {
+		t.Errorf("gauge Runtime = %q, want %q", row.Runtime, store.RateRuntimeCodex)
+	}
+}
+
+type tickState struct {
+	engine     *notify.Engine
+	comp       *compositionTracker
+	teammate   *teammateContextTracker
+	promWarned *bool
+	highWater  map[string]time.Time
+	i64a, i64b map[string]int64
+	costs      map[string]float64
+	s1, s2, s3 map[string]string
+}
+
+func newTickState() *tickState {
+	e, c, tm, pw := newTickCollaborators()
+	return &tickState{engine: e, comp: c, teammate: tm, promWarned: pw,
+		highWater: map[string]time.Time{}, i64a: map[string]int64{}, i64b: map[string]int64{},
+		costs: map[string]float64{}, s1: map[string]string{}, s2: map[string]string{}, s3: map[string]string{}}
+}
+
+func (ts *tickState) run(st store.Store, gs gauge.GaugeStore) {
+	collectTick(context.Background(), st, pricing.NewResolver(st), gs, ts.engine, ts.comp, ts.teammate, nil, ts.promWarned, "test-host",
+		ts.highWater, ts.i64a, ts.costs, ts.i64b, map[string]int64{}, ts.s1, ts.s2, ts.s3)
+}
+
+func codexReport(window, used int64, fill float64) gauge.GaugeRow {
+	reported := time.Now().UTC().Add(-3 * time.Hour)
+	return gauge.GaugeRow{
+		Host: "test-host", Runtime: store.RateRuntimeCodex, ContextSource: gauge.ContextSourceCodexAppserver,
+		ContextReportedAt: &reported, ContextWindowTokens: window, ContextTokensUsed: used, ContextFillPct: fill,
+		UpdatedAt: time.Now().UTC(),
+	}
+}
+
+func TestCollectTick_CodexReportKeptAcrossTicks(t *testing.T) {
+	st, gs := newCollectTickHarness(t)
+	const sessionID = "sess-cx-keep"
+	insertSession(t, st, sessionID, "")
+	seed := codexReport(258_400, 64_600, 0.25)
+	seed.SessionID = sessionID
+	_ = gs.Upsert(context.Background(), seed)
+
+	ts := newTickState()
+	base := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	insertLedgerRowWithRuntime(t, st, sessionID, "", "k1", store.RateRuntimeCodex, "gpt-6.1-sol", 1000, 100, base)
+	ts.run(st, gs)
+	insertLedgerRowWithRuntime(t, st, sessionID, "", "k2", store.RateRuntimeCodex, "gpt-6.1-sol", 1000, 100, base.Add(time.Minute))
+	ts.run(st, gs)
+
+	row, _, _ := gs.Get(context.Background(), gauge.GaugeKey{Host: "test-host", SessionID: sessionID})
+	if row.ContextSource != gauge.ContextSourceCodexAppserver || row.ContextWindowTokens != 258_400 ||
+		row.ContextTokensUsed != 64_600 || row.ContextFillPct != 0.25 || row.LongContextActive {
+		t.Fatalf("codex report lost: src=%q win=%d used=%d fill=%v long=%v",
+			row.ContextSource, row.ContextWindowTokens, row.ContextTokensUsed, row.ContextFillPct, row.LongContextActive)
+	}
+}
+
+func TestCollectTick_CodexRoleTeammateSkipsClaudeTranscriptPath(t *testing.T) {
+	st, gs := newCollectTickHarness(t)
+	const sessionID = "sess-cx-role"
+	const agent = "@worker"
+	insertSession(t, st, sessionID, agent)
+	seed := codexReport(258_400, 100_000, 0.387)
+	seed.SessionID, seed.AgentName = sessionID, agent
+	_ = gs.Upsert(context.Background(), seed)
+
+	insertLedgerRowWithRuntime(t, st, sessionID, agent, "r1", store.RateRuntimeCodex, "gpt-6.1-sol", 1000, 100, time.Now().UTC().Add(-time.Hour))
+	newTickState().run(st, gs)
+
+	row, _, _ := gs.Get(context.Background(), gauge.GaugeKey{Host: "test-host", SessionID: sessionID, AgentName: agent})
+	if row.ContextSource != gauge.ContextSourceCodexAppserver || row.ContextWindowTokens != 258_400 || row.ContextTokensUsed != 100_000 {
+		t.Fatalf("codex teammate: src=%q win=%d used=%d, want codex report kept", row.ContextSource, row.ContextWindowTokens, row.ContextTokensUsed)
+	}
+}
+
+func TestCollectTick_CodexNoReportIsZeroHeuristic(t *testing.T) {
+	st, gs := newCollectTickHarness(t)
+	const sessionID = "sess-cx-none"
+	insertSession(t, st, sessionID, "")
+	insertLedgerRowWithRuntime(t, st, sessionID, "", "n1", store.RateRuntimeCodex, "gpt-6.1-sol", 1000, 100, time.Now().UTC().Add(-time.Hour))
+	newTickState().run(st, gs)
+
+	row, found, _ := gs.Get(context.Background(), gauge.GaugeKey{Host: "test-host", SessionID: sessionID})
+	if !found {
+		t.Fatal("no gauge row")
+	}
+	if row.ContextWindowTokens != 0 || row.ContextTokensUsed != 0 || row.ContextFillPct != 0 || row.ContextSource != gauge.ContextSourceHeuristic {
+		t.Fatalf("got win=%d used=%d fill=%v src=%q, want 0/0/0/heuristic",
+			row.ContextWindowTokens, row.ContextTokensUsed, row.ContextFillPct, row.ContextSource)
+	}
+}
+
+func TestCollectTick_ClaudeStatuslineStillDecays(t *testing.T) {
+	st, gs := newCollectTickHarness(t)
+	const sessionID = "sess-claude-decay"
+	insertSession(t, st, sessionID, "")
+	reported := time.Now().UTC().Add(-2 * time.Minute)
+	_ = gs.Upsert(context.Background(), gauge.GaugeRow{
+		Host: "test-host", SessionID: sessionID, Runtime: store.RateRuntimeClaudeCode,
+		ContextSource: gauge.ContextSourceStatusline, ContextReportedAt: &reported,
+		ContextWindowTokens: 1_000_000, ContextTokensUsed: 50_000, ContextFillPct: 0.05, UpdatedAt: time.Now().UTC(),
+	})
+	insertLedgerRow(t, st, sessionID, "", "c1", 1000, 100, time.Now().UTC().Add(-time.Hour))
+	newTickState().run(st, gs)
+
+	row, _, _ := gs.Get(context.Background(), gauge.GaugeKey{Host: "test-host", SessionID: sessionID})
+	if row.ContextSource != gauge.ContextSourceHeuristic {
+		t.Fatalf("source = %q, want heuristic after statusline went stale", row.ContextSource)
+	}
+}
+
+// TestCollectTick_NumberedTeammate_TranscriptViaRosterAgentID: hookd numbers a
+// respawned teammate @redteam-2 while its sidecar name stays "redteam", so the
+// name match misses; the roster's agent_id must find the transcript.
+func TestCollectTick_NumberedTeammate_TranscriptViaRosterAgentID(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	const sessionID = "sess-numbered"
+
+	writeSidecarTranscript(t, home, sessionID, "anum2",
+		agentSidecar{Name: "redteam", TaskKind: taskKindTeammate, Model: "claude-sonnet-5"},
+		[]string{assistantLine(2, 117_000, 1_500, 300)})
+
+	st, gs := newCollectTickHarness(t)
+	insertSession(t, st, sessionID, "@redteam-2")
+	sid := sessionID
+	if err := st.UpsertRosterEntry(context.Background(), store.RosterEntry{
+		RosterID: "roster-num2", SessionID: &sid, AgentName: "@redteam-2", Host: "test-host",
+		Runtime: store.RateRuntimeClaudeCode, AgentID: "anum2", CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("upsert roster: %v", err)
+	}
+	insertLedgerRowWithTotalInput(t, st, sessionID, "@redteam-2", "n1", "claude-opus-4-6", 1000, 200, 45_000, time.Now().UTC().Add(-time.Hour))
+
+	ts := newTickState()
+	ts.run(st, gs)
+
+	row, found, err := gs.Get(context.Background(), gauge.GaugeKey{Host: "test-host", SessionID: sessionID, AgentName: "@redteam-2"})
+	if err != nil || !found {
+		t.Fatalf("expected gauge row, found=%v err=%v", found, err)
+	}
+	if row.ContextSource != gauge.ContextSourceTranscript {
+		t.Fatalf("ContextSource = %q, want transcript", row.ContextSource)
+	}
+	if want := int64(2 + 117_000 + 1_500); row.ContextTokensUsed != want {
+		t.Errorf("ContextUsedTokens = %d, want %d", row.ContextTokensUsed, want)
+	}
+	if row.ContextWindowTokens != 1_000_000 {
+		t.Errorf("ContextWindowTokens = %d, want 1000000", row.ContextWindowTokens)
+	}
+}
+
+// TestCollectTick_AgentIDStampedLater_ReResolvesToIDFile: tick 1 has no
+// agent_id on the roster row (name fallback resolves a dead same-name
+// instance); once the row is stamped, tick 2 caches the id and the tracker
+// re-resolves to the live agent_id transcript.
+func TestCollectTick_AgentIDStampedLater_ReResolvesToIDFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	const sessionID = "sess-stamp"
+
+	writeSidecarTranscript(t, home, sessionID, "adead1",
+		agentSidecar{Name: "redteam", TaskKind: taskKindTeammate, Model: "claude-sonnet-5"},
+		[]string{assistantLine(2, 10_000, 0, 1)})
+	writeSidecarTranscript(t, home, sessionID, "alive1",
+		agentSidecar{Name: "redteam", TaskKind: taskKindTeammate, Model: "claude-sonnet-5"},
+		[]string{assistantLine(2, 70_000, 0, 1)})
+	// Make the dead file the newest so the name fallback picks it.
+	later := time.Now().Add(time.Minute)
+	deadPath := filepath.Join(home, ".claude", "projects", "proj", sessionID, "subagents", "agent-adead1.jsonl")
+	if err := os.Chtimes(deadPath, later, later); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	st, gs := newCollectTickHarness(t)
+	insertSession(t, st, sessionID, "@redteam")
+	sid := sessionID
+	roster := store.RosterEntry{
+		RosterID: "roster-stamp", SessionID: &sid, AgentName: "@redteam", Host: "test-host",
+		Runtime: store.RateRuntimeClaudeCode, CreatedAt: time.Now().UTC(),
+	}
+	if err := st.UpsertRosterEntry(context.Background(), roster); err != nil {
+		t.Fatalf("upsert roster: %v", err)
+	}
+	insertLedgerRowWithTotalInput(t, st, sessionID, "@redteam", "s1", "claude-opus-4-6", 1000, 200, 45_000, time.Now().UTC().Add(-time.Hour))
+
+	ts := newTickState()
+	key := gauge.GaugeKey{Host: "test-host", SessionID: sessionID, AgentName: "@redteam"}
+
+	ts.run(st, gs)
+	row, _, _ := gs.Get(context.Background(), key)
+	if want := int64(10_002); row.ContextTokensUsed != want {
+		t.Fatalf("tick 1 ContextTokensUsed = %d, want %d (name fallback)", row.ContextTokensUsed, want)
+	}
+
+	roster.AgentID = "alive1"
+	if err := st.UpsertRosterEntry(context.Background(), roster); err != nil {
+		t.Fatalf("stamp roster: %v", err)
+	}
+	insertLedgerRowWithTotalInput(t, st, sessionID, "@redteam", "s2", "claude-opus-4-6", 1000, 200, 46_000, time.Now().UTC().Add(-time.Minute))
+	ts.run(st, gs)
+	row, _, _ = gs.Get(context.Background(), key)
+	if want := int64(70_002); row.ContextTokensUsed != want {
+		t.Fatalf("tick 2 ContextTokensUsed = %d, want %d (agent_id path)", row.ContextTokensUsed, want)
 	}
 }

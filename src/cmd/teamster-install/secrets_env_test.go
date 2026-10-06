@@ -184,3 +184,26 @@ func TestSweepTemplateHasNoInlineDSN(t *testing.T) {
 		t.Fatalf("sweep template must not carry the stale __STORE_DSN__ placeholder:\n%s", s)
 	}
 }
+
+// TestHealthCollectorDSNLineLandsInServiceSection guards the placement bug where
+// EnvironmentFile= was appended after [Install], where systemd ignores it.
+func TestHealthCollectorDSNLineLandsInServiceSection(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(repoRootFromTest(t), "skel", "etc", "teamster-health-collector.service.tmpl"))
+	if err != nil {
+		t.Fatalf("read template: %v", err)
+	}
+	line := dsnEnvLine("/etc/teamster/secrets.env")
+	m := insertIntoServiceSection(string(data), line)
+	envIdx := strings.Index(m, strings.TrimSpace(line))
+	svcIdx := strings.Index(m, "[Service]")
+	instIdx := strings.Index(m, "[Install]")
+	if envIdx < 0 || svcIdx < 0 || instIdx < 0 {
+		t.Fatalf("missing marker (env=%d service=%d install=%d):\n%s", envIdx, svcIdx, instIdx, m)
+	}
+	if !(svcIdx < envIdx && envIdx < instIdx) {
+		t.Fatalf("EnvironmentFile= must sit between [Service] and [Install]:\n%s", m)
+	}
+	if got := insertIntoServiceSection("[Service]\nType=simple\n", line); got != "[Service]\nType=simple\n"+line {
+		t.Fatalf("no-[Install] unit should append, got %q", got)
+	}
+}

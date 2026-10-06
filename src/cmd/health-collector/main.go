@@ -15,8 +15,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
@@ -25,6 +27,8 @@ import (
 	"time"
 
 	mysqldriver "github.com/go-sql-driver/mysql"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/bmjdotnet/teamster/internal/agenthealth/gauge"
 	gaugemysql "github.com/bmjdotnet/teamster/internal/agenthealth/gauge/mysql"
@@ -66,6 +70,13 @@ func run() int {
 		return 1
 	}
 
+	var metricsAddr string
+	fs := flag.NewFlagSet("health-collector", flag.ContinueOnError)
+	fs.StringVar(&metricsAddr, "metrics-addr", "", "address for /metrics (e.g. :9126); empty = disabled")
+	if err := fs.Parse(os.Args[1:]); err != nil {
+		return 2
+	}
+
 	if cfg.StoreDSN.Raw == "" {
 		logger.Error("TEAMSTER_STORE_DSN is required")
 		return 1
@@ -80,6 +91,23 @@ func run() int {
 		return 1
 	}
 	defer st.Close()
+
+	resolver := pricing.NewResolver(st)
+	// The resolver logs a failed refresh itself and serves embedded rates until
+	// a later refresh succeeds.
+	_ = resolver.Refresh(ctx)
+
+	if metricsAddr != "" {
+		reg := prometheus.NewRegistry()
+		reg.MustRegister(newPricingCollector(resolver))
+		go func() {
+			mux := http.NewServeMux()
+			mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
+			if err := http.ListenAndServe(metricsAddr, mux); err != nil {
+				slog.Error("metrics listener failed", "addr", metricsAddr, "err", err)
+			}
+		}()
+	}
 
 	drvDSN, err := toDriverDSN(cfg.StoreDSN.Raw)
 	if err != nil {
@@ -114,7 +142,7 @@ func run() int {
 
 	logger.Info("health-collector started",
 		"host", cfg.Host, "interval", defaultInterval.String())
-	collectLoop(ctx, st, gs, engine, compTracker, teammateTracker, prom, &promWarned, cfg.Host, defaultInterval)
+	collectLoop(ctx, st, resolver, gs, engine, compTracker, teammateTracker, prom, &promWarned, cfg.Host, defaultInterval)
 	logger.Info("health-collector stopped")
 	return 0
 }
@@ -136,7 +164,7 @@ func resolvePromClient(cfg config.Config) *promClient {
 	return newPromClient(promURL)
 }
 
-func collectLoop(ctx context.Context, st store.Store, gs gauge.GaugeStore, engine *notify.Engine, compTracker *compositionTracker, teammateTracker *teammateContextTracker, prom *promClient, promWarned *bool, host string, interval time.Duration) {
+func collectLoop(ctx context.Context, st store.Store, resolver *pricing.Resolver, gs gauge.GaugeStore, engine *notify.Engine, compTracker *compositionTracker, teammateTracker *teammateContextTracker, prom *promClient, promWarned *bool, host string, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -167,6 +195,7 @@ func collectLoop(ctx context.Context, st store.Store, gs gauge.GaugeStore, engin
 	tokensOutTotals := make(map[string]int64)
 	rosterIDs := make(map[string]string)
 	teamNames := make(map[string]string)
+	agentIDs := make(map[string]string)
 	var lastSweep time.Time
 
 	for {
@@ -174,7 +203,7 @@ func collectLoop(ctx context.Context, st store.Store, gs gauge.GaugeStore, engin
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			collectTick(ctx, st, gs, engine, compTracker, teammateTracker, prom, promWarned, host, highWater, prevContext, costTotals, tokensInTotals, tokensOutTotals, rosterIDs, teamNames)
+			collectTick(ctx, st, resolver, gs, engine, compTracker, teammateTracker, prom, promWarned, host, highWater, prevContext, costTotals, tokensInTotals, tokensOutTotals, rosterIDs, teamNames, agentIDs)
 
 			// Throttled to once per 1min, independent of the (much shorter)
 			// poll interval — a closed session gets no further token_ledger
@@ -207,6 +236,7 @@ func collectLoop(ctx context.Context, st store.Store, gs gauge.GaugeStore, engin
 
 type ledgerRow struct {
 	AgentName        string
+	Runtime          string
 	Model            string
 	InputTokens      int64
 	OutputTokens     int64
@@ -221,7 +251,7 @@ type ledgerRow struct {
 	Timestamp        time.Time
 }
 
-func collectTick(ctx context.Context, st store.Store, gs gauge.GaugeStore, engine *notify.Engine, compTracker *compositionTracker, teammateTracker *teammateContextTracker, prom *promClient, promWarned *bool, host string, highWater map[string]time.Time, prevContext map[string]int64, costTotals map[string]float64, tokensInTotals map[string]int64, tokensOutTotals map[string]int64, rosterIDs map[string]string, teamNames map[string]string) {
+func collectTick(ctx context.Context, st store.Store, resolver *pricing.Resolver, gs gauge.GaugeStore, engine *notify.Engine, compTracker *compositionTracker, teammateTracker *teammateContextTracker, prom *promClient, promWarned *bool, host string, highWater map[string]time.Time, prevContext map[string]int64, costTotals map[string]float64, tokensInTotals map[string]int64, tokensOutTotals map[string]int64, rosterIDs map[string]string, teamNames map[string]string, agentIDs map[string]string) {
 	rx, ok := st.(store.RawExecutor)
 	if !ok {
 		slog.Warn("store does not support RawExecutor — cannot query token_ledger")
@@ -275,21 +305,32 @@ func collectTick(ctx context.Context, st store.Store, gs gauge.GaugeStore, engin
 	for _, sk := range sessions {
 		k := sk.SessionID + "|" + sk.AgentName
 
+		var entry store.RosterEntry
+		haveEntry := false
 		if _, ok := rosterIDs[k]; !ok {
 			if rid, err := st.ResolveRosterID(ctx, sk.SessionID, sk.AgentName); err == nil {
 				rosterIDs[k] = rid
+				if rid != "" {
+					if e, err := st.GetRosterEntry(ctx, rid); err == nil {
+						entry, haveEntry = e, true
+					}
+				}
 			}
-		} else if _, err := st.GetRosterEntry(ctx, rosterIDs[k]); err != nil {
+		} else if e, err := st.GetRosterEntry(ctx, rosterIDs[k]); err != nil {
 			// Cached roster_id no longer resolves (e.g. purged by SQL
 			// cleanup) — drop it so the next tick re-resolves via
 			// ResolveRosterID instead of joining against a dead row.
 			delete(rosterIDs, k)
+			delete(agentIDs, k)
+		} else {
+			entry, haveEntry = e, true
 		}
-		if _, ok := teamNames[k]; !ok {
-			if rid, ok := rosterIDs[k]; ok && rid != "" {
-				if entry, err := st.GetRosterEntry(ctx, rid); err == nil {
-					teamNames[k] = entry.TeamName
-				}
+		if haveEntry {
+			if _, haveTeam := teamNames[k]; !haveTeam {
+				teamNames[k] = entry.TeamName
+			}
+			if entry.AgentID != "" && entry.AgentID != agentIDs[k] {
+				agentIDs[k] = entry.AgentID
 			}
 		}
 
@@ -323,7 +364,7 @@ func collectTick(ctx context.Context, st store.Store, gs gauge.GaugeStore, engin
 			deltaIn += r.InputTokens
 			deltaOut += r.OutputTokens
 		}
-		costTotals[k] += costForRows(rows)
+		costTotals[k] += costForRows(ctx, resolver, rows)
 		costUSD := costTotals[k]
 
 		existing, existingFound, getErr := gs.Get(ctx, gauge.GaugeKey{Host: gaugeHostFor(sk, host), SessionID: sk.SessionID, AgentName: sk.AgentName})
@@ -339,7 +380,17 @@ func collectTick(ctx context.Context, st store.Store, gs gauge.GaugeStore, engin
 		var fillPct float64
 		var contextSource string
 		var sessionTotalCost float64
-		if sk.AgentName == "" {
+		if latest.Runtime == store.RateRuntimeCodex {
+			window, contextUsed, longCtx, fillPct, contextSource = chooseCodexContext(existing, existingFound)
+			sessionTotalCost = existing.SessionTotalCostUSD
+			if sk.AgentName == "" {
+				if cost, err := querySessionTotalCost(ctx, rx, sk.SessionID); err != nil {
+					slog.Warn("query session total cost", "session", sk.SessionID, "error", err)
+				} else {
+					sessionTotalCost = cost
+				}
+			}
+		} else if sk.AgentName == "" {
 			window, contextUsed, longCtx, fillPct, contextSource = chooseContextWindow(existing, existingFound, time.Now(), latest.TotalInput, latest.Model)
 			// Computed once per session per tick (on the lead's row only,
 			// never per teammate) directly from token_ledger — the durable
@@ -361,7 +412,7 @@ func collectTick(ctx context.Context, st store.Store, gs gauge.GaugeStore, engin
 			}
 		} else {
 			leadWindow, leadWindowOK := leadWindows[sk.SessionID]
-			result := teammateTracker.Update(sk.SessionID, sk.AgentName, leadModels[sk.SessionID], leadWindow, leadWindowOK)
+			result := teammateTracker.Update(sk.SessionID, sk.AgentName, agentIDs[k], leadModels[sk.SessionID], leadWindow, leadWindowOK)
 			if result.Source == gauge.ContextSourceUnavailable {
 				result = teammateContextFromLedger(latest.Model, latest.TotalInput, leadModels[sk.SessionID], leadWindow, leadWindowOK)
 			}
@@ -392,7 +443,7 @@ func collectTick(ctx context.Context, st store.Store, gs gauge.GaugeStore, engin
 			Host:                  gaugeHostFor(sk, host),
 			SessionID:             sk.SessionID,
 			AgentName:             sk.AgentName,
-			Runtime:               "claude_code",
+			Runtime:               latest.Runtime,
 			Model:                 latest.Model,
 			LongContextActive:     longCtx,
 			ContextWindowTokens:   window,
@@ -519,7 +570,7 @@ func gaugeHostFor(sk store.SessionKey, collectorHost string) string {
 
 func queryTokenLedger(ctx context.Context, rx store.RawExecutor, sessionID, agentName string, since time.Time) ([]ledgerRow, error) {
 	rows, err := rx.QueryRaw(ctx, `
-		SELECT agent_name, model, input_tokens, output_tokens,
+		SELECT agent_name, runtime, model, input_tokens, output_tokens,
 		       cache_read_tokens, cache_write_tokens, cache_write_1h, cache_write_5m,
 		       total_input, n_text, n_tool_use, n_thinking, timestamp
 		FROM token_ledger
@@ -535,7 +586,7 @@ func queryTokenLedger(ctx context.Context, rx store.RawExecutor, sessionID, agen
 	for rows.Next() {
 		var r ledgerRow
 		if err := rows.Scan(
-			&r.AgentName, &r.Model, &r.InputTokens, &r.OutputTokens,
+			&r.AgentName, &r.Runtime, &r.Model, &r.InputTokens, &r.OutputTokens,
 			&r.CacheReadTokens, &r.CacheWriteTokens, &r.CacheWrite1h, &r.CacheWrite5m,
 			&r.TotalInput, &r.NText, &r.NToolUse, &r.NThinking, &r.Timestamp,
 		); err != nil {
@@ -551,13 +602,10 @@ func queryTokenLedger(ctx context.Context, rx store.RawExecutor, sessionID, agen
 // any individual agent's sessions.status or by SweepOffline deleting that
 // agent's gauge row. Deliberately reads the persisted cost_usd column rather
 // than recomputing via costForRows/internal/pricing: cost_usd was priced
-// once by token-scraper at ingest time, so summing it needs no per-row
-// pricing-table lookups (cheap even over a session's full history) and
-// isn't affected by which pricing-table version this health-collector
-// binary happens to be running — a stale-binary pricing gap (see
-// internal/pricing/pricing.go's history of missing-entry defects) only
-// affects costForRows's live recompute, never this stored-value sum, once
-// token-scraper's own binary has the correct rates at ingest time.
+// once at ingest time, so summing it needs no per-row rate lookups (cheap
+// even over a session's full history) and isn't affected by model_pricing
+// changing since — a rate gap only affects costForRows's live recompute,
+// never this stored-value sum, once ingest had the correct rates.
 func querySessionTotalCost(ctx context.Context, rx store.RawExecutor, sessionID string) (float64, error) {
 	rows, err := rx.QueryRaw(ctx,
 		`SELECT COALESCE(SUM(cost_usd), 0) FROM token_ledger WHERE session_id = ?`,
@@ -580,17 +628,24 @@ func querySessionTotalCost(ctx context.Context, rx store.RawExecutor, sessionID 
 // token columns (input/output/cache_read/cache_write, split by the 5m/1h
 // cache-write TTL tier since they price differently) × internal/pricing
 // rates, keyed by that row's OWN model (the real API model ID
-// token-scraper recorded, never a sidecar alias). Deliberately never uses
+// token-scraper recorded, never a sidecar alias), priced at the rate in effect
+// at that row's own timestamp. Deliberately never uses
 // TotalInput: that column is occupancy-shaped (context-window fill), not
 // cost-shaped, and would double- or under-count depending on cache state.
 // token-scraper already dedups output_tokens growth across sidechain lines
 // before writing token_ledger, so summing rows as-is here is correct — no
-// further dedup needed. A pure function — no DB access — so it's
-// unit-testable without mocking token_ledger.
-func costForRows(rows []ledgerRow) float64 {
+// further dedup needed. Never reads token_ledger: rates come from the
+// resolver's in-memory snapshot, so it's unit-testable with a fake RateSource.
+func costForRows(ctx context.Context, resolver *pricing.Resolver, rows []ledgerRow) float64 {
 	var total float64
 	for _, r := range rows {
-		total += pricing.ComputeCost(r.Model, r.InputTokens, r.OutputTokens, r.CacheReadTokens, r.CacheWrite5m, r.CacheWrite1h)
+		total += resolver.Price(ctx, r.Runtime, r.Model, r.Timestamp, pricing.Tokens{
+			Input:        r.InputTokens,
+			Output:       r.OutputTokens,
+			CacheRead:    r.CacheReadTokens,
+			CacheWrite5m: r.CacheWrite5m,
+			CacheWrite1h: r.CacheWrite1h,
+		}).CostUSD
 	}
 	return total
 }
@@ -644,6 +699,20 @@ func chooseContextWindow(existing gauge.GaugeRow, existingFound bool, now time.T
 		fillPct = float64(contextUsed) / float64(window)
 	}
 	return window, contextUsed, window > longContextWindowThreshold, fillPct, gauge.ContextSourceHeuristic
+}
+
+// chooseCodexContext resolves a codex-runtime row's context fields. A report
+// from the codex context subscriber (ContextSourceCodexAppserver) is kept
+// regardless of age: reports arrive only per API response and an idle
+// session's context does not change, so decaying it after
+// statuslineStaleAfter would replace exact data with a guess. With no report
+// yet, nothing is fabricated — no model-class guess and never the Claude
+// defaultContextWindow: window/used/fill stay zero with the heuristic source.
+func chooseCodexContext(existing gauge.GaugeRow, existingFound bool) (window, contextUsed int64, longCtx bool, fillPct float64, source string) {
+	if existingFound && existing.ContextSource == gauge.ContextSourceCodexAppserver && existing.ContextWindowTokens > 0 {
+		return existing.ContextWindowTokens, existing.ContextTokensUsed, existing.LongContextActive, existing.ContextFillPct, gauge.ContextSourceCodexAppserver
+	}
+	return 0, 0, false, 0, gauge.ContextSourceHeuristic
 }
 
 // chooseLastActivity decides last_activity_ts/tool/display for one

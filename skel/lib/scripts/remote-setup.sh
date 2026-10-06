@@ -508,13 +508,83 @@ else
     echo "  skipped (Codex not wired on this remote)"
 fi
 
+# 9. Schedule codex-context-subscriber (real-time context-window reporting for
+# remote Codex sessions), only if Step 7 wired Codex. The subscriber is a
+# DAEMON (long-running, handles its own backoff when no Codex socket exists),
+# not a oneshot — macOS uses KeepAlive (launchd restarts on exit/crash),
+# Linux uses @reboot cron + an immediate background start.
+echo "--> Step 9: Scheduling codex-context-subscriber..."
+SUBSCRIBER="$TEAMSTER_DIR/bin/codex-context-subscriber"
+if [[ "$CODEX_WIRED" -eq 1 && -x "$SUBSCRIBER" ]]; then
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+        SUB_PLIST="$HOME/Library/LaunchAgents/net.bmj.teamster.codex-context-subscriber.plist"
+        mkdir -p "$HOME/Library/LaunchAgents"
+        cat > "$SUB_PLIST" <<PLIST_EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>net.bmj.teamster.codex-context-subscriber</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$PYTHON3</string>
+        <string>$SUBSCRIBER</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>TEAMSTER_HOOK_SERVER_URL</key>
+        <string>http://$SERVER/event</string>
+        <key>TEAMSTER_HOST</key>
+        <string>$SHORT_HOST</string>
+    </dict>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>$HOME/teamster/var/codex-context-subscriber.log</string>
+    <key>StandardErrorPath</key>
+    <string>$HOME/teamster/var/codex-context-subscriber.log</string>
+</dict>
+</plist>
+PLIST_EOF
+        mkdir -p "$HOME/teamster/var"
+        launchctl bootout "gui/$(id -u)/net.bmj.teamster.codex-context-subscriber" 2>/dev/null || true
+        launchctl bootstrap "gui/$(id -u)" "$SUB_PLIST" \
+            || die "step 9 failed: launchctl bootstrap of codex-context-subscriber LaunchAgent failed"
+        echo "  installed codex-context-subscriber LaunchAgent (KeepAlive): $SUB_PLIST"
+    else
+        SUB_CRON_LINE="@reboot TEAMSTER_HOOK_SERVER_URL=http://$SERVER/event TEAMSTER_HOST=$SHORT_HOST nohup $PYTHON3 $SUBSCRIBER >> $HOME/teamster/var/codex-context-subscriber.log 2>&1 &"
+        if crontab -l 2>/dev/null | grep -qF 'codex-context-subscriber'; then
+            crontab -l 2>/dev/null | { grep -vF 'codex-context-subscriber' || [ $? -eq 1 ]; } | { cat; printf '%s\n' "$SUB_CRON_LINE"; } | crontab - \
+                || die "step 9 failed: could not update codex-context-subscriber cron entry"
+            echo "  updated codex-context-subscriber @reboot cron entry"
+        else
+            ( crontab -l 2>/dev/null; printf '%s\n' "$SUB_CRON_LINE" ) | crontab - \
+                || die "step 9 failed: could not install codex-context-subscriber cron entry"
+            echo "  installed codex-context-subscriber @reboot cron entry"
+        fi
+        mkdir -p "$HOME/teamster/var"
+        if ! pgrep -f 'codex-context-subscriber' >/dev/null 2>&1; then
+            TEAMSTER_HOOK_SERVER_URL="http://$SERVER/event" TEAMSTER_HOST="$SHORT_HOST" \
+                nohup "$PYTHON3" "$SUBSCRIBER" >> "$HOME/teamster/var/codex-context-subscriber.log" 2>&1 &
+            echo "  started codex-context-subscriber (pid $!)"
+        else
+            echo "  codex-context-subscriber already running"
+        fi
+    fi
+elif [[ "$CODEX_WIRED" -eq 1 ]]; then
+    echo "  WARN: $SUBSCRIBER not found — skipping scheduler setup (Codex context data will not be reported in real time)"
+else
+    echo "  skipped (Codex not wired on this remote)"
+fi
+
 echo ""
 echo "==> remote-setup.sh complete."
 echo "    Hub:     http://$SERVER"
 echo "    Hook:    $TEAMSTER_DIR/bin/teamster"
 echo "    Scraper: $SCRAPER (every 60s)"
 if [[ "$CODEX_WIRED" -eq 1 ]]; then
-    echo "    Codex:   wired (codex-scraper every 10min)"
+    echo "    Codex:   wired (codex-scraper every 10min, context-subscriber daemon)"
 else
     echo "    Codex:   not wired on this remote"
 fi

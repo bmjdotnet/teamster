@@ -1504,12 +1504,12 @@ func (s *Store) UpsertSession(ctx context.Context, sess store.Session) error {
 		ON DUPLICATE KEY UPDATE
 			host = VALUES(host),
 			username = VALUES(username),
-			team_name = VALUES(team_name),
-			project_id = VALUES(project_id),
-			goal_id = VALUES(goal_id),
-			task_id = VALUES(task_id),
-			workitem_id = VALUES(workitem_id),
-			focus = VALUES(focus),
+			team_name = COALESCE(NULLIF(VALUES(team_name),''), team_name),
+			project_id = COALESCE(NULLIF(VALUES(project_id),''), project_id),
+			goal_id = COALESCE(NULLIF(VALUES(goal_id),''), goal_id),
+			task_id = COALESCE(NULLIF(VALUES(task_id),''), task_id),
+			workitem_id = COALESCE(NULLIF(VALUES(workitem_id),''), workitem_id),
+			focus = COALESCE(NULLIF(VALUES(focus),''), focus),
 			last_seen = VALUES(last_seen),
 			status = VALUES(status),
 			runtime = VALUES(runtime),
@@ -2540,4 +2540,16 @@ func (s *Store) ListRelatedEntities(ctx context.Context, opts store.ListRelatedO
 		})
 	}
 	return out, nil
+}
+
+// classifyDuplicateKey maps a MySQL duplicate-key violation (error 1062) onto
+// store.ErrConflict so callers branch via errors.Is instead of matching driver
+// text; any other error is wrapped with the operation name. The mysql
+// counterpart of the sqlite backend's classifyConflict.
+func classifyDuplicateKey(op string, err error) error {
+	var myErr *mysqldriver.MySQLError
+	if errors.As(err, &myErr) && myErr.Number == 1062 {
+		return store.Conflict(op, err)
+	}
+	return fmt.Errorf("%s: %w", op, err)
 }

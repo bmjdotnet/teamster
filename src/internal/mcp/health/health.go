@@ -195,6 +195,8 @@ type agentHealthView struct {
 	TeamName       string  `json:"team_name,omitempty"`
 	Relationship   string  `json:"relationship,omitempty"`
 	ParentRef      *string `json:"parent_ref,omitempty"`
+	AgentID        string  `json:"agent_id,omitempty"`
+	Description    string  `json:"description,omitempty"`
 	Liveness       string  `json:"liveness,omitempty"`
 	ContextFillPct float64 `json:"context_fill_pct"`
 	SessionCostUSD float64 `json:"session_cost_usd"`
@@ -278,6 +280,8 @@ func buildHealthView(g gauge.GaugeRow, rosterEntry *store.RosterEntry, session *
 		v.TeamName = rosterEntry.TeamName
 		v.Relationship = rosterEntry.Relationship
 		v.ParentRef = rosterEntry.ParentRef
+		v.AgentID = rosterEntry.AgentID
+		v.Description = rosterEntry.Description
 		v.Liveness = mcproster.ComputeLiveness(*rosterEntry, session)
 	}
 
@@ -461,6 +465,8 @@ func handleListAgents(ctx context.Context, mainStore store.Store, gaugeStore gau
 			TeamName:     entry.TeamName,
 			Relationship: entry.Relationship,
 			ParentRef:    entry.ParentRef,
+			AgentID:      entry.AgentID,
+			Description:  entry.Description,
 			Liveness:     mcproster.ComputeLiveness(entry, session),
 		}
 		if session != nil {

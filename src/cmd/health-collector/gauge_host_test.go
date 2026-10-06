@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/bmjdotnet/teamster/internal/agenthealth/gauge"
+	"github.com/bmjdotnet/teamster/internal/pricing"
 	"github.com/bmjdotnet/teamster/internal/store"
 )
 
@@ -82,10 +83,11 @@ func TestCollectTick_GaugeRowKeyedBySessionHost(t *testing.T) {
 	tokensOutTotals := make(map[string]int64)
 	rosterIDs := make(map[string]string)
 	teamNames := make(map[string]string)
+	agentIDs := make(map[string]string)
 	engine, compTracker, teammateTracker, promWarned := newTickCollaborators()
 
-	collectTick(context.Background(), st, gs, engine, compTracker, teammateTracker, nil, promWarned, "hub-1",
-		highWater, prevContext, costTotals, tokensInTotals, tokensOutTotals, rosterIDs, teamNames)
+	collectTick(context.Background(), st, pricing.NewResolver(st), gs, engine, compTracker, teammateTracker, nil, promWarned, "hub-1",
+		highWater, prevContext, costTotals, tokensInTotals, tokensOutTotals, rosterIDs, teamNames, agentIDs)
 
 	if len(gs.rows) != 1 {
 		t.Fatalf("len(gs.rows) = %d, want 1", len(gs.rows))
@@ -115,10 +117,11 @@ func TestCollectTick_GaugeRowFallsBackToCollectorHostWhenSessionHostEmpty(t *tes
 	tokensOutTotals := make(map[string]int64)
 	rosterIDs := make(map[string]string)
 	teamNames := make(map[string]string)
+	agentIDs := make(map[string]string)
 	engine, compTracker, teammateTracker, promWarned := newTickCollaborators()
 
-	collectTick(context.Background(), st, gs, engine, compTracker, teammateTracker, nil, promWarned, "hub-1",
-		highWater, prevContext, costTotals, tokensInTotals, tokensOutTotals, rosterIDs, teamNames)
+	collectTick(context.Background(), st, pricing.NewResolver(st), gs, engine, compTracker, teammateTracker, nil, promWarned, "hub-1",
+		highWater, prevContext, costTotals, tokensInTotals, tokensOutTotals, rosterIDs, teamNames, agentIDs)
 
 	if len(gs.rows) != 1 {
 		t.Fatalf("len(gs.rows) = %d, want 1", len(gs.rows))
@@ -158,10 +161,11 @@ func TestCollectTick_BackfillModelUsesSessionHost(t *testing.T) {
 	tokensOutTotals := make(map[string]int64)
 	rosterIDs := make(map[string]string)
 	teamNames := make(map[string]string)
+	agentIDs := make(map[string]string)
 	engine, compTracker, teammateTracker, promWarned := newTickCollaborators()
 
-	collectTick(context.Background(), st, gs, engine, compTracker, teammateTracker, nil, promWarned, "hub-1",
-		highWater, prevContext, costTotals, tokensInTotals, tokensOutTotals, rosterIDs, teamNames)
+	collectTick(context.Background(), st, pricing.NewResolver(st), gs, engine, compTracker, teammateTracker, nil, promWarned, "hub-1",
+		highWater, prevContext, costTotals, tokensInTotals, tokensOutTotals, rosterIDs, teamNames, agentIDs)
 
 	row, found, err := gs.Get(context.Background(), preKey)
 	if err != nil || !found {

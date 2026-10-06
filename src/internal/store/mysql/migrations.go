@@ -2058,6 +2058,138 @@ WHERE NOT EXISTS (
 				('resolution', 'swept-unreviewed', 1, 'lifecycle', 'single', 'WorkUnit closed by the nightly wms-review-sweep timer: a wms_deliverables row existed, so the sweep closed it done rather than abandoned, but no human reviewed the result. Deliberately silent on whether the delivered work was good — only that it exists and nobody looked.')`,
 		},
 	},
+	{
+		// model-pricing (pricing kit WP2): the externalized rate card. Rates
+		// are DECIMAL(12,6) USD per MILLION tokens — exact and human-legible,
+		// converted to per-token at read; never float. The WP3 temporal
+		// columns (valid_from/valid_to) and the citation columns (source_url/
+		// fetched_at, NOT NULL: rates are cited, never remembered) land in
+		// this one migration so the table never needs a follow-up ALTER.
+		// match_kind (exact|prefix|class) makes the resolution chain data
+		// rather than code; variant (base|1m) is representable before any
+		// context-window premium exists.
+		//
+		// model_key is utf8mb4_bin: the server default (utf8mb4_0900_ai_ci)
+		// is case- and accent-insensitive, which would make the unique key
+		// reject two keys the Go-side resolver (case-sensitive) treats as
+		// distinct, and diverge from the SQLite backend.
+		//
+		// The unique key includes valid_from so a rate change is a new row at
+		// a later valid_from; the same instant twice is a conflict. Seed rows
+		// carry valid_from = the Unix epoch (store.SeedRateValidFrom) so all
+		// existing history resolves against them, and are inserted by
+		// seedModelPricing from the frozen store.ModelPricingSeedV1 table
+		// (INSERT IGNORE: a re-run after a partial apply is a no-op).
+		Version: 73,
+		Name:    "model-pricing",
+		Stmts: []string{
+			`CREATE TABLE IF NOT EXISTS model_pricing (
+				id                      BIGINT        NOT NULL AUTO_INCREMENT,
+				runtime                 VARCHAR(32)   NOT NULL,
+				match_kind              VARCHAR(16)   NOT NULL,
+				model_key               VARCHAR(128)  CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+				variant                 VARCHAR(16)   NOT NULL DEFAULT 'base',
+				input_per_mtok          DECIMAL(12,6) NOT NULL,
+				output_per_mtok         DECIMAL(12,6) NOT NULL,
+				cache_read_per_mtok     DECIMAL(12,6) NOT NULL,
+				cache_write_5m_per_mtok DECIMAL(12,6) NOT NULL,
+				cache_write_1h_per_mtok DECIMAL(12,6) NOT NULL,
+				valid_from              DATETIME(6)   NOT NULL,
+				valid_to                DATETIME(6)   NULL,
+				source_url              VARCHAR(512)  NOT NULL,
+				fetched_at              DATETIME(6)   NOT NULL,
+				notes                   TEXT          NULL,
+				PRIMARY KEY (id),
+				UNIQUE KEY uq_model_pricing_key (runtime, match_kind, model_key, variant, valid_from),
+				KEY idx_model_pricing_runtime (runtime, model_key)
+			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+		},
+		Func: seedModelPricing,
+	},
+	{
+		// cost-verification (pricing kit WP4A): the OTel reconciler's verdict
+		// store. One row per (session_id, runtime), latest evaluation wins —
+		// the dashboard question is "what is each session's status now", and
+		// an append-per-pass history would grow by every live session on every
+		// 10-minute rollup. The unique key is what makes the upsert possible.
+		//
+		// session_id is VARCHAR(64) to match token_ledger.session_id (the
+		// column this row is verified against), not wider. details is
+		// LONGTEXT holding a pre-encoded JSON object, the repo's pattern for
+		// JSON payloads (see statusline_json): the JSON column type is an
+		// alias for LONGTEXT on MariaDB but a distinct type on MySQL, which
+		// would make this table's schema differ by engine.
+		//
+		// converged_at is NULL until the session was first observed converged
+		// and is maintained by UpsertVerifications, not by a column default.
+		Version: 74,
+		Name:    "cost-verification",
+		Stmts: []string{
+			`CREATE TABLE IF NOT EXISTS cost_verification (
+				id           BIGINT        NOT NULL AUTO_INCREMENT,
+				session_id   VARCHAR(64)   NOT NULL,
+				runtime      VARCHAR(32)   NOT NULL DEFAULT 'claude_code',
+				hub_usd      DECIMAL(12,6) NOT NULL DEFAULT 0,
+				vendor_usd   DECIMAL(12,6) NOT NULL DEFAULT 0,
+				delta_usd    DECIMAL(12,6) NOT NULL DEFAULT 0,
+				verdict      VARCHAR(32)   NOT NULL,
+				converged_at DATETIME(6)   NULL,
+				evaluated_at DATETIME(6)   NOT NULL,
+				details      LONGTEXT      NULL,
+				PRIMARY KEY (id),
+				UNIQUE KEY uq_cv_session (session_id, runtime),
+				KEY idx_cv_verdict (verdict),
+				KEY idx_cv_evaluated (evaluated_at)
+			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+		},
+	},
+	{
+		// rate_id records the model_pricing.id that priced each token_ledger row.
+		// NULL means unstamped (pre-migration history). No FK: the relationship is
+		// enforced in the application to avoid lock risk on a high-volume table.
+		// reprice_journal is the audit trail for retroactive repricing.
+		Version: 75,
+		Name:    "token-ledger-rate-id",
+		Stmts: []string{
+			`ALTER TABLE token_ledger ADD COLUMN rate_id BIGINT NULL`,
+			`ALTER TABLE token_ledger ADD INDEX idx_token_ledger_rate_id (rate_id)`,
+			`CREATE TABLE IF NOT EXISTS reprice_journal (
+				id           BIGINT        NOT NULL AUTO_INCREMENT,
+				session_id   VARCHAR(64)   NOT NULL,
+				message_id   VARCHAR(128)  NOT NULL,
+				old_cost_usd DECIMAL(12,6) NOT NULL,
+				new_cost_usd DECIMAL(12,6) NOT NULL,
+				old_rate_id  BIGINT        NULL,
+				new_rate_id  BIGINT        NULL,
+				reason       VARCHAR(256)  NOT NULL,
+				operator     VARCHAR(64)   NOT NULL,
+				repriced_at  DATETIME(6)   NOT NULL,
+				PRIMARY KEY (id),
+				KEY idx_reprice_journal_session (session_id),
+				KEY idx_reprice_journal_time (repriced_at)
+			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+		},
+	},
+	{
+		// embedded-fallback sentinel (pricing kit WP3): one reserved rate row per
+		// runtime, stamped as rate_id on ledger rows priced from the embedded
+		// tables, so they are distinguishable from NULL (pre-migration history).
+		// Rates are zero and the reprice drift query excludes the rows. INSERT
+		// IGNORE: a re-run is a no-op.
+		Version: 76,
+		Name:    "embedded-fallback-sentinel",
+		Stmts:   []string{},
+		Func:    seedEmbeddedFallbackSentinels,
+	},
+	{
+		// description is the human-readable label for an anonymous
+		// sub-subagent (Agent-tool tool_input.description / .meta.json sidecar).
+		Version: 77,
+		Name:    "roster-description",
+		Stmts: []string{
+			`ALTER TABLE agent_roster ADD COLUMN description VARCHAR(255) NOT NULL DEFAULT ''`,
+		},
+	},
 }
 
 // mergeProjectToProduct renames `project` tag rows to `product`, handling the

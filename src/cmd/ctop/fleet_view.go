@@ -1077,6 +1077,11 @@ func (v fleetView) renderAgentRow(fr fleetRow, isCursor bool, cs fleetColSet, la
 	if fr.suffix != "" {
 		cell += dimStyle.Render(fr.suffix)
 	}
+	if r.Relationship == "subagent" && r.Description != "" {
+		if room := layout.agentW - lipgloss.Width(cell) - 1; room > 1 {
+			cell += " " + dimStyle.Render(display.TruncateLine(r.Description, room))
+		}
+	}
 	nameCell := padTrunc(cell, layout.agentW)
 
 	fill := r.ContextFillPct

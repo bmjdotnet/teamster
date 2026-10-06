@@ -245,6 +245,15 @@ func dsnEnvLine(secretsPath string) string {
 	return fmt.Sprintf("EnvironmentFile=%s\n", secretsPath)
 }
 
+// insertIntoServiceSection adds lines to the end of [Service], before [Install]
+// when the unit has one (systemd ignores service directives placed after it).
+func insertIntoServiceSection(unit, lines string) string {
+	if idx := strings.Index(unit, "\n[Install]"); idx >= 0 {
+		return unit[:idx] + "\n" + lines + unit[idx:]
+	}
+	return strings.TrimRight(unit, "\n") + "\n" + lines
+}
+
 // currentUsername returns the invoking user's login name for the systemd unit
 // User= directive. Falls back to USER/LOGNAME env vars, then to "root".
 func currentUsername() string {
@@ -766,6 +775,23 @@ func run() error {
 		}
 	}
 
+	// 5c2b. Materialize the codex-context-subscriber service (long-running
+	// Codex app-server listener reporting per-thread context fill to hookd's
+	// /context). Type=simple daemon, no timer, no DSN — it only talks to the
+	// local Codex control socket and to hookd over HTTP, same shape as
+	// token-scraper. Graceful no-op on a host with no Codex daemon: it backs
+	// off until the control socket appears.
+	codexCtxSvcTmpl := filepath.Join(*basedir, "etc", "teamster-codex-context-subscriber.service.tmpl")
+	codexCtxSvcOut := filepath.Join(*basedir, "etc", "teamster-codex-context-subscriber.service")
+	if data, err := os.ReadFile(codexCtxSvcTmpl); err == nil && *codexMode != "none" {
+		user := currentUsername()
+		m := strings.ReplaceAll(string(data), "__BASEDIR__", *basedir)
+		m = strings.ReplaceAll(m, "__USER__", user)
+		if werr := os.WriteFile(codexCtxSvcOut, []byte(m), 0o644); werr != nil {
+			fmt.Fprintf(os.Stderr, "warning: writing codex-context-subscriber service unit: %v\n", werr)
+		}
+	}
+
 	// 5c3. Materialize the mcp-scraper service + timer (MCP tool-call telemetry
 	// tailer — reads events.jsonl, ledgers completed mcp__* calls into
 	// claude_telemetry.mcp_tool_calls; see WP11-TAILER-DESIGN.md §3). Needs
@@ -913,8 +939,9 @@ func run() error {
 		user := currentUsername()
 		m := strings.ReplaceAll(string(data), "__BASEDIR__", *basedir)
 		m = strings.ReplaceAll(m, "__USER__", user)
+		m = strings.Replace(m, "/bin/health-collector\n", "/bin/health-collector --metrics-addr=:9126\n", 1)
 		if effectiveDSN != "" {
-			m = strings.TrimRight(m, "\n") + "\n" + dsnEnvLine(secretsPath)
+			m = insertIntoServiceSection(m, dsnEnvLine(secretsPath))
 		}
 		if werr := os.WriteFile(healthCollectorSvcOut, []byte(m), 0o644); werr != nil {
 			fmt.Fprintf(os.Stderr, "warning: writing health-collector service unit: %v\n", werr)

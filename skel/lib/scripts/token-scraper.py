@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import pathlib
+import re
 import shutil
 import signal
 import socket
@@ -67,19 +68,26 @@ _KNOWN: dict[str, tuple[float, float, float, float]] = {
     # opus-4-8 explicit entry: all opus 4.5+ are $5/$25 per Mtok; only
     # opus 4.0/4.1 were $15/$75.  Derived from COMPLETED anchor session a856fa7e.
     "claude-opus-4-8":   (0.000005,  0.000025,  0.0000005,  0.00000625),
+    "claude-opus-5":     (0.000005,  0.000025,  0.0000005,  0.00000625),
+    # opus-5-5 is a cheaper tier; longest-prefix keeps it apart from opus-5.
+    "claude-opus-5-5":   (0.000004,  0.00002,   0.0000002,  0.000005),
     "claude-sonnet-4-5": (0.000003,  0.000015,  0.0000003,  0.00000375),
     "claude-sonnet-4-6": (0.000003,  0.000015,  0.0000003,  0.00000375),
-    "claude-haiku-4-5":  (0.0000008, 0.000004,  0.00000008, 0.000001),
+    "claude-sonnet-5":   (0.000002,  0.00001,   0.0000002,  0.0000025),
+    "claude-sonnet-5-5": (0.000002,  0.00001,   0.0000002,  0.0000025),
+    "claude-haiku-4-5":  (0.000001,  0.000005,  0.0000001,  0.00000125),
     # fable-5: 2x opus-4-8 tier (operator-confirmed).
     # Derived from COMPLETED anchor session a856fa7e (-1.5% vs OTel $154.69).
     "claude-fable-5":    (0.00001,   0.00005,   0.000001,   0.0000125),
+    # fable-5-1: identical to fable-5 except cache reads ($0.25/Mtok).
+    "claude-fable-5-1":  (0.00001,   0.00005,   0.00000025, 0.0000125),
 }
 
 # Same-class fallback rates (most-recent known rate per class).
 _CLASS_RATES: dict[str, tuple[float, float, float, float]] = {
     "opus":   (0.000005,  0.000025,  0.0000005,  0.00000625),
-    "sonnet": (0.000003,  0.000015,  0.0000003,  0.00000375),
-    "haiku":  (0.0000008, 0.000004,  0.00000008, 0.000001),
+    "sonnet": (0.000002,  0.00001,   0.0000002,  0.0000025),
+    "haiku":  (0.000001,  0.000005,  0.0000001,  0.00000125),
     "fable":  (0.00001,   0.00005,   0.000001,   0.0000125),
 }
 
@@ -125,6 +133,113 @@ def compute_cost(model: str, input_tokens: int, output_tokens: int,
     inp, out, cr, cw = rates
     return (input_tokens * inp + output_tokens * out
             + cache_read_tokens * cr + cache_write_tokens * cw)
+
+
+# Wire marker for "priced from the embedded table"; hookd swaps it for the
+# runtime's sentinel rate id.
+EMBEDDED_FALLBACK_RATE_ID = -1
+
+
+def _fetch_rates(rates_url: str, runtime: str = "claude_code",
+                 timeout: float = 5) -> list | None:
+    """Fetch rate cards from hookd GET /rates. Returns rate dicts, or None on failure."""
+    url = rates_url
+    if runtime:
+        url += "?runtime=" + runtime
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url),
+                                    timeout=timeout) as resp:
+            data = json.loads(resp.read(4 * 1024 * 1024))
+        rates = data.get("rates")
+        if not isinstance(rates, list):
+            raise ValueError("no rates array in response")
+        return rates
+    except Exception as exc:
+        logging.warning("failed to fetch /rates: %s; using embedded table", exc)
+        return None
+
+
+def _parse_rate_ts(v) -> datetime | None:
+    """Parse an RFC3339 timestamp from /rates; None when absent or unparseable."""
+    if not v:
+        return None
+    try:
+        v = re.sub(r"\.(\d+)", lambda m: "." + m.group(1)[:6].ljust(6, "0"), str(v))
+        if v.endswith("Z"):
+            v = v[:-1] + "+00:00"
+        dt = datetime.fromisoformat(v)
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _effective_rates(rates: list, runtime: str, at: datetime) -> list:
+    """Rows of runtime in effect at `at`; per (kind, key, variant) the latest valid_from wins."""
+    latest: dict = {}
+    for r in rates:
+        if r.get("runtime") != runtime:
+            continue
+        start = _parse_rate_ts(r.get("valid_from"))
+        if start is None or start > at:
+            continue
+        if r.get("valid_to") is not None:
+            end = _parse_rate_ts(r["valid_to"])
+            if end is None or end <= at:
+                continue
+        k = (r.get("match_kind"), r.get("model_key"), r.get("variant"))
+        cur = latest.get(k)
+        if cur is None or (start, r.get("id") or 0) > cur[0]:
+            latest[k] = ((start, r.get("id") or 0), r)
+    return [v[1] for v in latest.values()]
+
+
+def _resolve_rate(rates: list | None, model: str,
+                  runtime: str = "claude_code") -> dict | None:
+    """Best rate in effect now: exact, then longest prefix, then class.
+
+    A "[1m]" model tries variant "1m" first, then base with the suffix stripped.
+    """
+    if not rates:
+        return None
+    live = _effective_rates(rates, runtime, datetime.now(timezone.utc))
+    base = model
+    variants = ["base"]
+    if model.endswith("[1m]"):
+        base = model[:-len("[1m]")]
+        variants = ["1m", "base"]
+    for variant in variants:
+        best = None
+        best_rank = None
+        for r in live:
+            if r.get("variant") != variant:
+                continue
+            kind = r.get("match_kind")
+            key = r.get("model_key") or ""
+            if kind == "exact" and key == base:
+                prio = 0
+            elif kind == "prefix" and base.startswith(key):
+                prio = 1
+            elif kind == "class" and key and key in base:
+                prio = 2
+            else:
+                continue
+            rank = (prio, -len(key))
+            if best_rank is None or rank < best_rank:
+                best, best_rank = r, rank
+        if best is not None:
+            return best
+    return None
+
+
+def _cost_from_rate(rate: dict, input_tokens: int, output_tokens: int,
+                    cache_read: int, cache_write_5m: int,
+                    cache_write_1h: int) -> float:
+    """USD cost from a /rates row (decimal-string per-MTok values)."""
+    return (input_tokens * float(rate["input_per_mtok"])
+            + output_tokens * float(rate["output_per_mtok"])
+            + cache_read * float(rate["cache_read_per_mtok"])
+            + cache_write_5m * float(rate["cache_write_5m_per_mtok"])
+            + cache_write_1h * float(rate["cache_write_1h_per_mtok"])) / 1_000_000.0
 
 
 # ---------------------------------------------------------------------------
@@ -564,6 +679,9 @@ class Scraper:
         if base.endswith("/telemetry"):
             base = base[:-len("/telemetry")]
         self._focus_url = base + "/focus-timeline"
+        self._rates_url = base + "/rates"
+        self._rates: list | None = None
+        self._rates_fetched_at = 0.0
         # Transcript cache directory.
         self._cache_dir = os.path.join(data_dir, "transcript-cache")
         # Killswitch path: touch this file to disable enhanced extraction.
@@ -650,7 +768,18 @@ class Scraper:
     # Poll
     # ------------------------------------------------------------------
 
+    def _refresh_rates(self) -> None:
+        """Fetch /rates on first poll and every 10 min; keep the last good table on failure."""
+        now = time.monotonic()
+        if self._rates_fetched_at and now - self._rates_fetched_at < 600:
+            return
+        self._rates_fetched_at = now
+        fetched = _fetch_rates(self._rates_url, timeout=self._http_timeout)
+        if fetched is not None:
+            self._rates = fetched
+
     def poll(self, stop_event=None) -> None:
+        self._refresh_rates()
         killswitch = self._killswitch_active()
         if killswitch:
             logging.info("killswitch active (.no-sweep exists), "
@@ -974,9 +1103,28 @@ class Scraper:
 
     def _emit(self, u: dict, agent_name: str) -> bool:
         """Price and send one deduplicated request row. Returns False on POST failure."""
-        cost_usd = compute_cost(
-            u["model"], u["input_tokens"], u["output_tokens"],
-            u["cache_read_tokens"], u["cache_write_tokens"])
+        rate = _resolve_rate(self._rates, u["model"])
+        rate_id = 0
+        if rate is not None:
+            cw_5m = u["cache_write_5m"]
+            cw_1h = u["cache_write_1h"]
+            if cw_5m + cw_1h < u["cache_write_tokens"]:
+                cw_5m += u["cache_write_tokens"] - cw_5m - cw_1h
+            try:
+                cost_usd = _cost_from_rate(
+                    rate, u["input_tokens"], u["output_tokens"],
+                    u["cache_read_tokens"], cw_5m, cw_1h)
+                rate_id = int(rate.get("id") or 0)
+            except (KeyError, TypeError, ValueError) as exc:
+                logging.warning("bad rate row id=%s: %s; using embedded table",
+                                rate.get("id"), exc)
+                rate = None
+        if rate is None:
+            cost_usd = compute_cost(
+                u["model"], u["input_tokens"], u["output_tokens"],
+                u["cache_read_tokens"], u["cache_write_tokens"])
+            if cost_usd > 0:  # $0 means unknown model or no tokens, not a fallback price
+                rate_id = EMBEDDED_FALLBACK_RATE_ID
 
         if self.dry_run:
             logging.info(
@@ -1022,6 +1170,9 @@ class Scraper:
             "cost_usd":          cost_usd,
             "timestamp":         ts,
         }
+
+        if rate_id > 0 or rate_id == EMBEDDED_FALLBACK_RATE_ID:
+            row["rate_id"] = rate_id
 
         ok = self._post_telemetry(row)
         if not ok:

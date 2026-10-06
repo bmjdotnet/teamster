@@ -405,9 +405,9 @@ func supervisorStart(cfg config.Config) error {
 		return err
 	}
 
-	// token-scraper and health-collector: systemd-managed under "systemd"
-	// hookd mode, supervisor-managed under "supervisor".
-	for _, name := range []string{"token-scraper", "health-collector"} {
+	// token-scraper, health-collector, codex-context-subscriber: systemd-managed
+	// under "systemd" hookd mode, supervisor-managed under "supervisor".
+	for _, name := range []string{"token-scraper", "health-collector", "codex-context-subscriber"} {
 		svc := "teamster-" + name
 		if cfg.HookdMode == "systemd" {
 			if err := exec.Command("systemctl", "is-active", "--quiet", svc).Run(); err == nil {
@@ -584,7 +584,7 @@ func supervisorStop(cfg config.Config) error {
 	// a nonexistent/inactive unit just errors, discarded) — may have been
 	// started under a different mode, or migrated between versions.
 	for _, svc := range []string{
-		"teamster-hookd", "teamster-token-scraper", "teamster-health-collector",
+		"teamster-hookd", "teamster-token-scraper", "teamster-codex-context-subscriber", "teamster-health-collector",
 		"teamster-otelcol", "teamster-prometheus", "teamster-grafana",
 	} {
 		_ = exec.Command("sudo", "systemctl", "stop", svc).Run()
