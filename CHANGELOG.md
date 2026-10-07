@@ -31,6 +31,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - **Status skill traversal** (issue #36). Status reports now recurse through nested outcome hierarchies and retrieve WorkUnits at every level, with DAG deduplication for shared descendants.
 - **Codex documentation drift** (issue #37). `codex-hook.py`'s header no longer claims Codex support is hub-local Linux only, `CODEX-INSTALL.md` separates the verified 0.137.0 baseline from historical context, and both solo skills now teach agents to follow the `wms_listTags` manifest's role groups (and never set `engineManaged` keys) instead of hardcoding a tag layout with a manual `component`.
 - **Codex focus-warning delivery documented** (issue #39). The Codex hook client discards hookd's response body, so focus nudges and the declined-claim follow-up warning never reach Codex agents (and no `UserPromptSubmit` hook is registered). The Codex solo skill no longer promises that warning and tells agents to call `wms_setFocus` after claiming; `CODEX-INSTALL.md` and `codex-hook.py` state the limitation and why forwarding is not implemented.
+- **Missing `active` timeline interval on claim** (issue #33). `wms_claimWorkUnit` now records the pending→active transition in the timeline, so `wms_getTimeline` shows the active segment and duration reporting no longer counts active work as pending time.
 
 ## v0.3.0 (2026-09-08)
 

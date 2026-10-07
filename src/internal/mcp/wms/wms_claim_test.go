@@ -207,3 +207,63 @@ func TestClaimWorkUnit_IdempotentReclaim(t *testing.T) {
 		t.Errorf("state after idempotent re-claim = status=%q agent=%q, want active/@agent-a", wu.Status, wu.AgentID)
 	}
 }
+
+func timelineStates(t *testing.T, store wms.Store, eng wms.Engine, wuID string) []wms.EventRecord {
+	t.Helper()
+	r, ce := callWithEngine(t, store, eng, ToolGetTimeline, map[string]interface{}{"entityType": wms.EntityWorkUnit, "entityID": wuID})
+	if ce != nil {
+		t.Fatalf("getTimeline: %v", ce)
+	}
+	var recs []wms.EventRecord
+	if err := json.Unmarshal([]byte(resultText(t, r)), &recs); err != nil {
+		t.Fatalf("decode timeline: %v", err)
+	}
+	// ListEventRecords returns newest first; reverse to chronological order.
+	for i, j := 0, len(recs)-1; i < j; i, j = i+1, j-1 {
+		recs[i], recs[j] = recs[j], recs[i]
+	}
+	return recs
+}
+
+// TestClaimWorkUnit_TimelineHasActiveInterval: a claim must close the
+// pending interval and open an active one, so duration reporting does not
+// count active work as pending time (#33).
+func TestClaimWorkUnit_TimelineHasActiveInterval(t *testing.T) {
+	store, oid := newStewardStore(t)
+	eng := realEngineFor(store)
+	const wuID = "wu-claim-timeline"
+	if _, ce := callWithEngine(t, store, eng, ToolCreateWorkUnit, map[string]interface{}{"id": wuID, "title": wuID, "outcomeID": oid}); ce != nil {
+		t.Fatalf("createWorkUnit: %v", ce)
+	}
+	if _, ce := callWithEngine(t, store, eng, ToolClaimWorkUnit, map[string]interface{}{"id": wuID}); ce != nil {
+		t.Fatalf("claimWorkUnit: %v", ce)
+	}
+
+	recs := timelineStates(t, store, eng, wuID)
+	if len(recs) != 2 || recs[0].State != wms.StatusPending || recs[1].State != wms.StatusActive {
+		t.Fatalf("timeline after claim = %+v, want pending then active", recs)
+	}
+	if recs[0].EndedAt == nil {
+		t.Error("pending interval not closed after claim")
+	}
+	if recs[1].EndedAt != nil {
+		t.Error("active interval should be open after claim")
+	}
+
+	if _, ce := callWithEngine(t, store, eng, ToolDeliverResult, map[string]interface{}{"id": wuID, "summary": "s", "result": "r"}); ce != nil {
+		t.Fatalf("deliverResult: %v", ce)
+	}
+	if _, ce := callWithEngine(t, store, eng, ToolUpdateWorkUnitStatus, map[string]interface{}{"id": wuID, "status": wms.StatusDone}); ce != nil {
+		t.Fatalf("complete: %v", ce)
+	}
+	recs = timelineStates(t, store, eng, wuID)
+	want := []string{wms.StatusPending, wms.StatusActive, wms.StatusReview, wms.StatusDone}
+	if len(recs) != len(want) {
+		t.Fatalf("full timeline = %+v, want states %v", recs, want)
+	}
+	for i, w := range want {
+		if recs[i].State != w {
+			t.Errorf("timeline[%d].State = %q, want %q", i, recs[i].State, w)
+		}
+	}
+}

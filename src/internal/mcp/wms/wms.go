@@ -1167,6 +1167,10 @@ func HandleToolCall(store wms.Store, eng wms.Engine, rawParams json.RawMessage) 
 				SessionID: p.Meta.SessionID, AgentName: p.Meta.AgentType, Host: p.Meta.Host,
 				Notes: fmt.Sprintf("claimed by %s", claimNoteAgent),
 			})
+			if err := store.TransitionEventRecord(ctx, wms.EntityWorkUnit, id, wms.StatusActive, p.Meta.SessionID, p.Meta.AgentType, p.Meta.Host); err != nil {
+				slog.Warn("wms-mcp: transition event record failed",
+					"entity_type", wms.EntityWorkUnit, "entity_id", id, "status", wms.StatusActive, "err", err)
+			}
 		}
 
 		wu, err := store.GetWorkUnit(ctx, id)
