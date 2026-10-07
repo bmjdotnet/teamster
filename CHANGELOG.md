@@ -28,6 +28,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - **Haiku 4.5 pricing.** Corrected from Haiku 3.5's $0.80/$4 to the published Haiku 4.5 rate ($1/$5) — about 20% undercounted since the model launched.
 - **Sonnet 5 pricing.** Updated to the permanent $2/$10 rate (the planned rise to $3/$15 was cancelled). Added entries for Sonnet 5.5, Opus 5, Opus 5.5, and Fable 5.1.
 - **Sweep model selection** (issue #31). The hourly LLM sweep service now pins `--model sonnet` instead of inheriting the operator's default Claude Code model.
+- **Status skill traversal** (issue #36). Status reports now recurse through nested outcome hierarchies and retrieve WorkUnits at every level, with DAG deduplication for shared descendants.
 
 ## v0.3.0 (2026-09-08)
 
