@@ -36,7 +36,7 @@ func (s *Store) ListDeliverables(ctx context.Context, entityType, entityID strin
 		return nil, err
 	}
 	defer rows.Close()
-	var out []wms.Deliverable
+	out := make([]wms.Deliverable, 0)
 	for rows.Next() {
 		var d wms.Deliverable
 		if err := rows.Scan(

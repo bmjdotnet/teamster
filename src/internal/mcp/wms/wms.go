@@ -1060,6 +1060,9 @@ func HandleToolCall(store wms.Store, eng wms.Engine, rawParams json.RawMessage) 
 		if err != nil {
 			return Result{}, &CallError{Code: -32000, Message: err.Error()}
 		}
+		if units == nil {
+			units = []*wms.WorkUnit{}
+		}
 		return JSONResult(units), nil
 
 	case ToolUpdateWorkUnitStatus:
@@ -1167,16 +1170,16 @@ func HandleToolCall(store wms.Store, eng wms.Engine, rawParams json.RawMessage) 
 			if claimNoteAgent == "" {
 				claimNoteAgent = "the lead (no agent type)"
 			}
+			if err := store.TransitionEventRecord(ctx, wms.EntityWorkUnit, id, wms.StatusActive, p.Meta.SessionID, p.Meta.AgentType, p.Meta.Host); err != nil {
+				slog.Warn("wms-mcp: transition event record failed",
+					"entity_type", wms.EntityWorkUnit, "entity_id", id, "status", wms.StatusActive, "err", err)
+			}
 			eng.OnStatusChange(ctx, wms.StatusChange{ //nolint:errcheck
 				EntityType: wms.EntityWorkUnit, EntityID: id,
 				OldStatus: wms.StatusPending, NewStatus: wms.StatusActive,
 				SessionID: p.Meta.SessionID, AgentName: p.Meta.AgentType, Host: p.Meta.Host,
 				Notes: fmt.Sprintf("claimed by %s", claimNoteAgent),
 			})
-			if err := store.TransitionEventRecord(ctx, wms.EntityWorkUnit, id, wms.StatusActive, p.Meta.SessionID, p.Meta.AgentType, p.Meta.Host); err != nil {
-				slog.Warn("wms-mcp: transition event record failed",
-					"entity_type", wms.EntityWorkUnit, "entity_id", id, "status", wms.StatusActive, "err", err)
-			}
 		}
 
 		wu, err := store.GetWorkUnit(ctx, id)
@@ -1310,6 +1313,9 @@ func HandleToolCall(store wms.Store, eng wms.Engine, rawParams json.RawMessage) 
 		deliverables, err := store.ListDeliverables(ctx, wms.EntityWorkUnit, id, limit)
 		if err != nil {
 			return Result{}, &CallError{Code: -32000, Message: err.Error()}
+		}
+		if deliverables == nil {
+			deliverables = []wms.Deliverable{}
 		}
 		return JSONResult(deliverables), nil
 
@@ -1596,6 +1602,9 @@ func HandleToolCall(store wms.Store, eng wms.Engine, rawParams json.RawMessage) 
 		if err != nil {
 			return Result{}, &CallError{Code: -32000, Message: err.Error()}
 		}
+		if relations == nil {
+			relations = []storeTypes.Relation{}
+		}
 		return JSONResult(relations), nil
 
 	case ToolListRelationKinds, "wms.listRelationKinds":
@@ -1606,6 +1615,9 @@ func HandleToolCall(store wms.Store, eng wms.Engine, rawParams json.RawMessage) 
 		kinds, err := relStore.ListRelationKinds(ctx)
 		if err != nil {
 			return Result{}, &CallError{Code: -32000, Message: err.Error()}
+		}
+		if kinds == nil {
+			kinds = []storeTypes.RelationKind{}
 		}
 		return JSONResult(kinds), nil
 
