@@ -8,8 +8,10 @@ them a third time (Go already has its own copy in internal/redact; this
 file is Python's second copy of that logic, not a third). Deliberately
 thinner than teamster.py's own main(): Codex v1 is solo-only (no Agent
 Teams), so there is no dedup-file or session-mode-marker logic to port,
-and no macOS agentName-from-transcript derivation (Codex v1 is hub-local
-Linux only — see the kit's README, Codex remotes are a later feature).
+and no macOS agentName-from-transcript derivation (macOS is a remote client
+only, and Codex has no teammate identity to derive). The same script runs
+on the hub and on remote hosts; remote installs are covered in
+docs/specs/REMOTE-INSTALL.md.
 
 Design note: an earlier Go prototype of this client (cmd/codex-hook) was
 superseded by operator directive — client-side hook code should be Python

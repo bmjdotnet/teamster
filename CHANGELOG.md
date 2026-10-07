@@ -29,6 +29,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - **Sonnet 5 pricing.** Updated to the permanent $2/$10 rate (the planned rise to $3/$15 was cancelled). Added entries for Sonnet 5.5, Opus 5, Opus 5.5, and Fable 5.1.
 - **Sweep model selection** (issue #31). The hourly LLM sweep service now pins `--model sonnet` instead of inheriting the operator's default Claude Code model.
 - **Status skill traversal** (issue #36). Status reports now recurse through nested outcome hierarchies and retrieve WorkUnits at every level, with DAG deduplication for shared descendants.
+- **Codex documentation drift** (issue #37). `codex-hook.py`'s header no longer claims Codex support is hub-local Linux only, `CODEX-INSTALL.md` separates the verified 0.137.0 baseline from historical context, and both solo skills now teach agents to follow the `wms_listTags` manifest's role groups (and never set `engineManaged` keys) instead of hardcoding a tag layout with a manual `component`.
 
 ## v0.3.0 (2026-09-08)
 

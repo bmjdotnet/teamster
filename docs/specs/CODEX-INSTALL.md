@@ -173,6 +173,13 @@ treat it as "adds latency, provides no function," not as a guaranteed hang
 to a specific timeout. Teamster never writes `hooks.json`; only the TOML
 form, and this doc should not repeat a specific hang duration as fact.
 
+**Verified baseline vs. current builds.** Statements below about hook
+events and behavior were live-verified against Codex 0.137.0, the pinned
+baseline. Codex auto-updates itself and Teamster does not pin it, so hosts
+commonly run newer builds (0.142.5 has been observed). Anything not
+re-verified on a newer build is historical investigation context, not a
+supported-behavior guarantee.
+
 Ten hook events exist in Codex 0.137.0, all PascalCase (`SessionStart`,
 `SubagentStart`, `PreToolUse`, `PermissionRequest`, `PostToolUse`,
 `PreCompact`, `PostCompact`, `UserPromptSubmit`, `SubagentStop`, `Stop`).

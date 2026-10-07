@@ -86,13 +86,15 @@ Before you begin a WorkUnit (or dispatch a subagent for it):
 
 1. **Create it with its required tags inline** —
    `mcp__wms__wms_createWorkUnit(outcomeID=<outcome>, ...,
-   tags={"work-type": "<feature|docs|test|...>", "phase": "build",
-   "component": "<value if known>"})` if it doesn't exist yet (decompose,
-   per above). Check the `requiredLifecycle` map in the manifest
-   (session-protocol Step 7a) for valid values — no extra lookup needed.
-   Include `component` when it's already known; it's not required to be
-   known at dispatch time, only before close-out. One call instead of a
-   create followed by up to three separate `wms_tagEntity` calls. (Context
+   tags={<every key the manifest lists under requiredLifecycle and required,
+   with valid values>})` if it doesn't exist yet (decompose, per above).
+   Call `wms_listTags` and follow the manifest's role groups rather than
+   assuming a fixed layout: which keys sit under `requiredLifecycle` (e.g.
+   `phase`) versus `required` (e.g. `product`, `work-type`) is the
+   manifest's call and can change. Never set keys the manifest lists under
+   `engineManaged`, `component` included when it is listed there; the
+   engine writes those itself. One call instead of a create followed by up
+   to three separate `wms_tagEntity` calls. (Context
    tags from the Outcome are inherited automatically — this is about
    WorkUnit-level required keys, not Outcome context.) Applying required
    tags at creation, not after, is what keeps the cost-by-work-type trail

@@ -207,10 +207,11 @@ response groups keys by role — no interpretation needed:
 - **`autoExtract`** — extract silently from the environment (git, env).
 - **`requiredLifecycle`** — lifecycle keys you MUST apply to every WorkUnit
   before starting it. Values are included (e.g. `phase`:
-  design/build/test/review/iterate; `work-type`: feature/bug/refactor/…).
+  design/build/test/review/iterate). Which keys land here is the manifest's
+  decision; read it each time instead of assuming a layout.
   Do NOT propose these at the Outcome interview — apply them per-WorkUnit.
 - **`required`** — non-lifecycle keys required on every WorkUnit before
-  close-out.
+  close-out (e.g. `product`, `work-type`; check the manifest).
 - **`engineManaged`** — engine-only keys: do not propose, set, or modify.
   The engine is confirmed the only writer.
 - **`ritualManaged`** — also skips the interview like `engineManaged`, but a
@@ -279,7 +280,7 @@ Either way:
 Context tags on the Outcome are inherited down the DAG automatically — you do
 NOT re-apply them per WorkUnit. The manifest's `scope` on each key tells you
 where it belongs: `scope: "outcome"` keys go on the Outcome and inherit down;
-`required` keys (e.g., `component`) must be set per-WorkUnit before close-out.
+`required` keys (as listed in the manifest) must be set per-WorkUnit before close-out.
 
 **Reuse existing values.** Always call `wms_listTags` before inventing new tag
 values. If an existing value fits (case-insensitive), use it.
@@ -339,17 +340,19 @@ Before you begin a WorkUnit (or spawn a subagent for it):
 
 1. **Create it with its required tags inline** —
    `mcp__wms__wms_createWorkUnit(outcomeID=<outcome>, ...,
-   tags={"work-type": "<feature|docs|test|...>", "phase": "build",
-   "component": "<value if known>"})` if it doesn't exist yet (decompose,
-   per above). Check the `requiredLifecycle` map in the manifest for valid
-   values — no extra lookup needed. Include `component` when it's already
-   known; it's not required to be known at dispatch time, only before
-   close-out. One call instead of a create followed by up to three separate
-   `wms_tagEntity` calls. (Context tags from the Outcome are inherited
-   automatically — this is about WorkUnit-level required keys, not Outcome
-   context.) Applying required tags at creation, not after, is what keeps
-   the cost-by-work-type trail honest; deferring them is the most common
-   way the trail ends up patchy.
+   tags={<every key the manifest lists under requiredLifecycle and required,
+   with valid values>})` if it doesn't exist yet (decompose, per above).
+   Call `wms_listTags` and follow the manifest's role groups rather than
+   assuming a fixed layout: which keys sit under `requiredLifecycle` (e.g.
+   `phase`) versus `required` (e.g. `product`, `work-type`) is the
+   manifest's call and can change. Never set keys the manifest lists under
+   `engineManaged`, `component` included when it is listed there; the
+   engine writes those itself. One call instead of a create followed by up
+   to three separate `wms_tagEntity` calls. (Context
+   tags from the Outcome are inherited automatically — this is about
+   WorkUnit-level required keys, not Outcome context.) Applying required
+   tags at creation, not after, is what keeps the cost-by-work-type trail
+   honest; deferring them is the most common way the trail ends up patchy.
 
    **Work-scope slug on the Outcome.** If the strategic Outcome does not yet
    carry a work-scope slug tag and the work type is clear, apply one now with
@@ -424,8 +427,8 @@ about it, form a recommendation, then ask.
 1. **No open WorkUnits** — walk the WorkUnits under the Outcome
    (`mcp__wms__wms_listWorkUnits`) and `mcp__wms__wms_updateWorkUnitStatus(...
    done)` any still `active`/`pending` whose work is finished. Confirm each
-   carries its `requiredLifecycle` keys (`work-type`, `phase`) and any
-   `required` context key before it goes `done`. (You should already have
+   carries every `requiredLifecycle` and `required` key the manifest
+   lists, and any context key before it goes `done`. (You should already have
    done this eagerly per the per-work-step checklist's own eager-trigger
    step, the moment each WorkUnit's close made it the last one under its
    Outcome — this walk is the end-of-session catch-all for anything that
