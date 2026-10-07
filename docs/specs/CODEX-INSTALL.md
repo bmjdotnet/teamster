@@ -197,6 +197,26 @@ that keeps `teamster.py` in Python) and imports `teamster.py`'s redaction
 and error-logging helpers directly, so the two files must ship together in
 `lib/hook/`.
 
+#### Hook output: warnings are not delivered to Codex agents
+
+`codex-hook.py` is fire-and-forget: it POSTs the event to hookd and ignores
+the response body (2-second timeout, always exit 0). hookd's response
+carries `additionalContext` on `PreToolUse` and `UserPromptSubmit` events:
+the focus-absent nudge, pressure nudges, and queued WMS warnings, including
+the follow-up that tells an agent to call `wms_setFocus` when
+`wms_claimWorkUnit`'s focus-interval request was declined. Claude Code's hook
+client forwards that text to the agent. Codex's does not, and the Codex
+installer registers no `UserPromptSubmit` hook at all, so on Codex none of
+those warnings is delivered by any path.
+
+Consequence for agents: after `wms_claimWorkUnit`, a Codex agent must call
+`wms_setFocus` itself (the solo skill says so) rather than wait for a
+nudge. Forwarding was left unimplemented because Codex's handling of a JSON
+stdout payload from a `PreToolUse` hook was only checked at 0.137.0 and an
+unexpected shape risks interfering with `codex exec`. Closing the gap needs
+a live check of that protocol on the supported builds first; the client's
+bounded timeout and fail-open behavior must be kept either way.
+
 Hooks require a one-time trust step Codex normally does interactively via
 its TUI. Teamster's installer writes the trust block directly — no TUI, no
 `--dangerously-bypass-hook-trust` flag needed — as

@@ -364,10 +364,14 @@ Before you begin a WorkUnit (or spawn a subagent for it):
    **preferred** path: in one call it sets status to `active` atomically and
    requests the **cost-bearing** focus interval (Step 5's table) alongside
    it — not just a `reportActivity` narration. The interval open itself is
-   hookd's, asynchronous and best-effort; it can decline, in which case a
-   follow-up nudge tells you to call `wms_setFocus` yourself. Until
-   attribution actually lands, your spend still attributes to the previous
-   entity (or to the Outcome, or to nothing).
+   hookd's, asynchronous and best-effort; it can decline. On Claude Code a
+   follow-up nudge then tells you to call `wms_setFocus` yourself, but **on
+   Codex that nudge is not delivered**: the Codex hook client discards
+   hookd's response body, so no warning ever reaches you. Don't wait for
+   one. Treat `focus_interval: "requested"` as unconfirmed, and call
+   `wms_setFocus` yourself right after claiming (or verify with
+   `wms_getFocus`). Until attribution actually lands, your spend still
+   attributes to the previous entity (or to the Outcome, or to nothing).
    Fall back to manual `mcp__wms__wms_updateWorkUnitStatus(... active)` +
    `mcp__wms__wms_setFocus(entityType="workunit", entityID=<this WU>,
    focus=<short what>)` only if claiming isn't appropriate — e.g. resuming a

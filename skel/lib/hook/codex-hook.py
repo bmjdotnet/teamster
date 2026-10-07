@@ -41,13 +41,15 @@ invocation on the host. 2-second HTTP timeout. Every error is logged to
 ~/teamster/var/hook-errors.log (the same file teamster.py logs to) and
 swallowed, never surfaced to Codex.
 
-Not implemented (open item, carried over from the Go prototype): echoing
-hookd's additionalContext back as hook stdout on PreToolUse, the focus-nudge
-parity Claude Code's hook gets. Whether Codex's hook protocol consumes a
-JSON stdout payload from a PreToolUse hook the same way Claude Code does is
-unverified for 0.137.0; writing an unexpected stdout shape risked
-interfering with `codex exec` rather than being silently ignored, and
-verifying it was outside this task's scope.
+Not implemented: echoing hookd's additionalContext back as hook stdout.
+hookd puts the focus nudge, pressure nudge and queued WMS warnings in the
+JSON response body of PreToolUse (and UserPromptSubmit, which this client
+is not registered for). This client discards that body, so none of those
+warnings reach a Codex agent; agents must call wms_setFocus after claiming
+rather than wait for a nudge. Whether Codex consumes a JSON stdout payload
+from a PreToolUse hook the way Claude Code does is unverified (checked
+only at 0.137.0), and an unexpected stdout shape risks interfering with
+`codex exec`. See "Hook output" in docs/specs/CODEX-INSTALL.md.
 """
 from __future__ import annotations
 import json
