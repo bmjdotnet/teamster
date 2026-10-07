@@ -117,10 +117,10 @@ def _resolve_host_and_url():
     Host intentionally does NOT split at the first dot the way this
     file's own TEAMSTER_HOST-absent fallback for a REMOTE client would
     (see teamster.py, whose fallback is a short hostname for noisy FQDNs) —
-    it matches internal/hook.getHostID()'s hub-local convention (the full
-    os.Hostname()) instead, since Codex v1 is hub-local only and its
-    sessions should be labeled the same way a Claude Code session on the
-    same host already is.
+    it matches internal/hook.getHostID()'s convention (the full
+    os.Hostname()) instead. This script runs on the hub and on remote
+    hosts alike, and Codex sessions should be labeled the same way a
+    Claude Code session on the same host already is.
 
     This matters specifically because Codex hook handlers have no `env`
     field in config.toml (checked codex-rs's HookHandlerConfig struct) —

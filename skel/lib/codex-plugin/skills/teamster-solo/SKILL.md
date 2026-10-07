@@ -207,11 +207,11 @@ response groups keys by role — no interpretation needed:
 - **`autoExtract`** — extract silently from the environment (git, env).
 - **`requiredLifecycle`** — lifecycle keys you MUST apply to every WorkUnit
   before starting it. Values are included (e.g. `phase`:
-  design/build/test/review/iterate). Which keys land here is the manifest's
+  design/build/test/review/iterate; `work-type`). Which keys land here is the manifest's
   decision; read it each time instead of assuming a layout.
   Do NOT propose these at the Outcome interview — apply them per-WorkUnit.
 - **`required`** — non-lifecycle keys required on every WorkUnit before
-  close-out (e.g. `product`, `work-type`; check the manifest).
+  close-out (e.g. `product`; check the manifest).
 - **`engineManaged`** — engine-only keys: do not propose, set, or modify.
   The engine is confirmed the only writer.
 - **`ritualManaged`** — also skips the interview like `engineManaged`, but a
@@ -344,7 +344,7 @@ Before you begin a WorkUnit (or spawn a subagent for it):
    with valid values>})` if it doesn't exist yet (decompose, per above).
    Call `wms_listTags` and follow the manifest's role groups rather than
    assuming a fixed layout: which keys sit under `requiredLifecycle` (e.g.
-   `phase`) versus `required` (e.g. `product`, `work-type`) is the
+   `phase`, `work-type`) versus `required` (e.g. `product`) is the
    manifest's call and can change. Never set keys the manifest lists under
    `engineManaged`, `component` included when it is listed there; the
    engine writes those itself. One call instead of a create followed by up

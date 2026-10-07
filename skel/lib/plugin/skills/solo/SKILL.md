@@ -90,7 +90,7 @@ Before you begin a WorkUnit (or dispatch a subagent for it):
    with valid values>})` if it doesn't exist yet (decompose, per above).
    Call `wms_listTags` and follow the manifest's role groups rather than
    assuming a fixed layout: which keys sit under `requiredLifecycle` (e.g.
-   `phase`) versus `required` (e.g. `product`, `work-type`) is the
+   `phase`, `work-type`) versus `required` (e.g. `product`) is the
    manifest's call and can change. Never set keys the manifest lists under
    `engineManaged`, `component` included when it is listed there; the
    engine writes those itself. One call instead of a create followed by up
