@@ -758,6 +758,9 @@ func HandleToolCall(store wms.Store, eng wms.Engine, rawParams json.RawMessage) 
 		if err != nil {
 			return Result{}, &CallError{Code: -32000, Message: err.Error()}
 		}
+		if entries == nil {
+			entries = []wms.JournalEntry{}
+		}
 		return JSONResult(entries), nil
 
 	case ToolGetTimeline:
@@ -768,6 +771,9 @@ func HandleToolCall(store wms.Store, eng wms.Engine, rawParams json.RawMessage) 
 		records, err := store.ListEventRecords(ctx, strArg("entityType"), strArg("entityID"), limit)
 		if err != nil {
 			return Result{}, &CallError{Code: -32000, Message: err.Error()}
+		}
+		if records == nil {
+			records = []wms.EventRecord{}
 		}
 		return JSONResult(records), nil
 

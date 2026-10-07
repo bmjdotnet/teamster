@@ -267,3 +267,66 @@ func TestClaimWorkUnit_TimelineHasActiveInterval(t *testing.T) {
 		}
 	}
 }
+
+// TestGetHistory_LifecycleNeverNull: getHistory returns [] (not null) for a
+// fresh work unit and one journal row per lifecycle transition thereafter (#34).
+func TestGetHistory_LifecycleNeverNull(t *testing.T) {
+	store, oid := newStewardStore(t)
+	eng := realEngineFor(store)
+	const wuID = "wu-history-lifecycle"
+	if _, ce := callWithEngine(t, store, eng, ToolCreateWorkUnit, map[string]interface{}{"id": wuID, "title": wuID, "outcomeID": oid}); ce != nil {
+		t.Fatalf("createWorkUnit: %v", ce)
+	}
+	history := func() (string, []wms.JournalEntry) {
+		r, ce := callWithEngine(t, store, eng, ToolGetHistory, map[string]interface{}{"entityType": wms.EntityWorkUnit, "entityID": wuID})
+		if ce != nil {
+			t.Fatalf("getHistory: %v", ce)
+		}
+		raw := strings.TrimSpace(resultText(t, r))
+		var entries []wms.JournalEntry
+		if err := json.Unmarshal([]byte(raw), &entries); err != nil {
+			t.Fatalf("decode history: %v", err)
+		}
+		return raw, entries
+	}
+
+	if raw, entries := history(); raw != "[]" || len(entries) != 0 {
+		t.Fatalf("fresh history = %s, want []", raw)
+	}
+
+	if _, ce := callWithEngine(t, store, eng, ToolClaimWorkUnit, map[string]interface{}{"id": wuID}); ce != nil {
+		t.Fatalf("claimWorkUnit: %v", ce)
+	}
+	if raw, entries := history(); len(entries) != 1 {
+		t.Fatalf("history after claim = %s, want 1 entry", raw)
+	}
+
+	if _, ce := callWithEngine(t, store, eng, ToolDeliverResult, map[string]interface{}{"id": wuID, "summary": "delivered it", "result": "r"}); ce != nil {
+		t.Fatalf("deliverResult: %v", ce)
+	}
+	if _, ce := callWithEngine(t, store, eng, ToolUpdateWorkUnitStatus, map[string]interface{}{"id": wuID, "status": wms.StatusDone, "notes": "accepted"}); ce != nil {
+		t.Fatalf("complete: %v", ce)
+	}
+	_, entries := history()
+	if len(entries) != 3 {
+		t.Fatalf("history after lifecycle has %d entries, want 3", len(entries))
+	}
+	for _, tr := range []struct{ old, new, notes string }{
+		{wms.StatusPending, wms.StatusActive, "claimed by"},
+		{wms.StatusActive, wms.StatusReview, "delivered it"},
+		{wms.StatusReview, wms.StatusDone, "accepted"},
+	} {
+		found := false
+		for _, e := range entries {
+			if e.Field == "status" && e.OldValue == tr.old && e.NewValue == tr.new {
+				found = true
+				if !strings.Contains(e.Notes, tr.notes) {
+					t.Errorf("%s→%s notes = %q, want to contain %q", tr.old, tr.new, e.Notes, tr.notes)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("no journal entry for %s→%s", tr.old, tr.new)
+		}
+	}
+}
