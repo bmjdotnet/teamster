@@ -870,3 +870,134 @@ func tokenCountLine(input, output, cachedInput, reasoningOutput int64) string {
 	})
 	return string(b)
 }
+
+// flakyUpserter fails while failing is true; failed attempts are not recorded.
+type flakyUpserter struct {
+	fakeUpserter
+	failing bool
+}
+
+func (f *flakyUpserter) UpsertSession(ctx context.Context, s store.Session, ident sessionIdentity) error {
+	if f.failing {
+		return fmt.Errorf("simulated hookd outage")
+	}
+	return f.fakeUpserter.UpsertSession(ctx, s, ident)
+}
+
+func TestProcessFile_FailedRegistrationRetriesAfterCursorAdvances(t *testing.T) {
+	s, _, _ := newTestScraper(t)
+	up := &flakyUpserter{failing: true}
+	s.st = up
+	path := filepath.Join(t.TempDir(), "rollout.jsonl")
+	writeLines(t, path, []string{
+		sessionMetaLine("019f3ed6-1354-7731-b35e-5356dd9af6d4", "/tmp/w", "codex-tui", "0.142.5"),
+		turnContextLine("gpt-5.4"),
+		tokenCountLine(100, 10, 0, 0),
+	})
+
+	if err := s.processFile(context.Background(), path); err != nil {
+		t.Fatal(err)
+	}
+	c := s.cursors[path]
+	if !c.PendingRegistration || c.Offset == 0 {
+		t.Fatalf("want pending registration with advanced offset, got %+v", c)
+	}
+
+	up.failing = false
+	if err := s.processFile(context.Background(), path); err != nil {
+		t.Fatal(err)
+	}
+	if len(up.calls) != 1 || c.PendingRegistration {
+		t.Fatalf("want 1 retried upsert and pending cleared, calls=%d pending=%v", len(up.calls), c.PendingRegistration)
+	}
+
+	if err := s.processFile(context.Background(), path); err != nil {
+		t.Fatal(err)
+	}
+	if len(up.calls) != 1 {
+		t.Fatalf("registration must not repeat once accepted, calls=%d", len(up.calls))
+	}
+}
+
+func TestProcessFile_TelemetryEarlyReturnStillRegistersNextCycle(t *testing.T) {
+	s, cap, _ := newTestScraper(t)
+	up := &flakyUpserter{failing: true}
+	s.st = up
+	good := s.telemetryURL
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer bad.Close()
+	s.telemetryURL = bad.URL
+
+	path := filepath.Join(t.TempDir(), "rollout.jsonl")
+	writeLines(t, path, []string{
+		sessionMetaLine("019f3ed6-1354-7731-b35e-5356dd9af6d4", "/tmp/w", "codex-tui", "0.142.5"),
+		turnContextLine("gpt-5.4"),
+		tokenCountLine(100, 10, 0, 0),
+	})
+	if err := s.processFile(context.Background(), path); err == nil {
+		t.Fatal("expected telemetry failure")
+	}
+	if !s.cursors[path].PendingRegistration {
+		t.Fatal("registration must stay pending after telemetry early return")
+	}
+
+	up.failing = false
+	s.telemetryURL = good
+	if err := s.processFile(context.Background(), path); err != nil {
+		t.Fatal(err)
+	}
+	if len(up.calls) != 1 || len(cap.rows) != 1 {
+		t.Fatalf("want 1 upsert and 1 row, got upserts=%d rows=%d", len(up.calls), len(cap.rows))
+	}
+}
+
+func TestProcessFile_PendingRegistrationSurvivesRestartAndConverges(t *testing.T) {
+	s, _, _ := newTestScraper(t)
+	up := &flakyUpserter{failing: true}
+	s.st = up
+	s.cursorPath = filepath.Join(t.TempDir(), "cursors.json")
+	dir := t.TempDir()
+	const parentID = "019f3ed6-1354-7731-b35e-5356dd9af6d4"
+	const threadID = "019f3ed8-1843-7d61-992b-f7a012bfa313"
+	parent := filepath.Join(dir, "rollout-parent.jsonl")
+	child := filepath.Join(dir, "rollout-child.jsonl")
+	writeLines(t, parent, []string{sessionMetaLine(parentID, "/tmp/w", "codex-tui", "0.142.5"), turnContextLine("gpt-5.4")})
+	writeLines(t, child, []string{subagentSessionMetaLine(threadID, parentID, parentID, "/tmp/w", "codex_exec", "0.142.5", "worker", "Dirac"), turnContextLine("gpt-5.4")})
+	for _, p := range []string{parent, child} {
+		if err := s.processFile(context.Background(), p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.saveCursors(); err != nil {
+		t.Fatal(err)
+	}
+
+	s.cursors = make(map[string]*cursorEntry)
+	if err := s.loadCursors(); err != nil {
+		t.Fatal(err)
+	}
+	up.failing = false
+	for _, p := range []string{parent, child} {
+		if err := s.processFile(context.Background(), p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(up.calls) != 2 {
+		t.Fatalf("want parent and child registrations, got %+v", up.calls)
+	}
+	byAgent := map[string]store.Session{}
+	for i, c := range up.calls {
+		byAgent[c.AgentName] = c
+		if c.SessionID != parentID {
+			t.Errorf("call %d session_id=%q want %q", i, c.SessionID, parentID)
+		}
+	}
+	if _, ok := byAgent[""]; !ok {
+		t.Error("missing parent registration")
+	}
+	if _, ok := byAgent["@Dirac"]; !ok || up.idents[0].Relationship+up.idents[1].Relationship != "subagent" {
+		t.Error("missing child registration")
+	}
+}

@@ -350,6 +350,7 @@ def _new_cursor() -> dict:
         "cli_version": "",
         "model": "",  # last-known model, updated per turn_context
         "usage_record_seen": False,
+        "pending_registration": False,  # set on identity change, cleared once hookd accepts the /session upsert
     }
 
 
@@ -461,6 +462,7 @@ class Scraper:
             cursor.update(_new_cursor())
 
         if st.st_size == cursor["offset"]:
+            self._flush_pending_registration(cursor)
             return
 
         try:
@@ -471,6 +473,14 @@ class Scraper:
             self._read_file(f, path, cursor)
         finally:
             f.close()
+            self._flush_pending_registration(cursor)
+
+    def _flush_pending_registration(self, cursor: dict) -> None:
+        """Retry a registration left pending by a failed upsert or by a scan
+        that returned early on a telemetry failure."""
+        if cursor.get("pending_registration") and cursor["session_id"]:
+            if self._upsert_codex_session(cursor):
+                cursor["pending_registration"] = False
 
     def _read_file(self, f, path: str, cursor: dict) -> None:
         """Inner read loop — mirrors the Go bufio.Scanner loop in
@@ -480,7 +490,6 @@ class Scraper:
         if cursor["offset"] > 0:
             f.seek(cursor["offset"])
 
-        session_changed = False
         pos = cursor["offset"]
         new_offset = cursor["offset"]
 
@@ -500,7 +509,7 @@ class Scraper:
             if trimmed.strip():
                 try:
                     if self._process_line(trimmed, cursor, path):
-                        session_changed = True
+                        cursor["pending_registration"] = True
                 except _PostFailed:
                     # Stop here; do not advance past this unsent row. It
                     # will be retried from this offset on the next poll.
@@ -514,9 +523,6 @@ class Scraper:
             new_offset = pos
 
         cursor["offset"] = new_offset
-
-        if session_changed and cursor["session_id"]:
-            self._upsert_codex_session(cursor)
 
     def _process_line(self, raw: bytes, cursor: dict, path: str) -> bool:
         """Parse one rollout JSONL line and update cursor state. Returns True
@@ -739,7 +745,7 @@ class Scraper:
                        message_id=row.get("message_id"), error=str(exc))
             return False
 
-    def _upsert_codex_session(self, cursor: dict) -> None:
+    def _upsert_codex_session(self, cursor: dict) -> bool:
         """Upsert this tailer's owned view of the Codex sessions row via
         hookd's /session endpoint (WP-R3) — the remote-side equivalent of
         the hub-local Go scraper's direct store.UpsertSession call, which a
@@ -756,7 +762,7 @@ class Scraper:
         if not self.session_url:
             logging.warning("codex-scraper: no session_url configured, skipping "
                             "session upsert session_id=%s", cursor["session_id"])
-            return
+            return False
 
         body = {
             "session_id": cursor["session_id"],
@@ -775,7 +781,7 @@ class Scraper:
 
         if self.dry_run:
             logging.info("dry-run session upsert=%r", body)
-            return
+            return False
 
         try:
             data = json.dumps(body).encode("utf-8")
@@ -789,16 +795,20 @@ class Scraper:
                                session_id=cursor["session_id"])
                     logging.error("codex-scraper: session upsert non-2xx status=%d "
                                  "session_id=%s", resp.status, cursor["session_id"])
+                    return False
+            return True
         except urllib.error.HTTPError as exc:
             _log_error("session POST HTTPError", status=exc.code,
                        session_id=cursor["session_id"], error=str(exc))
             logging.error("codex-scraper: session upsert failed session_id=%s: %s",
                          cursor["session_id"], exc)
+            return False
         except Exception as exc:
             _log_error("session POST error", session_id=cursor["session_id"],
                        error=str(exc))
             logging.error("codex-scraper: session upsert failed session_id=%s: %s",
                          cursor["session_id"], exc)
+            return False
 
 
 def _format_event_timestamp(raw: str) -> str:
