@@ -145,13 +145,17 @@ func fallbackEligible() bool {
 // runtimeTag classifies the calling connection into one of three buckets for
 // tagging freshly created entities: "codex", "claude_code", or "unknown" (a
 // third MCP client we can't positively identify as either — inspector tools,
-// another agent CLI, etc.). Independent of whether Codex's turn metadata was
-// present on this particular call; a Codex connection that dropped turn
+// another agent CLI, etc.). Per-call Codex turn metadata is a positive Codex
+// signal that also works over hookd's HTTP transport, where
+// ConnectionClientName is never set and would otherwise read as claude_code.
+// A Codex connection that dropped turn
 // metadata for one call is still "codex" here even though resolveSessionID
 // buckets its session id as unknown-codex rather than trusting a stolen file.
-func runtimeTag() string {
+func runtimeTag(m *Meta) string {
 	switch {
 	case strings.EqualFold(strings.TrimSpace(os.Getenv("TEAMSTER_RUNTIME")), "codex"):
+		return "codex"
+	case m != nil && m.CodexTurn != nil:
 		return "codex"
 	case ConnectionClientName == codexClientName:
 		return "codex"
@@ -186,7 +190,7 @@ func resolveSessionID(m *Meta) {
 		m.SessionID = readCurrentSessionID()
 		return
 	}
-	m.SessionID = "unknown-" + runtimeTag()
+	m.SessionID = "unknown-" + runtimeTag(m)
 }
 
 // applyRuntimeTag auto-applies runtime:<codex|claude_code|unknown> to a
@@ -382,7 +386,7 @@ func HandleToolCall(store wms.Store, eng wms.Engine, rawParams json.RawMessage) 
 	}
 
 	resolveSessionID(&p.Meta)
-	runtime := runtimeTag()
+	runtime := runtimeTag(&p.Meta)
 
 	strArg := func(key string) string {
 		v, _ := p.Arguments[key].(string)
