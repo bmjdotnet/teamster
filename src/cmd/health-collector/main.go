@@ -334,7 +334,26 @@ func collectTick(ctx context.Context, st store.Store, resolver *pricing.Resolver
 			}
 		}
 
+		existing, existingFound, getErr := gs.Get(ctx, gauge.GaugeKey{Host: gaugeHostFor(sk, host), SessionID: sk.SessionID, AgentName: sk.AgentName})
+		if getErr != nil {
+			existingFound = false
+		}
+
 		since := highWater[k]
+		// A swept or evicted gauge row leaves the in-memory accumulators
+		// pointing at nothing durable. Rebuild from the full ledger history
+		// (accumulators reset, so each ledger row is counted exactly once)
+		// instead of resuming from the high-water mark with a zero row.
+		restored := false
+		if getErr == nil && !existingFound && !since.IsZero() {
+			since = time.Time{}
+			delete(highWater, k)
+			delete(costTotals, k)
+			delete(tokensInTotals, k)
+			delete(tokensOutTotals, k)
+			delete(prevContext, k)
+			restored = true
+		}
 
 		rows, err := queryTokenLedger(ctx, rx, sk.SessionID, sk.AgentName, since)
 		if err != nil {
@@ -364,17 +383,9 @@ func collectTick(ctx context.Context, st store.Store, resolver *pricing.Resolver
 			deltaIn += r.InputTokens
 			deltaOut += r.OutputTokens
 		}
-		costTotals[k] += costForRows(ctx, resolver, rows)
-		costUSD := costTotals[k]
-
-		existing, existingFound, getErr := gs.Get(ctx, gauge.GaugeKey{Host: gaugeHostFor(sk, host), SessionID: sk.SessionID, AgentName: sk.AgentName})
-		if getErr != nil {
-			existingFound = false
-		}
-		tokensInTotals[k] += deltaIn
-		tokensOutTotals[k] += deltaOut
-		tokensIn := tokensInTotals[k]
-		tokensOut := tokensOutTotals[k]
+		costUSD := costTotals[k] + costForRows(ctx, resolver, rows)
+		tokensIn := tokensInTotals[k] + deltaIn
+		tokensOut := tokensOutTotals[k] + deltaOut
 		var window, contextUsed int64
 		var longCtx bool
 		var fillPct float64
@@ -466,6 +477,9 @@ func collectTick(ctx context.Context, st store.Store, resolver *pricing.Resolver
 			CollectorStatus:       "fresh",
 			UpdatedAt:             now,
 		}
+		if restored {
+			row.CollectorStatus = gauge.CollectorStatusRestored
+		}
 		if rid, ok := rosterIDs[k]; ok {
 			row.RosterID = &rid
 		}
@@ -486,6 +500,9 @@ func collectTick(ctx context.Context, st store.Store, resolver *pricing.Resolver
 			continue
 		}
 
+		costTotals[k] = costUSD
+		tokensInTotals[k] = tokensIn
+		tokensOutTotals[k] = tokensOut
 		highWater[k] = latest.Timestamp
 	}
 }

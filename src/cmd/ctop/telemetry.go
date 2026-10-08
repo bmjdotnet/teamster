@@ -10,6 +10,10 @@ const (
 	costStaleAfter    = 120 * time.Second
 )
 
+// gaugeRestoredStatus mirrors gauge.CollectorStatusRestored (ctop does not
+// import internal/agenthealth/gauge).
+const gaugeRestoredStatus = "restored"
+
 type telemetryState int
 
 const (
@@ -56,6 +60,9 @@ func (a Agent) costState(now time.Time) telemetryState {
 func (a Agent) contextState(now time.Time) telemetryState {
 	if !a.hasGauge() {
 		return telemetryUnavailable
+	}
+	if a.CollectorStatus == gaugeRestoredStatus {
+		return telemetryStale
 	}
 	ts := parseTelemetryTs(a.GaugeUpdatedAt)
 	if rep := parseTelemetryTs(a.ContextReportedAt); rep.After(ts) {
