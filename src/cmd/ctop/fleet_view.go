@@ -625,6 +625,22 @@ func fleetCtxBar(fill float64, dim rowDim) string {
 	return b.String()
 }
 
+// fleetCtxBarFor greys out the bar when context is unavailable or stale.
+func fleetCtxBarFor(fill float64, state telemetryState, dim rowDim) string {
+	if state == telemetryFresh {
+		return fleetCtxBar(fill, dim)
+	}
+	return renderDim(dimGreyRGB, strings.Repeat("░", fleetCtxBarCells), dim)
+}
+
+// fleetCostCellFor renders a member row's COST cell per telemetry state.
+func fleetCostCellFor(r Agent, maxCost float64, state telemetryState, dim rowDim) string {
+	if state == telemetryFresh {
+		return fleetCostCell(r.SessionCostUSD, maxCost, false, dim)
+	}
+	return telemetryCell(state, metricRGB, fmtCost(r.SessionCostUSD), fleetCostW, dim)
+}
+
 // fleetModelAbbrev is the Fleet view's MODEL column: strip the "claude-"
 // prefix only — no family-letter/version abbreviation — "claude-opus-4-6"
 // -> "opus-4-6", "claude-sonnet-5" -> "sonnet-5", "claude-fable-5" ->
@@ -1085,18 +1101,22 @@ func (v fleetView) renderAgentRow(fr fleetRow, isCursor bool, cs fleetColSet, la
 	nameCell := padTrunc(cell, layout.agentW)
 
 	fill := r.ContextFillPct
+	now := time.Now()
+	ctxState := r.contextState(now)
+	costState := r.costState(now)
 	var ctxCell string
-	if fill > 1.0 {
+	if ctxState == telemetryUnavailable {
+		ctxCell = telemetryCell(ctxState, metricRGB, "", fleetCtxW, dim)
+	} else if fill > 1.0 {
 		ctxCell = padRight(unreliableFill(), fleetCtxW)
 	} else {
 		clamped := fill
 		if clamped < 0 {
 			clamped = 0
 		}
-		ctxCell = renderDim(ctxGradientRGB(clamped), padRight(fmt.Sprintf("%.0f%%", clamped*100), fleetCtxW), dim)
+		ctxCell = telemetryCell(ctxState, ctxGradientRGB(clamped), fmt.Sprintf("%.0f%%", clamped*100), fleetCtxW, dim)
 	}
 
-	now := time.Now()
 	ageText := "—"
 	var ageDur time.Duration
 	if ts := m.agents.activityTsFor(r); !ts.IsZero() {
@@ -1135,15 +1155,15 @@ func (v fleetView) renderAgentRow(fr fleetRow, isCursor bool, cs fleetColSet, la
 		ageCell,
 		padTrunc(activityText, layout.activityW),
 		ctxCell,
-		fleetCtxBar(fill, dim),
+		fleetCtxBarFor(fill, ctxState, dim),
 		// Never bold on member rows — the lead included (operator decision
 		// 2026-07-13): cost is per-agent since 039f718, and the bold weight
 		// moved to the team header's authoritative total. Colored by
 		// fr.teamMaxCost's gradient (operator request) so the group's
 		// biggest spender pops.
-		fleetCostCell(r.SessionCostUSD, fr.teamMaxCost, false, dim),
-		renderDim(metricRGB, padRight(humanizeTokens(r.TokensInTotal), fleetTokW), dim),
-		renderDim(metricRGB, padRight(humanizeTokens(r.TokensOutTotal), fleetTokW), dim),
+		fleetCostCellFor(r, fr.teamMaxCost, costState, dim),
+		telemetryCell(costState, metricRGB, humanizeTokens(r.TokensInTotal), fleetTokW, dim),
+		telemetryCell(costState, metricRGB, humanizeTokens(r.TokensOutTotal), fleetTokW, dim),
 		cs,
 	)
 

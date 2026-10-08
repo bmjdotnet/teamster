@@ -21,6 +21,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - **Python scrapers fetch rates from the hub** via the `/rates` endpoint instead of using hardcoded pricing tables. The embedded tables remain as a fallback when the hub is unreachable.
 
 ### Fixed
+- **ctop distinguishes unavailable and stale telemetry from measured zero** (issue #38). Rows with no gauge data show `—` for context, cost and tokens; values whose last gauge write is older than 60s (context) or 120s (cost/tokens) keep their last-known value but render dim with a `~` marker. The health API now exposes `gauge_updated_at` and `context_reported_at`.
 - **Codex token ingestion** (issue #29). Both Go (hub) and Python (remote) scrapers now handle the `token_usage_record` event introduced in Codex CLI 0.159.x, with persisted dedup against the legacy `event_msg:token_count`. Added pricing for gpt-6-luna, gpt-6-astra, gpt-6.1-sol and gpt-6-sol (including cache-write rates). Reads `cache_write_input_tokens` from rollout data.
 - **Agent identity on respawn** (issue #27). A respawned teammate no longer inherits the dead predecessor's roster row, health gauge, and cost — it gets its own row, so gauges and cost stay with the instance that earned them.
 - **Blank upserts wiping session metadata.** Codex context-subscriber heartbeats (and any re-post that omits WMS/team/focus fields) no longer overwrite populated values with blanks.
