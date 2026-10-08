@@ -1156,5 +1156,89 @@ class TestHTTPRates(unittest.TestCase):
         self.assertEqual(9, rid)
 
 
+class TestPendingRegistrationRetry(_ScraperTestCase):
+    """Issue #35: a failed /session registration persists as pending state and
+    retries independently of new rollout metadata."""
+
+    PARENT = "019f3ed6-1354-7731-b35e-5356dd9af6d4"
+    CHILD = "019f3ed8-1843-7d61-992b-f7a012bfa313"
+
+    def _dead_url(self):
+        return "http://127.0.0.1:1/session"
+
+    def test_failed_registration_retries_after_cursor_advances(self):
+        good = self.scraper.session_url
+        self.scraper.session_url = self._dead_url()
+        path = os.path.join(self.tmpdir, "rollout.jsonl")
+        write_lines(path, [
+            session_meta_line(self.PARENT, "/tmp", "codex_exec", "0.142.5"),
+            turn_context_line("gpt-5.4"),
+            token_count_line(100, 10, 0, 0),
+        ])
+        self.scraper.process_file(path)
+        cursor = self.scraper.cursors[path]
+        self.assertTrue(cursor["pending_registration"])
+        self.assertGreater(cursor["offset"], 0)
+        self.assertEqual([], self.server.session_calls)
+
+        self.scraper.session_url = good
+        self.scraper.process_file(path)  # no new bytes
+        self.assertEqual(1, len(self.server.session_calls))
+        self.assertFalse(cursor["pending_registration"])
+        self.scraper.process_file(path)
+        self.assertEqual(1, len(self.server.session_calls))
+
+    def test_pending_survives_restart_and_parent_child_converge(self):
+        good = self.scraper.session_url
+        self.scraper.session_url = self._dead_url()
+        parent = os.path.join(self.tmpdir, "rollout-parent.jsonl")
+        child = os.path.join(self.tmpdir, "rollout-child.jsonl")
+        write_lines(parent, [session_meta_line(self.PARENT, "/tmp", "codex-tui", "0.142.5"),
+                             turn_context_line("gpt-5.4")])
+        write_lines(child, [subagent_session_meta_line(
+            self.CHILD, self.PARENT, self.PARENT, "/tmp", "codex_exec", "0.142.5",
+            "worker", "Dirac"), turn_context_line("gpt-5.4")])
+        self.scraper.process_file(parent)
+        self.scraper.process_file(child)
+        self.scraper.save_cursors()
+
+        self.scraper.session_url = good
+        self.scraper.cursors = {}
+        self.scraper.load_cursors()
+        self.scraper.process_file(parent)
+        self.scraper.process_file(child)
+        by_agent = {c["agent_name"]: c for c in self.server.session_calls}
+        self.assertEqual({"", "@Dirac"}, set(by_agent))
+        self.assertEqual(self.PARENT, by_agent[""]["session_id"])
+        self.assertEqual(self.PARENT, by_agent["@Dirac"]["session_id"])
+        self.assertEqual("subagent", by_agent["@Dirac"]["relationship"])
+        self.assertEqual(self.CHILD, by_agent["@Dirac"]["agent_id"])
+
+    def test_telemetry_early_return_still_registers_next_cycle(self):
+        failing = _FailingCaptureServer()
+        try:
+            good_tel = self.scraper.telemetry_url
+            good_sess = self.scraper.session_url
+            self.scraper.telemetry_url = failing.telemetry_url
+            self.scraper.session_url = self._dead_url()
+            path = os.path.join(self.tmpdir, "rollout.jsonl")
+            write_lines(path, [
+                session_meta_line(self.PARENT, "/tmp", "codex_exec", "0.142.5"),
+                turn_context_line("gpt-5.4"),
+                token_count_line(100, 10, 0, 0),
+            ])
+            self.scraper.process_file(path)
+            self.assertTrue(self.scraper.cursors[path]["pending_registration"])
+
+            self.scraper.telemetry_url = good_tel
+            self.scraper.session_url = good_sess
+            self.scraper.process_file(path)
+            self.assertEqual(1, len(self.server.session_calls))
+            self.assertEqual(1, len(self.server.telemetry_rows))
+            self.assertFalse(self.scraper.cursors[path]["pending_registration"])
+        finally:
+            failing.close()
+
+
 if __name__ == "__main__":
     unittest.main()

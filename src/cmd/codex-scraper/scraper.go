@@ -100,6 +100,12 @@ type cursorEntry struct {
 
 	SeenUsageRecord bool `json:"seen_usage_record,omitempty"`
 
+	// PendingRegistration is set whenever the session identity changes and
+	// cleared only after hookd accepts the sessions upsert. Persisted so a
+	// failed registration is retried on later polls even when the cursor has
+	// already advanced past the metadata that triggered it.
+	PendingRegistration bool `json:"pending_registration,omitempty"`
+
 	// dirty is set by processLine when it updates an identity field above, so
 	// processFile knows to upsert the sessions row once at the end of a scan
 	// rather than on every line. Transient — never persisted (unexported
@@ -232,6 +238,7 @@ func (s *scraper) processFile(ctx context.Context, path string) error {
 	}
 
 	if fi.Size() == cursor.Offset {
+		s.flushPendingRegistration(ctx, cursor)
 		return nil
 	}
 
@@ -247,7 +254,8 @@ func (s *scraper) processFile(ctx context.Context, path string) error {
 		}
 	}
 
-	sessionInfoChanged := false
+	defer s.flushPendingRegistration(ctx, cursor)
+
 	reader := bufio.NewReaderSize(f, 64*1024)
 	pos := cursor.Offset
 	newOffset := cursor.Offset
@@ -273,7 +281,12 @@ func (s *scraper) processFile(ctx context.Context, path string) error {
 		trimmed := bytes.TrimRight(line, "\r\n")
 
 		if len(bytes.TrimSpace(trimmed)) > 0 {
-			if err := s.processLine(ctx, trimmed, cursor, path); err != nil {
+			err := s.processLine(ctx, trimmed, cursor, path)
+			if cursor.dirty {
+				cursor.PendingRegistration = true
+				cursor.dirty = false
+			}
+			if err != nil {
 				if err == errPostFailed {
 					// Stop here; do not advance past this unsent row. It will
 					// be retried from this offset on the next poll.
@@ -281,9 +294,6 @@ func (s *scraper) processFile(ctx context.Context, path string) error {
 					return err
 				}
 				slog.Debug("skipping unparseable rollout line", "path", path, "error", err)
-			} else if cursor.dirty {
-				sessionInfoChanged = true
-				cursor.dirty = false
 			}
 		}
 
@@ -292,12 +302,18 @@ func (s *scraper) processFile(ctx context.Context, path string) error {
 	}
 
 	cursor.Offset = newOffset
-
-	if sessionInfoChanged && cursor.SessionID != "" {
-		s.upsertCodexSession(ctx, cursor)
-	}
-
 	return nil
+}
+
+// flushPendingRegistration retries a registration left pending by an earlier
+// failed upsert (or by a scan that returned early on a telemetry failure).
+func (s *scraper) flushPendingRegistration(ctx context.Context, cursor *cursorEntry) {
+	if !cursor.PendingRegistration || cursor.SessionID == "" {
+		return
+	}
+	if s.upsertCodexSession(ctx, cursor) {
+		cursor.PendingRegistration = false
+	}
 }
 
 // identityWS is the explicit ASCII whitespace class shared byte for byte with
@@ -548,11 +564,11 @@ func (s *scraper) postTelemetry(row telemetryRow) error {
 // a dependency for WMS/cost, this is the only writer. Best-effort: an error
 // is logged, not fatal to the poll (session-row freshness is not the ledger's
 // correctness boundary — cost still flows even if this upsert lags/fails).
-func (s *scraper) upsertCodexSession(ctx context.Context, cursor *cursorEntry) {
+func (s *scraper) upsertCodexSession(ctx context.Context, cursor *cursorEntry) bool {
 	if s.st == nil {
 		slog.Warn("codex-scraper: no store configured, skipping session upsert",
 			"session_id", cursor.SessionID)
-		return
+		return false
 	}
 	now := time.Now().UTC()
 	var ident sessionIdentity
@@ -575,7 +591,9 @@ func (s *scraper) upsertCodexSession(ctx context.Context, cursor *cursorEntry) {
 	}, ident)
 	if err != nil {
 		slog.Error("codex-scraper: session upsert failed", "session_id", cursor.SessionID, "error", err)
+		return false
 	}
+	return true
 }
 
 // httpSessionUpserter implements sessionUpserter by POSTing to hookd's
