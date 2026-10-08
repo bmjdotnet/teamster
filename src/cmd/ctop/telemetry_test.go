@@ -25,6 +25,7 @@ func TestTelemetryStates(t *testing.T) {
 		{"ctx stale cost fresh", Agent{CollectorStatus: "ok", GaugeUpdatedAt: tsAgo(now, 90*time.Second)}, telemetryFresh, telemetryStale},
 		{"both stale", Agent{CollectorStatus: "ok", GaugeUpdatedAt: tsAgo(now, 5*time.Minute)}, telemetryStale, telemetryStale},
 		{"ctx report keeps ctx fresh", Agent{CollectorStatus: "ok", GaugeUpdatedAt: tsAgo(now, 5*time.Minute), ContextReportedAt: tsAgo(now, 10*time.Second)}, telemetryStale, telemetryFresh},
+		{"restored row context is last known", Agent{CollectorStatus: "restored", GaugeUpdatedAt: tsAgo(now, time.Second)}, telemetryFresh, telemetryStale},
 		{"no timestamp from old hub", Agent{CollectorStatus: "ok", SessionCostUSD: 3}, telemetryFresh, telemetryFresh},
 	}
 	for _, c := range cases {

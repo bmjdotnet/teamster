@@ -96,6 +96,11 @@ type GaugeRow struct {
 	FidelityNotes       *string
 }
 
+// CollectorStatusRestored marks a row rebuilt from token_ledger after its
+// previous gauge row was swept or evicted: totals are exact, but the context
+// reading is the last known observation rather than a fresh sample.
+const CollectorStatusRestored = "restored"
+
 // GaugeKey is the composite primary key for a gauge row.
 type GaugeKey struct {
 	Host      string
