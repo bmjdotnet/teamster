@@ -12,7 +12,11 @@ import (
 	"github.com/bmjdotnet/teamster/internal/store"
 )
 
-const goldenSchemaFixture = "testdata/golden_schema_v70.txt"
+// goldenSchemaFixture is named for the MySQL schema version it captures (the
+// head, store.MaxSchemaVersion). When a migration changes the schema,
+// regenerate it with -update-golden below and rename the file and this
+// constant together.
+const goldenSchemaFixture = "testdata/golden_schema_v77.txt"
 
 // updateGolden regenerates the golden fixture from the pre-refactor migrate()
 // on a fresh database: `go test ./internal/store/mysql/ -run TestGoldenSchema -update-golden`.
@@ -29,14 +33,14 @@ var updateGolden = flag.Bool("update-golden", false, "regenerate the golden sche
 // byte-identical:
 //
 //  1. the checked-in golden fixture, captured from the pre-refactor migrate()
-//     applied fresh 1..70 (v70 is roster-lifecycle, agent_roster's updated_at
-//     heartbeat column — regenerated via -update-golden when that migration
-//     was added, per this test's own instruction below);
-//  2. the new Migrator/RunMigrations machinery applying Steps() fresh 1..70
+//     applied fresh to the head version (regenerated via -update-golden each
+//     time a migration changed the schema, per this test's own instruction
+//     below);
+//  2. the new Migrator/RunMigrations machinery applying Steps() fresh to the head
 //     on an empty database (the greenfield-install path);
 //  3. the new machinery applying Steps() from an older-version seed (v44,
 //     produced by the pre-refactor migrateUpTo helper — the reproducible
-//     equivalent of "a checked-in v44 dump") forward to v70 (the real
+//     equivalent of "a checked-in v44 dump") forward to the head (the real
 //     upgrade path a deployed hub takes, not just a greenfield run).
 //
 // Any diff is a hard-stop data-integrity signal (per memory
@@ -66,14 +70,14 @@ func TestGoldenSchema_ByteIdentical(t *testing.T) {
 
 	freshDB := freshBackfillDB(t, 0)
 	if err := store.RunMigrations(context.Background(), newMysqlMigrator(freshDB)); err != nil {
-		t.Fatalf("RunMigrations fresh 1..70: %v", err)
+		t.Fatalf("RunMigrations fresh 1..%d: %v", MaxSchemaVersion(), err)
 	}
 	freshDump, err := dumpNormalizedSchema(context.Background(), freshDB)
 	if err != nil {
 		t.Fatalf("dump fresh schema: %v", err)
 	}
 	if freshDump != string(golden) {
-		t.Errorf("fresh Steps() v70 schema diverges from golden fixture (Invariant 1 violation):\n--- golden ---\n%s\n--- fresh Steps() ---\n%s", golden, freshDump)
+		t.Errorf("fresh Steps() v%d schema diverges from golden fixture (Invariant 1 violation):\n--- golden ---\n%s\n--- fresh Steps() ---\n%s", MaxSchemaVersion(), golden, freshDump)
 	}
 
 	seedDB := freshBackfillDB(t, 44)
@@ -85,7 +89,7 @@ func TestGoldenSchema_ByteIdentical(t *testing.T) {
 		t.Fatalf("dump older-seed-forward schema: %v", err)
 	}
 	if seedDump != string(golden) {
-		t.Errorf("older-seed(v44)-forward v70 schema diverges from golden fixture (Invariant 1 violation):\n--- golden ---\n%s\n--- v44-forward Steps() ---\n%s", golden, seedDump)
+		t.Errorf("older-seed(v44)-forward v%d schema diverges from golden fixture (Invariant 1 violation):\n--- golden ---\n%s\n--- v44-forward Steps() ---\n%s", MaxSchemaVersion(), golden, seedDump)
 	}
 }
 

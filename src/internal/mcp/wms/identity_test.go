@@ -52,8 +52,8 @@ func TestResolveSessionID_ClaudeWithFallback(t *testing.T) {
 	if m.SessionID != fallbackSentinel {
 		t.Errorf("SessionID = %q, want the fallback file value %q", m.SessionID, fallbackSentinel)
 	}
-	if got := runtimeTag(); got != "claude_code" {
-		t.Errorf("runtimeTag() = %q, want claude_code", got)
+	if got := runtimeTag(&Meta{}); got != "claude_code" {
+		t.Errorf("runtimeTag(&Meta{}) = %q, want claude_code", got)
 	}
 }
 
@@ -90,8 +90,8 @@ func TestResolveSessionID_CodexWithTurnMetadata(t *testing.T) {
 	if m.SessionID == fallbackSentinel {
 		t.Fatal("resolveSessionID read the Claude fallback file despite present turn metadata")
 	}
-	if got := runtimeTag(); got != "codex" {
-		t.Errorf("runtimeTag() = %q, want codex", got)
+	if got := runtimeTag(&Meta{}); got != "codex" {
+		t.Errorf("runtimeTag(&Meta{}) = %q, want codex", got)
 	}
 }
 
@@ -131,10 +131,10 @@ func TestResolveSessionID_ThirdPartyClient(t *testing.T) {
 		t.Fatal("resolveSessionID read the Claude fallback file for an unrecognized third-party client")
 	}
 	if m.SessionID != "unknown-unknown" {
-		t.Errorf("SessionID = %q, want an unknown-* bucket (got runtimeTag=%q)", m.SessionID, runtimeTag())
+		t.Errorf("SessionID = %q, want an unknown-* bucket (got runtimeTag=%q)", m.SessionID, runtimeTag(&Meta{}))
 	}
-	if got := runtimeTag(); got != "unknown" {
-		t.Errorf("runtimeTag() = %q, want unknown", got)
+	if got := runtimeTag(&Meta{}); got != "unknown" {
+		t.Errorf("runtimeTag(&Meta{}) = %q, want unknown", got)
 	}
 }
 
@@ -166,8 +166,8 @@ func TestFallbackEligible_RuntimeEnvOverridesClientInfo(t *testing.T) {
 	if fallbackEligible() {
 		t.Error("fallbackEligible() = true, want false when TEAMSTER_RUNTIME=codex regardless of clientInfo")
 	}
-	if got := runtimeTag(); got != "codex" {
-		t.Errorf("runtimeTag() = %q, want codex (env should win)", got)
+	if got := runtimeTag(&Meta{}); got != "codex" {
+		t.Errorf("runtimeTag(&Meta{}) = %q, want codex (env should win)", got)
 	}
 }
 
@@ -225,5 +225,21 @@ func TestRuntimeTagAppliedOnCreate(t *testing.T) {
 	}
 	if ok, src := entityHasTag(t, store, wms.EntityWorkUnit, "wu-unknown", "runtime", "unknown"); !ok || src != "classifier" {
 		t.Errorf("unknown-client workunit runtime tag: ok=%v source=%q, want true/classifier", ok, src)
+	}
+}
+
+// TestRuntimeTag_CodexTurnMetadataOverHTTP: hookd's HTTP transport never sets
+// ConnectionClientName, so per-call Codex turn metadata must still classify
+// the call as codex (issue #40); a call without it stays claude_code.
+func TestRuntimeTag_CodexTurnMetadataOverHTTP(t *testing.T) {
+	resetConnectionState(t)
+	ConnectionClientName = ""
+
+	codex := &Meta{CodexTurn: &CodexTurnMeta{SessionID: "019f3b34-5d26-7441-a825-732013587709"}}
+	if got := runtimeTag(codex); got != "codex" {
+		t.Errorf("runtimeTag(codex turn metadata) = %q, want codex", got)
+	}
+	if got := runtimeTag(&Meta{}); got != "claude_code" {
+		t.Errorf("runtimeTag(no metadata) = %q, want claude_code", got)
 	}
 }

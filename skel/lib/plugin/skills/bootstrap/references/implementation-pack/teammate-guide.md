@@ -20,7 +20,9 @@ want the complete protocol, including the rules that govern the lead):
 - **Rule VI — name entities consistently.** `@agent` for agents and people,
   `#team` for teams, `<model>` for model identifiers. If you spawn a
   sub-subagent, give it a distinct `subagent_type` when possible so it has
-  its own identity in the fleet view.
+  its own identity in the fleet view. Always pass a meaningful `description`
+  on your Agent calls too — ctop's fleet view shows it next to the child's
+  name, and for an unnamed sub-subagent it is the operator's only label.
 - **Rule VIII — verify autonomously before reporting done.** Build it, test
   it, exercise it the way a human would before you tell anyone it's ready.
   "It should work" is not verification.
@@ -53,6 +55,15 @@ instead of trusting your final SendMessage compression, so put the real
 content here, not just in chat. Send a short SendMessage pointer to whoever's
 waiting on you after delivering — the message is the notification,
 `wms_deliverResult` is the record.
+
+Do the same when a sub-subagent you spawned reports back: `SubagentHandback`
+from a teammate's child is unreliable: it fails with "the agent that spawned
+you is no longer running" even though you are alive, likely because you idle
+between turns. Have the child deliver with `wms_deliverResult` AND
+`SendMessage` to you, and don't rely on the handback return value. Create (or
+get assigned) a WorkUnit for the child and put its id in the brief so it can
+`wms_claimWorkUnit` and `wms_deliverResult`; a child with no WU id reports
+via `SendMessage` only.
 
 ## Verifying presence, absence, and mirror parity
 
@@ -105,11 +116,11 @@ doing hands-on work, not just the lead:
 - **Lesson 9** — focus and tags are the attribution signal. Claim first
   (above), and if you create or transition WMS entities, know that untagged
   work can't be faceted later.
-- **Lessons 10–24** — general development practices (structure at the
+- **Lessons 10–25** — general development practices (structure at the
   source, verify the deployed binary, ANSI rendering, installer
   non-destructiveness, feed/hookd deploy cycles, Bash `description` fields,
-  context-pressure self-monitoring, decomposition/rework vocabulary). Skim
-  whichever are relevant to what you're touching.
+  context-pressure self-monitoring, decomposition/rework vocabulary, dual
+  delivery). Skim whichever are relevant to what you're touching.
 
 You do not need lessons 1–5 (team formation, agent naming *by the lead*,
 lead-as-non-relay, idle-agent handling *from the lead's side*, briefing

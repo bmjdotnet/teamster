@@ -139,3 +139,51 @@ func TestChooseContextWindow_ExistingHeuristicRow_KnownModel_UsesModelClass(t *t
 		t.Fatalf("used = %d, want 10000", used)
 	}
 }
+
+func TestChooseCodexContext_OldReport_Kept(t *testing.T) {
+	reported := time.Now().Add(-3 * time.Hour)
+	existing := gauge.GaugeRow{
+		Runtime:             "codex",
+		ContextSource:       gauge.ContextSourceCodexAppserver,
+		ContextReportedAt:   &reported,
+		ContextWindowTokens: 258_400,
+		ContextTokensUsed:   64_600,
+		ContextFillPct:      0.25,
+		LongContextActive:   true,
+	}
+	window, used, longCtx, fillPct, source := chooseCodexContext(existing, true)
+	if window != 258_400 || used != 64_600 || fillPct != 0.25 || !longCtx || source != gauge.ContextSourceCodexAppserver {
+		t.Fatalf("got %d/%d/%v/%v/%q, want old codex report kept", window, used, longCtx, fillPct, source)
+	}
+}
+
+func TestChooseCodexContext_NoReport_NotClaudeDefault(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		existing gauge.GaugeRow
+		found    bool
+	}{
+		{"no row", gauge.GaugeRow{}, false},
+		{"heuristic row", gauge.GaugeRow{ContextSource: gauge.ContextSourceHeuristic, ContextWindowTokens: 1_000_000}, true},
+		{"claude statusline row", gauge.GaugeRow{ContextSource: gauge.ContextSourceStatusline, ContextWindowTokens: 1_000_000}, true},
+	} {
+		window, used, longCtx, fillPct, source := chooseCodexContext(tc.existing, tc.found)
+		if window != 0 || used != 0 || longCtx || fillPct != 0 || source != gauge.ContextSourceHeuristic {
+			t.Fatalf("%s: got %d/%d/%v/%v/%q, want 0/0/false/0/heuristic", tc.name, window, used, longCtx, fillPct, source)
+		}
+	}
+}
+
+func TestChooseContextWindow_StaleStatusline_NotAffectedByCodexSource(t *testing.T) {
+	reported := time.Now().Add(-3 * time.Hour)
+	existing := gauge.GaugeRow{
+		ContextSource:       gauge.ContextSourceStatusline,
+		ContextReportedAt:   &reported,
+		ContextWindowTokens: 200_000,
+		ContextTokensUsed:   10_000,
+	}
+	window, _, _, _, source := chooseContextWindow(existing, true, time.Now(), 50_000, "")
+	if source != gauge.ContextSourceHeuristic || window != defaultContextWindow {
+		t.Fatalf("got %d/%q, want heuristic default for stale Claude statusline", window, source)
+	}
+}

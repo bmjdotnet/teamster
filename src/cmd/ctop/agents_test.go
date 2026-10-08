@@ -173,6 +173,86 @@ func TestGroupBySessionPartitionsBySessionID(t *testing.T) {
 	}
 }
 
+func lineageRow(sess, roster, parent, team string) Agent {
+	a := Agent{SessionID: sess, TeamName: team}
+	if roster != "" {
+		a.RosterID = strPtr(roster)
+	}
+	if parent != "" {
+		a.ParentRef = strPtr(parent)
+	}
+	return a
+}
+
+func TestGroupBySessionSameTeamNameSeparateSessionsStaySplit(t *testing.T) {
+	groups := groupBySession([]Agent{
+		lineageRow("old", "r1", "", "x"),
+		lineageRow("new", "r2", "", "x"),
+	})
+	if len(groups) != 2 {
+		t.Fatalf("groups = %d, want 2 (team_name must not merge sessions)", len(groups))
+	}
+}
+
+func TestGroupBySessionMacOSTeammateMergesViaParentRef(t *testing.T) {
+	groups := groupBySession([]Agent{
+		lineageRow("T", "r2", "r1", "x"),
+		lineageRow("L", "r1", "", "x"),
+	})
+	if len(groups) != 1 || groups[0].sessionID != "L" || len(groups[0].rows) != 2 {
+		t.Fatalf("groups = %+v, want one group with sessionID L and 2 rows", groups)
+	}
+}
+
+func TestGroupBySessionLineageDepthTwo(t *testing.T) {
+	groups := groupBySession([]Agent{
+		lineageRow("L", "r1", "", "x"),
+		lineageRow("T", "r2", "r1", "x"),
+		lineageRow("S", "r3", "r2", "x"),
+	})
+	if len(groups) != 1 || groups[0].sessionID != "L" || len(groups[0].rows) != 3 {
+		t.Fatalf("groups = %+v, want one group rooted at L", groups)
+	}
+}
+
+func TestGroupBySessionBrokenChainGroupsByLastResolvableAncestor(t *testing.T) {
+	rows := []Agent{
+		lineageRow("T", "r2", "gone", "x"),
+		lineageRow("S", "r3", "r2", "x"),
+	}
+	for name, in := range map[string][]Agent{"forward": rows, "reversed": {rows[1], rows[0]}} {
+		groups := groupBySession(in)
+		if len(groups) != 1 || groups[0].sessionID != "T" || len(groups[0].rows) != 2 {
+			t.Fatalf("%s: groups = %+v, want one group rooted at T", name, groups)
+		}
+	}
+}
+
+func TestGroupBySessionNilParentTeammateIsOwnGroup(t *testing.T) {
+	groups := groupBySession([]Agent{
+		lineageRow("L", "r1", "", "x"),
+		lineageRow("T", "r2", "", "x"),
+	})
+	if len(groups) != 2 {
+		t.Fatalf("groups = %d, want 2", len(groups))
+	}
+}
+
+func TestGroupBySessionCycleTerminates(t *testing.T) {
+	groups := groupBySession([]Agent{
+		lineageRow("A", "r1", "r2", "x"),
+		lineageRow("B", "r2", "r1", "x"),
+	})
+	if len(groups) != 2 {
+		t.Fatalf("groups = %+v, want 2 (each cycle member in its own session group)", groups)
+	}
+	for _, g := range groups {
+		if len(g.rows) != 1 || g.sessionID != g.rows[0].SessionID {
+			t.Errorf("group = %+v, want single row with sessionID == row session", g)
+		}
+	}
+}
+
 func TestFilterGroupsByMaxAgeDropsWholeStaleGroup(t *testing.T) {
 	m := &agentsModel{maxAge: time.Hour, lastActions: make(map[string]lastAction)}
 	m.recordActivity(render.Record{Session: "fresh-sess", AgentName: "@a", Tag: "ACT", Display: "just now"})

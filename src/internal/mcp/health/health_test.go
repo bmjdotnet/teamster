@@ -220,6 +220,40 @@ func TestListAgentsReturnsGaugeRows(t *testing.T) {
 	}
 }
 
+func TestListAgentsSurfacesAgentIDAndDescription(t *testing.T) {
+	ms := openMainStore(t)
+	gs := newMemGaugeStore()
+
+	rid := "r-desc"
+	sid := "sess-desc"
+	now := time.Now().UTC()
+	if err := ms.UpsertRosterEntry(context.Background(), store.RosterEntry{
+		RosterID: rid, SessionID: &sid, AgentName: "@Explore-5", Host: "host-a",
+		Runtime: "claude_code", Relationship: "subagent", AgentID: "a1b2c3",
+		Description: "Scout macOS identity pipeline", CreatedAt: now, BoundAt: &now,
+	}); err != nil {
+		t.Fatalf("seed roster: %v", err)
+	}
+	seedGaugeRow(t, gs, "host-a", sid, "@Explore-5", "claude_code", "opus", "ok", &rid, 10.0)
+
+	result, callErr := call(t, ms, gs, "health_listAgents", map[string]interface{}{})
+	if callErr != nil {
+		t.Fatalf("health_listAgents: %v", callErr)
+	}
+	var views []struct {
+		AgentName   string `json:"agent_name"`
+		AgentID     string `json:"agent_id"`
+		Description string `json:"description"`
+	}
+	parseResult(t, result, &views)
+	if len(views) == 0 {
+		t.Fatal("expected at least 1 agent")
+	}
+	if views[0].AgentID != "a1b2c3" || views[0].Description != "Scout macOS identity pipeline" {
+		t.Fatalf("agent_id/description = %q/%q", views[0].AgentID, views[0].Description)
+	}
+}
+
 // TestListAgentsSurfacesLastActivityTag confirms the health API exposes
 // last_activity_tag from gauge.GaugeRow.LastActivityTool — see that field's
 // doc comment: it's misleadingly named "tool" but has held the display's

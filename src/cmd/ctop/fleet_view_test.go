@@ -863,11 +863,18 @@ func TestFleetForestRowsTeamlessMultiAgentGetsHeader(t *testing.T) {
 }
 
 // TestFleetForestRowsDuplicateTeamNamesDisambiguated: two sessions sharing
-// a team name get ·<prefix8> on the second onward.
+// a team name, grouped by the real groupBySession path (no parent_refs
+// between them), get ·<prefix8> on the second onward.
 func TestFleetForestRowsDuplicateTeamNamesDisambiguated(t *testing.T) {
-	g1, g2 := medicGroup(), medicGroup()
-	g2.sessionID = "sess2-medic"
-	got := fleetForestRows([]agentGroup{g1, g2}, nil, false)
+	l1 := treeAgent("", "L1", "", "lead")
+	l1.SessionID, l1.TeamName = "sess1-medic", "medic"
+	l2 := treeAgent("", "L2", "", "lead")
+	l2.SessionID, l2.TeamName = "sess2-medic", "medic"
+	groups := groupBySession([]Agent{l1, l2})
+	if len(groups) != 2 {
+		t.Fatalf("groupBySession = %d groups, want 2", len(groups))
+	}
+	got := fleetForestRows(groups, nil, false)
 	var labels []string
 	for _, fr := range got {
 		if fr.isHeader {
@@ -1105,5 +1112,46 @@ func TestFleetForestRowsDepthCapUnderTeammate(t *testing.T) {
 		if w := lipgloss.Width(got[i].prefix); w != capW {
 			t.Errorf("row %d prefix %q width = %d, want capped at %d (d2's %q)", i, got[i].prefix, w, capW, got[4].prefix)
 		}
+	}
+}
+
+func TestFleetRenderAgentRowSubagentDescription(t *testing.T) {
+	m := model{width: 160, colorize: true}
+	v := fleetView{m: &m}
+	cs := fleetColumnsForWidth(160)
+	cs, layout := fleetLayoutFor(160, 30, cs)
+	render := func(a Agent) string {
+		return display.StripANSI(v.renderAgentRow(fleetRow{agent: a}, false, cs, layout, 160))
+	}
+	base := Agent{SessionID: "s1", AgentName: "@Explore-5", Liveness: "live", Model: "claude-sonnet-5"}
+
+	sub := base
+	sub.Relationship = "subagent"
+	sub.Description = "Scout macOS"
+	if out := render(sub); !strings.Contains(out, "@Explore-5 Scout macOS") {
+		t.Errorf("subagent row = %q, want description after name", out)
+	}
+
+	tm := sub
+	tm.Relationship = "teammate"
+	if out := render(tm); strings.Contains(out, "Scout macOS") {
+		t.Errorf("teammate row = %q, must not show description", out)
+	}
+
+	long := sub
+	long.Description = strings.Repeat("d", 200)
+	out := render(long)
+	if !strings.Contains(out, "…") || strings.Contains(out, strings.Repeat("d", 100)) {
+		t.Errorf("long description row = %q, want truncated with ellipsis", out)
+	}
+	if w := len([]rune(out)); w != 160 {
+		t.Errorf("row width = %d, want 160", w)
+	}
+
+	empty := base
+	empty.Relationship = "subagent"
+	withEmpty := render(empty)
+	if withEmpty != render(base) {
+		t.Errorf("empty-description subagent row differs from plain row:\n%q\n%q", withEmpty, render(base))
 	}
 }

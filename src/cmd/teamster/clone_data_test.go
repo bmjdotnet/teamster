@@ -15,23 +15,36 @@ import (
 	"github.com/bmjdotnet/teamster/internal/clone"
 )
 
-func TestAssertTargetSchemaCurrent_Match(t *testing.T) {
-	sshRun := func(ctx context.Context, target string, args ...string) (string, error) {
-		if len(args) < 2 || args[0] != "~/teamster/bin/teamster" || args[1] != "sql" {
-			t.Fatalf("unexpected command: %v", args)
+// fakeTargetSSH answers `store schema-version` with compiled and
+// `sql ... schema_version` with db.
+func fakeTargetSSH(compiled, db string) clone.SSHRunner {
+	return func(ctx context.Context, target string, args ...string) (string, error) {
+		if len(args) >= 3 && args[1] == "store" && args[2] == "schema-version" {
+			return compiled + "\n", nil
 		}
-		return "63\n", nil
+		if len(args) >= 2 && args[1] == "sql" {
+			return db + "\n", nil
+		}
+		return "", errors.New("unexpected command")
 	}
-	if err := assertTargetSchemaCurrent(context.Background(), sshRun, "user@chunk", "~/teamster/bin/teamster", 63); err != nil {
+}
+
+func TestAssertTargetSchemaCurrent_Match(t *testing.T) {
+	if err := assertTargetSchemaCurrent(context.Background(), fakeTargetSSH("63", "63"), "user@chunk", "~/teamster/bin/teamster"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
-func TestAssertTargetSchemaCurrent_Mismatch(t *testing.T) {
-	sshRun := func(ctx context.Context, target string, args ...string) (string, error) {
-		return "40\n", nil
+// The driver's own mysql.MaxSchemaVersion() must not matter: a shipped ref
+// whose binary is ahead of the driver (v74 vs the driver's) is current.
+func TestAssertTargetSchemaCurrent_ShippedAheadOfDriver(t *testing.T) {
+	if err := assertTargetSchemaCurrent(context.Background(), fakeTargetSSH("9999", "9999"), "user@chunk", "~/teamster/bin/teamster"); err != nil {
+		t.Fatalf("shipped binary ahead of driver must pass, got: %v", err)
 	}
-	err := assertTargetSchemaCurrent(context.Background(), sshRun, "user@chunk", "~/teamster/bin/teamster", 63)
+}
+
+func TestAssertTargetSchemaCurrent_Mismatch(t *testing.T) {
+	err := assertTargetSchemaCurrent(context.Background(), fakeTargetSSH("63", "40"), "user@chunk", "~/teamster/bin/teamster")
 	if !errors.Is(err, ErrSchemaVersionMismatch) {
 		t.Fatalf("got %v, want ErrSchemaVersionMismatch", err)
 	}
@@ -44,17 +57,14 @@ func TestAssertTargetSchemaCurrent_QueryFails(t *testing.T) {
 	sshRun := func(ctx context.Context, target string, args ...string) (string, error) {
 		return "connection refused", errors.New("exit status 1")
 	}
-	err := assertTargetSchemaCurrent(context.Background(), sshRun, "user@chunk", "~/teamster/bin/teamster", 63)
+	err := assertTargetSchemaCurrent(context.Background(), sshRun, "user@chunk", "~/teamster/bin/teamster")
 	if !errors.Is(err, ErrSchemaVersionMismatch) {
 		t.Fatalf("got %v, want ErrSchemaVersionMismatch", err)
 	}
 }
 
 func TestAssertTargetSchemaCurrent_UnparsableOutput(t *testing.T) {
-	sshRun := func(ctx context.Context, target string, args ...string) (string, error) {
-		return "NULL\n", nil
-	}
-	err := assertTargetSchemaCurrent(context.Background(), sshRun, "user@chunk", "~/teamster/bin/teamster", 63)
+	err := assertTargetSchemaCurrent(context.Background(), fakeTargetSSH("63", "NULL"), "user@chunk", "~/teamster/bin/teamster")
 	if !errors.Is(err, ErrSchemaVersionMismatch) {
 		t.Fatalf("got %v, want ErrSchemaVersionMismatch", err)
 	}

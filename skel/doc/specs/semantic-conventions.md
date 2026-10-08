@@ -1020,25 +1020,61 @@ parent session so it attributes exactly like a Claude Code teammate:
 | `session_meta` field | Top-level file | Subagent file |
 |----------------------|----------------|---------------|
 | `id` | the session's own thread UUID | the **subagent's** own thread UUID |
-| `session_id` | equal to `id` | the **parent** thread's id |
+| `session_id` | equal to `id` | the **root** thread's id |
 | `parent_thread_id` | absent | the parent thread's id |
-| `agent_role` | absent | the subagent's role (e.g. `explorer`) |
+| `thread_source` | `user` (0.160.0+) | `subagent` (0.160.0+) |
+| `agent_nickname` | absent | the subagent's per-agent nickname (e.g. `Avicenna`) |
+| `agent_role` | absent | the spawn's optional role (e.g. `explorer`); omitted when null, which is the usual case |
 
-- **`session_id` (parent-resolved)** is what ledger rows and the `sessions`
-  upsert use, so subagent cost books under the **same session** as the parent's
-  focus intervals. On Codex 0.137.0 `session_meta` has no `session_id` field,
-  so the scraper falls back to `id` (harmless — top-level 0.142.x files already
-  have `session_id == id`).
-- **`agent_name`** is `@<agent_role>` for a subagent (e.g. `@explorer`) and
-  `""` for parent/direct spend — the same `@`-prefixed identity wms-mcp opens
-  focus intervals under. The `sessions` primary key is `(session_id,
-  agent_name)`, so a subagent's `(parent, @role)` row coexists with the
-  parent's `(parent, "")` row, exactly like a hub Claude Code teammate.
+- **`session_id` (root-resolved)** is what ledger rows and the `sessions`
+  upsert use, so subagent cost books under the **same session** as the root
+  thread's focus intervals. On Codex 0.137.0 `session_meta` has no `session_id`
+  field, so the scraper falls back to `id` (harmless — top-level 0.142.x files
+  already have `session_id == id`). The subagent's own thread id is not lost:
+  it is written to `agent_roster.agent_id`.
+- **Identity rule (the single definition; every other doc references this
+  section, and `codex-scraper` in Go and Python plus
+  `codex-context-subscriber` must produce byte-identical results).** A thread
+  is a subagent iff `parent_thread_id` (app-server `parentThreadId`) is
+  non-empty OR `thread_source` (`threadSource`) is `"subagent"`. A root
+  thread's `agent_name` is `""` (the lead row). A subagent's `agent_name` is
+  `"@" + name`, where `name` is the first non-empty of `agent_nickname`,
+  `agent_role`, then the first 8 characters of the thread id. Each candidate is
+  trimmed before the fallback applies, so a whitespace-only nickname falls
+  through to the role. Whitespace means exactly the ASCII set space, tab, LF,
+  CR, FF and VT (not Unicode spaces, not `\x1c`-`\x1f`), and each run of it
+  collapses to `-` (`Avicenna the 2nd` -> `@Avicenna-the-2nd`).
+  Nickname outranks role because role is an optional classifier shared by
+  siblings, while the nickname is a per-agent handle that Codex keeps unique
+  among a tree's active agents and that both the rollout and the app-server
+  expose. The `sessions` primary key is `(session_id, agent_name)`, so a
+  subagent's `(root, @nickname)` row coexists with the root's `(root, "")` row,
+  exactly like a hub Claude Code teammate.
+- **Roster row.** A subagent thread registers via hookd `POST /session` with
+  `relationship: "subagent"` and `agent_id` = its thread id; hookd derives
+  `parent_ref` and `team_name` from the root thread's roster row (see
+  architecture.md, Codex runtime). The cross-runtime contract: Claude and Codex
+  share one key shape (`session_id`, `agent_name`) and one nesting rule
+  (`parent_ref`), so nothing in ctop or health-collector is Codex-specific.
 - **`message_id`** for a Codex ledger row is `codex:<thread-id>:<seq>`, keyed
   by the file's **own** thread id (never the shared `session_id`) so sibling
   subagent files' sequence counters cannot collide onto one key. `<seq>` is
   scan-order, which is why a full re-scan reproduces identical keys (the
   `uq_message` upsert makes the re-insert a no-op).
+
+Recorded limitations of this model: `agent_path` (`/root/<task_name>`, the key
+Codex's own TUI shows) is **not used** — it is absent from the app-server
+`Thread`, so the subscriber cannot derive it. Depth-2 subagents (a subagent's
+own subagent) get a `parent_ref` pointing at the **root** thread, not the
+intermediate subagent. Remote hosts run only the Python scraper (no
+subscriber), so their subagents register with up to 10 minutes of latency. A
+resumed or forked subagent given a preferred nickname bypasses Codex's
+uniqueness check, so two threads can then share one row (cost is never lost).
+A rollout file whose scraper cursor predates the identity change is never
+re-identified, because neither scraper re-reads `session_meta` once past it. A
+subagent file mid-scrape at upgrade time therefore keeps its old name (`""` or
+`@<role>`) for its remaining rows while the context subscriber posts
+`@<nickname>`; only files in progress at the moment of upgrade are affected.
 
 Cost then flows through the standard attribution methods in §7.2 — there is no
 Codex-specific `usage_attribution.method` value; a subagent message resolves as

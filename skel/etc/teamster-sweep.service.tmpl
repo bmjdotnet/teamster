@@ -12,7 +12,7 @@ ExecStart=/bin/bash -c '\
     exit 0; \
   fi; \
   echo "sweep-llm: $orphans orphan sessions found, running LLM sweep"; \
-  "__CLAUDE_BIN__" --print -p "/teamster:sweep" \
+  "__CLAUDE_BIN__" --print --model sonnet -p "/teamster:sweep" \
     --allowedTools "Bash,Read,Write,mcp__wms__*,mcp__activity__*" \
     2>>__BASEDIR__/var/sweep-llm.log || true'
 Environment=TEAMSTER_DATA_DIR=__BASEDIR__/var

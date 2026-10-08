@@ -231,3 +231,111 @@ func TestHandleContextReport_WrongMethod(t *testing.T) {
 		t.Fatalf("status = %d, want 405", rec.Code)
 	}
 }
+
+func TestHandleContextReport_CodexSeedsRuntimeAndSource(t *testing.T) {
+	gs := newFakeGaugeStore()
+	s := &Server{gaugeStore: gs}
+
+	rec := postContextReport(t, s, map[string]interface{}{
+		"session_id":          "thread-1",
+		"host":                "hub01",
+		"context_window_size": 258_400,
+		"used_percentage":     25.0,
+		"total_input_tokens":  64_600,
+		"runtime":             "codex",
+		"context_source":      "codex_appserver",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body: %s", rec.Code, rec.Body.String())
+	}
+	row, found, _ := gs.Get(context.Background(), gauge.GaugeKey{Host: "hub01", SessionID: "thread-1"})
+	if !found {
+		t.Fatal("row not created")
+	}
+	if row.Runtime != "codex" || row.ContextSource != gauge.ContextSourceCodexAppserver {
+		t.Fatalf("runtime/source = %q/%q, want codex/codex_appserver", row.Runtime, row.ContextSource)
+	}
+	if row.ContextWindowTokens != 258_400 || row.ContextFillPct != 0.25 || row.LongContextActive {
+		t.Fatalf("window/fill/long = %d/%v/%v", row.ContextWindowTokens, row.ContextFillPct, row.LongContextActive)
+	}
+}
+
+func TestHandleContextReport_AbsentFieldsDefaultClaude(t *testing.T) {
+	gs := newFakeGaugeStore()
+	s := &Server{gaugeStore: gs}
+	postContextReport(t, s, map[string]interface{}{
+		"session_id": "sess-2", "host": "hub01",
+		"context_window_size": 200_000, "used_percentage": 10.0, "total_input_tokens": 20_000,
+	})
+	row, _, _ := gs.Get(context.Background(), gauge.GaugeKey{Host: "hub01", SessionID: "sess-2"})
+	if row.Runtime != "claude_code" || row.ContextSource != gauge.ContextSourceStatusline {
+		t.Fatalf("runtime/source = %q/%q, want claude_code/statusline", row.Runtime, row.ContextSource)
+	}
+}
+
+func TestHandleContextReport_ExistingRuntimePreserved(t *testing.T) {
+	gs := newFakeGaugeStore()
+	s := &Server{gaugeStore: gs}
+	if err := gs.Upsert(context.Background(), gauge.GaugeRow{
+		Host: "hub01", SessionID: "thread-3", Runtime: "codex", UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	postContextReport(t, s, map[string]interface{}{
+		"session_id": "thread-3", "host": "hub01",
+		"context_window_size": 200_000, "used_percentage": 10.0, "total_input_tokens": 20_000,
+	})
+	row, _, _ := gs.Get(context.Background(), gauge.GaugeKey{Host: "hub01", SessionID: "thread-3"})
+	if row.Runtime != "codex" {
+		t.Fatalf("runtime = %q, want codex preserved", row.Runtime)
+	}
+}
+
+func TestHandleContextReport_RejectsBadInput(t *testing.T) {
+	s := &Server{gaugeStore: newFakeGaugeStore()}
+	base := func() map[string]interface{} {
+		return map[string]interface{}{
+			"session_id": "t", "host": "hub01", "runtime": "codex", "context_source": "codex_appserver",
+			"context_window_size": 258_400, "used_percentage": 25.0, "total_input_tokens": 1,
+		}
+	}
+	for name, mut := range map[string]func(map[string]interface{}){
+		"zero window":                  func(m map[string]interface{}) { m["context_window_size"] = 0 },
+		"codex runtime, no source":     func(m map[string]interface{}) { delete(m, "context_source") },
+		"codex runtime, statusline":    func(m map[string]interface{}) { m["context_source"] = "statusline" },
+		"codex source, no runtime":     func(m map[string]interface{}) { delete(m, "runtime") },
+		"codex source, claude runtime": func(m map[string]interface{}) { m["runtime"] = "claude_code" },
+		"unknown runtime":              func(m map[string]interface{}) { m["runtime"] = "gemini" },
+		"unknown source":               func(m map[string]interface{}) { m["context_source"] = "bogus" },
+	} {
+		m := base()
+		mut(m)
+		if rec := postContextReport(t, s, m); rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s: status = %d, want 400", name, rec.Code)
+		}
+	}
+}
+
+func TestHandleContextReport_CodexClampsPercentage(t *testing.T) {
+	for name, tc := range map[string]struct {
+		pct  float64
+		fill float64
+	}{"over 100": {103, 1.0}, "negative": {-5, 0}} {
+		gs := newFakeGaugeStore()
+		s := &Server{gaugeStore: gs}
+		rec := postContextReport(t, s, map[string]interface{}{
+			"session_id": "t", "host": "hub01", "runtime": "codex", "context_source": "codex_appserver",
+			"context_window_size": 258_400, "used_percentage": tc.pct, "total_input_tokens": 270_000,
+		})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: status = %d, body: %s", name, rec.Code, rec.Body.String())
+		}
+		row, _, _ := gs.Get(context.Background(), gauge.GaugeKey{Host: "hub01", SessionID: "t"})
+		if row.ContextFillPct != tc.fill {
+			t.Fatalf("%s: fill = %v, want %v", name, row.ContextFillPct, tc.fill)
+		}
+		if row.ContextTokensFree != 0 {
+			t.Fatalf("%s: free = %d, want 0", name, row.ContextTokensFree)
+		}
+	}
+}

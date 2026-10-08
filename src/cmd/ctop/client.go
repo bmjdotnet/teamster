@@ -30,6 +30,8 @@ type Agent struct {
 	TeamName            string  `json:"team_name,omitempty"`
 	Relationship        string  `json:"relationship,omitempty"`
 	ParentRef           *string `json:"parent_ref,omitempty"`
+	AgentID             string  `json:"agent_id,omitempty"`
+	Description         string  `json:"description,omitempty"`
 	Liveness            string  `json:"liveness,omitempty"`
 	ContextFillPct      float64 `json:"context_fill_pct"`
 	SessionCostUSD      float64 `json:"session_cost_usd"`
@@ -44,6 +46,8 @@ type Agent struct {
 	LastActivityTag     string  `json:"last_activity_tag,omitempty"`
 	CurrentFocus        string  `json:"current_focus,omitempty"`
 	CompositionJSON     *string `json:"composition_json,omitempty"`
+	GaugeUpdatedAt      *string `json:"gauge_updated_at,omitempty"`
+	ContextReportedAt   *string `json:"context_reported_at,omitempty"`
 }
 
 // SelectionKey returns the stable identity used to keep a selection anchored

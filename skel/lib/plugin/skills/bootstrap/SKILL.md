@@ -180,7 +180,8 @@ Teammates spawning their own Agent-tool subagents for bounded sub-tasks
 should use distinct `subagent_type` values when possible — the fleet view
 nests sub-subagents under their spawning teammate by type. Note: CC
 currently blocks `name` from teammate Agent tool calls; hookd auto-numbers
-same-type siblings to ensure unique identities.
+same-type siblings to ensure unique identities, so pass a meaningful
+`description` — it is shown as the label after the name.
 
 **3. Send a short pointer — the brief already lives in WMS.**
 Send via `SendMessage` to the identified (or newly spawned) agent. Since the

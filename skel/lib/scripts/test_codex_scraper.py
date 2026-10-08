@@ -36,6 +36,8 @@ class _CaptureServer:
     def __init__(self):
         self.telemetry_rows = []
         self.session_calls = []
+        self.rates_payload = None  # dict served at GET /rates; None -> 500
+        self.rates_requests = []
         handler = self._make_handler()
         self.httpd = HTTPServer(("127.0.0.1", 0), handler)
         self.port = self.httpd.server_port
@@ -48,6 +50,23 @@ class _CaptureServer:
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *args):
                 pass  # silence
+
+            def do_GET(self):
+                if self.path.split("?")[0] != "/rates":
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                outer.rates_requests.append(self.path)
+                if outer.rates_payload is None:
+                    self.send_response(500)
+                    self.end_headers()
+                    return
+                body = json.dumps(outer.rates_payload).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
 
             def do_POST(self):
                 length = int(self.headers.get("Content-Length", 0))
@@ -73,6 +92,10 @@ class _CaptureServer:
     @property
     def telemetry_url(self):
         return f"http://127.0.0.1:{self.port}/telemetry"
+
+    @property
+    def rates_url(self):
+        return f"http://127.0.0.1:{self.port}/rates?runtime=codex"
 
     @property
     def session_url(self):
@@ -103,7 +126,7 @@ class _FailingCaptureServer(_CaptureServer):
         return Handler
 
 
-def _new_test_scraper(server, dry_run=False):
+def _new_test_scraper(server, dry_run=False, rates=None):
     tmpdir = tempfile.mkdtemp()
     cursor_path = os.path.join(tmpdir, "cursors.json")
     scraper = codex_scraper.Scraper(
@@ -114,6 +137,7 @@ def _new_test_scraper(server, dry_run=False):
         roots=[],
         cursor_path=cursor_path,
         dry_run=dry_run,
+        rates=rates,
     )
     return scraper, tmpdir
 
@@ -201,6 +225,35 @@ def token_count_line(input_, output, cached_input, reasoning_output):
     })
 
 
+def token_usage_record_line(input_, output, cached_input, reasoning_output,
+                            timestamp="2026-10-01T19:47:36.748Z"):
+    """Codex 0.159.x top-level token_usage_record. payload.usage has the same
+    shape as last_token_usage (plus cache_write_input_tokens); the
+    turn/thread cumulative blocks are present but must always be ignored."""
+    def usage(mult):
+        return {
+            "input_tokens": input_ * mult,
+            "cached_input_tokens": cached_input * mult,
+            "cache_write_input_tokens": 0,
+            "output_tokens": output * mult,
+            "reasoning_output_tokens": reasoning_output * mult,
+            "total_tokens": (input_ + output) * mult,
+        }
+
+    return json.dumps({
+        "timestamp": timestamp,
+        "type": "token_usage_record",
+        "payload": {
+            "thread_id": "thread-synthetic",
+            "turn_id": "turn-synthetic",
+            "session_id": "session-synthetic",
+            "usage": usage(1),
+            "turn_token_usage": usage(10),  # cumulative, always ignored
+            "thread_token_usage": usage(100),  # cumulative, always ignored
+        },
+    })
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -241,13 +294,127 @@ class TestSubagentThreadBooksUnderParentSession(unittest.TestCase):
                          "ledger session_id must be the parent id, not the thread's own id")
         self.assertEqual(f"codex:{thread_id}:000000", row["message_id"],
                          "message_id must be keyed by thread id, not session_id")
-        self.assertEqual("@explorer", row["agent_name"],
-                         "agent_name must be role-based (@explorer), not nickname (@Mencius)")
+        self.assertEqual("@Mencius", row["agent_name"],
+                         "agent_name must be nickname-first (@Mencius), not role (@explorer)")
 
         calls = self.server.session_calls
         self.assertEqual(1, len(calls))
         self.assertEqual(parent_id, calls[0]["session_id"])
-        self.assertEqual("@explorer", calls[0]["agent_name"])
+        self.assertEqual("@Mencius", calls[0]["agent_name"])
+        self.assertEqual("subagent", calls[0]["relationship"])
+        self.assertEqual(thread_id, calls[0]["agent_id"])
+
+
+# Verbatim first line of a real Codex 0.160.0 subagent rollout (base_instructions
+# and creator ids redacted) — DESIGN.md D2 fixture session_meta_01a108e6.json.
+_REAL_SUBAGENT_META_0160 = (
+    '{"timestamp":"2026-10-04T21:51:32.368Z","type":"session_meta","payload":'
+    '{"creator_user_id":"user-REDACTED","creator_account_id":"REDACTED",'
+    '"session_id":"01a108dd-60b4-7722-b2d1-36ee22189a03",'
+    '"id":"01a108e6-9810-7cd1-a1a2-2d7d1eee6a0b",'
+    '"parent_thread_id":"01a108dd-60b4-7722-b2d1-36ee22189a03",'
+    '"timestamp":"2026-10-04T21:51:32.368Z","cwd":"/home/claude/teamster",'
+    '"runtime_workspace_roots":["/home/claude/teamster"],"originator":"codex-tui",'
+    '"cli_version":"0.160.0","source":{"subagent":{"thread_spawn":'
+    '{"parent_thread_id":"01a108dd-60b4-7722-b2d1-36ee22189a03","depth":1,'
+    '"agent_path":"/root/review_data_analysis","agent_nickname":"Avicenna",'
+    '"agent_role":null}}},"thread_source":"subagent","agent_nickname":"Avicenna",'
+    '"agent_path":"/root/review_data_analysis","model_provider":"openai",'
+    '"base_instructions":"<redacted>","history_mode":"paginated",'
+    '"multi_agent_version":"v2","context_window":'
+    '{"window_id":"01a108e6-9810-7cd1-a1a2-2d80da665f51"}}}')
+
+
+class TestSubagentIdentityD2(unittest.TestCase):
+    """DESIGN.md D1/D2/D4 (caller side): nickname-first agent_name, whitespace
+    collapsed, relationship/agent_id sent for subagent files only."""
+
+    PARENT = "01a108dd-60b4-7722-b2d1-36ee22189a03"
+    THREAD = "01a108e6-9810-7cd1-a1a2-2d7d1eee6a0b"
+
+    def setUp(self):
+        self.server = _CaptureServer()
+        self.scraper, self.tmpdir = _new_test_scraper(self.server)
+
+    def tearDown(self):
+        self.server.close()
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _run(self, meta_line):
+        path = os.path.join(self.tmpdir, "rollout-x.jsonl")
+        write_lines(path, [meta_line, turn_context_line("gpt-5.4"),
+                           token_count_line(100, 10, 0, 0)])
+        self.scraper.process_file(path)
+        self.assertEqual(1, len(self.server.session_calls))
+        return self.server.session_calls[0]
+
+    def _meta(self, payload):
+        return json.dumps({"timestamp": "2026-10-04T00:00:00.000Z",
+                           "type": "session_meta", "payload": payload})
+
+    def test_real_0160_fixture(self):
+        call = self._run(_REAL_SUBAGENT_META_0160)
+        self.assertEqual(self.PARENT, call["session_id"])
+        self.assertEqual("@Avicenna", call["agent_name"])
+        self.assertEqual("subagent", call["relationship"])
+        self.assertEqual(self.THREAD, call["agent_id"])
+        row = self.server.telemetry_rows[0]
+        self.assertEqual(self.PARENT, row["session_id"])
+        self.assertEqual(f"codex:{self.THREAD}:000000", row["message_id"])
+        self.assertEqual("@Avicenna", row["agent_name"])
+
+    def _sub(self, **extra):
+        p = {"id": self.THREAD, "session_id": self.PARENT,
+             "parent_thread_id": self.PARENT, "cwd": "/tmp",
+             "originator": "codex-tui", "cli_version": "0.160.0",
+             "thread_source": "subagent"}
+        p.update(extra)
+        return self._meta(p)
+
+    def test_nickname_beats_role(self):
+        call = self._run(self._sub(agent_role="worker", agent_nickname="Dirac"))
+        self.assertEqual("@Dirac", call["agent_name"])
+
+    def test_whitespace_collapsed(self):
+        call = self._run(self._sub(agent_nickname="Avicenna the 2nd"))
+        self.assertEqual("@Avicenna-the-2nd", call["agent_name"])
+
+    def test_subagent_name_ascii_whitespace_rule(self):
+        f = codex_scraper._subagent_name
+        tid = self.THREAD
+        self.assertEqual("@" + tid[:8], f(" ", None, tid))
+        self.assertEqual("@rev", f(" ", "rev", tid))
+        self.assertEqual("@\x1cA\x1cB", f("\x1cA\x1cB", None, tid))
+        self.assertEqual("@A\u00a0B", f("A\u00a0B", None, tid))
+        self.assertEqual("@A-B", f("A  B", None, tid))
+        self.assertEqual("@A-B", f("A\t\tB", None, tid))
+        self.assertEqual("@Avicenna-the-2nd", f("Avicenna the 2nd", None, tid))
+
+    def test_role_when_no_nickname(self):
+        call = self._run(self._sub(agent_role="reviewer"))
+        self.assertEqual("@reviewer", call["agent_name"])
+
+    def test_id_prefix_when_neither(self):
+        call = self._run(self._sub())
+        self.assertEqual("@" + self.THREAD[:8], call["agent_name"])
+        self.assertEqual("subagent", call["relationship"])
+
+    def test_thread_source_alone_marks_subagent(self):
+        p = {"id": self.THREAD, "session_id": self.PARENT, "cwd": "/tmp",
+             "originator": "codex-tui", "cli_version": "0.160.0",
+             "thread_source": "subagent", "agent_nickname": "Solo"}
+        call = self._run(self._meta(p))
+        self.assertEqual("@Solo", call["agent_name"])
+        self.assertEqual("subagent", call["relationship"])
+
+    def test_root_thread_has_no_identity_fields(self):
+        p = {"id": self.PARENT, "session_id": self.PARENT, "cwd": "/tmp",
+             "originator": "codex-tui", "cli_version": "0.160.0",
+             "thread_source": "user"}
+        call = self._run(self._meta(p))
+        self.assertEqual("", call["agent_name"])
+        self.assertNotIn("relationship", call)
+        self.assertNotIn("agent_id", call)
 
 
 class TestPreThreadSpawnSessionMetaFallsBackToID(unittest.TestCase):
@@ -283,6 +450,8 @@ class TestPreThreadSpawnSessionMetaFallsBackToID(unittest.TestCase):
 
         calls = self.server.session_calls
         self.assertEqual("", calls[0]["agent_name"])
+        self.assertNotIn("relationship", calls[0])
+        self.assertNotIn("agent_id", calls[0])
 
 
 class TestParentAndSubagentNoMessageIDCollision(unittest.TestCase):
@@ -335,8 +504,10 @@ class TestParentAndSubagentNoMessageIDCollision(unittest.TestCase):
         by_agent = {c["agent_name"]: c for c in calls}
         self.assertIn("", by_agent)
         self.assertEqual(parent_id, by_agent[""]["session_id"])
-        self.assertIn("@worker", by_agent)
-        self.assertEqual(parent_id, by_agent["@worker"]["session_id"])
+        self.assertIn("@Dirac", by_agent)
+        self.assertEqual(parent_id, by_agent["@Dirac"]["session_id"])
+        self.assertNotIn("relationship", by_agent[""])
+        self.assertNotIn("agent_id", by_agent[""])
 
 
 class TestEmitLedgerRowCachedAndReasoningAreSubsets(unittest.TestCase):
@@ -606,6 +777,186 @@ class TestPostFailureDoesNotAdvanceCursor(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+class _ScraperTestCase(unittest.TestCase):
+    def setUp(self):
+        self.server = _CaptureServer()
+        self.scraper, self.tmpdir = _new_test_scraper(self.server)
+
+    def tearDown(self):
+        self.server.close()
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+
+class TestTokenUsageRecordOnly(_ScraperTestCase):
+    """A file with ONLY token_usage_record events (a future Codex that drops
+    the legacy token_count) must ledger one row per record."""
+
+    def test_record_only_file(self):
+        thread_id = "019f0000-0000-7000-8000-0000000000aa"
+        path = os.path.join(self.tmpdir, "rollout-record-only.jsonl")
+        write_lines(path, [
+            session_meta_line(thread_id, "/tmp", "codex_exec", "0.159.3"),
+            turn_context_line("gpt-6-luna"),
+            token_usage_record_line(20389, 166, 11008, 59),
+            token_usage_record_line(23731, 73, 20224, 7),
+        ])
+
+        self.scraper.process_file(path)
+
+        rows = self.server.telemetry_rows
+        self.assertEqual(2, len(rows))
+        first = rows[0]
+        self.assertEqual(f"codex:{thread_id}:000000", first["message_id"])
+        self.assertEqual(f"codex:{thread_id}:000001", rows[1]["message_id"])
+        self.assertEqual(thread_id, first["session_id"])
+        self.assertEqual("codex", first["runtime"])
+        self.assertEqual("gpt-6-luna", first["model"])
+        self.assertEqual(20389 - 11008, first["input_tokens"],
+                         "input_tokens - cached_input_tokens")
+        self.assertEqual(11008, first["cache_read_tokens"])
+        self.assertEqual(166, first["output_tokens"], "output as-is, NOT +reasoning")
+        self.assertEqual(59, first["reasoning_output_tokens"])
+        self.assertEqual(0, first["cache_write_tokens"])
+        self.assertEqual("2026-10-01T19:47:36.748000000Z", first["timestamp"],
+                         "timestamp must be the record's own event time")
+        want_cost = (20389 - 11008) * 0.0000001 + 166 * 0.0000005 + 11008 * 0.00000001
+        self.assertGreater(first["cost_usd"], 0.0, "gpt-6-luna must not price at $0")
+        self.assertAlmostEqual(want_cost, first["cost_usd"])
+
+    def test_record_without_usage_is_skipped(self):
+        path = os.path.join(self.tmpdir, "rollout-empty-record.jsonl")
+        empty = json.dumps({"timestamp": "2026-10-01T19:47:36.748Z",
+                            "type": "token_usage_record", "payload": {}})
+        write_lines(path, [
+            session_meta_line("sess-empty", "/tmp", "codex_exec", "0.159.3"),
+            turn_context_line("gpt-6-luna"),
+            empty,
+            token_count_line(100, 10, 0, 0),
+        ])
+
+        self.scraper.process_file(path)
+
+        self.assertEqual(1, len(self.server.telemetry_rows),
+                         "an empty record is not usage; the token_count must still be ledgered")
+        self.assertFalse(self.scraper.cursors[path]["usage_record_seen"])
+
+
+class TestTokenUsageRecordDedup(_ScraperTestCase):
+    """Codex 0.159.3 writes BOTH token_usage_record and event_msg:token_count
+    for each turn. Exactly one ledger row per turn must result."""
+
+    def test_both_formats_ledger_once_per_turn(self):
+        thread_id = "019f0000-0000-7000-8000-0000000000bb"
+        path = os.path.join(self.tmpdir, "rollout-both.jsonl")
+        write_lines(path, [
+            session_meta_line(thread_id, "/tmp", "codex_exec", "0.159.3"),
+            turn_context_line("gpt-6-luna"),
+            token_usage_record_line(20389, 166, 11008, 59),
+            token_count_line(20389, 166, 11008, 59),
+            token_usage_record_line(23731, 73, 20224, 7),
+            token_count_line(23731, 73, 20224, 7),
+        ])
+
+        self.scraper.process_file(path)
+
+        rows = self.server.telemetry_rows
+        self.assertEqual(2, len(rows), "4 usage events for 2 turns must ledger 2 rows")
+        self.assertEqual([f"codex:{thread_id}:000000", f"codex:{thread_id}:000001"],
+                         [r["message_id"] for r in rows])
+        self.assertEqual([166, 73], [r["output_tokens"] for r in rows])
+
+    def test_legacy_only_file_unchanged(self):
+        path = os.path.join(self.tmpdir, "rollout-legacy.jsonl")
+        write_lines(path, [
+            session_meta_line("sess-legacy", "/tmp", "codex_exec", "0.142.5"),
+            turn_context_line("gpt-5.5"),
+            token_count_line(100, 10, 0, 0),
+            token_count_line(200, 20, 0, 0),
+        ])
+
+        self.scraper.process_file(path)
+
+        self.assertEqual(2, len(self.server.telemetry_rows))
+        self.assertFalse(self.scraper.cursors[path]["usage_record_seen"])
+
+    def test_resumed_file_old_turns_then_new_format(self):
+        # A rollout started on an old Codex, resumed on 0.159.x: the old turns
+        # are token_count-only and must all be kept; only the new-format
+        # turns' token_counts are duplicates.
+        path = os.path.join(self.tmpdir, "rollout-resumed-upgrade.jsonl")
+        write_lines(path, [
+            session_meta_line("sess-upgrade", "/tmp", "codex_exec", "0.142.5"),
+            turn_context_line("gpt-6-luna"),
+            token_count_line(100, 10, 0, 0),
+            token_count_line(200, 20, 0, 0),
+            token_usage_record_line(300, 30, 0, 0),
+            token_count_line(300, 30, 0, 0),
+        ])
+
+        self.scraper.process_file(path)
+
+        rows = self.server.telemetry_rows
+        self.assertEqual(3, len(rows))
+        self.assertEqual([10, 20, 30], [r["output_tokens"] for r in rows])
+
+    def test_poll_boundary_between_record_and_its_token_count(self):
+        # Real rollouts show the paired token_count landing minutes after its
+        # record, so a poll can read the record in one run and the
+        # token_count in the next. Each cron run is a fresh process: carry
+        # the state through the persisted cursor file, not in-memory.
+        thread_id = "019f0000-0000-7000-8000-0000000000cc"
+        path = os.path.join(self.tmpdir, "rollout-straddle.jsonl")
+        write_lines(path, [
+            session_meta_line(thread_id, "/tmp", "codex_exec", "0.159.3"),
+            turn_context_line("gpt-6-luna"),
+            token_usage_record_line(20389, 166, 11008, 59),
+        ])
+        self.scraper.roots = [self.tmpdir]
+        self.scraper.poll()
+        self.assertEqual(1, len(self.server.telemetry_rows))
+
+        with open(path, "a") as f:
+            f.write(token_count_line(20389, 166, 11008, 59) + "\n")
+            f.write(token_usage_record_line(23731, 73, 20224, 7) + "\n")
+            f.write(token_count_line(23731, 73, 20224, 7) + "\n")
+
+        second_run = codex_scraper.Scraper(
+            telemetry_url=self.server.telemetry_url,
+            session_url=self.server.session_url,
+            host="testhost", username="testuser", roots=[self.tmpdir],
+            cursor_path=self.scraper.cursor_path, dry_run=False)
+        second_run.load_cursors()
+        second_run.poll()
+
+        rows = self.server.telemetry_rows
+        self.assertEqual(2, len(rows),
+                         "the straddling token_count must not be ledgered a second time")
+        self.assertEqual([f"codex:{thread_id}:000000", f"codex:{thread_id}:000001"],
+                         [r["message_id"] for r in rows])
+
+    def test_flag_cleared_when_cursor_resets_on_truncation(self):
+        path = os.path.join(self.tmpdir, "rollout-trunc-flag.jsonl")
+        write_lines(path, [
+            session_meta_line("sess-a", "/tmp", "codex_exec", "0.159.3"),
+            turn_context_line("gpt-6-luna"),
+            token_usage_record_line(100, 10, 0, 0),
+            token_count_line(100, 10, 0, 0),
+        ])
+        self.scraper.process_file(path)
+        self.assertTrue(self.scraper.cursors[path]["usage_record_seen"])
+
+        self.server.telemetry_rows.clear()
+        write_lines(path, [
+            session_meta_line("sess-b", "/tmp", "codex_exec", "0.142.5"),
+            turn_context_line("gpt-5.5"),
+            token_count_line(50, 5, 0, 0),
+        ])
+        self.scraper.process_file(path)
+
+        self.assertEqual(1, len(self.server.telemetry_rows),
+                         "a reset cursor must forget the old file's format")
+
+
 class TestMcpCallOK(unittest.TestCase):
     """Port of TestMcpCallOK."""
 
@@ -690,10 +1041,203 @@ class TestPricing(unittest.TestCase):
     def test_unknown_model_is_zero(self):
         self.assertEqual(0.0, codex_scraper.compute_cost("totally-unknown-model", 100, 100, 0, 0))
 
+    def test_gpt_6_luna_priced(self):
+        # $0.10 in / $0.50 out / $0.01 cache-read per million tokens.
+        cost = codex_scraper.compute_cost("gpt-6-luna", 1_000_000, 1_000_000, 1_000_000, 0)
+        self.assertAlmostEqual(0.10 + 0.50 + 0.01, cost)
+
+    def test_gpt_6_luna_dated_variant_prefix_match(self):
+        cost = codex_scraper.compute_cost("gpt-6-luna-2026-10-01", 1_000_000, 0, 0, 0)
+        self.assertAlmostEqual(0.10, cost)
+
     def test_prefix_match(self):
         # A dated/suffixed variant of a known family should resolve via prefix match.
         cost = codex_scraper.compute_cost("gpt-5.4-mini-2026-01-01", 1000, 1000, 0, 0)
         self.assertGreater(cost, 0.0)
+
+
+def _rate(id_, kind, key, inp, out, cr, cw5, variant="base", valid_to=None,
+          runtime="codex", valid_from="1970-01-01T00:00:00Z"):
+    return {"id": id_, "runtime": runtime, "match_kind": kind, "model_key": key,
+            "variant": variant, "input_per_mtok": inp, "output_per_mtok": out,
+            "cache_read_per_mtok": cr, "cache_write_5m_per_mtok": cw5,
+            "cache_write_1h_per_mtok": "0.000000",
+            "valid_from": valid_from, "valid_to": valid_to}
+
+
+class TestHTTPRates(unittest.TestCase):
+    def setUp(self):
+        self.server = _CaptureServer()
+        self.tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        self.server.close()
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _rollout(self, model):
+        path = os.path.join(self.tmpdir, "rollout-rates.jsonl")
+        write_lines(path, [
+            session_meta_line("sess-rates", "/tmp", "codex_exec", "0.137.0"),
+            turn_context_line(model),
+            token_count_line(1000, 200, 400, 50),
+        ])
+        return path
+
+    def test_fetch_success_prices_from_rates_and_sends_rate_id(self):
+        self.server.rates_payload = {"count": 1, "rates": [
+            _rate(42, "exact", "gpt-5.5", "10.000000", "20.000000", "1.000000", "5.000000")]}
+        rates = codex_scraper._fetch_rates(self.server.rates_url)
+        self.assertEqual(1, len(rates))
+        self.assertEqual(["/rates?runtime=codex"], self.server.rates_requests)
+        scraper, _ = _new_test_scraper(self.server, rates=rates)
+        scraper.process_file(self._rollout("gpt-5.5"))
+        row = self.server.telemetry_rows[0]
+        self.assertEqual(42, row["rate_id"])
+        # uncached 600 in, 200 out, 400 cache read
+        self.assertAlmostEqual((600 * 10 + 200 * 20 + 400 * 1) / 1e6, row["cost_usd"])
+
+    def test_fetch_failure_falls_back_to_known_without_rate_id(self):
+        self.server.rates_payload = None
+        rates = codex_scraper._fetch_rates(self.server.rates_url)
+        self.assertIsNone(rates)
+        scraper, _ = _new_test_scraper(self.server, rates=rates)
+        scraper.process_file(self._rollout("gpt-5.5"))
+        row = self.server.telemetry_rows[0]
+        self.assertEqual(-1, row["rate_id"])
+        self.assertAlmostEqual(
+            codex_scraper.compute_cost("gpt-5.5", 600, 200, 400, 0), row["cost_usd"])
+
+    def test_unreachable_server_returns_none(self):
+        self.assertIsNone(codex_scraper._fetch_rates("http://127.0.0.1:1/rates"))
+
+    def test_unmatched_model_falls_back_to_known(self):
+        rates = [_rate(7, "exact", "other-model", "1", "1", "1", "1")]
+        scraper, _ = _new_test_scraper(self.server, rates=rates)
+        scraper.process_file(self._rollout("gpt-5.5"))
+        row = self.server.telemetry_rows[0]
+        self.assertEqual(-1, row["rate_id"])
+        self.assertGreater(row["cost_usd"], 0.0)
+
+    def test_exact_beats_prefix_and_longest_prefix_wins(self):
+        rates = [
+            _rate(1, "prefix", "gpt-5", "1", "1", "1", "1"),
+            _rate(2, "prefix", "gpt-5.5", "1", "1", "1", "1"),
+            _rate(3, "exact", "gpt-5.5-x", "1", "1", "1", "1"),
+        ]
+        self.assertEqual(3, codex_scraper._resolve_rate(rates, "gpt-5.5-x")["id"])
+        self.assertEqual(2, codex_scraper._resolve_rate(rates, "gpt-5.5-y")["id"])
+        self.assertEqual(1, codex_scraper._resolve_rate(rates, "gpt-5.1")["id"])
+
+    def test_resolver_skips_closed_variant_class_and_other_runtime(self):
+        rates = [
+            _rate(1, "exact", "m", "1", "1", "1", "1", valid_to="2026-01-01T00:00:00Z"),
+            _rate(2, "exact", "m", "1", "1", "1", "1", variant="fast"),
+            _rate(3, "class", "m", "1", "1", "1", "1"),
+            _rate(4, "exact", "m", "1", "1", "1", "1", runtime="claude_code"),
+        ]
+        self.assertIsNone(codex_scraper._resolve_rate(rates, "m"))
+
+    def test_future_valid_from_skipped(self):
+        rates = [_rate(1, "exact", "m", "1", "1", "1", "1",
+                       valid_from="2999-01-01T00:00:00Z")]
+        self.assertIsNone(codex_scraper._resolve_rate(rates, "m"))
+
+    def test_latest_valid_from_wins_among_open_rows(self):
+        rates = [
+            _rate(5, "exact", "m", "1", "1", "1", "1", valid_from="2026-01-01T00:00:00Z"),
+            _rate(3, "exact", "m", "1", "1", "1", "1", valid_from="2026-06-01T00:00:00.123456Z"),
+        ]
+        self.assertEqual(3, codex_scraper._resolve_rate(rates, "m")["id"])
+
+    def test_cache_write_priced_at_5m_rate(self):
+        rate = _rate(9, "exact", "m", "0", "0", "0", "8.000000")
+        cost, rid = codex_scraper._cost_from_rate(rate, 0, 0, 0, 1_000_000)
+        self.assertAlmostEqual(8.0, cost)
+        self.assertEqual(9, rid)
+
+
+class TestPendingRegistrationRetry(_ScraperTestCase):
+    """Issue #35: a failed /session registration persists as pending state and
+    retries independently of new rollout metadata."""
+
+    PARENT = "019f3ed6-1354-7731-b35e-5356dd9af6d4"
+    CHILD = "019f3ed8-1843-7d61-992b-f7a012bfa313"
+
+    def _dead_url(self):
+        return "http://127.0.0.1:1/session"
+
+    def test_failed_registration_retries_after_cursor_advances(self):
+        good = self.scraper.session_url
+        self.scraper.session_url = self._dead_url()
+        path = os.path.join(self.tmpdir, "rollout.jsonl")
+        write_lines(path, [
+            session_meta_line(self.PARENT, "/tmp", "codex_exec", "0.142.5"),
+            turn_context_line("gpt-5.4"),
+            token_count_line(100, 10, 0, 0),
+        ])
+        self.scraper.process_file(path)
+        cursor = self.scraper.cursors[path]
+        self.assertTrue(cursor["pending_registration"])
+        self.assertGreater(cursor["offset"], 0)
+        self.assertEqual([], self.server.session_calls)
+
+        self.scraper.session_url = good
+        self.scraper.process_file(path)  # no new bytes
+        self.assertEqual(1, len(self.server.session_calls))
+        self.assertFalse(cursor["pending_registration"])
+        self.scraper.process_file(path)
+        self.assertEqual(1, len(self.server.session_calls))
+
+    def test_pending_survives_restart_and_parent_child_converge(self):
+        good = self.scraper.session_url
+        self.scraper.session_url = self._dead_url()
+        parent = os.path.join(self.tmpdir, "rollout-parent.jsonl")
+        child = os.path.join(self.tmpdir, "rollout-child.jsonl")
+        write_lines(parent, [session_meta_line(self.PARENT, "/tmp", "codex-tui", "0.142.5"),
+                             turn_context_line("gpt-5.4")])
+        write_lines(child, [subagent_session_meta_line(
+            self.CHILD, self.PARENT, self.PARENT, "/tmp", "codex_exec", "0.142.5",
+            "worker", "Dirac"), turn_context_line("gpt-5.4")])
+        self.scraper.process_file(parent)
+        self.scraper.process_file(child)
+        self.scraper.save_cursors()
+
+        self.scraper.session_url = good
+        self.scraper.cursors = {}
+        self.scraper.load_cursors()
+        self.scraper.process_file(parent)
+        self.scraper.process_file(child)
+        by_agent = {c["agent_name"]: c for c in self.server.session_calls}
+        self.assertEqual({"", "@Dirac"}, set(by_agent))
+        self.assertEqual(self.PARENT, by_agent[""]["session_id"])
+        self.assertEqual(self.PARENT, by_agent["@Dirac"]["session_id"])
+        self.assertEqual("subagent", by_agent["@Dirac"]["relationship"])
+        self.assertEqual(self.CHILD, by_agent["@Dirac"]["agent_id"])
+
+    def test_telemetry_early_return_still_registers_next_cycle(self):
+        failing = _FailingCaptureServer()
+        try:
+            good_tel = self.scraper.telemetry_url
+            good_sess = self.scraper.session_url
+            self.scraper.telemetry_url = failing.telemetry_url
+            self.scraper.session_url = self._dead_url()
+            path = os.path.join(self.tmpdir, "rollout.jsonl")
+            write_lines(path, [
+                session_meta_line(self.PARENT, "/tmp", "codex_exec", "0.142.5"),
+                turn_context_line("gpt-5.4"),
+                token_count_line(100, 10, 0, 0),
+            ])
+            self.scraper.process_file(path)
+            self.assertTrue(self.scraper.cursors[path]["pending_registration"])
+
+            self.scraper.telemetry_url = good_tel
+            self.scraper.session_url = good_sess
+            self.scraper.process_file(path)
+            self.assertEqual(1, len(self.server.session_calls))
+            self.assertEqual(1, len(self.server.telemetry_rows))
+            self.assertFalse(self.scraper.cursors[path]["pending_registration"])
+        finally:
+            failing.close()
 
 
 if __name__ == "__main__":

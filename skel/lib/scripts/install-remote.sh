@@ -274,6 +274,9 @@ cp -r "$BASEDIR/lib/.claude-plugin" "$STAGING/teamster/lib/" \
 cp "$BASEDIR/lib/scripts/codex-scraper.py" "$STAGING/teamster/bin/codex-scraper" \
     || die "step 2 failed: cannot copy codex-scraper.py from $BASEDIR/lib/scripts/codex-scraper.py"
 chmod +x "$STAGING/teamster/bin/codex-scraper"
+cp "$BASEDIR/lib/scripts/codex-context-subscriber.py" "$STAGING/teamster/bin/codex-context-subscriber" \
+    || die "step 2 failed: cannot copy codex-context-subscriber.py from $BASEDIR/lib/scripts/codex-context-subscriber.py"
+chmod +x "$STAGING/teamster/bin/codex-context-subscriber"
 # codex-hook.py + teamster.py ship together in lib/hook/ (codex-hook.py
 # imports teamster.py as a same-directory module — LESSONS.md §1/CODEX-
 # INSTALL.md's hooks-channel section) — a SECOND copy of teamster.py from the

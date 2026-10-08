@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/bmjdotnet/teamster/internal/store"
+	"github.com/bmjdotnet/teamster/internal/store/mysql"
 )
 
 // runStore dispatches the `teamster store <subcommand>` family. It returns
@@ -16,6 +17,7 @@ import (
 // Supported subcommands:
 //
 //	teamster store migrate --dsn <dsn>
+//	teamster store schema-version
 //
 // All flags are long-form (--double-dash); short flags are not exposed for
 // this surface to keep cutover scripts unambiguous.
@@ -27,6 +29,9 @@ func runStore(args []string) int {
 	switch args[0] {
 	case "migrate":
 		return runStoreMigrate(args[1:])
+	case "schema-version":
+		fmt.Fprintln(os.Stdout, mysql.MaxSchemaVersion())
+		return 0
 	case "-h", "--help", "help":
 		fmt.Fprintln(os.Stdout, storeUsage)
 		return 0
@@ -39,7 +44,8 @@ func runStore(args []string) int {
 const storeUsage = `usage: teamster store <subcommand>
 
 subcommands:
-  migrate    apply schema migrations to a backend
+  migrate         apply schema migrations to a backend
+  schema-version  print this binary's highest known schema version
 
 flags (migrate):
   --dsn <DSN>         mysql://...`

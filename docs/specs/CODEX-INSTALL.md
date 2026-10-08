@@ -2,10 +2,10 @@
 
 **Status: complete (v1 hub-local; remote support shipped).** Installer
 wiring, MCP servers, OTEL, skills, hooks, the audit-trail residual-risk note,
-codex-scraper, and uninstall are all covered below for hub-local Codex; see
-"Remote Codex support" for what's different when Codex runs on a remote host
-instead of the hub. This is the authoritative Codex-support doc — merge new
-content in here rather than starting a second one.
+codex-scraper, the context subscriber, and uninstall are all covered below for
+hub-local Codex; see "Remote Codex support" for what's different when Codex
+runs on a remote host instead of the hub. This is the authoritative
+Codex-support doc — merge new content in here rather than starting a second one.
 
 ## Overview
 
@@ -173,6 +173,13 @@ treat it as "adds latency, provides no function," not as a guaranteed hang
 to a specific timeout. Teamster never writes `hooks.json`; only the TOML
 form, and this doc should not repeat a specific hang duration as fact.
 
+**Verified baseline vs. current builds.** Statements below about hook
+events and behavior were live-verified against Codex 0.137.0, the pinned
+baseline. Codex auto-updates itself and Teamster does not pin it, so hosts
+commonly run newer builds (0.142.5 has been observed). Anything not
+re-verified on a newer build is historical investigation context, not a
+supported-behavior guarantee.
+
 Ten hook events exist in Codex 0.137.0, all PascalCase (`SessionStart`,
 `SubagentStart`, `PreToolUse`, `PermissionRequest`, `PostToolUse`,
 `PreCompact`, `PostCompact`, `UserPromptSubmit`, `SubagentStop`, `Stop`).
@@ -189,6 +196,26 @@ requiring a Go toolchain on hosts that only run Codex, the same reasoning
 that keeps `teamster.py` in Python) and imports `teamster.py`'s redaction
 and error-logging helpers directly, so the two files must ship together in
 `lib/hook/`.
+
+#### Hook output: warnings are not delivered to Codex agents
+
+`codex-hook.py` is fire-and-forget: it POSTs the event to hookd and ignores
+the response body (2-second timeout, always exit 0). hookd's response
+carries `additionalContext` on `PreToolUse` and `UserPromptSubmit` events:
+the focus-absent nudge, pressure nudges, and queued WMS warnings, including
+the follow-up that tells an agent to call `wms_setFocus` when
+`wms_claimWorkUnit`'s focus-interval request was declined. Claude Code's hook
+client forwards that text to the agent. Codex's does not, and the Codex
+installer registers no `UserPromptSubmit` hook at all, so on Codex none of
+those warnings is delivered by any path.
+
+Consequence for agents: after `wms_claimWorkUnit`, a Codex agent must call
+`wms_setFocus` itself (the solo skill says so) rather than wait for a
+nudge. Forwarding was left unimplemented because Codex's handling of a JSON
+stdout payload from a `PreToolUse` hook was only checked at 0.137.0 and an
+unexpected shape risks interfering with `codex exec`. Closing the gap needs
+a live check of that protocol on the supported builds first; the client's
+bounded timeout and fail-open behavior must be kept either way.
 
 Hooks require a one-time trust step Codex normally does interactively via
 its TUI. Teamster's installer writes the trust block directly — no TUI, no
@@ -371,10 +398,11 @@ regardless of which of the categories above the specific tool falls into.
 `~/.codex/archived_sessions/*.jsonl`) and is the **sole writer of Codex cost
 data**: it POSTs per-`token_count`-event telemetry rows to hookd's
 `/telemetry` endpoint (the same contract `token-scraper` uses for Claude
-Code) and upserts the Codex `sessions` row itself via a direct store
-connection, because hookd's hook-event pipeline never fires for Codex and
-WMS/cost attribution must not depend on Codex hooks (a separate, optional
-component) being installed or trusted.
+Code) and upserts the Codex `sessions` row (via hookd's `POST /session`; see
+"Design note for reviewers" below; `codex-context-subscriber` is a second,
+identity-only `/session` writer, see its section), because hookd's hook-event
+pipeline never fires for Codex and WMS/cost attribution must not depend on
+Codex hooks (a separate, optional component) being installed or trusted.
 
 It is a **oneshot** binary driven by a systemd timer (`teamster-codex-scraper.timer`,
 every 10 minutes) — not a daemon like `token-scraper`. Each run processes
@@ -468,15 +496,16 @@ file. The tailer attributes that subagent spend to the parent session rather
 than stranding it as an orphan:
 
 - A subagent file's `session_meta` carries `id` = the subagent's own thread
-  UUID, `session_id` = the **parent** thread's id, and `parent_thread_id` =
-  that same parent id (a top-level file has `id == session_id` and no
-  `parent_thread_id`). Verified live (chunk-test2 evidence). Codex 0.137.0's
+  UUID, `session_id` = the **root** thread's id, and `parent_thread_id` = the
+  spawning thread's id (a top-level file has `id == session_id` and no
+  `parent_thread_id`). Codex 0.160.0 adds `thread_source` and
+  `agent_nickname`. Verified live (chunk evidence). Codex 0.137.0's
   `session_meta` has no `session_id` field at all, so the tailer **falls back
   to `id`** — which also makes top-level 0.142.x files (`session_id == id`)
   behave identically either way.
-- **Ledger rows and the `sessions` upsert use the parent-resolved id**
+- **Ledger rows and the `sessions` upsert use the root-resolved id**
   (`session_meta.session_id`), so a subagent's cost books under the **same
-  `session_id` as the parent's own focus intervals**. `rollup`'s existing
+  `session_id` as the root thread's own focus intervals**. `rollup`'s existing
   `temporal_join` / `temporal_join_lead_session_fallback` machinery then
   attributes it like any other message in that session. This scraper-time
   resolution is the **single point** of child→parent mapping — no rollup-side
@@ -487,13 +516,24 @@ than stranding it as an orphan:
   `session_id` (`codex:<thread-id>:<seq>`). Keying on `session_id` would let a
   parent file's `seq 1..N` and a subagent file's `seq 1..M` collide onto the
   same key, and the `uq_message` upsert would silently swallow one file's rows.
-- **`agent_name` = `@<agent_role>`** (e.g. `@explorer`), read from
-  `session_meta.agent_role` (present only on subagent files; role, not
-  nickname). This matches the identity wms-mcp already opens focus intervals
-  under, and the `sessions` primary key `(session_id, agent_name)` lets a
-  subagent's `(parent, @role)` row coexist with the parent's `(parent, "")`
-  row exactly like a Claude Code teammate. Parent/direct spend carries
-  `agent_name=""`.
+- **`agent_name`** follows the identity rule defined once in
+  `skel/doc/specs/semantic-conventions.md` §10.3 (Codex subagent thread model):
+  `@<nickname>` (e.g. `@Avicenna`) for a subagent, `""` for parent/direct
+  spend. The `sessions` primary key `(session_id, agent_name)` lets a
+  subagent's `(root, @nickname)` row coexist with the root's `(root, "")` row
+  exactly like a Claude Code teammate. The thread's own id is stored in
+  `agent_roster.agent_id`.
+- **Registration.** For a subagent file the scraper's `POST /session` carries
+  `relationship: "subagent"` and `agent_id` (the thread id); hookd derives
+  `parent_ref` (the root thread's roster row) and `team_name` from the root
+  row. `UpsertRosterEntry` keeps an existing `parent_ref`/`team_name`/
+  `agent_id` when a later post omits them. The scraper alone registers a
+  subagent up to 10 minutes after it started; the hub's
+  `codex-context-subscriber` posts it immediately (see its section).
+- **Limitations.** `agent_path` is not used (not on the app-server `Thread`,
+  so the subscriber could not derive it); depth-2 subagents' `parent_ref`
+  points at the root thread, not the intermediate subagent; remote hosts are
+  scraper-only, so a subagent there appears with up to 10 minutes of latency.
 
 **Upgrading a pre-release install scraped by a pre-fix build.** This fix
 changed how `session_id` / `message_id` / `agent_name` are derived. Rows a
@@ -532,7 +572,7 @@ regenerated at `testdata/golden_schema_v51.txt`.
   there is no team-mode wiring in v1 (operator decision). Ephemeral
   `thread_spawn` subagents ARE attributed to their parent session — see
   Subagent attribution above; parent/direct spend carries `agent_name=""`,
-  subagent spend carries `@<agent_role>`.
+  subagent spend carries `@<nickname>` (semantic-conventions §10.3).
 - **MCP tool-call activity is parsed but not yet shipped as telemetry.**
   `event_msg.mcp_tool_call_end` (server/tool/args/duration/result, branching
   correctly on `result.Ok` vs `result.Err` — a cancelled/denied call is an
@@ -593,6 +633,184 @@ publish — matching the pre-existing quiet `s.obsStore.UpsertSession` call in
 the `Stop` handler) and is rejected by a read-only hookd (replica) exactly
 like `/telemetry` and `/mcp/*` — point a Codex install, hub-local or remote,
 at a real hub, never a replica.
+
+## codex-context-subscriber — Codex context-window gauge
+
+Codex sessions used to show 0% context in `ctop`: nothing reported context for
+them (the statusLine channel is Claude Code only) and the health-collector fell
+back to a Claude-sized heuristic. `codex-scraper` stays the **sole writer of
+Codex cost data**; context fill now has a second, separate writer,
+`codex-context-subscriber` (`skel/lib/scripts/codex-context-subscriber.py`,
+pure-stdlib Python 3, a long-lived daemon rather than a timer oneshot). The
+sessions row is likewise no longer scraper-only: both write it via hookd
+`/session` (see "Session registration" below).
+
+### Mechanism
+
+Codex runs one shared per-user app-server daemon. Its control socket is
+`$CODEX_HOME/app-server-control/app-server-control.sock` (default
+`CODEX_HOME=~/.codex`); the path is a mode-600 symlink to
+`/tmp/codex-daemon-<uid>/<hash>` whose target changes whenever the daemon
+restarts, so the subscriber resolves it afresh on every connect. The transport
+is WebSocket over the unix socket: an HTTP Upgrade `GET /rpc`, then one
+JSON-RPC message per text frame. On every `thread/tokenUsage/updated
+{threadId, turnId, tokenUsage: {total, last, modelContextWindow}}` the
+subscriber POSTs to hookd's `/context`.
+
+**Subscription model.** The subscriber holds a subscription on a thread only
+while that thread is Active. Resuming a thread pins it in the daemon, and
+pinning every loaded thread would change the daemon's thread lifecycle
+(idle threads would never unload), so a subscription is taken only when
+needed and dropped as soon as it is not.
+
+- *Startup:* `initialize` -> `initialized` -> `thread/loaded/list` ->
+  `thread/resume {threadId}` for each loaded thread (it does not pass
+  `excludeTurns`; the resume result embeds the full turn history, hence the
+  frame cap below) -> wait up to 1.5s for the replayed
+  `thread/tokenUsage/updated` -> POST it -> `thread/unsubscribe`, unless the
+  thread is Active.
+- *Steady state:* `thread/status/changed` to active resumes the thread (and
+  keeps it subscribed); to idle, notLoaded or systemError unsubscribes.
+  `thread/closed` drops the thread. `thread/started` takes a one-shot
+  snapshot (resume, replay, unsubscribe) unless the thread is already active;
+  on Codex 0.160 no `thread/started` notification was observed in a live
+  capture, and new threads (including subagents) were discovered via the
+  `thread/status/changed` active broadcast, which is the path that matters in
+  practice. Ephemeral threads are skipped entirely.
+
+It is **passive**: it never answers server-to-client requests (approvals and
+the like — first responder wins, and a silent listener must not be able to
+answer an operator's prompt); it only pongs WebSocket pings. With no Codex
+daemon socket present it idles with exponential backoff (1s doubling to a 30s
+cap, reset after a successful `initialize`), so it is a harmless no-op on a
+host without Codex.
+
+Robustness: WebSocket frames (and reassembled fragmented messages) are capped
+at 64 MiB — a `thread/resume` result was ~0.7 MB for a long thread on chunk
+and multi-MB is plausible — and a larger frame drops the connection. POSTs are made by a worker thread that coalesces
+to the latest body per `(session_id, agent_name)`, so a slow hookd can never
+stall the socket read loop or grow an unbounded queue. `CODEX_CTX_DEBUG=1`
+logs every frame sent and received.
+
+### Contract
+
+Context fill is `tokenUsage.last.totalTokens / modelContextWindow` — the same
+quantity Codex's own `/status` meter uses, minus Codex's 12k baseline
+adjustment. `tokenUsage.total` is cumulative billing and is deliberately not
+used. The POST body to `/context`:
+
+```json
+{"session_id": "<sessionId or threadId>", "agent_name": "" | "@<name>", "host": "...",
+ "context_window_size": <modelContextWindow>, "total_input_tokens": <last.totalTokens>,
+ "used_percentage": <pct>, "model": "<if known>",
+ "runtime": "codex", "context_source": "codex_appserver",
+ "statusline_json": <raw params>}
+```
+
+`session_id` is the thread's `sessionId` (falling back to its own id), as in
+`codex-scraper`. `agent_name` follows the shared identity rule in
+`skel/doc/specs/semantic-conventions.md` §10.3, applied to the app-server
+`Thread` fields (`parentThreadId`, `threadSource`, `agentNickname`,
+`agentRole`), so the context row lines up with the scraper's cost row. `host`
+is the short hostname (`TEAMSTER_HOST` overrides). `used_percentage` is
+clamped to [0, 100] in the subscriber, since `last.totalTokens` can exceed the
+window at peak pressure.
+
+Known limitation: the Go `codex-scraper` records the unshortened
+`os.Hostname()`, so on a host whose hostname is an FQDN the `host` values
+differ; reconciling that is deferred.
+
+### Session registration
+
+The scraper only runs every 10 minutes, so on its own a subagent would
+register after most are finished. The subscriber therefore also POSTs hookd's
+`/session` (default: the `/context` URL with `/context` replaced by
+`/session`; `--session-url` overrides) for every non-ephemeral thread it
+learns, with the same identity fields as
+the scraper (`session_id`, `agent_name`, `host`, `username`, `runtime=codex`,
+`cwd`, `model`, `originator`, `cli_version`) plus `relationship`
+(`lead` / `subagent`) and `agent_id` (the thread id). It posts
+unconditionally on `thread/started`, on `thread/resume` only when the thread
+is active (an idle snapshot resume does not register, so a reconnect or a
+`--once` run never bumps `last_seen` or `status` of idle threads), and as a
+heartbeat at most once per 60 s per active thread (on
+`thread/tokenUsage/updated`) so
+`sessions.last_seen` keeps the row live instead of letting it go stale while
+the agent works; this also keeps Codex lead rows live. This is a recorded
+exception to the earlier "scraper is the sole writer of the Codex sessions
+row": both writers use the same `/session` upsert, and the scraper remains the
+sole cost writer. The dual-writer focus-interval hazard does not apply, since
+`UpsertSession` is a pure last-seen/identity upsert. `--dry-run` prints the
+session bodies as well as the context bodies. Remotes have no subscriber.
+
+hookd's `handleContextReport` (`src/internal/server/context_report.go`)
+accepts the optional `runtime` (`claude_code|codex`, default `claude_code`)
+and `context_source` (`statusline|codex_appserver`, default `statusline`)
+fields; an unknown value is a 400. The two must be set together: `runtime=codex`
+requires `context_source=codex_appserver` and vice versa, otherwise 400. A
+codex post must have a window > 0 (else 400); `used_percentage` is clamped to
+[0, 100] server-side as well (not rejected), and `LongContextActive` is always
+false for codex.
+
+On the read side, the health-collector (`chooseCodexContext` in
+`src/cmd/health-collector/main.go`) keeps a `codex_appserver` report for a
+codex-runtime row **regardless of age** — Codex reports only per API response
+and idle context does not change — and never falls back to the Claude 1M
+default for Codex. With no report yet, the row shows window/used/fill 0 with
+source `heuristic`. Claude Code behavior is unchanged. The source constant is
+`gauge.ContextSourceCodexAppserver` (`src/internal/agenthealth/gauge/store.go`).
+
+### Install / units
+
+`skel/etc/teamster-codex-context-subscriber.service.tmpl` (`Type=simple`,
+`Restart=always`, `RestartSec=5`, `User=__USER__`, `ExecStart=python3
+__BASEDIR__/lib/scripts/codex-context-subscriber.py`) is materialized by
+`teamster-install` (step 5c2b) and synced/enabled by `lib/installrunner.sh`
+under the same guards as `token-scraper` (`WIRE=1`, not read-only,
+`HOOKD_MODE` not supervisor/external, `systemctl` present), plus one more: both
+steps are skipped when `--codex-mode=none`. `lib/installrunner.sh` restarts the
+unit on upgrade if it is active, so a new script takes effect. `teamster stop`
+includes the unit in its systemd stop list, and `teamster status` shows a
+"Codex Context Subscriber" row (systemd mode only).
+
+| Env var / flag | Purpose |
+|---|---|
+| `CODEX_HOME` | Codex data root (default `~/.codex`); the control socket lives under it. |
+| `CODEX_APP_SERVER_SOCK` | Override the control-socket path. |
+| `TEAMSTER_HOOK_SERVER_URL` | Base hookd address (default `http://localhost:9125/event`); `/context` is the derived sibling endpoint. |
+| `TEAMSTER_CONTEXT_URL` | Override the full `/context` POST URL. |
+| `TEAMSTER_HOST` | Host label (default: short hostname; see the FQDN note above). |
+| `CODEX_CTX_DEBUG` | `1` or `true` logs every WebSocket frame sent/received. |
+| `--once` | Resume all loaded threads, forward the replayed usages, exit. |
+| `--dry-run` | Print payloads instead of POSTing. |
+
+Logs go to stderr (the journal under systemd).
+
+### Limitations
+
+- **Sessions that bypass the daemon are invisible.** Codex sessions started
+  with `codex --no-daemon`, `--oss`, `--profile`, `--strict-config`, or any
+  `-c`/`--enable`/`--disable`/`--search` override run in-process with no
+  app-server daemon, so the subscriber never sees them and they still show 0
+  context. Tailing the rollout file as a fallback is a possible follow-up; it
+  is not built.
+- **No remote wiring yet.** This change wires the subscriber on the hub only.
+  Remotes (the `REMOTE-INSTALL.md` path) do not yet get it. The script is
+  stdlib Python and remote-compatible; the missing follow-up is the unit/
+  launcher wiring (staging the script and a systemd/launchd launcher in
+  `install-remote`), so Codex sessions on a remote still show 0 context.
+
+### Verify
+
+```bash
+systemctl status teamster-codex-context-subscriber       # active (running)
+python3 ~/teamster/lib/scripts/codex-context-subscriber.py --once --dry-run
+```
+
+With a Codex session open, `--once --dry-run` prints one `/context` payload per
+loaded thread. In `ctop`, that session's row should show a nonzero context
+fill (the `codex_appserver` source) after its first API response, instead of
+0%.
 
 ## Remote Codex support
 
@@ -681,8 +899,8 @@ below directly on the host (drop the `ssh user@host "..."` wrapper; the
 marker names and `~/teamster`/`~/.codex` paths are identical).
 
 **Limitations carried from hub-local v1, unchanged on remotes:** `--ephemeral`
-Codex runs are invisible to the tailer; same-role sibling `thread_spawn`
-subagents collapse onto one identity; a read-only replica hookd rejects
+Codex runs are invisible to the tailer; a resumed/forked `thread_spawn` subagent
+given a preferred nickname can share a row with another thread; a read-only replica hookd rejects
 `/telemetry` and `/session` the same way it rejects `/mcp/*` (point a remote
 Codex install at a real hub, never a replica).
 
@@ -727,6 +945,11 @@ sudo rm -f /etc/systemd/system/teamster-codex-scraper.{service,timer}
 sudo systemctl daemon-reload
 
 rm -f ~/teamster/var/codex-scraper-cursors.json   # tailer's byte-offset cursor
+
+# codex-context-subscriber daemon (hub only; remotes don't get it yet):
+sudo systemctl disable --now teamster-codex-context-subscriber 2>/dev/null || true
+sudo rm -f /etc/systemd/system/teamster-codex-context-subscriber.service
+sudo systemctl daemon-reload
 ```
 
 **AGENTS.md protocol text** (`mergeCodexAgentsMD`) is a plain content append

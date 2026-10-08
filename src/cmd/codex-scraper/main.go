@@ -5,7 +5,9 @@
 // uses for Claude Code) and, since hookd's hook-event pipeline never fires
 // for Codex, upserts the Codex sessions row itself via hookd's POST /session
 // endpoint — the same HTTP transport as /telemetry, so this binary needs no
-// store DSN of its own.
+// store DSN of its own. Cost is priced from hookd's GET /rates through a
+// pricing.Resolver, falling back to the embedded rate tables (with a WARN)
+// while hookd is unreachable.
 //
 // Oneshot, not a daemon: driven by a systemd timer (mirrors classify), not a
 // poll loop (unlike token-scraper). Idempotent — safe to run concurrently
@@ -35,6 +37,7 @@ import (
 
 	"github.com/bmjdotnet/teamster/internal/config"
 	"github.com/bmjdotnet/teamster/internal/logging"
+	"github.com/bmjdotnet/teamster/internal/pricing"
 	"github.com/bmjdotnet/teamster/internal/version"
 )
 
@@ -103,6 +106,7 @@ func run() int {
 
 	s := &scraper{
 		client:       httpClient,
+		resolver:     pricing.NewResolver(pricing.NewHTTPSource(hookdBase)),
 		telemetryURL: telemetryURL,
 		host:         cfg.Host,
 		username:     cfg.User,

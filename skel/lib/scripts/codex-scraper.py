@@ -36,6 +36,7 @@ import getpass
 import json
 import logging
 import os
+import re
 import socket
 import sys
 import urllib.error
@@ -44,6 +45,19 @@ from datetime import datetime, timezone
 
 _LOG_MAX_BYTES = 1_000_000  # rotate at ~1 MB, matches token-scraper.py
 _HTTP_TIMEOUT = 2  # seconds — reliability contract cap for remote-shipped code
+
+# Explicit ASCII whitespace (never \s, which is Unicode-aware in Python str
+# patterns); must stay byte-identical with the Go scraper (DESIGN.md D2).
+_IDENTITY_WS = " \t\n\r\f\v"
+_IDENTITY_WS_RUN = re.compile("[" + re.escape(_IDENTITY_WS) + "]+")
+
+
+def _subagent_name(nick, role, tid) -> str:
+    """"@" + trimmed nickname, else trimmed role, else thread id[:8]; each
+    candidate is trimmed before falling back, ASCII-whitespace runs -> "-"."""
+    name = ((nick or "").strip(_IDENTITY_WS) or
+            (role or "").strip(_IDENTITY_WS) or tid[:8])
+    return "@" + _IDENTITY_WS_RUN.sub("-", name)
 
 
 def _read_version() -> str:
@@ -88,11 +102,20 @@ _KNOWN: dict = {
     "gpt-5.4-mini": (0.00000075, 0.0000045, 0.000000075, 0.0),
     "gpt-5.4-nano": (0.0000002,  0.00000125, 0.00000002, 0.0),
     "gpt-5.3-codex": (0.00000175, 0.000014, 0.000000175, 0.0),
+    "gpt-6-luna":   (0.0000001,  0.0000005, 0.00000001,  0.000000125),
+    "gpt-6-astra":  (0.00001,    0.00005,   0.000001,    0.0000125),
+    "gpt-6.1-sol":  (0.000002,   0.00001,   0.0000001,   0.0000025),
+    "gpt-6-sol":    (0.000002,   0.00001,   0.0000002,   0.0000025),
     # gpt-5.1-codex/gpt-5.2-codex/o3/o4-mini are real selectable Codex model
     # IDs with no current published rate (superseded / not a standalone
     # priced row) — deliberately NOT given a fabricated entry; they fall
     # through to the loud-warning + $0 path below, matching pricing.go.
 }
+
+
+# Wire marker for "priced from the embedded table"; hookd swaps it for the
+# runtime's sentinel rate id.
+EMBEDDED_FALLBACK_RATE_ID = -1
 
 
 def _price_for(model: str):
@@ -132,6 +155,81 @@ def compute_cost(model: str, input_tokens: int, output_tokens: int,
     inp, out, cr, cw = rates
     return (input_tokens * inp + output_tokens * out
             + cache_read_tokens * cr + cache_write_tokens * cw)
+
+
+_RATES_TIMEOUT = 5  # seconds — one fetch per oneshot run
+
+
+def _fetch_rates(rates_url: str):
+    """Fetch rate cards from hookd's GET /rates. Returns a list of rate dicts,
+    or None on any failure (caller falls back to the embedded _KNOWN table)."""
+    try:
+        req = urllib.request.Request(rates_url)
+        with urllib.request.urlopen(req, timeout=_RATES_TIMEOUT) as resp:
+            data = json.loads(resp.read(4 * 1024 * 1024))
+        rates = data.get("rates")
+        if not isinstance(rates, list):
+            raise ValueError("response has no rates list")
+        return rates
+    except Exception as exc:
+        logging.warning("failed to fetch /rates: %s — falling back to embedded "
+                        "pricing table", exc)
+        return None
+
+
+def _parse_ts(raw):
+    """RFC3339 -> aware datetime (fractional seconds dropped), or None."""
+    try:
+        base = str(raw).replace("Z", "+00:00")
+        if "." in base:
+            head, rest = base.split(".", 1)
+            tz = rest[next((k for k, c in enumerate(rest) if c in "+-"), len(rest)):]
+            base = head + tz
+        dt = datetime.fromisoformat(base)
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
+def _resolve_rate(rates, model: str, runtime: str = "codex", now=None):
+    """Best effective base rate for model: exact match, else longest prefix.
+    Mirrors Go EffectiveRates: skips closed rows and rows not yet effective;
+    among same-key rows the latest valid_from (then highest id) wins.
+    No class fallback for Codex. Returns the rate dict or None."""
+    now = now or datetime.now(timezone.utc)
+    best = None
+    best_rank = None
+    for r in rates or []:
+        if (r.get("runtime") != runtime or r.get("variant") != "base"
+                or r.get("valid_to") is not None):
+            continue
+        start = _parse_ts(r.get("valid_from"))
+        if start is None or start > now:
+            continue
+        key = r.get("model_key") or ""
+        kind = r.get("match_kind")
+        if kind == "exact" and key == model:
+            tier = (0, 0)
+        elif kind == "prefix" and key and model.startswith(key):
+            tier = (1, -len(key))
+        else:
+            continue
+        rank = tier + (-start.timestamp(), -int(r.get("id") or 0))
+        if best_rank is None or rank < best_rank:
+            best, best_rank = r, rank
+    return best
+
+
+def _cost_from_rate(rate: dict, input_tokens: int, output_tokens: int,
+                    cache_read_tokens: int, cache_write_tokens: int):
+    """Return (cost_usd, rate_id). Rate values are per-MTok decimal strings.
+    All cache writes price at the 5m rate (OpenAI publishes no TTL split)."""
+    per_mtok = 1_000_000.0
+    cost = (input_tokens * float(rate["input_per_mtok"])
+            + output_tokens * float(rate["output_per_mtok"])
+            + cache_read_tokens * float(rate["cache_read_per_mtok"])
+            + cache_write_tokens * float(rate["cache_write_5m_per_mtok"])) / per_mtok
+    return cost, int(rate["id"])
 
 
 # ---------------------------------------------------------------------------
@@ -217,24 +315,42 @@ def _new_cursor() -> dict:
     codex:<id>:<seq> key (which session_id-keying would cause, since
     multiple subagent files can share one session_id).
 
-    seq is the count of token_count events already ledgered from this file.
-    Codex's token_count events carry no content-derived unique id, so the
-    tailer manufactures one from (thread_id, seq) — stable because rollout
-    files are strictly append-only: re-scanning from offset 0 (e.g. after an
-    archive-triggered path change loses the cursor) reproduces the identical
-    sequence, so the derived message_id matches what's already ledgered and
-    hookd's uq_message-keyed upsert makes the re-insert a harmless no-op.
+    seq is the count of usage events (token_usage_record, or token_count on
+    older files) already ledgered from this file. Codex's usage events carry
+    no content-derived unique id, so the tailer manufactures one from
+    (thread_id, seq) — stable because rollout files are strictly
+    append-only: re-scanning from offset 0 (e.g. after an archive-triggered
+    path change loses the cursor) reproduces the identical sequence, so the
+    derived message_id matches what's already ledgered and hookd's
+    uq_message-keyed upsert makes the re-insert a harmless no-op.
+
+    agent_name / subagent (DESIGN.md D2): a file is a subagent iff
+    session_meta.parent_thread_id is non-empty OR thread_source ==
+    "subagent"; its agent_name is "@" + (agent_nickname or agent_role or
+    thread_id[:8]) with whitespace runs collapsed to "-". Root threads keep
+    agent_name "" and subagent False. The subagent flag drives the session
+    upsert's relationship/agent_id fields.
+
+    usage_record_seen: Codex 0.159.x writes a top-level token_usage_record
+    AND the legacy event_msg:token_count for every turn (identical usage,
+    record first, the token_count can lag minutes behind). Once a file has
+    ledgered a record, its token_counts are duplicates and are skipped. This
+    must persist with the cursor, not live in memory: each poll is a fresh
+    process, and a poll can land between a record and its token_count.
     """
     return {
         "offset": 0,
         "seq": 0,
         "session_id": "",
         "thread_id": "",
-        "agent_name": "",  # "@"+agent_role for a subagent thread, else ""
+        "agent_name": "",  # "@"+nickname|role|id[:8] for a subagent thread, else ""
+        "subagent": False,  # parent_thread_id set or thread_source == "subagent"
         "cwd": "",
         "originator": "",
         "cli_version": "",
         "model": "",  # last-known model, updated per turn_context
+        "usage_record_seen": False,
+        "pending_registration": False,  # set on identity change, cleared once hookd accepts the /session upsert
     }
 
 
@@ -249,7 +365,8 @@ class _PostFailed(Exception):
 
 class Scraper:
     def __init__(self, *, telemetry_url: str, session_url: str, host: str,
-                 username: str, roots, cursor_path: str, dry_run: bool):
+                 username: str, roots, cursor_path: str, dry_run: bool,
+                 rates=None):
         self.telemetry_url = telemetry_url
         self.session_url = session_url
         self.host = host
@@ -258,6 +375,7 @@ class Scraper:
         self.cursor_path = cursor_path
         self.dry_run = dry_run
         self.cursors: dict = {}  # path -> cursor dict (see _new_cursor)
+        self.rates = rates  # list of /rates dicts, or None -> embedded _KNOWN
 
     # ------------------------------------------------------------------
     # Cursor persistence
@@ -344,6 +462,7 @@ class Scraper:
             cursor.update(_new_cursor())
 
         if st.st_size == cursor["offset"]:
+            self._flush_pending_registration(cursor)
             return
 
         try:
@@ -354,6 +473,14 @@ class Scraper:
             self._read_file(f, path, cursor)
         finally:
             f.close()
+            self._flush_pending_registration(cursor)
+
+    def _flush_pending_registration(self, cursor: dict) -> None:
+        """Retry a registration left pending by a failed upsert or by a scan
+        that returned early on a telemetry failure."""
+        if cursor.get("pending_registration") and cursor["session_id"]:
+            if self._upsert_codex_session(cursor):
+                cursor["pending_registration"] = False
 
     def _read_file(self, f, path: str, cursor: dict) -> None:
         """Inner read loop — mirrors the Go bufio.Scanner loop in
@@ -363,7 +490,6 @@ class Scraper:
         if cursor["offset"] > 0:
             f.seek(cursor["offset"])
 
-        session_changed = False
         pos = cursor["offset"]
         new_offset = cursor["offset"]
 
@@ -383,7 +509,7 @@ class Scraper:
             if trimmed.strip():
                 try:
                     if self._process_line(trimmed, cursor, path):
-                        session_changed = True
+                        cursor["pending_registration"] = True
                 except _PostFailed:
                     # Stop here; do not advance past this unsent row. It
                     # will be retried from this offset on the next poll.
@@ -397,9 +523,6 @@ class Scraper:
             new_offset = pos
 
         cursor["offset"] = new_offset
-
-        if session_changed and cursor["session_id"]:
-            self._upsert_codex_session(cursor)
 
     def _process_line(self, raw: bytes, cursor: dict, path: str) -> bool:
         """Parse one rollout JSONL line and update cursor state. Returns True
@@ -426,9 +549,15 @@ class Scraper:
                 # which have no session_id field at all.
                 sid = payload.get("session_id", "")
                 cursor["session_id"] = sid if sid else pid
-                role = payload.get("agent_role", "")
-                if role:
-                    cursor["agent_name"] = "@" + role
+                is_sub = bool(payload.get("parent_thread_id")) or \
+                    payload.get("thread_source") == "subagent"
+                cursor["subagent"] = is_sub
+                if is_sub:
+                    cursor["agent_name"] = _subagent_name(
+                        payload.get("agent_nickname"),
+                        payload.get("agent_role"), pid)
+                else:
+                    cursor["agent_name"] = ""
                 cursor["cwd"] = payload.get("cwd", "")
                 cursor["originator"] = payload.get("originator", "")
                 cursor["cli_version"] = payload.get("cli_version", "")
@@ -447,9 +576,18 @@ class Scraper:
                 return True
             return False
 
+        if typ == "token_usage_record":
+            usage = payload.get("usage")
+            if isinstance(usage, dict) and usage:
+                self._emit_ledger_row(env.get("timestamp", ""), usage, cursor)
+                cursor["usage_record_seen"] = True
+            return False
+
         if typ == "event_msg":
             etype = payload.get("type", "")
             if etype == "token_count":
+                if cursor.get("usage_record_seen"):
+                    return False  # duplicate of the token_usage_record already ledgered
                 info = payload.get("info")
                 if not info:
                     return False
@@ -475,9 +613,10 @@ class Scraper:
         return False
 
     def _emit_ledger_row(self, timestamp: str, last_usage: dict, cursor: dict) -> None:
-        """Build and POST one telemetry row from a token_count event's
-        last_token_usage. Ledger derivation rule (binding, LESSONS.md §3):
-        use last_token_usage ONLY — never total_token_usage (cumulative
+        """Build and POST one telemetry row from a token_usage_record's
+        usage or a token_count event's last_token_usage (same shape). Ledger
+        derivation rule (binding, LESSONS.md §3): use the per-call usage
+        ONLY — never total_token_usage / thread_token_usage (cumulative
         across the whole session; summing it double-counts).
 
         Token bucket derivation: cached_input_tokens is a SUBSET of
@@ -485,13 +624,14 @@ class Scraper:
         output_tokens (both informational breakdowns, not additional
         tokens) — total_tokens == input_tokens + output_tokens always. So:
           - uncached input (billed at the full input rate)
-              = input_tokens - cached_input_tokens
+              = input_tokens - cached_input_tokens - cache_write_input_tokens
           - cache-read tokens (billed at the cheaper cache-read rate)
               = cached_input_tokens
           - output tokens, as-is (reasoning_output_tokens is already inside
             this number; OpenAI bills it at the output rate by inclusion,
             not by adding it again)
-          - cache-write is always 0 (no Codex/OpenAI equivalent)
+          - cache-write tokens, as-is (billed at 1.25x input for gpt-6
+            family; 0 in all observed rollouts as of 2026-10-03)
         This differs from Claude Code's transcript semantics, where
         input_tokens already excludes cache reads — do not copy that
         assumption here.
@@ -506,6 +646,7 @@ class Scraper:
 
         input_tokens = int(last_usage.get("input_tokens") or 0)
         cached_input_tokens = int(last_usage.get("cached_input_tokens") or 0)
+        cache_write_input_tokens = int(last_usage.get("cache_write_input_tokens") or 0)
         output_tokens = int(last_usage.get("output_tokens") or 0)
         reasoning_output_tokens = int(last_usage.get("reasoning_output_tokens") or 0)
         total_tokens = int(last_usage.get("total_tokens") or 0)
@@ -518,34 +659,52 @@ class Scraper:
                 "session_id=%s input=%d output=%d total=%d",
                 cursor["session_id"], input_tokens, output_tokens, total_tokens)
 
-        uncached_input = input_tokens - cached_input_tokens
+        uncached_input = input_tokens - cached_input_tokens - cache_write_input_tokens
         if uncached_input < 0:
             logging.warning(
-                "codex-scraper: cached_input_tokens exceeds input_tokens, clamping "
-                "to 0 session_id=%s input=%d cached_input=%d",
-                cursor["session_id"], input_tokens, cached_input_tokens)
+                "codex-scraper: cached+cache_write input exceeds input_tokens, clamping "
+                "to 0 session_id=%s input=%d cached_input=%d cache_write_input=%d",
+                cursor["session_id"], input_tokens, cached_input_tokens,
+                cache_write_input_tokens)
             uncached_input = 0
 
-        cost_usd = compute_cost(cursor["model"], uncached_input, output_tokens,
-                                 cached_input_tokens, 0)
+        rate_id = 0
+        rate = _resolve_rate(self.rates, cursor["model"]) if self.rates else None
+        if rate is not None:
+            try:
+                cost_usd, rate_id = _cost_from_rate(
+                    rate, uncached_input, output_tokens,
+                    cached_input_tokens, cache_write_input_tokens)
+            except (KeyError, TypeError, ValueError) as exc:
+                logging.warning("malformed rate row, using embedded table "
+                                "model=%s: %s", cursor["model"], exc)
+                rate_id = 0
+                rate = None
+        if rate is None:
+            cost_usd = compute_cost(cursor["model"], uncached_input, output_tokens,
+                                     cached_input_tokens, cache_write_input_tokens)
+            if cost_usd > 0:  # $0 means unknown model or no tokens, not a fallback price
+                rate_id = EMBEDDED_FALLBACK_RATE_ID
         ts = _format_event_timestamp(timestamp)
 
         row = {
             "message_id": message_id,
             "session_id": cursor["session_id"],
-            "agent_name": cursor["agent_name"],  # "" for direct/parent spend, "@"+role for a subagent thread
+            "agent_name": cursor["agent_name"],  # "" for direct/parent spend, "@"+nickname for a subagent thread
             "host": self.host,
             "username": self.username,
             "model": cursor["model"],
             "input_tokens": uncached_input,
             "output_tokens": output_tokens,
             "cache_read_tokens": cached_input_tokens,
-            "cache_write_tokens": 0,
+            "cache_write_tokens": cache_write_input_tokens,
             "cost_usd": cost_usd,
             "timestamp": ts,
             "runtime": "codex",
             "reasoning_output_tokens": reasoning_output_tokens,
         }
+        if rate_id > 0 or rate_id == EMBEDDED_FALLBACK_RATE_ID:
+            row["rate_id"] = rate_id
 
         if self.dry_run:
             logging.info(
@@ -586,7 +745,7 @@ class Scraper:
                        message_id=row.get("message_id"), error=str(exc))
             return False
 
-    def _upsert_codex_session(self, cursor: dict) -> None:
+    def _upsert_codex_session(self, cursor: dict) -> bool:
         """Upsert this tailer's owned view of the Codex sessions row via
         hookd's /session endpoint (WP-R3) — the remote-side equivalent of
         the hub-local Go scraper's direct store.UpsertSession call, which a
@@ -603,11 +762,11 @@ class Scraper:
         if not self.session_url:
             logging.warning("codex-scraper: no session_url configured, skipping "
                             "session upsert session_id=%s", cursor["session_id"])
-            return
+            return False
 
         body = {
             "session_id": cursor["session_id"],
-            "agent_name": cursor["agent_name"],  # "" for parent/direct-spend row, "@"+role for a subagent thread's own row
+            "agent_name": cursor["agent_name"],  # "" for parent/direct-spend row, "@"+nickname for a subagent thread's own row
             "host": self.host,
             "username": self.username,
             "runtime": "codex",
@@ -616,10 +775,13 @@ class Scraper:
             "originator": cursor["originator"],
             "cli_version": cursor["cli_version"],
         }
+        if cursor.get("subagent"):
+            body["relationship"] = "subagent"
+            body["agent_id"] = cursor["thread_id"]
 
         if self.dry_run:
             logging.info("dry-run session upsert=%r", body)
-            return
+            return False
 
         try:
             data = json.dumps(body).encode("utf-8")
@@ -633,16 +795,20 @@ class Scraper:
                                session_id=cursor["session_id"])
                     logging.error("codex-scraper: session upsert non-2xx status=%d "
                                  "session_id=%s", resp.status, cursor["session_id"])
+                    return False
+            return True
         except urllib.error.HTTPError as exc:
             _log_error("session POST HTTPError", status=exc.code,
                        session_id=cursor["session_id"], error=str(exc))
             logging.error("codex-scraper: session upsert failed session_id=%s: %s",
                          cursor["session_id"], exc)
+            return False
         except Exception as exc:
             _log_error("session POST error", session_id=cursor["session_id"],
                        error=str(exc))
             logging.error("codex-scraper: session upsert failed session_id=%s: %s",
                          cursor["session_id"], exc)
+            return False
 
 
 def _format_event_timestamp(raw: str) -> str:
@@ -712,6 +878,13 @@ def _session_url() -> str:
     return _hub_base_url() + "/session"
 
 
+def _rates_url() -> str:
+    direct = os.environ.get("TEAMSTER_RATES_URL", "")
+    if direct:
+        return direct
+    return _hub_base_url() + "/rates?runtime=codex"
+
+
 def _codex_home() -> str:
     return os.environ.get("CODEX_HOME") or os.path.join(os.path.expanduser("~"), ".codex")
 
@@ -777,6 +950,7 @@ def main() -> int:
         roots=roots,
         cursor_path=cursor_path,
         dry_run=dry_run,
+        rates=_fetch_rates(_rates_url()),
     )
     scraper.load_cursors()
 

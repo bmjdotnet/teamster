@@ -207,3 +207,126 @@ func TestClaimWorkUnit_IdempotentReclaim(t *testing.T) {
 		t.Errorf("state after idempotent re-claim = status=%q agent=%q, want active/@agent-a", wu.Status, wu.AgentID)
 	}
 }
+
+func timelineStates(t *testing.T, store wms.Store, eng wms.Engine, wuID string) []wms.EventRecord {
+	t.Helper()
+	r, ce := callWithEngine(t, store, eng, ToolGetTimeline, map[string]interface{}{"entityType": wms.EntityWorkUnit, "entityID": wuID})
+	if ce != nil {
+		t.Fatalf("getTimeline: %v", ce)
+	}
+	var recs []wms.EventRecord
+	if err := json.Unmarshal([]byte(resultText(t, r)), &recs); err != nil {
+		t.Fatalf("decode timeline: %v", err)
+	}
+	// ListEventRecords returns newest first; reverse to chronological order.
+	for i, j := 0, len(recs)-1; i < j; i, j = i+1, j-1 {
+		recs[i], recs[j] = recs[j], recs[i]
+	}
+	return recs
+}
+
+// TestClaimWorkUnit_TimelineHasActiveInterval: a claim must close the
+// pending interval and open an active one, so duration reporting does not
+// count active work as pending time (#33).
+func TestClaimWorkUnit_TimelineHasActiveInterval(t *testing.T) {
+	store, oid := newStewardStore(t)
+	eng := realEngineFor(store)
+	const wuID = "wu-claim-timeline"
+	if _, ce := callWithEngine(t, store, eng, ToolCreateWorkUnit, map[string]interface{}{"id": wuID, "title": wuID, "outcomeID": oid}); ce != nil {
+		t.Fatalf("createWorkUnit: %v", ce)
+	}
+	if _, ce := callWithEngine(t, store, eng, ToolClaimWorkUnit, map[string]interface{}{"id": wuID}); ce != nil {
+		t.Fatalf("claimWorkUnit: %v", ce)
+	}
+
+	recs := timelineStates(t, store, eng, wuID)
+	if len(recs) != 2 || recs[0].State != wms.StatusPending || recs[1].State != wms.StatusActive {
+		t.Fatalf("timeline after claim = %+v, want pending then active", recs)
+	}
+	if recs[0].EndedAt == nil {
+		t.Error("pending interval not closed after claim")
+	}
+	if recs[1].EndedAt != nil {
+		t.Error("active interval should be open after claim")
+	}
+
+	if _, ce := callWithEngine(t, store, eng, ToolDeliverResult, map[string]interface{}{"id": wuID, "summary": "s", "result": "r"}); ce != nil {
+		t.Fatalf("deliverResult: %v", ce)
+	}
+	if _, ce := callWithEngine(t, store, eng, ToolUpdateWorkUnitStatus, map[string]interface{}{"id": wuID, "status": wms.StatusDone}); ce != nil {
+		t.Fatalf("complete: %v", ce)
+	}
+	recs = timelineStates(t, store, eng, wuID)
+	want := []string{wms.StatusPending, wms.StatusActive, wms.StatusReview, wms.StatusDone}
+	if len(recs) != len(want) {
+		t.Fatalf("full timeline = %+v, want states %v", recs, want)
+	}
+	for i, w := range want {
+		if recs[i].State != w {
+			t.Errorf("timeline[%d].State = %q, want %q", i, recs[i].State, w)
+		}
+	}
+}
+
+// TestGetHistory_LifecycleNeverNull: getHistory returns [] (not null) for a
+// fresh work unit and one journal row per lifecycle transition thereafter (#34).
+func TestGetHistory_LifecycleNeverNull(t *testing.T) {
+	store, oid := newStewardStore(t)
+	eng := realEngineFor(store)
+	const wuID = "wu-history-lifecycle"
+	if _, ce := callWithEngine(t, store, eng, ToolCreateWorkUnit, map[string]interface{}{"id": wuID, "title": wuID, "outcomeID": oid}); ce != nil {
+		t.Fatalf("createWorkUnit: %v", ce)
+	}
+	history := func() (string, []wms.JournalEntry) {
+		r, ce := callWithEngine(t, store, eng, ToolGetHistory, map[string]interface{}{"entityType": wms.EntityWorkUnit, "entityID": wuID})
+		if ce != nil {
+			t.Fatalf("getHistory: %v", ce)
+		}
+		raw := strings.TrimSpace(resultText(t, r))
+		var entries []wms.JournalEntry
+		if err := json.Unmarshal([]byte(raw), &entries); err != nil {
+			t.Fatalf("decode history: %v", err)
+		}
+		return raw, entries
+	}
+
+	if raw, entries := history(); raw != "[]" || len(entries) != 0 {
+		t.Fatalf("fresh history = %s, want []", raw)
+	}
+
+	if _, ce := callWithEngine(t, store, eng, ToolClaimWorkUnit, map[string]interface{}{"id": wuID}); ce != nil {
+		t.Fatalf("claimWorkUnit: %v", ce)
+	}
+	if raw, entries := history(); len(entries) != 1 {
+		t.Fatalf("history after claim = %s, want 1 entry", raw)
+	}
+
+	if _, ce := callWithEngine(t, store, eng, ToolDeliverResult, map[string]interface{}{"id": wuID, "summary": "delivered it", "result": "r"}); ce != nil {
+		t.Fatalf("deliverResult: %v", ce)
+	}
+	if _, ce := callWithEngine(t, store, eng, ToolUpdateWorkUnitStatus, map[string]interface{}{"id": wuID, "status": wms.StatusDone, "notes": "accepted"}); ce != nil {
+		t.Fatalf("complete: %v", ce)
+	}
+	_, entries := history()
+	if len(entries) != 3 {
+		t.Fatalf("history after lifecycle has %d entries, want 3", len(entries))
+	}
+	for _, tr := range []struct{ old, new, notes string }{
+		{wms.StatusPending, wms.StatusActive, "claimed by"},
+		{wms.StatusActive, wms.StatusReview, "delivered it"},
+		{wms.StatusReview, wms.StatusDone, "accepted"},
+	} {
+		found := false
+		for _, e := range entries {
+			if e.Field == "status" && e.OldValue == tr.old && e.NewValue == tr.new {
+				found = true
+				if !strings.Contains(e.Notes, tr.notes) {
+					t.Errorf("%s→%s notes = %q, want to contain %q", tr.old, tr.new, e.Notes, tr.notes)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("no journal entry for %s→%s", tr.old, tr.new)
+		}
+	}
+}

@@ -89,7 +89,22 @@ type agentSidecar struct {
 // never picked up here. Matching is by the sidecar's own name (falling back
 // to agentType for older sidecars that predate the name field) rather than
 // a filename convention, mirroring composition.go's findTranscriptPath.
-func findTeammateTranscript(sessionID, agentName string) (path string, meta agentSidecar, err error) {
+//
+// When agentID is non-empty the transcript is first looked up directly by
+// its filename (agent-<agentID>.jsonl — the roster's agent_id IS the sidecar
+// filename stem), which is deterministic: it survives hookd's auto-numbered
+// respawn names (@name-2, whose sidecar name is still "name") and two
+// sidecars sharing one name. The taskKind filter is kept on that path too: it
+// does not depend on the name, so it cannot misfire for a numbered teammate,
+// and it keeps an Agent-tool subagent's transcript out of the teammate
+// channel. If the file or a teammate sidecar is not there (not yet written,
+// remote host, macOS) it falls through to the name + newest-mtime match.
+func findTeammateTranscript(sessionID, agentName, agentID string) (path string, meta agentSidecar, err error) {
+	if agentID != "" {
+		if p, m, ok := findTeammateTranscriptByID(sessionID, agentID); ok {
+			return p, m, nil
+		}
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", agentSidecar{}, err
@@ -131,6 +146,33 @@ func findTeammateTranscript(sessionID, agentName string) (path string, meta agen
 	return best, metaByPath[best], nil
 }
 
+// findTeammateTranscriptByID resolves agent-<agentID>.jsonl directly under
+// any project dir for the lead's sessionID. ok is false when the transcript
+// or its teammate sidecar is absent or unreadable.
+func findTeammateTranscriptByID(sessionID, agentID string) (path string, meta agentSidecar, ok bool) {
+	if strings.ContainsAny(agentID, `/\*?[`) {
+		return "", agentSidecar{}, false
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", agentSidecar{}, false
+	}
+	pattern := filepath.Join(home, ".claude", "projects", "*", sessionID, "subagents", "agent-"+agentID+".jsonl")
+	candidates, _ := filepath.Glob(pattern)
+	for _, c := range candidates {
+		data, err := os.ReadFile(strings.TrimSuffix(c, ".jsonl") + ".meta.json")
+		if err != nil {
+			continue
+		}
+		var m agentSidecar
+		if json.Unmarshal(data, &m) != nil || m.TaskKind != taskKindTeammate {
+			continue
+		}
+		return c, m, true
+	}
+	return "", agentSidecar{}, false
+}
+
 // teammateContextState is one teammate's transcript-scan cursor, carried
 // across collector ticks so the transcript is never re-walked from the
 // start — mirrors compositionState's cursor pattern in composition.go.
@@ -138,6 +180,7 @@ type teammateContextState struct {
 	transcriptPath string
 	model          string // from the sidecar, resolved once alongside transcriptPath
 	resolved       bool   // whether transcript/sidecar lookup has succeeded yet
+	resolvedByID   bool   // resolved via agent_id (final); false = name fallback, upgradable once
 
 	cursorOffset int64
 	lastUsage    transcript.Usage
@@ -230,7 +273,11 @@ func newTeammateContextTracker() *teammateContextTracker {
 // identical model strings share the same entitlement. Any other case with
 // no derivable signal returns ContextSourceUnavailable with every field
 // zeroed, rather than fabricating a number.
-func (t *teammateContextTracker) Update(sessionID, agentName, leadModel string, leadWindow int64, leadWindowOK bool) teammateContextResult {
+//
+// agentID is the roster's agent_id ("" when unknown); see
+// findTeammateTranscript. A state resolved by name is upgraded once to the
+// agent_id path as soon as that file exists, resetting the walk cursor.
+func (t *teammateContextTracker) Update(sessionID, agentName, agentID, leadModel string, leadWindow int64, leadWindowOK bool) teammateContextResult {
 	key := sessionID + "|" + agentName
 	st, ok := t.states[key]
 	if !ok {
@@ -239,11 +286,23 @@ func (t *teammateContextTracker) Update(sessionID, agentName, leadModel string, 
 	}
 
 	if !st.resolved {
-		path, meta, err := findTeammateTranscript(sessionID, agentName)
+		path, meta, err := findTeammateTranscript(sessionID, agentName, agentID)
 		if err == nil {
 			st.transcriptPath = path
 			st.model = meta.Model
 			st.resolved = true
+			st.resolvedByID = agentID != "" && filepath.Base(path) == "agent-"+agentID+".jsonl"
+		}
+	} else if !st.resolvedByID && agentID != "" {
+		if path, meta, ok := findTeammateTranscriptByID(sessionID, agentID); ok {
+			if path != st.transcriptPath {
+				st.cursorOffset = 0
+				st.lastUsage = transcript.Usage{}
+				st.haveUsage = false
+			}
+			st.transcriptPath = path
+			st.model = meta.Model
+			st.resolvedByID = true
 		}
 	}
 

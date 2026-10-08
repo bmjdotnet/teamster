@@ -86,14 +86,22 @@ func restartTemporaryDaemons(ctx context.Context, sshRun clone.SSHRunner, target
 // 1.5, and it must hard-fail before Leg 3 (restore) is allowed to start.
 var ErrSchemaVersionMismatch = errors.New("clone: target schema_version does not match this binary's max known version")
 
-// assertTargetSchemaCurrent runs SELECT MAX(version) FROM schema_version on
-// the target (over SSH, using the target's own already-provisioned app
-// DSN — the target is disposable, so this carries no I7 concern) and
-// compares it against wantMaxVersion, which the caller computes locally via
-// mysql.MaxSchemaVersion() — valid because Stage A (VerifyStageA, which
-// must run before this) already proved the target binary is the identical
-// commit as the one that produced wantMaxVersion.
-func assertTargetSchemaCurrent(ctx context.Context, sshRun clone.SSHRunner, target, binaryPath string, wantMaxVersion int) error {
+// assertTargetSchemaCurrent compares SELECT MAX(version) FROM schema_version
+// on the target (over SSH, using the target's own already-provisioned app DSN
+// — the target is disposable, so this carries no I7 concern) against the
+// target binary's own `store schema-version`. The expectation must come from
+// the shipped binary, never the driver's mysql.MaxSchemaVersion(): the driver
+// may be a different commit than the shipped ref (Stage A only proves the
+// target matches the shipped ref).
+func assertTargetSchemaCurrent(ctx context.Context, sshRun clone.SSHRunner, target, binaryPath string) error {
+	wantOut, err := sshRun(ctx, target, binaryPath, "store", "schema-version")
+	if err != nil {
+		return fmt.Errorf("%w: querying %s's compiled schema version on %s (a ref predating `store schema-version` cannot be cloned): %v\n%s", ErrSchemaVersionMismatch, binaryPath, target, err, tailLines(wantOut, 20))
+	}
+	wantMaxVersion, perr := strconv.Atoi(strings.TrimSpace(wantOut))
+	if perr != nil {
+		return fmt.Errorf("%w: unexpected schema-version output %q on %s: %v", ErrSchemaVersionMismatch, strings.TrimSpace(wantOut), target, perr)
+	}
 	out, err := sshRun(ctx, target, binaryPath, "sql", "-N", "-e", "SELECT MAX(version) FROM schema_version")
 	if err != nil {
 		return fmt.Errorf("%w: querying schema_version on %s: %v\n%s", ErrSchemaVersionMismatch, target, err, tailLines(out, 20))
@@ -103,7 +111,7 @@ func assertTargetSchemaCurrent(ctx context.Context, sshRun clone.SSHRunner, targ
 		return fmt.Errorf("%w: unexpected schema_version output %q on %s: %v", ErrSchemaVersionMismatch, strings.TrimSpace(out), target, perr)
 	}
 	if got != wantMaxVersion {
-		return fmt.Errorf("%w: target %s reports schema v%d, this binary's install shipped v%d — installrunner.sh's migration step may have failed silently (its own exit code is not a reliable signal, DESIGN.md gap #10)", ErrSchemaVersionMismatch, target, got, wantMaxVersion)
+		return fmt.Errorf("%w: target %s reports schema v%d, its binary's install shipped v%d — installrunner.sh's migration step may have failed silently (its own exit code is not a reliable signal, DESIGN.md gap #10)", ErrSchemaVersionMismatch, target, got, wantMaxVersion)
 	}
 	return nil
 }
