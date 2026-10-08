@@ -33,6 +33,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - **Codex focus-warning delivery documented** (issue #39). The Codex hook client discards hookd's response body, so focus nudges and the declined-claim follow-up warning never reach Codex agents (and no `UserPromptSubmit` hook is registered). The Codex solo skill no longer promises that warning and tells agents to call `wms_setFocus` after claiming; `CODEX-INSTALL.md` and `codex-hook.py` state the limitation and why forwarding is not implemented.
 - **Missing `active` timeline interval on claim** (issue #33). `wms_claimWorkUnit` now records the pending→active transition in the timeline, so `wms_getTimeline` shows the active segment and duration reporting no longer counts active work as pending time.
 - **WMS list tools returning `null`** (issue #34). `wms_getHistory`, `wms_getTimeline`, `wms_listWorkUnits`, `wms_listDeliverables`, `wms_listRelations` and `wms_listRelationKinds` now yield an empty array instead of JSON `null` when nothing matches, in both the MCP handlers and the MySQL and SQLite stores.
+- **Codex-created WMS entities tagged `runtime:claude_code`** (issue #40). Over hookd's HTTP transport no MCP clientInfo is recorded, so `runtimeTag()` defaulted to `claude_code`; it now treats per-call Codex turn metadata as a positive Codex signal.
 
 ## v0.3.0 (2026-09-08)
 
