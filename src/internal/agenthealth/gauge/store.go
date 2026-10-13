@@ -47,6 +47,12 @@ const (
 	// — every context field is left at its zero value rather than
 	// fabricated via inheritance from an unrelated agent.
 	ContextSourceUnavailable = "unavailable"
+	// ContextSourceCodexAppserver is the Codex app-server's own reported
+	// modelContextWindow and last-turn token total, POSTed to hookd's
+	// /context endpoint by the codex context subscriber. Posts arrive only
+	// per API response, so health-collector keeps it indefinitely (idle
+	// context does not change) until a newer report replaces it.
+	ContextSourceCodexAppserver = "codex_appserver"
 )
 
 // GaugeRow is one agent_health_gauge row — a last-write-wins snapshot of an
@@ -89,6 +95,11 @@ type GaugeRow struct {
 	UpdatedAt           time.Time
 	FidelityNotes       *string
 }
+
+// CollectorStatusRestored marks a row rebuilt from token_ledger after its
+// previous gauge row was swept or evicted: totals are exact, but the context
+// reading is the last known observation rather than a fresh sample.
+const CollectorStatusRestored = "restored"
 
 // GaugeKey is the composite primary key for a gauge row.
 type GaugeKey struct {

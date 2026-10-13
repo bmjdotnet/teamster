@@ -88,6 +88,14 @@ work (check `wms_listTags(tagKey="team")`), reuse it — two sessions
 sharing a team name signals they're part of the same effort. Don't force
 uniqueness when continuity is the right signal.
 
+The trade-off: ctop groups by parent_ref lineage and shows a reused name as
+`#name·<prefix8>` (the lead session id's first 8 chars), so reuse doesn't
+merge dead sessions into the live tree. The health API team endpoints
+(`GET /health/api/team/{team_name}`, `health_getTeamSummary`, roster
+scoping by team) still merge every session sharing the name. Reuse for
+continuity; pick a session-distinct name when you want isolated team-level
+health and cost numbers.
+
 Record this name — you'll use it in 4b and when tagging the strategic
 Outcome (Step 7d) with `team:<name>`.
 

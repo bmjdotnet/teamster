@@ -13,7 +13,6 @@ import (
 	"github.com/bmjdotnet/teamster/internal/backup"
 	"github.com/bmjdotnet/teamster/internal/clone"
 	"github.com/bmjdotnet/teamster/internal/clonetopology"
-	"github.com/bmjdotnet/teamster/internal/store/mysql"
 )
 
 const cloneUsage = `usage: teamster clone [OPTIONS] <user>@<host>
@@ -252,10 +251,11 @@ func runClone(args []string) int {
 	}
 
 	// WP3 step 1.5: assert the target's schema is genuinely at this binary's
-	// max known version before Leg 3 starts. installrunner.sh's own migration
+	// max known version before Leg 3 starts. The expected version comes from the
+	// shipped binary itself, not this driver, which may be a different commit. installrunner.sh's own migration
 	// step is non-fatal under set -euo pipefail (DESIGN.md gap #10), so the
 	// installer's clean exit code alone does not guarantee this.
-	if err := assertTargetSchemaCurrent(ctx, deps.SSHRun, target, targetBinary, mysql.MaxSchemaVersion()); err != nil {
+	if err := assertTargetSchemaCurrent(ctx, deps.SSHRun, target, targetBinary); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		return 1
 	}

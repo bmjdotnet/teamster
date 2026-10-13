@@ -1,6 +1,8 @@
 // Command token-scraper reads Claude Code session JSONL files and POSTs
 // per-message token usage rows to hookd's /telemetry endpoint.
-// Runs as a long-lived daemon.
+// Runs as a long-lived daemon. Cost is priced from hookd's GET /rates through
+// a pricing.Resolver, falling back to the embedded rate tables (with a WARN)
+// while hookd is unreachable.
 package main
 
 import (
@@ -23,6 +25,7 @@ import (
 	"github.com/bmjdotnet/teamster/internal/config"
 	"github.com/bmjdotnet/teamster/internal/logging"
 	"github.com/bmjdotnet/teamster/internal/pricing"
+	"github.com/bmjdotnet/teamster/internal/store"
 	"github.com/bmjdotnet/teamster/internal/transcript"
 	"github.com/bmjdotnet/teamster/internal/version"
 )
@@ -83,6 +86,7 @@ type telemetryRow struct {
 	ServiceTier      string  `json:"service_tier"`
 	Speed            string  `json:"speed"`
 	CostUSD          float64 `json:"cost_usd"`
+	RateID           int64   `json:"rate_id,omitempty"`
 	Timestamp        string  `json:"timestamp"`
 }
 
@@ -117,10 +121,11 @@ func main() {
 
 	dryRun := os.Getenv("SCRAPER_DRY_RUN") == "true" || os.Getenv("SCRAPER_DRY_RUN") == "1"
 
+	hookdBase := strings.TrimSuffix(cfg.HookServerURL, "/event")
+
 	telemetryURL := os.Getenv("TEAMSTER_TELEMETRY_URL")
 	if telemetryURL == "" {
-		base := strings.TrimSuffix(cfg.HookServerURL, "/event")
-		telemetryURL = base + "/telemetry"
+		telemetryURL = hookdBase + "/telemetry"
 	}
 
 	cursorPath := filepath.Join(cfg.DataDir, "scraper-cursors.json")
@@ -137,6 +142,7 @@ func main() {
 
 	s := &scraper{
 		client:       &http.Client{Timeout: 5 * time.Second},
+		resolver:     pricing.NewResolver(pricing.NewHTTPSource(hookdBase)),
 		telemetryURL: telemetryURL,
 		host:         cfg.Host,
 		username:     cfg.User,
@@ -166,6 +172,7 @@ func main() {
 
 type scraper struct {
 	client       *http.Client
+	resolver     *pricing.Resolver
 	telemetryURL string
 	host         string
 	username     string
@@ -349,7 +356,7 @@ func (s *scraper) processFile(ctx context.Context, path, agentName, agentID stri
 		if cur == nil {
 			return true
 		}
-		if !s.emit(*cur, agentName, agentID) {
+		if !s.emit(ctx, *cur, agentName, agentID) {
 			postErr = errPostFailed
 			return false
 		}
@@ -496,8 +503,19 @@ func mergeUsage(dst *sessionUsage, src sessionUsage) {
 
 // emit prices and sends one deduplicated request row. Returns false on POST
 // failure (so the caller stops advancing the cursor). Honors dry-run.
-func (s *scraper) emit(u sessionUsage, agentName, agentID string) bool {
-	costUSD := pricing.ComputeCost(u.model, u.inputTokens, u.outputTokens, u.cacheReadTokens, u.cacheWrite5m, u.cacheWrite1h)
+func (s *scraper) emit(ctx context.Context, u sessionUsage, agentName, agentID string) bool {
+	priced := s.resolver.Price(ctx, store.RateRuntimeClaudeCode, u.model, u.timestamp, pricing.Tokens{
+		Input:        u.inputTokens,
+		Output:       u.outputTokens,
+		CacheRead:    u.cacheReadTokens,
+		CacheWrite5m: u.cacheWrite5m,
+		CacheWrite1h: u.cacheWrite1h,
+	})
+	costUSD := priced.CostUSD
+	rateID := priced.RateID
+	if priced.Source == pricing.SourceFallback {
+		rateID = store.RateIDEmbeddedFallback
+	}
 
 	if s.dryRun {
 		slog.Info("dry-run",
@@ -534,6 +552,7 @@ func (s *scraper) emit(u sessionUsage, agentName, agentID string) bool {
 		ServiceTier:      u.serviceTier,
 		Speed:            u.speed,
 		CostUSD:          costUSD,
+		RateID:           rateID,
 		Timestamp:        u.timestamp.UTC().Format(time.RFC3339Nano),
 	}
 

@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -111,7 +112,10 @@ type mcpIdentity struct {
 type instanceEntry struct {
 	name         string // unique roster name (e.g., "@Explore-2")
 	rosterID     string
-	healAttempts int // bounds selfHealParentRef retries — see its doc comment
+	healAttempts int       // bounds selfHealParentRef retries — see its doc comment
+	parentKnown  bool      // ParentRef is set; no heal needed
+	descKnown    bool      // description came from the sidecar (ground truth); no heal needed
+	lastHealAt   time.Time // spaces async heal launches from tool events
 }
 
 // Server receives hook telemetry events via HTTP and writes them to a JSONL log.
@@ -136,14 +140,17 @@ type Server struct {
 	subagentNames    subagentNameMap
 	regMu            sync.Mutex
 	instanceRegistry map[string]instanceEntry
-	pendingMCPMu     sync.Mutex
-	pendingMCPIdent  map[string][]mcpIdentity // key: "toolSuffix:entityID", FIFO per key
-	focusNudge       focusNudgeCache
-	pressureNudge    pressureNudgeCache
-	wmsWarnings      wmsWarningQueue
-	rosterLastSeen   lastSeenCache
-	turnStates       turnStateTracker
-	registry         *intercept.Registry
+	// earlyRegistered holds instKeys whose roster row was written by the
+	// early (first tool event) path, so SubagentStart still owes a FIFO pop.
+	earlyRegistered map[string]struct{}
+	pendingMCPMu    sync.Mutex
+	pendingMCPIdent map[string][]mcpIdentity // key: "toolSuffix:entityID", FIFO per key
+	focusNudge      focusNudgeCache
+	pressureNudge   pressureNudgeCache
+	wmsWarnings     wmsWarningQueue
+	rosterLastSeen  lastSeenCache
+	turnStates      turnStateTracker
+	registry        *intercept.Registry
 }
 
 // storeOpenMaxAttempts bounds how many times NewServer retries store.Open
@@ -312,6 +319,7 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.Handle("/health", timed(s.handleHealth))
 	mux.HandleFunc("/events/stream", s.handleSSE)
 	mux.Handle("/api/events", timed(s.handleEventsAPI))
+	mux.Handle("/rates", timed(s.handleRates))
 
 	if s.cfg.ReadOnly {
 		reject := func(w http.ResponseWriter, r *http.Request) {
@@ -646,6 +654,16 @@ func (s *Server) dispatchObservability(event hook.HookEvent, data map[string]int
 					now := time.Now().UTC()
 					spawnerType, _ := data["_spawner_type"].(string)
 					go func() {
+						if event.AgentID != "" {
+							if existingID, err := s.obsStore.ResolveRosterID(ctx, event.SessionID, agent); err == nil {
+								if existing, err := s.obsStore.GetRosterEntry(ctx, existingID); err == nil &&
+									existing.AgentID != "" && existing.AgentID != event.AgentID {
+									slog.Debug("roster row belongs to another instance; deferring to SubagentStart",
+										"session", event.SessionID, "agent", agent, "agent_id", event.AgentID, "owner_agent_id", existing.AgentID)
+									return
+								}
+							}
+						}
 						sess := store.Session{
 							SessionID: event.SessionID,
 							AgentName: agent,
@@ -691,6 +709,7 @@ func (s *Server) dispatchObservability(event hook.HookEvent, data map[string]int
 							Relationship: rel,
 							CreatedAt:    now,
 							BoundAt:      &boundAt,
+							AgentID:      event.AgentID,
 						}
 						// Attempt to resolve the parent's roster_id as parent_ref.
 						// macOS separate-session teammates carry _parent_session_id
@@ -721,6 +740,13 @@ func (s *Server) dispatchObservability(event hook.HookEvent, data map[string]int
 						}
 						if err := s.obsStore.UpsertRosterEntry(ctx, entry); err != nil {
 							slog.Warn("upsert roster entry", "session", event.SessionID, "agent", agent, "roster_id", rosterID, "error", err)
+						} else if event.AgentID != "" {
+							s.regMu.Lock()
+							if s.earlyRegistered == nil {
+								s.earlyRegistered = make(map[string]struct{})
+							}
+							s.earlyRegistered[event.SessionID+"|"+event.AgentID] = struct{}{}
+							s.regMu.Unlock()
 						}
 					}()
 				}
@@ -1269,7 +1295,34 @@ func (s *Server) registerNewSubagentInstance(ctx context.Context, event hook.Hoo
 	// parent-ref-fifo-fix WU).
 	sidecarMeta := readSidecarForEvent(event)
 
-	baseName, spawnerType := s.subagentNames.pop(sessionID, agentType)
+	if event.AgentID != "" && s.obsStore != nil {
+		name, err := s.obsStore.ResolveByAgentID(ctx, sessionID, event.AgentID)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			slog.Warn("resolve by agent_id", "session", sessionID, "agent_id", event.AgentID, "error", err)
+		}
+		if err == nil {
+			if rosterID, err := s.obsStore.ResolveRosterID(ctx, sessionID, name); err == nil {
+				s.regMu.Lock()
+				if s.instanceRegistry == nil {
+					s.instanceRegistry = make(map[string]instanceEntry)
+				}
+				_, early := s.earlyRegistered[instKey]
+				delete(s.earlyRegistered, instKey)
+				s.instanceRegistry[instKey] = instanceEntry{name: name, rosterID: rosterID}
+				s.regMu.Unlock()
+				if early {
+					s.completeEarlyRegistration(ctx, event, instKey, rosterID)
+				} else if entry, err := s.obsStore.GetRosterEntry(ctx, rosterID); err == nil && entry.ParentRef != nil {
+					s.markParentKnown(instKey)
+				}
+				data["_agent_name"] = name
+				s.sessions.Upsert(sessionID, strings.TrimPrefix(name, "@"))
+				return name
+			}
+		}
+	}
+
+	baseName, spawnerType, fifoDesc := s.subagentNames.popWithDescription(sessionID, agentType)
 	// spawnerKnown distinguishes "the FIFO gave us a confirmed answer, and
 	// that answer happens to be the lead" (baseName came back non-empty,
 	// spawnerType=="" because the lead's own events carry no agent_type)
@@ -1290,7 +1343,9 @@ func (s *Server) registerNewSubagentInstance(ctx context.Context, event hook.Hoo
 			if rosterID, err := s.obsStore.ResolveRosterID(ctx, sessionID, resolvedName); err == nil {
 				// Before adopting: check no other instance already maps to
 				// this name (concurrent same-type agents after hookd
-				// restart could otherwise both try to adopt it).
+				// restart could otherwise both try to adopt it). The adopt
+				// decision itself runs under regMu so the agent_id claim and
+				// the registry insert are one step for racing resumes.
 				alreadyClaimed := false
 				s.regMu.Lock()
 				for _, existing := range s.instanceRegistry {
@@ -1299,7 +1354,7 @@ func (s *Server) registerNewSubagentInstance(ctx context.Context, event hook.Hoo
 						break
 					}
 				}
-				if !alreadyClaimed {
+				if !alreadyClaimed && s.adoptRosterRow(ctx, event, rosterID) {
 					if s.instanceRegistry == nil {
 						s.instanceRegistry = make(map[string]instanceEntry)
 					}
@@ -1311,7 +1366,8 @@ func (s *Server) registerNewSubagentInstance(ctx context.Context, event hook.Hoo
 				}
 				s.regMu.Unlock()
 				// Fall through to create a new entry — this name is already
-				// adopted by a sibling's resume.
+				// adopted by a sibling's resume, or its row belongs to
+				// another agent_id.
 			}
 		}
 		baseName = agentNameFor(agentType)
@@ -1374,6 +1430,18 @@ func (s *Server) registerNewSubagentInstance(ctx context.Context, event hook.Hoo
 	if sidecarMeta != nil && sidecarMeta.Model != "" {
 		entry.Model = sidecarMeta.Model
 	}
+	// The sidecar is exact per agent_id; the FIFO can cross-label parallel
+	// same-type spawns, so it is only a fallback (and stays open to heal).
+	descFromSidecar := false
+	if sidecarMeta != nil {
+		if d := store.SanitizeRosterDescription(sidecarMeta.Description); d != "" {
+			entry.Description = d
+			descFromSidecar = true
+		}
+	}
+	if entry.Description == "" {
+		entry.Description = store.SanitizeRosterDescription(fifoDesc)
+	}
 	if s.obsStore != nil {
 		// Sidecar parentAgentId, when present, is exact — prefer it over the
 		// FIFO/TTL name-matching heuristic's parentAgent guess, which can
@@ -1411,7 +1479,7 @@ func (s *Server) registerNewSubagentInstance(ctx context.Context, event hook.Hoo
 			slog.Warn("upsert roster entry", "session", sessionID, "agent", unique, "roster_id", rosterID, "error", err)
 		}
 	}
-	s.instanceRegistry[instKey] = instanceEntry{name: unique, rosterID: rosterID}
+	s.instanceRegistry[instKey] = instanceEntry{name: unique, rosterID: rosterID, parentKnown: entry.ParentRef != nil, descKnown: descFromSidecar}
 	s.regMu.Unlock()
 
 	s.subagentNames.setResolved(sessionID, agentType, unique, spawnerType)
@@ -1437,6 +1505,101 @@ func (s *Server) registerNewSubagentInstance(ctx context.Context, event hook.Hoo
 	return unique
 }
 
+// adoptRosterRow decides whether the instance in event may take over an
+// existing roster row found by name, and performs the claim when needed. Must
+// be called with regMu held. A row stamped with a different agent_id belongs
+// to another (typically dead) instance and is never inherited — its gauges,
+// cost and ledger would leak across (teamster#27). A legacy row with no
+// agent_id is claimed atomically (ClaimRosterAgentID) so only one of several
+// racing resumes can take it. Any store error fails closed (caller numbers).
+func (s *Server) adoptRosterRow(ctx context.Context, event hook.HookEvent, rosterID string) bool {
+	entry, err := s.obsStore.GetRosterEntry(ctx, rosterID)
+	if err != nil {
+		slog.Warn("adopt roster row: read entry", "session", event.SessionID, "roster_id", rosterID, "error", err)
+		return false
+	}
+	if entry.AgentID == event.AgentID {
+		return true
+	}
+	if entry.AgentID != "" || event.AgentID == "" {
+		return false
+	}
+	claimed, err := s.obsStore.ClaimRosterAgentID(ctx, rosterID, event.AgentID)
+	if err != nil {
+		slog.Warn("adopt roster row: claim agent_id", "session", event.SessionID, "roster_id", rosterID, "error", err)
+		return false
+	}
+	return claimed
+}
+
+// markParentKnown records that the instance's row has a ParentRef so
+// resolveSubagentName stops launching heal attempts for it.
+func (s *Server) markParentKnown(instKey string) {
+	s.regMu.Lock()
+	if inst, ok := s.instanceRegistry[instKey]; ok {
+		inst.parentKnown = true
+		s.instanceRegistry[instKey] = inst
+	}
+	s.regMu.Unlock()
+}
+
+func (s *Server) markDescKnown(instKey string) {
+	s.regMu.Lock()
+	if inst, ok := s.instanceRegistry[instKey]; ok {
+		inst.descKnown = true
+		s.instanceRegistry[instKey] = inst
+	}
+	s.regMu.Unlock()
+}
+
+// completeEarlyRegistration finishes the FIFO bookkeeping SubagentStart owes
+// an instance whose roster row was written by the early path: it consumes the
+// lead's queued spawn record (so it can't shift the next same-type spawn) and
+// uses the spawner to fill a nil ParentRef.
+func (s *Server) completeEarlyRegistration(ctx context.Context, event hook.HookEvent, instKey, rosterID string) {
+	_, spawnerType, fifoDesc := s.subagentNames.popWithDescription(event.SessionID, event.AgentType)
+	entry, err := s.obsStore.GetRosterEntry(ctx, rosterID)
+	if err != nil {
+		return
+	}
+	desc, fromSidecar := store.SanitizeRosterDescription(fifoDesc), false
+	if sc := readSidecarForEvent(event); sc != nil {
+		if d := store.SanitizeRosterDescription(sc.Description); d != "" {
+			desc, fromSidecar = d, true
+		}
+	}
+	if desc != "" && (entry.Description == "" || (fromSidecar && entry.Description != desc)) {
+		if err := s.obsStore.SetRosterDescription(ctx, rosterID, desc); err != nil {
+			slog.Warn("early registration: set description", "session", event.SessionID, "roster_id", rosterID, "error", err)
+		} else {
+			entry.Description = desc
+			if fromSidecar {
+				s.markDescKnown(instKey)
+			}
+		}
+	} else if fromSidecar {
+		s.markDescKnown(instKey)
+	}
+	if entry.ParentRef != nil {
+		s.markParentKnown(instKey)
+		return
+	}
+	if spawnerType == "" {
+		return
+	}
+	parentID, err := s.obsStore.ResolveRosterID(ctx, event.SessionID, agentNameFor(spawnerType))
+	if err != nil {
+		return
+	}
+	entry.ParentRef = &parentID
+	entry.Relationship = "subagent"
+	if err := s.obsStore.UpsertRosterEntry(ctx, entry); err != nil {
+		slog.Warn("early registration: set parent_ref", "session", event.SessionID, "roster_id", rosterID, "error", err)
+		return
+	}
+	s.markParentKnown(instKey)
+}
+
 // subagentMeta is the subset of a Claude Code agent-<id>.meta.json sidecar
 // (written alongside a subagent's transcript at launch time) that
 // registerNewSubagentInstance uses to enrich roster registration with ground
@@ -1448,6 +1611,7 @@ type subagentMeta struct {
 	ParentAgentID string `json:"parentAgentId"`
 	Model         string `json:"model"`
 	SpawnDepth    int    `json:"spawnDepth"`
+	Description   string `json:"description"`
 }
 
 // readSubagentMeta reads and parses a subagent's meta.json sidecar.
@@ -1526,6 +1690,11 @@ func readSidecarForEvent(event hook.HookEvent) *subagentMeta {
 // read plus a DB round trip for the rest of its life.
 const selfHealMaxAttempts = 3
 
+// selfHealMinSpacing is the minimum gap between heal attempts launched from
+// an instance's tool events, so a Pre/Post pair can't burn the whole budget
+// within milliseconds. A var so tests can shrink it.
+var selfHealMinSpacing = 5 * time.Second
+
 // selfHealParentRef re-attempts parent resolution for an already-registered
 // instance (instKey already in instanceRegistry, i.e. this is a turn-resume,
 // not the initial registration) whose roster row still has a nil ParentRef —
@@ -1553,12 +1722,35 @@ func (s *Server) selfHealParentRef(ctx context.Context, event hook.HookEvent, in
 	s.regMu.Unlock()
 
 	entry, err := s.obsStore.GetRosterEntry(ctx, inst.rosterID)
-	if err != nil || entry.ParentRef != nil {
+	if err != nil {
+		return
+	}
+	needParent := entry.ParentRef == nil
+	needDesc := !inst.descKnown
+	if !needParent {
+		s.markParentKnown(instKey)
+	}
+	if !needParent && !needDesc {
 		return
 	}
 
 	sidecarMeta := readSidecarForEvent(event)
-	if sidecarMeta == nil || sidecarMeta.ParentAgentID == "" {
+	if sidecarMeta == nil {
+		return
+	}
+	// The sidecar description is ground truth for this agent_id, so unlike
+	// parent_ref it may correct a stored (FIFO-sourced) value.
+	if d := store.SanitizeRosterDescription(sidecarMeta.Description); needDesc && d != "" {
+		if d == entry.Description {
+			s.markDescKnown(instKey)
+		} else if err := s.obsStore.SetRosterDescription(ctx, inst.rosterID, d); err != nil {
+			slog.Warn("self-heal: set description", "session", event.SessionID, "roster_id", inst.rosterID, "error", err)
+		} else {
+			entry.Description = d
+			s.markDescKnown(instKey)
+		}
+	}
+	if !needParent || sidecarMeta.ParentAgentID == "" {
 		return
 	}
 	parentID, err := s.resolveParentRosterID(ctx, event.SessionID, sidecarMeta.ParentAgentID)
@@ -1578,7 +1770,9 @@ func (s *Server) selfHealParentRef(ctx context.Context, event hook.HookEvent, in
 	}
 	if err := s.obsStore.UpsertRosterEntry(ctx, entry); err != nil {
 		slog.Warn("self-heal: correct parent_ref", "session", event.SessionID, "roster_id", inst.rosterID, "error", err)
+		return
 	}
+	s.markParentKnown(instKey)
 }
 
 // activityFromData extracts the (tag, display) pair hook.EnrichRecord wrote
@@ -1960,6 +2154,7 @@ func (s *Server) injectMCPIdentity(raw json.RawMessage) json.RawMessage {
 type subagentEntry struct {
 	name       string
 	spawner    string
+	desc       string
 	recordedAt time.Time
 }
 
@@ -2000,13 +2195,19 @@ func subagentNameKey(sessionID, agentType string) string {
 }
 
 func (m *subagentNameMap) record(sessionID, agentType, name, spawnerType string) {
+	m.recordWithDescription(sessionID, agentType, name, spawnerType, "")
+}
+
+// recordWithDescription is record plus the Agent-tool tool_input.description,
+// the human-readable label that survives when CC blocks the name parameter.
+func (m *subagentNameMap) recordWithDescription(sessionID, agentType, name, spawnerType, desc string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.m == nil {
 		m.m = make(map[string][]subagentEntry)
 	}
 	key := subagentNameKey(sessionID, agentType)
-	m.m[key] = append(m.m[key], subagentEntry{name: "@" + name, spawner: spawnerType, recordedAt: time.Now()})
+	m.m[key] = append(m.m[key], subagentEntry{name: "@" + name, spawner: spawnerType, desc: desc, recordedAt: time.Now()})
 }
 
 // pop dequeues the oldest queued entry for (sessionID, agentType), mirroring
@@ -2015,12 +2216,19 @@ func (m *subagentNameMap) record(sessionID, agentType, name, spawnerType string)
 // consumed (and still mirrored to resolved as a display fallback), just not
 // reported as a confirmed match to the caller.
 func (m *subagentNameMap) pop(sessionID, agentType string) (name, spawner string) {
+	name, spawner, _ = m.popWithDescription(sessionID, agentType)
+	return name, spawner
+}
+
+// popWithDescription is pop plus the entry's Agent-tool description; the
+// description is withheld ("") under the same conditions as name and spawner.
+func (m *subagentNameMap) popWithDescription(sessionID, agentType string) (name, spawner, desc string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	key := subagentNameKey(sessionID, agentType)
 	queue := m.m[key]
 	if len(queue) == 0 {
-		return "", ""
+		return "", "", ""
 	}
 	entry := queue[0]
 	if len(queue) == 1 {
@@ -2033,9 +2241,9 @@ func (m *subagentNameMap) pop(sessionID, agentType string) (name, spawner string
 	}
 	m.resolved[key] = entry
 	if time.Since(entry.recordedAt) > subagentEntryTTL {
-		return "", ""
+		return "", "", ""
 	}
-	return entry.name, entry.spawner
+	return entry.name, entry.spawner, entry.desc
 }
 
 // peek returns the sticky last-resolved name for (sessionID, agentType)
@@ -2251,7 +2459,8 @@ func (s *Server) resolveSubagentName(event hook.HookEvent, data map[string]inter
 		if displayName == "" {
 			displayName = agentType
 		}
-		s.subagentNames.record(event.SessionID, agentType, displayName, event.AgentType)
+		s.subagentNames.recordWithDescription(event.SessionID, agentType, displayName, event.AgentType,
+			store.SanitizeRosterDescription(hook.StrField(ti, "description", 4096)))
 	}
 
 	if event.AgentID != "" {
@@ -2259,9 +2468,22 @@ func (s *Server) resolveSubagentName(event hook.HookEvent, data map[string]inter
 		s.regMu.Lock()
 		if inst, ok := s.instanceRegistry[instKey]; ok {
 			data["_agent_name"] = inst.name
+			heal := event.HookEventName != "SubagentStart" && (!inst.parentKnown || !inst.descKnown) &&
+				inst.healAttempts < selfHealMaxAttempts && time.Since(inst.lastHealAt) >= selfHealMinSpacing
+			if heal {
+				inst.lastHealAt = time.Now()
+				s.instanceRegistry[instKey] = inst
+			}
 			s.regMu.Unlock()
 			if _, spawner := s.subagentNames.peek(event.SessionID, event.AgentType); spawner != "" {
 				data["_spawner_type"] = spawner
+			}
+			if heal {
+				go func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cancel()
+					s.selfHealParentRef(ctx, event, instKey)
+				}()
 			}
 			return
 		}

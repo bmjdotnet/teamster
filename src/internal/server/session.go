@@ -3,7 +3,9 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -28,6 +30,7 @@ type SessionRow struct {
 	CliVersion   string `json:"cli_version"`
 	Relationship string `json:"relationship,omitempty"`
 	BusTeam      string `json:"bus_team,omitempty"`
+	AgentID      string `json:"agent_id,omitempty"`
 }
 
 // handleSession accepts POST /session with a SessionRow JSON body and upserts
@@ -111,10 +114,30 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		Model:        row.Model,
 		Relationship: rel,
 		BusTeam:      row.BusTeam,
+		AgentID:      row.AgentID,
 		CreatedAt:    now,
 		BoundAt:      &boundAt,
 	}
-	_ = s.obsStore.UpsertRosterEntry(ctx, rosterEntry)
+	// A subagent thread nests under its root thread's roster row (the one with
+	// agent_name ""), mirroring dispatchObservability's parent_ref resolution
+	// for Claude. A missing parent leaves ParentRef nil; the next upsert heals it.
+	if rel == "subagent" && row.AgentName != "" {
+		if parentID, err := s.obsStore.ResolveRosterID(ctx, row.SessionID, ""); err == nil && parentID != "" {
+			rosterEntry.ParentRef = &parentID
+			if parent, err := s.obsStore.GetRosterEntry(ctx, parentID); err == nil {
+				rosterEntry.TeamName = parent.TeamName
+			} else {
+				slog.Warn("session: get parent roster entry", "session", row.SessionID, "parent", parentID, "error", err)
+			}
+		} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+			slog.Warn("session: resolve parent roster", "session", row.SessionID, "error", err)
+		} else {
+			slog.Debug("session: subagent parent not registered yet", "session", row.SessionID)
+		}
+	}
+	if err := s.obsStore.UpsertRosterEntry(ctx, rosterEntry); err != nil {
+		slog.Warn("session: upsert roster entry", "session", row.SessionID, "agent", row.AgentName, "error", err)
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)

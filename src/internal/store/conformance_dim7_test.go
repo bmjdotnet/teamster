@@ -5,8 +5,10 @@ package store_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/bmjdotnet/teamster/internal/store"
 )
@@ -150,6 +152,60 @@ func TestRosterUpsertBlankTeamNamePreservesExisting(t *testing.T) {
 		}
 		if got.TeamName != "new-crew" {
 			t.Fatalf("non-blank team_name upsert should still apply: got %q, want %q", got.TeamName, "new-crew")
+		}
+	})
+}
+
+func TestRosterUpsertBlankIdentityPreservesExisting(t *testing.T) {
+	run(t, func(t *testing.T, s store.Store) {
+		ctx := context.Background()
+		now := time.Now().UTC().Truncate(time.Microsecond)
+		sid := "sess-blank-ident"
+		p1, p2 := "P", "P2"
+		entry := store.RosterEntry{
+			RosterID:     "r-ident-1",
+			SessionID:    &sid,
+			AgentName:    "@impl",
+			Host:         "host-a",
+			Runtime:      "codex",
+			Relationship: "teammate",
+			TeamName:     "T",
+			ParentRef:    &p1,
+			AgentID:      "A",
+			CreatedAt:    now,
+			BoundAt:      &now,
+		}
+		if err := s.UpsertRosterEntry(ctx, entry); err != nil {
+			t.Fatal(err)
+		}
+
+		blank := entry
+		blank.TeamName, blank.ParentRef, blank.AgentID = "", nil, ""
+		if err := s.UpsertRosterEntry(ctx, blank); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.GetRosterEntry(ctx, "r-ident-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.TeamName != "T" || got.ParentRef == nil || *got.ParentRef != "P" {
+			t.Fatalf("blank upsert clobbered identity: team=%q parent=%v", got.TeamName, got.ParentRef)
+		}
+		if name, err := s.ResolveByAgentID(ctx, sid, "A"); err != nil || name != "@impl" {
+			t.Fatalf("blank upsert clobbered agent_id: name=%q err=%v", name, err)
+		}
+
+		replaced := entry
+		replaced.ParentRef = &p2
+		if err := s.UpsertRosterEntry(ctx, replaced); err != nil {
+			t.Fatal(err)
+		}
+		got, err = s.GetRosterEntry(ctx, "r-ident-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.ParentRef == nil || *got.ParentRef != "P2" {
+			t.Fatalf("non-blank parent_ref should replace: got %v, want P2", got.ParentRef)
 		}
 	})
 }
@@ -736,6 +792,193 @@ func TestRosterUnboundEntry(t *testing.T) {
 		}
 		if gotEntry.SessionID == nil || *gotEntry.SessionID != "sess-new" {
 			t.Fatalf("after bind, session_id should be sess-new: %v", gotEntry.SessionID)
+		}
+	})
+}
+
+func TestRosterAgentIDRoundTripsOnRead(t *testing.T) {
+	run(t, func(t *testing.T, s store.Store) {
+		ctx := context.Background()
+		now := time.Now().UTC().Truncate(time.Microsecond)
+		sid := "sess-agentid-read"
+		entry := store.RosterEntry{
+			RosterID:     "r-aid-1",
+			SessionID:    &sid,
+			AgentName:    "@redteam",
+			Host:         "host-a",
+			Runtime:      "claude_code",
+			Relationship: "teammate",
+			AgentID:      "aredteam-6d519fb763043287",
+			CreatedAt:    now,
+		}
+		if err := s.UpsertRosterEntry(ctx, entry); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.GetRosterEntry(ctx, "r-aid-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.AgentID != entry.AgentID {
+			t.Fatalf("GetRosterEntry AgentID = %q, want %q", got.AgentID, entry.AgentID)
+		}
+		list, err := s.ListRosterEntries(ctx, store.RosterFilter{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, e := range list {
+			if e.RosterID == "r-aid-1" {
+				found = true
+				if e.AgentID != entry.AgentID {
+					t.Fatalf("ListRosterEntries AgentID = %q, want %q", e.AgentID, entry.AgentID)
+				}
+			}
+		}
+		if !found {
+			t.Fatal("entry missing from ListRosterEntries")
+		}
+	})
+}
+
+func TestRosterClaimAgentIDExactlyOnce(t *testing.T) {
+	run(t, func(t *testing.T, s store.Store) {
+		ctx := context.Background()
+		sid := "sess-claim"
+		if err := s.UpsertRosterEntry(ctx, store.RosterEntry{
+			RosterID: "r-claim", SessionID: &sid, AgentName: "@old", Host: "h",
+			Runtime: "claude_code", Relationship: "teammate", CreatedAt: time.Now().UTC().Truncate(time.Microsecond),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		ok, err := s.ClaimRosterAgentID(ctx, "r-claim", "A1")
+		if err != nil || !ok {
+			t.Fatalf("first claim: ok=%v err=%v", ok, err)
+		}
+		ok, err = s.ClaimRosterAgentID(ctx, "r-claim", "A2")
+		if err != nil || ok {
+			t.Fatalf("second claim must lose: ok=%v err=%v", ok, err)
+		}
+		got, err := s.GetRosterEntry(ctx, "r-claim")
+		if err != nil || got.AgentID != "A1" {
+			t.Fatalf("agent_id=%q err=%v, want A1", got.AgentID, err)
+		}
+	})
+}
+
+func TestRosterDescriptionRoundTripAndRetention(t *testing.T) {
+	run(t, func(t *testing.T, s store.Store) {
+		ctx := context.Background()
+		sid := "sess-desc"
+		entry := store.RosterEntry{
+			RosterID: "r-desc", SessionID: &sid, AgentName: "@Explore-5", Host: "h",
+			Runtime: "claude_code", Relationship: "subagent", Description: "Scout macOS identity pipeline",
+			CreatedAt: time.Now().UTC().Truncate(time.Microsecond),
+		}
+		if err := s.UpsertRosterEntry(ctx, entry); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.GetRosterEntry(ctx, "r-desc")
+		if err != nil || got.Description != entry.Description {
+			t.Fatalf("Get description = %q err=%v, want %q", got.Description, err, entry.Description)
+		}
+		list, err := s.ListRosterEntries(ctx, store.RosterFilter{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, e := range list {
+			if e.RosterID == "r-desc" {
+				found = true
+				if e.Description != entry.Description {
+					t.Fatalf("List description = %q, want %q", e.Description, entry.Description)
+				}
+			}
+		}
+		if !found {
+			t.Fatal("entry missing from ListRosterEntries")
+		}
+		entry.Description = ""
+		if err := s.UpsertRosterEntry(ctx, entry); err != nil {
+			t.Fatal(err)
+		}
+		got, err = s.GetRosterEntry(ctx, "r-desc")
+		if err != nil || got.Description != "Scout macOS identity pipeline" {
+			t.Fatalf("description after empty upsert = %q err=%v, want preserved", got.Description, err)
+		}
+	})
+}
+
+func TestRosterDescriptionSanitizedAndClamped(t *testing.T) {
+	run(t, func(t *testing.T, s store.Store) {
+		ctx := context.Background()
+		sid := "sess-desc-clamp"
+		wide := strings.Repeat("a", 254) + "é" + "日本語" + strings.Repeat("z", 50)
+		entry := store.RosterEntry{
+			RosterID: "r-clamp", SessionID: &sid, AgentName: "@c", Host: "h", Runtime: "claude_code",
+			Relationship: "subagent", Description: "a\nb\x1b[0m\tc " + wide, CreatedAt: time.Now().UTC().Truncate(time.Microsecond),
+		}
+		check := func(label string) {
+			got, err := s.GetRosterEntry(ctx, "r-clamp")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !utf8.ValidString(got.Description) || len([]rune(got.Description)) > 255 || strings.ContainsAny(got.Description, "\n\t\x1b") {
+				t.Fatalf("%s: description invalid/oversized: %q", label, got.Description)
+			}
+		}
+		if err := s.CreateRosterEntry(ctx, entry); err != nil {
+			t.Fatalf("Create with oversized description: %v", err)
+		}
+		check("create")
+		entry.Description = strings.Repeat("é", 300)
+		if err := s.UpsertRosterEntry(ctx, entry); err != nil {
+			t.Fatalf("Upsert with 300 multibyte runes: %v", err)
+		}
+		check("upsert")
+		if err := s.SetRosterDescription(ctx, "r-clamp", strings.Repeat("日", 400)); err != nil {
+			t.Fatalf("SetRosterDescription: %v", err)
+		}
+		check("set")
+	})
+}
+
+func TestSetRosterDescriptionOverwritesOnlyDescription(t *testing.T) {
+	run(t, func(t *testing.T, s store.Store) {
+		ctx := context.Background()
+		sid := "sess-set-desc"
+		entry := store.RosterEntry{
+			RosterID: "r-set", SessionID: &sid, AgentName: "@s", Host: "h", Runtime: "claude_code",
+			Relationship: "subagent", TeamName: "tm", Description: "old", CreatedAt: time.Now().UTC().Truncate(time.Microsecond),
+		}
+		if err := s.UpsertRosterEntry(ctx, entry); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetRosterDescription(ctx, "r-set", "new"); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.GetRosterEntry(ctx, "r-set")
+		if err != nil || got.Description != "new" || got.TeamName != "tm" || got.Relationship != "subagent" {
+			t.Fatalf("got %+v err=%v", got, err)
+		}
+		if err := s.SetRosterDescription(ctx, "r-missing", "x"); err == nil {
+			t.Fatal("SetRosterDescription on a missing row must error")
+		}
+	})
+}
+
+func TestCreateRosterEntryWritesDescription(t *testing.T) {
+	run(t, func(t *testing.T, s store.Store) {
+		ctx := context.Background()
+		sid := "sess-create-desc"
+		if err := s.CreateRosterEntry(ctx, store.RosterEntry{
+			RosterID: "r-cd", SessionID: &sid, AgentName: "@cd", Host: "h", Runtime: "claude_code",
+			Relationship: "subagent", Description: "created label", CreatedAt: time.Now().UTC().Truncate(time.Microsecond),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.GetRosterEntry(ctx, "r-cd")
+		if err != nil || got.Description != "created label" {
+			t.Fatalf("Description = %q err=%v", got.Description, err)
 		}
 	})
 }

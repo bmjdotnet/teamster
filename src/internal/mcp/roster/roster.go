@@ -222,6 +222,7 @@ type agentView struct {
 	BusTeam      string  `json:"bus_team"`
 	Relationship string  `json:"relationship"`
 	ParentRef    *string `json:"parent_ref"`
+	Description  string  `json:"description,omitempty"`
 	Liveness     string  `json:"liveness"`
 	LastSeen     *string `json:"last_seen,omitempty"`
 	RevokedAt    *string `json:"revoked_at,omitempty"`
@@ -240,6 +241,7 @@ func buildView(entry store.RosterEntry, session *store.Session, tok *store.Agent
 		BusTeam:      entry.BusTeam,
 		Relationship: entry.Relationship,
 		ParentRef:    entry.ParentRef,
+		Description:  entry.Description,
 		Liveness:     ComputeLiveness(entry, session),
 	}
 	if session != nil {

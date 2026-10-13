@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/bmjdotnet/teamster/internal/agenthealth/gauge"
 )
@@ -68,7 +69,7 @@ func TestFindTeammateTranscript_MatchesByName(t *testing.T) {
 		Name: "collector", TaskKind: taskKindTeammate, Model: "sonnet",
 	}, nil)
 
-	path, meta, err := findTeammateTranscript("sess-1", "@collector")
+	path, meta, err := findTeammateTranscript("sess-1", "@collector", "")
 	if err != nil {
 		t.Fatalf("findTeammateTranscript: %v", err)
 	}
@@ -90,7 +91,7 @@ func TestFindTeammateTranscript_SkipsNonTeammateTaskKind(t *testing.T) {
 		Name: "collector", TaskKind: "local_agent", Model: "sonnet",
 	}, nil)
 
-	_, _, err := findTeammateTranscript("sess-1", "@collector")
+	_, _, err := findTeammateTranscript("sess-1", "@collector", "")
 	if err == nil {
 		t.Fatal("expected error — no teammate-taskKind sidecar should match")
 	}
@@ -105,7 +106,7 @@ func TestFindTeammateTranscript_FallsBackToAgentType(t *testing.T) {
 		AgentType: "collector", TaskKind: taskKindTeammate, Model: "sonnet",
 	}, nil)
 
-	path, _, err := findTeammateTranscript("sess-1", "@collector")
+	path, _, err := findTeammateTranscript("sess-1", "@collector", "")
 	if err != nil {
 		t.Fatalf("findTeammateTranscript: %v", err)
 	}
@@ -118,7 +119,7 @@ func TestFindTeammateTranscript_NotFound(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
-	_, _, err := findTeammateTranscript("sess-1", "@nobody")
+	_, _, err := findTeammateTranscript("sess-1", "@nobody", "")
 	if err == nil {
 		t.Fatal("expected error for unknown agent")
 	}
@@ -218,7 +219,7 @@ func TestTeammateContextTracker_Update_Transcript(t *testing.T) {
 		[]string{assistantLine(2, 117_000, 1_500, 300)})
 
 	tr := newTeammateContextTracker()
-	result := tr.Update("sess-1", "@collector", "", 0, false)
+	result := tr.Update("sess-1", "@collector", "", "", 0, false)
 
 	if result.Source != gauge.ContextSourceTranscript {
 		t.Fatalf("Source = %q, want transcript", result.Source)
@@ -244,7 +245,7 @@ func TestTeammateContextTracker_Update_NoTranscript_Unavailable(t *testing.T) {
 	t.Setenv("HOME", home)
 
 	tr := newTeammateContextTracker()
-	result := tr.Update("sess-1", "@ghost", "claude-opus-4-6", 1_000_000, true)
+	result := tr.Update("sess-1", "@ghost", "", "claude-opus-4-6", 1_000_000, true)
 
 	if result.Source != gauge.ContextSourceUnavailable {
 		t.Fatalf("Source = %q, want unavailable", result.Source)
@@ -265,7 +266,7 @@ func TestTeammateContextTracker_Update_SameModelLeadFallback(t *testing.T) {
 		[]string{assistantLine(2, 50_000, 1_000, 300)})
 
 	tr := newTeammateContextTracker()
-	result := tr.Update("sess-1", "@collector", "some-future-model", 900_000, true)
+	result := tr.Update("sess-1", "@collector", "", "some-future-model", 900_000, true)
 
 	if result.Source != gauge.ContextSourceFallback {
 		t.Fatalf("Source = %q, want fallback", result.Source)
@@ -351,9 +352,149 @@ func TestTeammateContextTracker_Update_DifferentModel_NoFallback(t *testing.T) {
 	tr := newTeammateContextTracker()
 	// Lead is on a different, known model — fallback must not apply since
 	// the models don't match.
-	result := tr.Update("sess-1", "@collector", "claude-opus-4-6", 1_000_000, true)
+	result := tr.Update("sess-1", "@collector", "", "claude-opus-4-6", 1_000_000, true)
 
 	if result.Source != gauge.ContextSourceUnavailable {
 		t.Fatalf("Source = %q, want unavailable (models differ, no fallback)", result.Source)
+	}
+}
+
+func TestFindTeammateTranscript_ByAgentID_BeatsNewestSameName(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	live := writeSidecarTranscript(t, home, "sess-1", "alive1", agentSidecar{
+		Name: "redteam", TaskKind: taskKindTeammate, Model: "sonnet",
+	}, nil)
+	dead := writeSidecarTranscript(t, home, "sess-1", "adead1", agentSidecar{
+		Name: "redteam", TaskKind: taskKindTeammate, Model: "opus",
+	}, nil)
+	// The dead instance has the newest mtime: the name path alone would pick it.
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(live, old, old); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	byName, _, err := findTeammateTranscript("sess-1", "@redteam", "")
+	if err != nil || byName != dead {
+		t.Fatalf("name path = %q, %v; want newest (dead) %q", byName, err, dead)
+	}
+	path, meta, err := findTeammateTranscript("sess-1", "@redteam", "alive1")
+	if err != nil {
+		t.Fatalf("findTeammateTranscript: %v", err)
+	}
+	if path != live || meta.Model != "sonnet" {
+		t.Errorf("path = %q model = %q, want %q sonnet", path, meta.Model, live)
+	}
+}
+
+func TestFindTeammateTranscript_NumberedTeammateFoundByAgentID(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	want := writeSidecarTranscript(t, home, "sess-1", "anum2", agentSidecar{
+		Name: "redteam", TaskKind: taskKindTeammate, Model: "sonnet",
+	}, nil)
+
+	if _, _, err := findTeammateTranscript("sess-1", "@redteam-2", ""); err == nil {
+		t.Fatal("name path must miss @redteam-2 (sidecar name is redteam)")
+	}
+	path, _, err := findTeammateTranscript("sess-1", "@redteam-2", "anum2")
+	if err != nil || path != want {
+		t.Fatalf("path = %q err = %v, want %q", path, err, want)
+	}
+}
+
+func TestFindTeammateTranscript_AgentIDAbsent_FallsBackToName(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	want := writeSidecarTranscript(t, home, "sess-1", "acollector1", agentSidecar{
+		Name: "collector", TaskKind: taskKindTeammate, Model: "sonnet",
+	}, nil)
+
+	path, _, err := findTeammateTranscript("sess-1", "@collector", "not-yet-written")
+	if err != nil || path != want {
+		t.Fatalf("path = %q err = %v, want name-fallback %q", path, err, want)
+	}
+}
+
+func TestFindTeammateTranscript_AgentIDWithNonTeammateKind_NotUsed(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	writeSidecarTranscript(t, home, "sess-1", "asub1", agentSidecar{
+		Name: "collector", TaskKind: "local_agent", Model: "sonnet",
+	}, nil)
+
+	if _, _, err := findTeammateTranscript("sess-1", "@collector", "asub1"); err == nil {
+		t.Fatal("an Agent-tool subagent transcript must not resolve as a teammate, even by agent_id")
+	}
+}
+
+func TestTeammateContextTracker_Update_ReResolvesNameToAgentIDOnce(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	// Dead same-name instance: the name fallback resolves to it first.
+	writeSidecarTranscript(t, home, "sess-1", "adead1",
+		agentSidecar{Name: "redteam", TaskKind: taskKindTeammate, Model: "claude-sonnet-5"},
+		[]string{assistantLine(2, 10_000, 0, 1)})
+
+	tr := newTeammateContextTracker()
+	r := tr.Update("sess-1", "@redteam", "alive1", "", 0, false)
+	if r.Used != 10_002 {
+		t.Fatalf("name-fallback Used = %d, want 10002", r.Used)
+	}
+	st := tr.states["sess-1|@redteam"]
+	if st.resolvedByID {
+		t.Fatal("must not be resolvedByID while agent file is absent")
+	}
+
+	live := writeSidecarTranscript(t, home, "sess-1", "alive1",
+		agentSidecar{Name: "redteam", TaskKind: taskKindTeammate, Model: "claude-sonnet-5"},
+		[]string{assistantLine(2, 50_000, 0, 1)})
+
+	r = tr.Update("sess-1", "@redteam", "alive1", "", 0, false)
+	if r.Used != 50_002 || r.Source != gauge.ContextSourceTranscript {
+		t.Fatalf("after re-resolve Used = %d Source = %q, want 50002 transcript", r.Used, r.Source)
+	}
+	if st.transcriptPath != live || !st.resolvedByID {
+		t.Fatalf("state path = %q byID = %v, want %q true", st.transcriptPath, st.resolvedByID, live)
+	}
+
+	// Once resolved by ID, a further tick keeps (not resets) the cursor.
+	cur := st.cursorOffset
+	if cur == 0 {
+		t.Fatal("cursor should have advanced after walking the live transcript")
+	}
+	r = tr.Update("sess-1", "@redteam", "alive1", "", 0, false)
+	if r.Used != 50_002 || st.transcriptPath != live || st.cursorOffset != cur {
+		t.Fatalf("further tick: Used = %d path = %q cursor = %d (want %d)", r.Used, st.transcriptPath, st.cursorOffset, cur)
+	}
+}
+
+func TestTeammateContextTracker_Update_SamePathUpgradeKeepsCursor(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	path := writeSidecarTranscript(t, home, "sess-1", "alive1",
+		agentSidecar{Name: "redteam", TaskKind: taskKindTeammate, Model: "claude-sonnet-5"},
+		[]string{assistantLine(2, 40_000, 0, 1)})
+
+	tr := newTeammateContextTracker()
+	tr.Update("sess-1", "@redteam", "", "", 0, false)
+	st := tr.states["sess-1|@redteam"]
+	if st.resolvedByID || st.cursorOffset == 0 {
+		t.Fatalf("precondition: byID = %v cursor = %d", st.resolvedByID, st.cursorOffset)
+	}
+	cur := st.cursorOffset
+
+	r := tr.Update("sess-1", "@redteam", "alive1", "", 0, false)
+	if !st.resolvedByID || st.transcriptPath != path {
+		t.Fatalf("byID = %v path = %q, want true %q", st.resolvedByID, st.transcriptPath, path)
+	}
+	if st.cursorOffset != cur || r.Used != 40_002 {
+		t.Errorf("cursor = %d (want %d, no reset) Used = %d (want 40002)", st.cursorOffset, cur, r.Used)
 	}
 }

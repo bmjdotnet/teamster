@@ -19,6 +19,7 @@ type prometheusTemplateData struct {
 	Env                     string
 	HookServerHost          string
 	HookServerPort          int
+	HealthMetricsPort       int
 	PrometheusPort          int
 	PrometheusDataDir       string
 	PrometheusRetention     string
@@ -162,6 +163,7 @@ func renderPrometheusConfig(dst string, cfg config.Config, dataDir string) error
 		Env:                     cfg.Env,
 		HookServerHost:          hookHost,
 		HookServerPort:          cfg.HookServerPort,
+		HealthMetricsPort:       cfg.HealthMetricsPort,
 		PrometheusPort:          cfg.PrometheusPort,
 		PrometheusDataDir:       dataDir,
 		PrometheusRetention:     cfg.PrometheusRetention,

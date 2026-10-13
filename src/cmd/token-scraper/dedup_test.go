@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+
+	"github.com/bmjdotnet/teamster/internal/pricing"
 )
 
 // captureServer is a stand-in for hookd's /telemetry endpoint that records every
@@ -37,6 +39,7 @@ func newCaptureScraper(t *testing.T) (*scraper, *captureServer) {
 	t.Cleanup(ts.Close)
 	return &scraper{
 		client:       ts.Client(),
+		resolver:     pricing.NewResolver(nil),
 		telemetryURL: ts.URL,
 		host:         "testhost",
 		cursors:      make(map[string]*cursorEntry),

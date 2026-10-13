@@ -92,7 +92,7 @@ func (s *Store) GetJournalEntries(ctx context.Context, entityType, entityID stri
 		return nil, err
 	}
 	defer rows.Close()
-	var out []wms.JournalEntry
+	out := make([]wms.JournalEntry, 0)
 	for rows.Next() {
 		var e wms.JournalEntry
 		if err := rows.Scan(
@@ -207,7 +207,7 @@ func (s *Store) ListEventRecords(ctx context.Context, entityType, entityID strin
 		return nil, err
 	}
 	defer rows.Close()
-	var out []wms.EventRecord
+	out := make([]wms.EventRecord, 0)
 	for rows.Next() {
 		var r wms.EventRecord
 		var endedAt sql.NullTime

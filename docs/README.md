@@ -17,6 +17,7 @@ see the top-level [README](../README.md) first.
 | Document | What it covers |
 |----------|----------------|
 | [terminology.md](terminology.md) | Glossary of Teamster terms: WMS hierarchy (outcomes, work units), cost attribution methods, activity tags, session modes, and the tag taxonomy. |
+| [pricing-runbook.md](pricing-runbook.md) | Operator runbook for the `model_pricing` rate card: add a rate, change one (close-and-insert), and validate with `rollup --reprice`. |
 | [vision.md](vision.md) | The product vision and how Teamster's workflow model fits the broader design. |
 | [session-explorer-guide.md](session-explorer-guide.md) | Primer for driving interactive programs (Claude, ssh, wizards) via tmux — used by test agents. |
 

@@ -412,3 +412,25 @@ what the rework-tax metric sums. If you find yourself reaching for a
 `rework` tag value anywhere, stop: it no longer exists on either axis. The
 phase value is `iterate`; the cost-of-correction signal is an edge, drawn at
 intake, not a tag applied after the fact.
+
+## 25. Deliver durably and notify directly — SubagentHandback fails when the spawner is a teammate
+
+A teammate that spawns its own Agent-tool subagent hits a trap. Observed:
+when the child calls `SubagentHandback`, it fails with "the agent that
+spawned you is no longer running" even though the teammate is alive and will
+be resumed on its next message. The likely cause is that the teammate is
+idle between turns. It failed on every one of roughly twelve sub-spawns in
+one session, so the handback return value cannot be the delivery path.
+
+Deliver twice, on purpose. Store the result durably with `wms_deliverResult`
+(the record), then send a short `SendMessage` to the spawner or lead (the
+notification). If a report is still lost, the spawner can recover it from the
+child's transcript. `wms_deliverResult` needs a WorkUnit id, so the spawner
+creates (or assigns) a WorkUnit for the child and puts its id in the brief,
+letting the child `wms_claimWorkUnit` and `wms_deliverResult` against it; a
+child with no WU id reports via `SendMessage` only. In the child's brief,
+say so explicitly: "deliver via
+`wms_deliverResult` and `SendMessage`; treat `SubagentHandback` as
+best-effort." The `description` you pass on the Agent call matters just as
+much: a sub-subagent cannot be named, so that string is the only label the
+operator sees for it in ctop's fleet view.

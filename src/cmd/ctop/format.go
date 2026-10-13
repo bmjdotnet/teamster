@@ -426,8 +426,12 @@ func humanizeCount(n int) string {
 // fmtCost renders a session_cost_usd value as whole dollars — "$0", "$12",
 // "$455" — rounded, no cents (per the style guide's column-diet polish: the
 // COST column budgets for "$"+4 digits, and cents added width without
-// adding much signal at a glance).
+// adding much signal at a glance). Sub-$1 values keep cents ("$0.37", 5
+// chars, still within the budget) so small spend doesn't collapse to "$0".
 func fmtCost(usd float64) string {
+	if usd > 0 && usd < 1.0 {
+		return fmt.Sprintf("$%.2f", usd)
+	}
 	return fmt.Sprintf("$%d", int(usd+0.5))
 }
 

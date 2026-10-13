@@ -135,7 +135,7 @@ func (s *Store) ListRelations(ctx context.Context, entityType, entityID, directi
 		return nil, err
 	}
 	defer rows.Close()
-	var out []store.Relation
+	out := make([]store.Relation, 0)
 	for rows.Next() {
 		var r store.Relation
 		if err := rows.Scan(&r.ID, &r.Kind, &r.FromType, &r.FromID, &r.ToType, &r.ToID,
@@ -156,7 +156,7 @@ func (s *Store) ListRelationKinds(ctx context.Context) ([]store.RelationKind, er
 		return nil, err
 	}
 	defer rows.Close()
-	var out []store.RelationKind
+	out := make([]store.RelationKind, 0)
 	for rows.Next() {
 		rk, taxable, lineage, isSeed := store.RelationKind{}, 0, 0, 0
 		if err := rows.Scan(&rk.Kind, &taxable, &rk.MissClass, &lineage, &isSeed, &rk.Description); err != nil {

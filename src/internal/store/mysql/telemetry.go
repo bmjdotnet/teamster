@@ -9,8 +9,8 @@ import (
 
 // telemetryColumnsPerRow is the placeholder count of one VALUES group below.
 // MySQL caps a prepared statement at 65535 placeholders; maxTelemetryRowsPerInsert
-// keeps every chunk well under that ceiling (1000*23 = 23000).
-const telemetryColumnsPerRow = 23
+// keeps every chunk well under that ceiling (1000*24 = 24000).
+const telemetryColumnsPerRow = 24
 const maxTelemetryRowsPerInsert = 1000
 
 // UpsertTelemetryBatch implements store.TelemetryStore. It chunks rows into
@@ -47,7 +47,7 @@ func (s *Store) upsertTelemetryChunk(ctx context.Context, chunk []store.Telemetr
 		 cache_write_1h, cache_write_5m,
 		 n_text, n_tool_use, n_thinking,
 		 total_input, stop_reason, service_tier, speed,
-		 cost_usd, timestamp, runtime, reasoning_output_tokens)
+		 cost_usd, timestamp, runtime, reasoning_output_tokens, rate_id)
 	VALUES `
 
 	args := make([]interface{}, 0, len(chunk)*telemetryColumnsPerRow)
@@ -58,7 +58,7 @@ func (s *Store) upsertTelemetryChunk(ctx context.Context, chunk []store.Telemetr
 		if runtime == "" {
 			runtime = "claude_code"
 		}
-		placeholders = append(placeholders, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+		placeholders = append(placeholders, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
 		args = append(args,
 			row.SessionID, row.MessageID, row.AgentName, row.Host, row.Username, row.Model,
 			row.InputTokens, row.OutputTokens, row.CacheReadTokens, row.CacheWriteTokens,
@@ -66,6 +66,7 @@ func (s *Store) upsertTelemetryChunk(ctx context.Context, chunk []store.Telemetr
 			row.NText, row.NToolUse, row.NThinking,
 			row.TotalInput, row.StopReason, row.ServiceTier, row.Speed,
 			row.CostUSD, row.Timestamp.UTC(), runtime, row.ReasoningOutputTokens,
+			nullableRateID(row.RateID),
 		)
 	}
 
@@ -98,6 +99,7 @@ func (s *Store) upsertTelemetryChunk(ctx context.Context, chunk []store.Telemetr
 			stop_reason        = IF(VALUES(output_tokens) > output_tokens, VALUES(stop_reason), stop_reason),
 			cost_usd           = IF(VALUES(output_tokens) > output_tokens, VALUES(cost_usd), cost_usd),
 			reasoning_output_tokens = IF(VALUES(output_tokens) > output_tokens, VALUES(reasoning_output_tokens), reasoning_output_tokens),
+			rate_id            = IF(VALUES(output_tokens) > output_tokens, VALUES(rate_id), rate_id),
 			session_id         = VALUES(session_id),
 			runtime            = VALUES(runtime),
 			output_tokens      = IF(VALUES(output_tokens) > output_tokens, VALUES(output_tokens), output_tokens)`
@@ -159,4 +161,11 @@ func resolveAgentFromNames(names []string) string {
 		// row is the lead.
 		return ""
 	}
+}
+
+func nullableRateID(id int64) interface{} {
+	if id == 0 {
+		return nil
+	}
+	return id
 }

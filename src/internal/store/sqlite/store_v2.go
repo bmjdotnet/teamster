@@ -210,7 +210,7 @@ func (s *Store) ListWorkUnits(ctx context.Context, outcomeID string) ([]*wms.Wor
 		return nil, err
 	}
 	defer rows.Close()
-	var out []*wms.WorkUnit
+	out := make([]*wms.WorkUnit, 0)
 	for rows.Next() {
 		var wu wms.WorkUnit
 		if err := scanWorkUnit(rows, &wu); err != nil {
@@ -245,7 +245,7 @@ func (s *Store) ListReadyWorkUnits(ctx context.Context, outcomeID string) ([]*wm
 		return nil, err
 	}
 	defer rows.Close()
-	var out []*wms.WorkUnit
+	out := make([]*wms.WorkUnit, 0)
 	for rows.Next() {
 		var wu wms.WorkUnit
 		if err := scanWorkUnit(rows, &wu); err != nil {

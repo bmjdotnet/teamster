@@ -64,7 +64,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: all spend incl. unallocated \u2014 reads cost_facts (attribution lags rollup timer + sweep)",
+      "description": "scope: all spend incl. unallocated — reads cost_facts (attribution lags rollup timer + sweep)",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -426,7 +426,7 @@
       },
       "id": 20,
       "panels": [],
-      "title": "Cost Explorer: $facet1 \u2192 $facet2 \u2192 $facet3",
+      "title": "Cost Explorer: $facet1 → $facet2 → $facet3",
       "type": "row"
     },
     {
@@ -434,7 +434,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: all spend incl. unallocated. Conservation holds to within per-group cent rounding: sum of first-stage outflows equals window total at every N including All. No row cap is applied, and row inclusion is decided on the unrounded per-group sum (not the rounded-to-$0.00 display value), so a real nonzero flow is never silently dropped. Node labels prefixed with stage key to prevent DAG cycle errors when facets share values. Per-facet Count control (labeled 'Count:', paired immediately beside its 'Facet N:' selector; starts at 5 \u2014 raise per facet from the dropdown for more detail) ranks each facet's real tag values by total cost across the window; values ranked outside N collapse into a single '(other)' node per stage \u2014 their cost is retained, not dropped. Setting several facets to high-cardinality keys (e.g. outcome) with N=All simultaneously can render a very dense graph \u2014 that's a readability limit you control via N, not a data limit. (unallocated) and (untagged) are pinned: always their own node, never counted toward N or swept into (other). Within each column, nodes are ordered top-to-bottom by dollar value, descending \u2014 but (unallocated), (untagged), and (other) are always pinned below every real value regardless of their own dollars (sorted by value among themselves), so a large aggregate or diagnostic bucket never displaces a real category from the top of the ranking. facet2's ranking is computed identically for both the source side (facet1\u2192facet2) and target side (facet2\u2192facet3) so the two stages share one consistent node set. Multi-valued keys split cost fractionally. (unallocated)=bright red; (untagged @key)=grey; (other)=slate blue.",
+      "description": "scope: all spend incl. unallocated. Conservation holds to within per-group cent rounding: sum of first-stage outflows equals window total at every N including All. No row cap is applied, and row inclusion is decided on the unrounded per-group sum (not the rounded-to-$0.00 display value), so a real nonzero flow is never silently dropped. Node labels prefixed with stage key to prevent DAG cycle errors when facets share values. Per-facet Count control (labeled 'Count:', paired immediately beside its 'Facet N:' selector; starts at 5 — raise per facet from the dropdown for more detail) ranks each facet's real tag values by total cost across the window; values ranked outside N collapse into a single '(other)' node per stage — their cost is retained, not dropped. Setting several facets to high-cardinality keys (e.g. outcome) with N=All simultaneously can render a very dense graph — that's a readability limit you control via N, not a data limit. (unallocated) and (untagged) are pinned: always their own node, never counted toward N or swept into (other). Within each column, nodes are ordered top-to-bottom by dollar value, descending — but (unallocated), (untagged), and (other) are always pinned below every real value regardless of their own dollars (sorted by value among themselves), so a large aggregate or diagnostic bucket never displaces a real category from the top of the ranking. facet2's ranking is computed identically for both the source side (facet1→facet2) and target side (facet2→facet3) so the two stages share one consistent node set. Multi-valued keys split cost fractionally. (unallocated)=bright red; (untagged @key)=grey; (other)=slate blue.",
       "fieldConfig": {
         "defaults": {},
         "overrides": []
@@ -460,7 +460,7 @@
           "key": "",
           "plugin": "AMap.Scale,AMap.ToolBar"
         },
-        "getOption": "const allSeries = context.panel.data.series;\nif (!allSeries || allSeries.length < 1) return { series: [] };\n\nconst fld = (s, name) => {\n  const f = s.fields.find(x => x.name === name);\n  if (!f) return [];\n  const v = f.values;\n  return (v && v.buffer) ? v.buffer : (v || []);\n};\n\nconst links = [];\nconst nodeSet = new Set();\n\nfor (const s of allSeries) {\n  if (!s || !s.fields || s.fields.length < 3) continue;\n  const sources = fld(s, 'source');\n  const targets = fld(s, 'target');\n  const values  = fld(s, 'value');\n  for (let i = 0; i < sources.length; i++) {\n    const v = parseFloat(values[i]) || 0;\n    const src = String(sources[i]);\n    const tgt = String(targets[i]);\n    if (v > 0 && src !== tgt) {\n      links.push({ source: src, target: tgt, value: v });\n      nodeSet.add(src);\n      nodeSet.add(tgt);\n    }\n  }\n}\nif (!links.length) return { series: [] };\n\nconst phaseColors = { 'design':'#FADE2A','build':'#73BF69','test':'#73BF69','review':'#5794F2','iterate':'#FF780A','admin':'#A9A9A9' };\nconst wtColors = { 'feature':'#FF780A','bug':'#FADE2A','research':'#B877D9','docs':'#5794F2','test':'#73BF69','infra':'#F2495C','refactor':'#64A0C8','admin':'#A9A9A9' };\nconst allColors = {...phaseColors, ...wtColors};\n\n// Per-node value for SORTING only (echarts computes its own displayed node\n// value from connected links independently -- this is a separate, sort-only\n// estimate, not wired into the chart's rendered dollar amounts). Prefer the\n// inbound sum (a node's \"size\" as the flow reaching it); nodes with no\n// inbound links (the first stage) fall back to their outbound sum.\nconst inSum = new Map();\nconst outSum = new Map();\nfor (const l of links) {\n  inSum.set(l.target, (inSum.get(l.target) || 0) + l.value);\n  outSum.set(l.source, (outSum.get(l.source) || 0) + l.value);\n}\nconst nodeValue = name => inSum.has(name) ? inSum.get(name) : (outSum.get(name) || 0);\nconst isSpecial = name => name.includes('(other)') || name.includes('(untagged') || name.includes('(unallocated)');\n\n// Sort each column top-to-bottom by $ value, descending. Real values first;\n// (other)/(untagged)/(unallocated) pinned below all real values regardless\n// of their own $ value -- an aggregate or diagnostic bucket outranking real\n// categories would invert what the ranking is meant to communicate. Within\n// each of those two groups, still sorted by value desc, alphabetical as a\n// final tiebreak for determinism. One flat sort produces correct per-column\n// order without grouping by stage explicitly: echarts assigns columns by\n// link topology, and filtering a sorted array to any subset preserves that\n// subset's relative order.\nconst sortedNames = Array.from(nodeSet).sort((a, b) => {\n  const specialA = isSpecial(a), specialB = isSpecial(b);\n  if (specialA !== specialB) return specialA ? 1 : -1;\n  const diff = nodeValue(b) - nodeValue(a);\n  return diff !== 0 ? diff : a.localeCompare(b);\n});\n\nconst nodes = sortedNames.map(name => {\n  let color = null;\n  if (name.includes('(unallocated)')) color = '#F2495C';\n  else if (name.includes('(untagged')) color = '#808080';\n  else if (name.includes('(other)')) color = '#4C6785';\n  else {\n    const parts = name.split(': ');\n    const val = parts.length > 1 ? parts.slice(1).join(': ') : name;\n    if (allColors[val]) color = allColors[val];\n  }\n  return { name, itemStyle: color ? { color } : {} };\n});\n\nreturn {\n  tooltip: {\n    trigger: 'item',\n    formatter: p => {\n      const strip = s => { const ci = s.indexOf(': '); return ci >= 0 ? s.slice(ci + 2) : s; };\n      if (p.dataType === 'edge')\n        return strip(p.data.source) + ' \u2192 ' + strip(p.data.target) + '<br/>$' + p.data.value.toFixed(2);\n      return strip(p.name) + '<br/>$' + ((p.value || 0).toFixed(2));\n    }\n  },\n  series: [{\n    type: 'sankey',\n    layout: 'none',\n    layoutIterations: 0,\n    emphasis: { focus: 'adjacency' },\n    nodeAlign: 'left',\n    data: nodes,\n    links: links,\n    lineStyle: { color: 'gradient', opacity: 0.4 },\n    label: {\n      show: true, position: 'right', fontSize: 11,\n      formatter: p => { let lbl = p.name; const ci = lbl.indexOf(': '); if (ci >= 0) lbl = lbl.slice(ci + 2); if (lbl.length > 20) lbl = lbl.slice(0,18)+'\u2026'; return lbl + '\\n$' + ((p.value || 0).toFixed(0)); }\n    },\n    nodeGap: 12,\n    nodeWidth: 20\n  }]\n};",
+        "getOption": "const allSeries = context.panel.data.series;\nif (!allSeries || allSeries.length < 1) return { series: [] };\n\nconst fld = (s, name) => {\n  const f = s.fields.find(x => x.name === name);\n  if (!f) return [];\n  const v = f.values;\n  return (v && v.buffer) ? v.buffer : (v || []);\n};\n\nconst links = [];\nconst nodeSet = new Set();\n\nfor (const s of allSeries) {\n  if (!s || !s.fields || s.fields.length < 3) continue;\n  const sources = fld(s, 'source');\n  const targets = fld(s, 'target');\n  const values  = fld(s, 'value');\n  for (let i = 0; i < sources.length; i++) {\n    const v = parseFloat(values[i]) || 0;\n    const src = String(sources[i]);\n    const tgt = String(targets[i]);\n    if (v > 0 && src !== tgt) {\n      links.push({ source: src, target: tgt, value: v });\n      nodeSet.add(src);\n      nodeSet.add(tgt);\n    }\n  }\n}\nif (!links.length) return { series: [] };\n\nconst phaseColors = { 'design':'#FADE2A','build':'#73BF69','test':'#73BF69','review':'#5794F2','iterate':'#FF780A','admin':'#A9A9A9' };\nconst wtColors = { 'feature':'#FF780A','bug':'#FADE2A','research':'#B877D9','docs':'#5794F2','test':'#73BF69','infra':'#F2495C','refactor':'#64A0C8','admin':'#A9A9A9' };\nconst allColors = {...phaseColors, ...wtColors};\n\n// Per-node value for SORTING only (echarts computes its own displayed node\n// value from connected links independently -- this is a separate, sort-only\n// estimate, not wired into the chart's rendered dollar amounts). Prefer the\n// inbound sum (a node's \"size\" as the flow reaching it); nodes with no\n// inbound links (the first stage) fall back to their outbound sum.\nconst inSum = new Map();\nconst outSum = new Map();\nfor (const l of links) {\n  inSum.set(l.target, (inSum.get(l.target) || 0) + l.value);\n  outSum.set(l.source, (outSum.get(l.source) || 0) + l.value);\n}\nconst nodeValue = name => inSum.has(name) ? inSum.get(name) : (outSum.get(name) || 0);\nconst isSpecial = name => name.includes('(other)') || name.includes('(untagged') || name.includes('(unallocated)');\n\n// Sort each column top-to-bottom by $ value, descending. Real values first;\n// (other)/(untagged)/(unallocated) pinned below all real values regardless\n// of their own $ value -- an aggregate or diagnostic bucket outranking real\n// categories would invert what the ranking is meant to communicate. Within\n// each of those two groups, still sorted by value desc, alphabetical as a\n// final tiebreak for determinism. One flat sort produces correct per-column\n// order without grouping by stage explicitly: echarts assigns columns by\n// link topology, and filtering a sorted array to any subset preserves that\n// subset's relative order.\nconst sortedNames = Array.from(nodeSet).sort((a, b) => {\n  const specialA = isSpecial(a), specialB = isSpecial(b);\n  if (specialA !== specialB) return specialA ? 1 : -1;\n  const diff = nodeValue(b) - nodeValue(a);\n  return diff !== 0 ? diff : a.localeCompare(b);\n});\n\nconst nodes = sortedNames.map(name => {\n  let color = null;\n  if (name.includes('(unallocated)')) color = '#F2495C';\n  else if (name.includes('(untagged')) color = '#808080';\n  else if (name.includes('(other)')) color = '#4C6785';\n  else {\n    const parts = name.split(': ');\n    const val = parts.length > 1 ? parts.slice(1).join(': ') : name;\n    if (allColors[val]) color = allColors[val];\n  }\n  return { name, itemStyle: color ? { color } : {} };\n});\n\nreturn {\n  tooltip: {\n    trigger: 'item',\n    formatter: p => {\n      const strip = s => { const ci = s.indexOf(': '); return ci >= 0 ? s.slice(ci + 2) : s; };\n      if (p.dataType === 'edge')\n        return strip(p.data.source) + ' → ' + strip(p.data.target) + '<br/>$' + p.data.value.toFixed(2);\n      return strip(p.name) + '<br/>$' + ((p.value || 0).toFixed(2));\n    }\n  },\n  series: [{\n    type: 'sankey',\n    layout: 'none',\n    layoutIterations: 0,\n    emphasis: { focus: 'adjacency' },\n    nodeAlign: 'left',\n    data: nodes,\n    links: links,\n    lineStyle: { color: 'gradient', opacity: 0.4 },\n    label: {\n      show: true, position: 'right', fontSize: 11,\n      formatter: p => { let lbl = p.name; const ci = lbl.indexOf(': '); if (ci >= 0) lbl = lbl.slice(ci + 2); if (lbl.length > 20) lbl = lbl.slice(0,18)+'…'; return lbl + '\\n$' + ((p.value || 0).toFixed(0)); }\n    },\n    nodeGap: 12,\n    nodeWidth: 20\n  }]\n};",
         "google": {
           "callback": "gmapReady",
           "key": ""
@@ -498,7 +498,7 @@
           "refId": "B"
         }
       ],
-      "title": "Tag Flow: $facet1 \u2192 $facet2 \u2192 $facet3",
+      "title": "Tag Flow: $facet1 → $facet2 → $facet3",
       "type": "volkovlabs-echarts-panel"
     },
     {
@@ -837,7 +837,7 @@
       },
       "id": 10,
       "panels": [],
-      "title": "Cost Stack: $facet1 \u2192 $facet2",
+      "title": "Cost Stack: $facet1 → $facet2",
       "type": "row"
     },
     {
@@ -845,7 +845,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: all spend incl. unallocated. Fractional weights for multi-valued keys \u2014 totals reconcile with Total Spend above. (unallocated)=no entity; (untagged)=entity with no value for this key.",
+      "description": "scope: all spend incl. unallocated. Fractional weights for multi-valued keys — totals reconcile with Total Spend above. (unallocated)=no entity; (untagged)=entity with no value for this key.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1157,7 +1157,7 @@
           "refId": "A"
         }
       ],
-      "title": "Cost by $facet1 \u2192 $facet2",
+      "title": "Cost by $facet1 → $facet2",
       "transformations": [
         {
           "id": "groupingToMatrix",
@@ -1176,7 +1176,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: all spend incl. unallocated. Cell totals computed in SQL with fractional weights \u2014 no footer needed.",
+      "description": "scope: all spend incl. unallocated. Cell totals computed in SQL with fractional weights — no footer needed.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -1296,7 +1296,7 @@
           "refId": "A"
         }
       ],
-      "title": "Cost Matrix: $facet1 \u00d7 $facet2",
+      "title": "Cost Matrix: $facet1 × $facet2",
       "type": "table"
     },
     {
@@ -1414,7 +1414,7 @@
           "refId": "A"
         }
       ],
-      "title": "Drill Table: $facet1 \u2192 $facet2 \u2192 Cost  (filter: $filter1)",
+      "title": "Drill Table: $facet1 → $facet2 → Cost  (filter: $filter1)",
       "type": "table"
     },
     {
@@ -1507,7 +1507,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: all spend in cost_facts. Model cost share trend \u2014 watch for premium model growth.",
+      "description": "scope: all spend in cost_facts. Model cost share trend — watch for premium model growth.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1622,7 +1622,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: immediate token ledger \u2014 cache_read_tokens / (input_tokens + cache_read_tokens). High ratio means prompt caching is effective.",
+      "description": "scope: immediate token ledger — cache_read_tokens / (input_tokens + cache_read_tokens). High ratio means prompt caching is effective.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1697,7 +1697,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: immediate token ledger \u2014 estimated savings vs paying full input price for cache-read tokens. Per-model: cache_read_tokens \u00d7 (input_price \u2212 cache_read_price). Rates per Mtok: opus-4-8 $5/$0.5, opus-4-5/6/7 $5/$0.5, sonnet-4-5/6 $3/$0.3, haiku-4-5 $0.8/$0.08, fable-5 $10/$1.0. List-price approximation.",
+      "description": "scope: immediate token ledger — estimated savings vs paying full input price for cache-read tokens. Per-model: cache_read_tokens × (input_price − cache_read_price). Rates from model_pricing table (exact → prefix → class resolution).",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1750,7 +1750,7 @@
             "uid": "teamster-mysql"
           },
           "format": "table",
-          "rawSql": "SELECT ROUND(SUM(\n  cache_read_tokens *\n  CASE\n    WHEN model LIKE 'claude-opus-4-8%'   THEN (0.000005  - 0.0000005)\n    WHEN model LIKE 'claude-opus-4%'     THEN (0.000005  - 0.0000005)\n    WHEN model LIKE 'claude-sonnet-4%'   THEN (0.000003  - 0.0000003)\n    WHEN model LIKE 'claude-haiku-4%'    THEN (0.0000008 - 0.00000008)\n    WHEN model LIKE 'claude-fable-5%'    THEN (0.00001   - 0.000001)\n    ELSE 0\n  END\n), 2) AS value\nFROM token_ledger\nWHERE $__timeFilter(timestamp)",
+          "rawSql": "SELECT ROUND(SUM(\n  tl.cache_read_tokens * COALESCE(mp.input_per_mtok - mp.cache_read_per_mtok, 0) / 1000000.0\n), 2) AS value\nFROM token_ledger tl\nLEFT JOIN model_pricing mp ON mp.id = (SELECT mp2.id FROM model_pricing mp2 WHERE mp2.runtime = tl.runtime AND mp2.variant = 'base' AND mp2.valid_from <= tl.timestamp AND (mp2.valid_to IS NULL OR tl.timestamp < mp2.valid_to) AND ((mp2.match_kind = 'exact' AND mp2.model_key = tl.model) OR (mp2.match_kind = 'prefix' AND tl.model LIKE CONCAT(mp2.model_key, '%')) OR (mp2.match_kind = 'class' AND tl.model LIKE CONCAT('%', mp2.model_key, '%'))) ORDER BY FIELD(mp2.match_kind, 'exact', 'prefix', 'class'), LENGTH(mp2.model_key) DESC LIMIT 1)\nWHERE $__timeFilter(tl.timestamp) ",
           "refId": "A"
         }
       ],
@@ -1762,7 +1762,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: immediate token ledger \u2014 average USD cost per message in the window",
+      "description": "scope: immediate token ledger — average USD cost per message in the window",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1827,7 +1827,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: immediate token ledger \u2014 message count in the window",
+      "description": "scope: immediate token ledger — message count in the window",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1892,7 +1892,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: immediate token ledger \u2014 per-token-class cost reconstruction. cacheRead cost is low (1/10th input price) \u2014 its dominance is the cache dividend, not a cost concern.",
+      "description": "scope: immediate token ledger — per-token-class cost reconstruction. cacheRead cost is low (1/10th input price) — its dominance is the cache dividend, not a cost concern.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -2041,7 +2041,7 @@
             "uid": "teamster-mysql"
           },
           "format": "time_series",
-          "rawSql": "SELECT $__timeGroupAlias(timestamp, $agg), 'input' AS metric,\n  ROUND(SUM(input_tokens * CASE WHEN model LIKE 'claude-opus-4-8%' THEN 0.000005 WHEN model LIKE 'claude-opus-4%' THEN 0.000005 WHEN model LIKE 'claude-sonnet-4%' THEN 0.000003 WHEN model LIKE 'claude-haiku-4%' THEN 0.0000008 WHEN model LIKE 'claude-fable-5%' THEN 0.00001 ELSE 0 END), 6) AS cost_usd\nFROM token_ledger WHERE $__timeFilter(timestamp) GROUP BY 1\nUNION ALL\nSELECT $__timeGroupAlias(timestamp, $agg), 'output' AS metric,\n  ROUND(SUM(output_tokens * CASE WHEN model LIKE 'claude-opus-4-8%' THEN 0.000025 WHEN model LIKE 'claude-opus-4%' THEN 0.000025 WHEN model LIKE 'claude-sonnet-4%' THEN 0.000015 WHEN model LIKE 'claude-haiku-4%' THEN 0.000004 WHEN model LIKE 'claude-fable-5%' THEN 0.00005 ELSE 0 END), 6) AS cost_usd\nFROM token_ledger WHERE $__timeFilter(timestamp) GROUP BY 1\nUNION ALL\nSELECT $__timeGroupAlias(timestamp, $agg), 'cacheRead' AS metric,\n  ROUND(SUM(cache_read_tokens * CASE WHEN model LIKE 'claude-opus-4-8%' THEN 0.0000005 WHEN model LIKE 'claude-opus-4%' THEN 0.0000005 WHEN model LIKE 'claude-sonnet-4%' THEN 0.0000003 WHEN model LIKE 'claude-haiku-4%' THEN 0.00000008 WHEN model LIKE 'claude-fable-5%' THEN 0.000001 ELSE 0 END), 6) AS cost_usd\nFROM token_ledger WHERE $__timeFilter(timestamp) GROUP BY 1\nUNION ALL\nSELECT $__timeGroupAlias(timestamp, $agg), 'cacheWrite' AS metric,\n  ROUND(SUM(cache_write_tokens * CASE WHEN model LIKE 'claude-opus-4-8%' THEN 0.00000625 WHEN model LIKE 'claude-opus-4%' THEN 0.00000625 WHEN model LIKE 'claude-sonnet-4%' THEN 0.00000375 WHEN model LIKE 'claude-haiku-4%' THEN 0.000001 WHEN model LIKE 'claude-fable-5%' THEN 0.0000125 ELSE 0 END), 6) AS cost_usd\nFROM token_ledger WHERE $__timeFilter(timestamp) GROUP BY 1\nORDER BY 1",
+          "rawSql": "SELECT $__timeGroupAlias(tl.timestamp, $agg), 'input' AS metric,\n  ROUND(SUM(tl.input_tokens * COALESCE(mp.input_per_mtok, 0) / 1000000.0), 6) AS cost_usd\nFROM token_ledger tl\nLEFT JOIN model_pricing mp ON mp.id = (SELECT mp2.id FROM model_pricing mp2 WHERE mp2.runtime = tl.runtime AND mp2.variant = 'base' AND mp2.valid_from <= tl.timestamp AND (mp2.valid_to IS NULL OR tl.timestamp < mp2.valid_to) AND ((mp2.match_kind = 'exact' AND mp2.model_key = tl.model) OR (mp2.match_kind = 'prefix' AND tl.model LIKE CONCAT(mp2.model_key, '%')) OR (mp2.match_kind = 'class' AND tl.model LIKE CONCAT('%', mp2.model_key, '%'))) ORDER BY FIELD(mp2.match_kind, 'exact', 'prefix', 'class'), LENGTH(mp2.model_key) DESC LIMIT 1)\nWHERE $__timeFilter(tl.timestamp) GROUP BY 1\nUNION ALL\nSELECT $__timeGroupAlias(tl.timestamp, $agg), 'output' AS metric,\n  ROUND(SUM(tl.output_tokens * COALESCE(mp.output_per_mtok, 0) / 1000000.0), 6) AS cost_usd\nFROM token_ledger tl\nLEFT JOIN model_pricing mp ON mp.id = (SELECT mp2.id FROM model_pricing mp2 WHERE mp2.runtime = tl.runtime AND mp2.variant = 'base' AND mp2.valid_from <= tl.timestamp AND (mp2.valid_to IS NULL OR tl.timestamp < mp2.valid_to) AND ((mp2.match_kind = 'exact' AND mp2.model_key = tl.model) OR (mp2.match_kind = 'prefix' AND tl.model LIKE CONCAT(mp2.model_key, '%')) OR (mp2.match_kind = 'class' AND tl.model LIKE CONCAT('%', mp2.model_key, '%'))) ORDER BY FIELD(mp2.match_kind, 'exact', 'prefix', 'class'), LENGTH(mp2.model_key) DESC LIMIT 1)\nWHERE $__timeFilter(tl.timestamp) GROUP BY 1\nUNION ALL\nSELECT $__timeGroupAlias(tl.timestamp, $agg), 'cacheRead' AS metric,\n  ROUND(SUM(tl.cache_read_tokens * COALESCE(mp.cache_read_per_mtok, 0) / 1000000.0), 6) AS cost_usd\nFROM token_ledger tl\nLEFT JOIN model_pricing mp ON mp.id = (SELECT mp2.id FROM model_pricing mp2 WHERE mp2.runtime = tl.runtime AND mp2.variant = 'base' AND mp2.valid_from <= tl.timestamp AND (mp2.valid_to IS NULL OR tl.timestamp < mp2.valid_to) AND ((mp2.match_kind = 'exact' AND mp2.model_key = tl.model) OR (mp2.match_kind = 'prefix' AND tl.model LIKE CONCAT(mp2.model_key, '%')) OR (mp2.match_kind = 'class' AND tl.model LIKE CONCAT('%', mp2.model_key, '%'))) ORDER BY FIELD(mp2.match_kind, 'exact', 'prefix', 'class'), LENGTH(mp2.model_key) DESC LIMIT 1)\nWHERE $__timeFilter(tl.timestamp) GROUP BY 1\nUNION ALL\nSELECT $__timeGroupAlias(tl.timestamp, $agg), 'cacheWrite' AS metric,\n  ROUND(SUM(tl.cache_write_tokens * COALESCE(mp.cache_write_5m_per_mtok, 0) / 1000000.0), 6) AS cost_usd\nFROM token_ledger tl\nLEFT JOIN model_pricing mp ON mp.id = (SELECT mp2.id FROM model_pricing mp2 WHERE mp2.runtime = tl.runtime AND mp2.variant = 'base' AND mp2.valid_from <= tl.timestamp AND (mp2.valid_to IS NULL OR tl.timestamp < mp2.valid_to) AND ((mp2.match_kind = 'exact' AND mp2.model_key = tl.model) OR (mp2.match_kind = 'prefix' AND tl.model LIKE CONCAT(mp2.model_key, '%')) OR (mp2.match_kind = 'class' AND tl.model LIKE CONCAT('%', mp2.model_key, '%'))) ORDER BY FIELD(mp2.match_kind, 'exact', 'prefix', 'class'), LENGTH(mp2.model_key) DESC LIMIT 1)\nWHERE $__timeFilter(tl.timestamp) GROUP BY 1\nORDER BY 1 ",
           "refId": "A"
         }
       ],
@@ -2053,7 +2053,7 @@
         "type": "mysql",
         "uid": "teamster-mysql"
       },
-      "description": "scope: immediate token ledger \u2014 rolling average cost per message. Rising trend may indicate model mix shift or context bloat.",
+      "description": "scope: immediate token ledger — rolling average cost per message. Rising trend may indicate model mix shift or context bloat.",
       "fieldConfig": {
         "defaults": {
           "color": {

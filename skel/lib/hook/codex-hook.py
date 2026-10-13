@@ -8,8 +8,10 @@ them a third time (Go already has its own copy in internal/redact; this
 file is Python's second copy of that logic, not a third). Deliberately
 thinner than teamster.py's own main(): Codex v1 is solo-only (no Agent
 Teams), so there is no dedup-file or session-mode-marker logic to port,
-and no macOS agentName-from-transcript derivation (Codex v1 is hub-local
-Linux only — see the kit's README, Codex remotes are a later feature).
+and no macOS agentName-from-transcript derivation (macOS is a remote client
+only, and Codex has no teammate identity to derive). The same script runs
+on the hub and on remote hosts; remote installs are covered in
+docs/specs/REMOTE-INSTALL.md.
 
 Design note: an earlier Go prototype of this client (cmd/codex-hook) was
 superseded by operator directive — client-side hook code should be Python
@@ -39,13 +41,15 @@ invocation on the host. 2-second HTTP timeout. Every error is logged to
 ~/teamster/var/hook-errors.log (the same file teamster.py logs to) and
 swallowed, never surfaced to Codex.
 
-Not implemented (open item, carried over from the Go prototype): echoing
-hookd's additionalContext back as hook stdout on PreToolUse, the focus-nudge
-parity Claude Code's hook gets. Whether Codex's hook protocol consumes a
-JSON stdout payload from a PreToolUse hook the same way Claude Code does is
-unverified for 0.137.0; writing an unexpected stdout shape risked
-interfering with `codex exec` rather than being silently ignored, and
-verifying it was outside this task's scope.
+Not implemented: echoing hookd's additionalContext back as hook stdout.
+hookd puts the focus nudge, pressure nudge and queued WMS warnings in the
+JSON response body of PreToolUse (and UserPromptSubmit, which this client
+is not registered for). This client discards that body, so none of those
+warnings reach a Codex agent; agents must call wms_setFocus after claiming
+rather than wait for a nudge. Whether Codex consumes a JSON stdout payload
+from a PreToolUse hook the way Claude Code does is unverified (checked
+only at 0.137.0), and an unexpected stdout shape risks interfering with
+`codex exec`. See "Hook output" in docs/specs/CODEX-INSTALL.md.
 """
 from __future__ import annotations
 import json
@@ -113,10 +117,10 @@ def _resolve_host_and_url():
     Host intentionally does NOT split at the first dot the way this
     file's own TEAMSTER_HOST-absent fallback for a REMOTE client would
     (see teamster.py, whose fallback is a short hostname for noisy FQDNs) —
-    it matches internal/hook.getHostID()'s hub-local convention (the full
-    os.Hostname()) instead, since Codex v1 is hub-local only and its
-    sessions should be labeled the same way a Claude Code session on the
-    same host already is.
+    it matches internal/hook.getHostID()'s convention (the full
+    os.Hostname()) instead. This script runs on the hub and on remote
+    hosts alike, and Codex sessions should be labeled the same way a
+    Claude Code session on the same host already is.
 
     This matters specifically because Codex hook handlers have no `env`
     field in config.toml (checked codex-rs's HookHandlerConfig struct) —

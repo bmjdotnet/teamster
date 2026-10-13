@@ -145,13 +145,17 @@ func fallbackEligible() bool {
 // runtimeTag classifies the calling connection into one of three buckets for
 // tagging freshly created entities: "codex", "claude_code", or "unknown" (a
 // third MCP client we can't positively identify as either — inspector tools,
-// another agent CLI, etc.). Independent of whether Codex's turn metadata was
-// present on this particular call; a Codex connection that dropped turn
+// another agent CLI, etc.). Per-call Codex turn metadata is a positive Codex
+// signal that also works over hookd's HTTP transport, where
+// ConnectionClientName is never set and would otherwise read as claude_code.
+// A Codex connection that dropped turn
 // metadata for one call is still "codex" here even though resolveSessionID
 // buckets its session id as unknown-codex rather than trusting a stolen file.
-func runtimeTag() string {
+func runtimeTag(m *Meta) string {
 	switch {
 	case strings.EqualFold(strings.TrimSpace(os.Getenv("TEAMSTER_RUNTIME")), "codex"):
+		return "codex"
+	case m != nil && m.CodexTurn != nil:
 		return "codex"
 	case ConnectionClientName == codexClientName:
 		return "codex"
@@ -186,7 +190,7 @@ func resolveSessionID(m *Meta) {
 		m.SessionID = readCurrentSessionID()
 		return
 	}
-	m.SessionID = "unknown-" + runtimeTag()
+	m.SessionID = "unknown-" + runtimeTag(m)
 }
 
 // applyRuntimeTag auto-applies runtime:<codex|claude_code|unknown> to a
@@ -382,7 +386,7 @@ func HandleToolCall(store wms.Store, eng wms.Engine, rawParams json.RawMessage) 
 	}
 
 	resolveSessionID(&p.Meta)
-	runtime := runtimeTag()
+	runtime := runtimeTag(&p.Meta)
 
 	strArg := func(key string) string {
 		v, _ := p.Arguments[key].(string)
@@ -758,6 +762,9 @@ func HandleToolCall(store wms.Store, eng wms.Engine, rawParams json.RawMessage) 
 		if err != nil {
 			return Result{}, &CallError{Code: -32000, Message: err.Error()}
 		}
+		if entries == nil {
+			entries = []wms.JournalEntry{}
+		}
 		return JSONResult(entries), nil
 
 	case ToolGetTimeline:
@@ -768,6 +775,9 @@ func HandleToolCall(store wms.Store, eng wms.Engine, rawParams json.RawMessage) 
 		records, err := store.ListEventRecords(ctx, strArg("entityType"), strArg("entityID"), limit)
 		if err != nil {
 			return Result{}, &CallError{Code: -32000, Message: err.Error()}
+		}
+		if records == nil {
+			records = []wms.EventRecord{}
 		}
 		return JSONResult(records), nil
 
@@ -1054,6 +1064,9 @@ func HandleToolCall(store wms.Store, eng wms.Engine, rawParams json.RawMessage) 
 		if err != nil {
 			return Result{}, &CallError{Code: -32000, Message: err.Error()}
 		}
+		if units == nil {
+			units = []*wms.WorkUnit{}
+		}
 		return JSONResult(units), nil
 
 	case ToolUpdateWorkUnitStatus:
@@ -1160,6 +1173,10 @@ func HandleToolCall(store wms.Store, eng wms.Engine, rawParams json.RawMessage) 
 			claimNoteAgent := agentID
 			if claimNoteAgent == "" {
 				claimNoteAgent = "the lead (no agent type)"
+			}
+			if err := store.TransitionEventRecord(ctx, wms.EntityWorkUnit, id, wms.StatusActive, p.Meta.SessionID, p.Meta.AgentType, p.Meta.Host); err != nil {
+				slog.Warn("wms-mcp: transition event record failed",
+					"entity_type", wms.EntityWorkUnit, "entity_id", id, "status", wms.StatusActive, "err", err)
 			}
 			eng.OnStatusChange(ctx, wms.StatusChange{ //nolint:errcheck
 				EntityType: wms.EntityWorkUnit, EntityID: id,
@@ -1300,6 +1317,9 @@ func HandleToolCall(store wms.Store, eng wms.Engine, rawParams json.RawMessage) 
 		deliverables, err := store.ListDeliverables(ctx, wms.EntityWorkUnit, id, limit)
 		if err != nil {
 			return Result{}, &CallError{Code: -32000, Message: err.Error()}
+		}
+		if deliverables == nil {
+			deliverables = []wms.Deliverable{}
 		}
 		return JSONResult(deliverables), nil
 
@@ -1586,6 +1606,9 @@ func HandleToolCall(store wms.Store, eng wms.Engine, rawParams json.RawMessage) 
 		if err != nil {
 			return Result{}, &CallError{Code: -32000, Message: err.Error()}
 		}
+		if relations == nil {
+			relations = []storeTypes.Relation{}
+		}
 		return JSONResult(relations), nil
 
 	case ToolListRelationKinds, "wms.listRelationKinds":
@@ -1596,6 +1619,9 @@ func HandleToolCall(store wms.Store, eng wms.Engine, rawParams json.RawMessage) 
 		kinds, err := relStore.ListRelationKinds(ctx)
 		if err != nil {
 			return Result{}, &CallError{Code: -32000, Message: err.Error()}
+		}
+		if kinds == nil {
+			kinds = []storeTypes.RelationKind{}
 		}
 		return JSONResult(kinds), nil
 

@@ -50,6 +50,7 @@ TABLE agent_roster
   COLUMN bound_at type=datetime(6) null=YES default=<NULL> extra=
   COLUMN bus_team type=varchar(64) null=NO default= extra=
   COLUMN created_at type=datetime(6) null=NO default=CURRENT_TIMESTAMP(6) extra=DEFAULT_GENERATED
+  COLUMN description type=varchar(255) null=NO default= extra=
   COLUMN host type=varchar(128) null=NO default= extra=
   COLUMN model type=varchar(128) null=NO default= extra=
   COLUMN parent_ref type=varchar(36) null=YES default=<NULL> extra=
@@ -203,6 +204,21 @@ TABLE cost_rollup
   INDEX idx_cr_agent nonunique (agent_name)
   INDEX idx_cr_entity nonunique (entity_type,entity_id)
   INDEX PRIMARY unique (bucket_hour,entity_type,entity_id,agent_name,model)
+TABLE cost_verification
+  COLUMN converged_at type=datetime(6) null=YES default=<NULL> extra=
+  COLUMN delta_usd type=decimal(12,6) null=NO default=0.000000 extra=
+  COLUMN details type=longtext null=YES default=<NULL> extra=
+  COLUMN evaluated_at type=datetime(6) null=NO default=<NULL> extra=
+  COLUMN hub_usd type=decimal(12,6) null=NO default=0.000000 extra=
+  COLUMN id type=bigint null=NO default=<NULL> extra=auto_increment
+  COLUMN runtime type=varchar(32) null=NO default=claude_code extra=
+  COLUMN session_id type=varchar(64) null=NO default=<NULL> extra=
+  COLUMN vendor_usd type=decimal(12,6) null=NO default=0.000000 extra=
+  COLUMN verdict type=varchar(32) null=NO default=<NULL> extra=
+  INDEX idx_cv_evaluated nonunique (evaluated_at)
+  INDEX idx_cv_verdict nonunique (verdict)
+  INDEX PRIMARY unique (id)
+  INDEX uq_cv_session unique (session_id,runtime)
 TABLE directive_evidence
   COLUMN agent_name type=varchar(128) null=NO default= extra=
   COLUMN directive_id type=varchar(128) null=NO default= extra=
@@ -254,6 +270,25 @@ TABLE job_heartbeats
   COLUMN job_name type=varchar(64) null=NO default=<NULL> extra=
   COLUMN last_run_at type=datetime(6) null=NO default=<NULL> extra=
   INDEX PRIMARY unique (job_name)
+TABLE model_pricing
+  COLUMN cache_read_per_mtok type=decimal(12,6) null=NO default=<NULL> extra=
+  COLUMN cache_write_1h_per_mtok type=decimal(12,6) null=NO default=<NULL> extra=
+  COLUMN cache_write_5m_per_mtok type=decimal(12,6) null=NO default=<NULL> extra=
+  COLUMN fetched_at type=datetime(6) null=NO default=<NULL> extra=
+  COLUMN id type=bigint null=NO default=<NULL> extra=auto_increment
+  COLUMN input_per_mtok type=decimal(12,6) null=NO default=<NULL> extra=
+  COLUMN match_kind type=varchar(16) null=NO default=<NULL> extra=
+  COLUMN model_key type=varchar(128) null=NO default=<NULL> extra=
+  COLUMN notes type=text null=YES default=<NULL> extra=
+  COLUMN output_per_mtok type=decimal(12,6) null=NO default=<NULL> extra=
+  COLUMN runtime type=varchar(32) null=NO default=<NULL> extra=
+  COLUMN source_url type=varchar(512) null=NO default=<NULL> extra=
+  COLUMN valid_from type=datetime(6) null=NO default=<NULL> extra=
+  COLUMN valid_to type=datetime(6) null=YES default=<NULL> extra=
+  COLUMN variant type=varchar(16) null=NO default=base extra=
+  INDEX idx_model_pricing_runtime nonunique (runtime,model_key)
+  INDEX PRIMARY unique (id)
+  INDEX uq_model_pricing_key unique (runtime,match_kind,model_key,variant,valid_from)
 TABLE outcome_cost_rollup
   COLUMN agent_name type=varchar(128) null=NO default= extra=
   COLUMN bucket_day type=date null=NO default=<NULL> extra=
@@ -335,6 +370,20 @@ TABLE relation_kinds
   COLUMN miss_class type=varchar(16) null=NO default= extra=
   COLUMN taxable type=tinyint(1) null=NO default=0 extra=
   INDEX PRIMARY unique (kind)
+TABLE reprice_journal
+  COLUMN id type=bigint null=NO default=<NULL> extra=auto_increment
+  COLUMN message_id type=varchar(128) null=NO default=<NULL> extra=
+  COLUMN new_cost_usd type=decimal(12,6) null=NO default=<NULL> extra=
+  COLUMN new_rate_id type=bigint null=YES default=<NULL> extra=
+  COLUMN old_cost_usd type=decimal(12,6) null=NO default=<NULL> extra=
+  COLUMN old_rate_id type=bigint null=YES default=<NULL> extra=
+  COLUMN operator type=varchar(64) null=NO default=<NULL> extra=
+  COLUMN reason type=varchar(256) null=NO default=<NULL> extra=
+  COLUMN repriced_at type=datetime(6) null=NO default=<NULL> extra=
+  COLUMN session_id type=varchar(64) null=NO default=<NULL> extra=
+  INDEX idx_reprice_journal_session nonunique (session_id)
+  INDEX idx_reprice_journal_time nonunique (repriced_at)
+  INDEX PRIMARY unique (id)
 TABLE schema_version
   COLUMN applied_at type=datetime(6) null=NO default=<NULL> extra=
   COLUMN name type=varchar(128) null=NO default=<NULL> extra=
@@ -421,6 +470,7 @@ TABLE token_ledger
   COLUMN n_thinking type=smallint unsigned null=NO default=0 extra=
   COLUMN n_tool_use type=smallint unsigned null=NO default=0 extra=
   COLUMN output_tokens type=bigint unsigned null=NO default=0 extra=
+  COLUMN rate_id type=bigint null=YES default=<NULL> extra=
   COLUMN reasoning_output_tokens type=bigint unsigned null=NO default=0 extra=
   COLUMN runtime type=varchar(16) null=NO default=claude_code extra=
   COLUMN service_tier type=varchar(32) null=NO default= extra=
@@ -432,6 +482,7 @@ TABLE token_ledger
   COLUMN username type=varchar(64) null=NO default= extra=
   INDEX idx_token_agent nonunique (agent_name)
   INDEX idx_token_agent_time nonunique (agent_name,timestamp)
+  INDEX idx_token_ledger_rate_id nonunique (rate_id)
   INDEX idx_token_model nonunique (model)
   INDEX idx_token_session nonunique (session_id)
   INDEX idx_token_time nonunique (timestamp)

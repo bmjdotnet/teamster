@@ -98,4 +98,8 @@ GRANT SELECT ON `__STORE_DB__`.`outcome_relations`     TO '__GRAFANA_DB_USER__'@
 -- tracing the phase/work-type vocabulary weed's per-entity remaps.
 GRANT SELECT ON `__STORE_DB__`.`wp2_migration_audit`   TO '__GRAFANA_DB_USER__'@'%';
 
+-- Model pricing rate cards (v73 migration). fd-cost-explorer JOINs this table
+-- for per-model rate lookup instead of hardcoded CASE blocks.
+GRANT SELECT ON `__STORE_DB__`.`model_pricing`         TO '__GRAFANA_DB_USER__'@'%';
+
 FLUSH PRIVILEGES;

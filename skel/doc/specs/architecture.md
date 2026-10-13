@@ -472,6 +472,23 @@ Claude Code session (remote)
   ├─ GET  /wms/api/cost-flow → JSON cost-flow data
   ├─ GET  /wms/api/tags    → JSON tag data
   ├─ GET  /metrics         → Prometheus metrics (default registry)
+  ├─ GET  /rates           → model_pricing rate table as JSON, for scrapers
+  │                          with no store connection (?runtime=, ?model=
+  │                          filters); pure read, served in read-only mode too
+  ├─ POST /telemetry       → per-message / per-token_count cost ledger rows
+  │                          (Claude Code token-scraper, Codex codex-scraper;
+  │                          hub or remote); carries rate_id; rejected in
+  │                          read-only mode
+  ├─ POST /session         → Codex sessions-row upsert (codex-scraper, hub or
+  │                          remote; codex-context-subscriber, hub). Accepts
+  │                          optional relationship + agent_id; relationship=
+  │                          "subagent" derives parent_ref (root thread's
+  │                          roster row) and inherits team_name; rejected in
+  │                          read-only mode
+  ├─ POST /context         → context-window gauge report (Claude Code
+  │                          statusLine; Codex codex-context-subscriber, which
+  │                          sends runtime=codex + context_source=codex_appserver
+  │                          together) → agent_health_gauge context fields
   ├─ POST /mcp/activity    → JSON-RPC 2.0 activity MCP (for remote sessions)
   ├─ POST /mcp/wms         → JSON-RPC 2.0 WMS MCP (for remote sessions)
   ├─ POST /mcp/roster      → JSON-RPC 2.0 roster MCP (agent roster,
@@ -511,8 +528,17 @@ Claude Code session (remote)
 ~/teamster/bin/codex-scraper → Codex rollout-JSONL cost/ledger tailer (systemd timer, oneshot)
   ├─ tails ~/.codex/sessions/**/rollout-*.jsonl (+ archived_sessions/)
   ├─ POST hookd /telemetry → token_ledger rows (runtime='codex')
-  ├─ upserts the Codex sessions row via a direct store connection
-  └─ books thread_spawn subagent spend under the parent session (@<role>)
+  ├─ POST hookd /session → sessions-row upsert (no direct store connection);
+  │                        subagent files send relationship="subagent" + agent_id
+  └─ books thread_spawn subagent spend under the root session (identity rule:
+     semantic-conventions §10.3)
+
+~/teamster/lib/scripts/codex-context-subscriber.py → Codex context-window reporter (systemd daemon, hub only)
+  ├─ passive WebSocket listener on Codex's app-server control socket; never answers approvals
+  ├─ subscribes only to Active threads (resume pins a thread in the daemon)
+  ├─ POST hookd /session on thread start + 60 s heartbeat per active thread
+  └─ POST hookd /context (runtime=codex, context_source=codex_appserver, set together)
+      → agent_health_gauge context fields; health-collector keeps the latest report for codex rows
 
 ~/teamster/bin/health-collector → agent health gauge collector (hub daemon, 15s poll)
   ├─ polls token_ledger for per-agent token usage (E2 exception: direct SQL read)
@@ -628,6 +654,88 @@ On macOS: each teammate is a SEPARATE top-level session — own session_id, own
   Both scans are best-effort and never raise.
 ```
 
+### Claude agent identity (hub)
+
+How hookd, the health collector and ctop tell Claude Code agents apart on the
+hub. The macOS variant (no `agent_id`, identity from the transcript's
+`agentName`) is *Remote teammate identity derivation (macOS)* above; the Codex
+analogue is under *Codex runtime* below. Code anchors: `registerNewSubagentInstance`,
+`resolveSubagentName`, `selfHealParentRef` in `src/internal/server/server.go`.
+
+```
+Identity sources per agent kind (hook payload fields)
+  lead                  no agent_id, no agent_type        -> roster row agent_name ""
+  teammate (Agent Teams) agent_id + agent_type = name     -> "@" + name
+  Agent-tool subagent   agent_id + agent_type =           -> name from the Agent call's
+                        subagent_type                        tool_input.name (FIFO), else type
+  macOS teammate        none (separate session)           -> transcript agentName; see the
+                                                             macOS section
+
+Resolution order at SubagentStart (registerNewSubagentInstance)
+  1. ResolveByAgentID(session, agent_id): a known instance keeps its roster row
+     and name (instanceRegistry is re-seeded after a hookd restart this way).
+  2. Name FIFO: the lead's/teammate's Agent PreToolUse pushed
+     (subagent_type -> display name, spawner type, description); popped here.
+     The FIFO is why the lead's PreToolUse for Agent matters.
+  3. FIFO empty/expired: look the resolved name up in agent_roster; adopt the
+     row only if adoptRosterRow allows it:
+       row.agent_id == event.agent_id        -> adopt (same instance resuming)
+       row.agent_id non-empty, different     -> never adopt (teamster#27)
+       row.agent_id empty (legacy row)       -> ClaimRosterAgentID, an atomic
+                                                stamp; only one racing resume wins
+       store error                           -> fail closed (number instead)
+  4. Otherwise create a new row; a taken name becomes name-2, name-3, ... (<=64).
+  The early-registration path (the first PreToolUse/UserPromptSubmit the
+  in-memory SessionTracker sees as new, in dispatchObservability; skipped for
+  sub-subagents via the _spawner_type gate) stamps agent_id on the row it creates, defers to
+  SubagentStart when the name already belongs to another agent_id, and is
+  reconciled by completeEarlyRegistration (consumes the FIFO record, fills
+  parent_ref/description).
+
+Sidecar (<session>/subagents/agent-<agent_id>.meta.json, read via readSidecarForEvent)
+  hookd reads: parentAgentId (exact parent_ref, resolved by agent_id),
+  spawnDepth (>0 -> relationship "subagent"), model, description.
+  health-collector reads: name, agentType, taskKind, model (agentSidecar).
+  Claude Code may not have written it when SubagentStart arrives, so a miss is
+  logged and leaves parent_ref nil ("unknown", never a guessed lead).
+  selfHealParentRef retries on the instance's tool events (bounded:
+  selfHealMaxAttempts, selfHealMinSpacing; gated by parentKnown / descKnown) and
+  heals a nil parent_ref from the sidecar (relationship=subagent when
+  spawnDepth>0) and a missing/FIFO-sourced description.
+  A stored parent_ref is never overwritten; the sidecar description is ground
+  truth per agent_id and may correct a FIFO-sourced one.
+
+Description label pipeline
+  Agent tool_input.description -> FIFO -> roster.description  (fallback)
+  sidecar description          ->        roster.description  (wins when readable)
+  store.SanitizeRosterDescription (control chars collapsed, 255 runes) on every
+  write; SetRosterDescription persists (mysql migration v77 / sqlite v76).
+  -> /health/api/agents (agent_id, description); roster MCP (description)
+  -> ctop: dim label after the name on relationship=="subagent" rows only.
+
+ctop lineage grouping (cmd/ctop/agents.go groupBySession)
+  group = session of the root of the parent_ref chain (16-hop cap; cycle -> own
+  session; broken chain -> last resolvable ancestor). team_name is NOT a join
+  key: team names are reused across sessions, so a second group with the same
+  name is labelled #team·<prefix8> (fleetForestRows). macOS teammates, being
+  separate sessions, merge into the lead's group through parent_ref.
+  The health API team endpoints (GET /health/api/team/{team_name},
+  health_getTeamSummary) are unscoped and still merge across sessions.
+
+health-collector transcript lookup (cmd/health-collector/teammate_context.go)
+  roster agent_id -> subagents/agent-<agent_id>.jsonl directly
+  (findTeammateTranscriptByID; taskKind in_process_teammate still required).
+  Name + newest-mtime is the fallback only, upgraded once to the
+  agent_id path when it becomes known. Needed because an auto-numbered @name-2 teammate's
+  sidecar still says "name".
+
+Deliberately unchanged
+  agent_health_gauge and sessions keep their (session_id, agent_name) keys. A
+  respawned teammate is a new name (@name-2), not a reused row, so it starts
+  with fresh gauges instead of inheriting its predecessor's. The roster row is
+  keyed by roster_id; agent_id is an attribute used for resolution, not a PK.
+```
+
 ### Remote UserPromptSubmit context (nudge parity)
 
 ```
@@ -730,8 +838,15 @@ human-set one.
 token-scraper runs (cron or systemd timer)
   → reads Claude Code session JSONL transcripts
   → extracts per-message token counts
-  → POSTs to hookd /telemetry endpoint
-  → hookd writes to token_ledger table
+  → prices each message via pricing.Resolver over the HTTP RateSource
+    (GET hookd /rates → model_pricing; embedded tables + WARN if unreachable)
+  → POSTs to hookd /telemetry endpoint, including rate_id (the model_pricing
+    row that priced the message; -1 = priced from the embedded fallback tables)
+  → hookd writes to token_ledger table, stamping rate_id (migration v75);
+    rate_id=-1 is swapped for the runtime's embedded-fallback sentinel row
+    (model_key embedded-fallback-v1, all-zero rates, migration v76). NULL
+    rate_id = unstamped history (see rollup --reprice-backfill). Sentinel rows
+    are excluded from rollup --reprice drift detection.
 
 rollup --sweep runs (systemd timer, every 10 min)
   → entity hygiene: drain dangling intervals, reclassify
@@ -741,6 +856,9 @@ rollup --sweep runs (systemd timer, every 10 min)
   → writes usage_attribution table
   → recovery passes (recover-focus, recover-warmup, recover-gaps)
   → aggregation + reconciliation
+  → verification pass (normal and --sweep paths, non-fatal): reconciler.ReconcileSince
+    compares recent sessions' ledger cost against Claude Code's OTel counters,
+    pricing via the store-backed Resolver, and stores verdicts in cost_verification
 
 classify runs (systemd timer, every 10 min)
   → reads wms_intervals + tool signals
@@ -792,23 +910,53 @@ codex-scraper runs (systemd timer, every 10 min; oneshot, not a daemon)
   → per token_count event: derive cost from last_token_usage
     (cached_input / reasoning_output are SUBSETS, not extra tokens)
   → POST hookd /telemetry → token_ledger row (runtime='codex')
-  → upsert the Codex sessions row via a DIRECT store connection
-    (hookd's /telemetry never touches sessions; codex-scraper is its sole writer)
+  → POST hookd /session → upsert the Codex sessions row (hookd's /telemetry
+    never touches sessions; codex-scraper is the sole COST writer, while both
+    it and codex-context-subscriber upsert the sessions row through this same
+    /session endpoint with identical identity fields)
 
 rollup --sweep (unchanged) then attributes those ledger rows to WMS entities
   by the same temporal join used for Claude Code cost.
 ```
 
 **Subagent sessions.** Codex 0.142.x `thread_spawn` subagents write their own
-rollout file whose `session_meta.session_id` is the PARENT thread's id (and
-`agent_role` names the subagent). codex-scraper books the ledger + sessions
-rows under the parent `session_id` with `agent_name=@<role>` (falling back to
-the file's own id on 0.137.0, which has no `session_id`); `message_id` is keyed
-by the file's own thread id so sibling files never collide. Because the
-`sessions` primary key is `(session_id, agent_name)`, the `(parent, @role)` row
-coexists with the parent's `(parent, "")` row exactly like a Claude Code
-teammate, and rollup's existing temporal join attributes it with no rollup-side
-change. See `docs/specs/CODEX-INSTALL.md` and semantic-conventions §10.
+rollout file whose `session_meta.session_id` is the ROOT thread's id.
+codex-scraper books the ledger + sessions rows under that root `session_id`
+(falling back to the file's own id on 0.137.0, which has no `session_id`) with
+the `agent_name` defined once in semantic-conventions §10.3; `message_id` is
+keyed by the file's own thread id so sibling files never collide. Because the
+`sessions` primary key is `(session_id, agent_name)`, the `(root, @name)` row
+coexists with the root's `(root, "")` row exactly like a Claude Code teammate,
+and rollup's existing temporal join attributes it with no rollup-side change.
+
+Registration is a hookd `POST /session` carrying `relationship: "subagent"`
+and `agent_id` (the thread's own id). `handleSession` then resolves
+`parent_ref` to the root thread's `agent_roster` row (`ResolveRosterID(
+session_id, "")`) and inherits its `team_name`; if the root row does not exist
+yet both stay NULL and the next upsert from either writer heals them.
+`UpsertRosterEntry` keeps the existing `parent_ref`, `team_name` and
+`agent_id` when a later post omits them, so a re-post without the fields never
+wipes a resolved link. Once the `sessions` row exists, health-collector's
+sessions-table discovery creates the gauge row with its `roster_id`, and
+ctop's existing `parent_ref` nesting shows the subagent under the Codex lead.
+
+There are two `/session` writers by design. The scraper runs every 10 minutes,
+which would register a subagent long after most have finished, so
+`codex-context-subscriber` also POSTs `/session` the moment it learns a
+non-ephemeral thread (`thread/started`, `thread/resume` of an active thread,
+or an idle thread's transition to active; idle snapshot resumes do not
+register) and re-posts at most once per 60 s per active thread — every
+registration path shares that one stamp — so `sessions.last_seen` tracks real activity
+and the roster row does not go stale while the agent is working. This is a
+recorded exception to a one-writer rule: both go through the same vendable
+upsert, and the scraper remains the only cost writer. The dual-writer
+focus-interval hazard does not apply, because the sessions upsert is a pure
+last-seen/identity write with no end-of-interval semantics.
+
+Limitations: `agent_path` is not used (not on the app-server `Thread`);
+depth-2 subagents parent to the root thread; remotes run only the scraper, so
+their subagents register with up to 10 minutes of latency. See
+`docs/specs/CODEX-INSTALL.md` and semantic-conventions §10.3.
 
 **OTEL.** When the monitoring bundle includes the collector, Codex exports its
 metrics to a **dedicated** OTLP receiver (`otlp/codex`, default port 4329,
@@ -1360,6 +1508,7 @@ Backup configuration lives in the `backup:` section of `teamster.yaml` (merged i
 │   ├── teamster-backup.timer     (backup timer, configurable, default 1h)
 │   ├── teamster-codex-scraper.service (Codex rollout tailer one-shot, when Codex wired)
 │   ├── teamster-codex-scraper.timer   (Codex-scraper timer, every 10 min)
+│   ├── teamster-codex-context-subscriber.service (Codex context-gauge daemon, when Codex wired)
 │   ├── teamster-wms-review-sweep.service (review-sweep one-shot, config-gated)
 │   ├── teamster-wms-review-sweep.timer   (review-sweep timer, nightly 03:00)
 │   ├── teamster-mcp-scraper.service (MCP tool-call tailer one-shot, config-gated)
@@ -1443,12 +1592,13 @@ the token scraper, and the plugin. MCP endpoints point at the hub over HTTP.
 | `feed` | Go | hub | Long-running terminal viewer. Tails events.jsonl, ANSI colorizes. |
 | `activity-mcp` | Go | hub | MCP stdio for activity tools (hub-local sessions). No-op: tools return confirmation strings; real data extracted from PreToolUse by hook client. Includes `setMode`. |
 | `wms-mcp` | Go | hub | MCP stdio for WMS CRUD (hub-local sessions). Outcome/WorkUnit lifecycle, rename, tags, focus, dependencies. `wms_claimWorkUnit` returns the WorkUnit's `brief` and performs the `pending`→`active` transition as an atomic CAS, requesting a focus interval alongside it — the interval open itself is hookd's, asynchronous and best-effort, and may be declined; `wms_deliverResult` records an agent's output in `wms_deliverables` and transitions the WorkUnit active→review. Writes MySQL, emits status events via HookObserver. |
-| `rollup` | Go | hub | Cost-attribution pipeline. Allocates token spend to WMS entities. Recovery passes for unallocated messages. Run by systemd timer. |
+| `rollup` | Go | hub | Cost-attribution pipeline. Allocates token spend to WMS entities. Recovery passes for unallocated messages. Ends each pass (normal and `--sweep`) with a non-fatal `reconciler.ReconcileSince` OTel cost verification (`cmd/rollup/reconcile.go`). Run by systemd timer. |
 | `classify` | Go | hub | Derives phase and work-type tags on intervals/workunits from rule-based signals. Run by systemd timer every 10 min. |
-| `token-scraper` | Go | hub | Reads **Claude Code** session transcripts, extracts per-message token usage, writes to token_ledger. Never reads Codex data. |
-| `codex-scraper` | Go | hub | Codex rollout-JSONL cost/ledger tailer (systemd timer, oneshot). Sole writer of Codex `token_ledger` rows (via hookd `/telemetry`) and Codex `sessions` rows (direct store). Books `thread_spawn` subagent spend under the parent session as `@<role>`. No-op on hosts with no `codex` CLI. |
+| `token-scraper` | Go | hub | Reads **Claude Code** session transcripts, extracts per-message token usage, writes to token_ledger. Prices via `pricing.Resolver` over the HTTP `RateSource` (hookd `GET /rates`), falling back to embedded tables with a WARN. Never reads Codex data. |
+| `codex-scraper` | Go | hub | Codex rollout-JSONL cost/ledger tailer (systemd timer, oneshot). Sole writer of Codex `token_ledger` rows (via hookd `/telemetry`); upserts Codex `sessions` rows via hookd `/session`, as does `codex-context-subscriber`. Prices via `pricing.Resolver` over the HTTP `RateSource` (hookd `GET /rates`). Books `thread_spawn` subagent spend under the root session (identity: semantic-conventions §10.3). No-op on hosts with no `codex` CLI. |
+| `codex-context-subscriber` | Python | hub | Codex context-window reporter (systemd `Type=simple` daemon). Passive listener on Codex's app-server control socket; subscribes only to Active threads and POSTs `thread/tokenUsage/updated` fill to hookd `/context` with `runtime=codex` + `context_source=codex_appserver`. Also upserts the Codex `sessions` row via hookd `/session` on thread start and a 60 s heartbeat; `codex-scraper` remains the sole cost writer. Not staged on remotes. |
 | `mcp-scraper` | Go | hub | MCP tool-call telemetry tailer (systemd timer, oneshot, config-gated on `MCPScraper.Enabled`/`TEAMSTER_MCP_SCRAPER_ENABLED`). Tails `events.jsonl`, filters to completed `mcp__*` tool calls, ledgers one row per call into `claude_telemetry.mcp_tool_calls` — a call-volume instrument, not an audit trail (no `tool_input` capture). Cursor + generation counter survive `copytruncate` rotation. Single-writer invariant: only the hub's own process writes this table, so `teamster-mcp-scraper.timer` is permanently masked on every `teamster clone` target. |
-| `health-collector` | Go | hub | Agent health gauge collector. Hub daemon, 15s poll interval. Reads `token_ledger` for per-agent token usage and cost, writes `agent_health_gauge` rows. Context window comes from Claude Code's StatusLine when available; an Agent-Teams teammate (no StatusLine channel) gets its window from its own transcript instead, falling back to a model-class table then the lead's window. Resolves `roster_id` per agent. |
+| `health-collector` | Go | hub | Agent health gauge collector. Hub daemon, 15s poll interval. Reads `token_ledger` for per-agent token usage and cost (priced via `pricing.Resolver` over the store directly), writes `agent_health_gauge` rows. Context window comes from Claude Code's StatusLine when available; an Agent-Teams teammate (no StatusLine channel) gets its window from its own transcript instead, falling back to a model-class table then the lead's window. Resolves `roster_id` per agent. |
 | `ctop` | Go | hub | Terminal Bubbletea dashboard over hookd's `/health/api/*` + `/health/stream` (HTTP client only — no DB/store imports), so `--server` can point it at any hub, hub-local or remote. Four views (keys 1–4): health, focus, cost, and fleet — a multi-team tree (team headers, lead + teammates + sub-spawns with tree connectors, collapse/expand) with a live activity log below the grid. Fleet is the default view on launch. |
 | `teamster-install` | Go | hub | Called by `lib/installrunner.sh`. Copies binaries, materializes systemd units, merges settings.json. |
 | `demogen` | Go | hub | Synthetic data generator for dashboards. Creates correlated demo data. `--clean` for teardown. |

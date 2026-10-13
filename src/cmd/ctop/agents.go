@@ -518,28 +518,52 @@ func pinLeadsFirst(rows []Agent) {
 	copy(rows[len(leads):], rest)
 }
 
-// groupBySession partitions rows into per-session groups, merging macOS
-// separate-session teammates into their parent's group when both share a
-// team_name. On macOS, each teammate runs as its own session (distinct
-// session_id) but carries the same team_name and a parent_ref pointing at
-// the lead — without merging, each appears as its own solo team in the
-// fleet tree. Hub/Linux teammates already share the lead's session_id, so
-// this is a no-op for them.
+// maxLineageHops bounds the parent_ref walk in groupBySession; real fleets
+// nest lead -> teammate -> subagent, so this only ever trips on a cycle.
+const maxLineageHops = 16
+
+// groupBySession partitions rows into fleet groups by lineage. Each row's
+// group is the session of the root of its parent_ref chain (parent_ref is a
+// roster_id into this same snapshot). On macOS each Agent-Teams teammate is
+// its own session but carries a parent_ref to the lead, so it merges into
+// the lead's group; hub/Linux teammates share the lead's session_id and group
+// identically. A chain that breaks (parent_ref absent from the snapshot) or
+// cycles stops at the last resolvable row. Team names are deliberately NOT a
+// join key: they are reused across sessions for a project's whole lifetime.
 func groupBySession(rows []Agent) []agentGroup {
+	byRoster := make(map[string]Agent, len(rows))
+	for _, r := range rows {
+		if r.RosterID != nil && *r.RosterID != "" {
+			byRoster[*r.RosterID] = r
+		}
+	}
+	rootSession := func(r Agent) string {
+		cur := r
+		visited := map[string]bool{}
+		if r.RosterID != nil && *r.RosterID != "" {
+			visited[*r.RosterID] = true
+		}
+		for hop := 0; hop < maxLineageHops; hop++ {
+			if cur.ParentRef == nil || *cur.ParentRef == "" {
+				break
+			}
+			parent, ok := byRoster[*cur.ParentRef]
+			if !ok {
+				break
+			}
+			if visited[*cur.ParentRef] {
+				return r.SessionID
+			}
+			visited[*cur.ParentRef] = true
+			cur = parent
+		}
+		return cur.SessionID
+	}
+
 	order := make([]string, 0, len(rows))
 	byKey := make(map[string][]Agent, len(rows))
-	sessionToKey := make(map[string]string, len(rows))
-
 	for _, r := range rows {
-		key := r.SessionID
-		if r.TeamName != "" {
-			key = "team:" + r.TeamName
-		}
-		if existing, ok := sessionToKey[r.SessionID]; ok {
-			key = existing
-		} else {
-			sessionToKey[r.SessionID] = key
-		}
+		key := rootSession(r)
 		if _, ok := byKey[key]; !ok {
 			order = append(order, key)
 		}
@@ -549,14 +573,7 @@ func groupBySession(rows []Agent) []agentGroup {
 	groups := make([]agentGroup, 0, len(order))
 	for _, key := range order {
 		members := byKey[key]
-		sid := members[0].SessionID
-		for _, m := range members {
-			if m.ParentRef == nil || *m.ParentRef == "" {
-				sid = m.SessionID
-				break
-			}
-		}
-		groups = append(groups, agentGroup{sessionID: sid, rows: members})
+		groups = append(groups, agentGroup{sessionID: key, rows: members})
 	}
 	return groups
 }
@@ -628,15 +645,12 @@ func (m *agentsModel) filterGroupsByMaxAge(groups []agentGroup) []agentGroup {
 // disables the filter entirely, matching filterGroupsByMaxAge's own
 // convention.
 //
-// A group can legitimately contain more than one AgentName == "" row:
-// groupBySession merges every row sharing a team_name into one group with
-// no recency check, and team names are persistent (reused across sessions
-// for a project's whole lifetime — see the Eight Rules), so a long-dead
-// session's own lead entry can ride along in the same group as today's
-// live lead. Only the single most recently active lead is exempt from
-// staleness; any other AgentName == "" row is just another stale/closed
-// member and gets filtered like one — this is what keeps a week-old dead
-// session's lead from permanently riding along as an unfilterable ghost.
+// A group can still contain more than one AgentName == "" row (groupBySession
+// groups by parent_ref lineage, not team_name, but a session can carry
+// several lead-shaped rows, e.g. across a lead restart). Only the single most
+// recently active lead is exempt from staleness; any other AgentName == ""
+// row is just another stale/closed member and gets filtered like one — this
+// keeps a dead lead entry from riding along as an unfilterable ghost.
 func (m *agentsModel) filterStaleClosedMembers(groups []agentGroup) []agentGroup {
 	if m.maxAge <= 0 {
 		return groups
@@ -1078,10 +1092,8 @@ var tintBaseRGB = [3]int{13, 17, 23}
 
 // teamTintRGB returns a session group's background-tint source color.
 // Teams use empty salt (team name alone) so team identity is stable and
-// recognizable across all sessions and views — a team's membership spans
-// multiple sessions, so no single session_id is stable (groupBySession picks
-// a representative member's session_id, which can shift if that member's
-// ParentRef status changes). Sessionless groups use their sessionID with
+// recognizable across all sessions and views — groups from different sessions
+// that share a team name therefore share a hue. Sessionless groups use their sessionID with
 // empty salt for a stable, session-bound tint.
 func teamTintRGB(g agentGroup) [3]int {
 	team := ""

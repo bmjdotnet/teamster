@@ -519,6 +519,8 @@ type TelemetryRow struct {
 	// own column for raw-count fidelity.
 	Runtime               string
 	ReasoningOutputTokens int64
+	// RateID is the model_pricing.id that priced this row; 0 = not stamped.
+	RateID int64
 }
 
 // TelemetryStore is token_ledger ingest: the per-message token-usage rows
@@ -991,6 +993,7 @@ type RosterEntry struct {
 	BusTeam      string
 	ParentRef    *string
 	AgentID      string
+	Description  string
 	CreatedAt    time.Time
 	BoundAt      *time.Time
 	// UpdatedAt is stamped by the store on every Create/Upsert/Bind — a
@@ -1033,6 +1036,10 @@ type RosterStore interface {
 	GetRosterEntry(ctx context.Context, rosterID string) (RosterEntry, error)
 	ResolveRosterID(ctx context.Context, sessionID, agentName string) (string, error)
 	ResolveByAgentID(ctx context.Context, sessionID, agentID string) (string, error)
+	ClaimRosterAgentID(ctx context.Context, rosterID, agentID string) (claimed bool, err error)
+	// SetRosterDescription overwrites only the description (sanitized) of one
+	// roster row, leaving every other column untouched.
+	SetRosterDescription(ctx context.Context, rosterID, description string) error
 	ListRosterEntries(ctx context.Context, filter RosterFilter) ([]RosterEntry, error)
 	UpsertRosterEntry(ctx context.Context, entry RosterEntry) error
 	CreateToken(ctx context.Context, token AgentToken) error
@@ -1044,6 +1051,60 @@ type RosterStore interface {
 	// cutoff, returning the number of rows deleted. Mirrors
 	// gauge.GaugeStore.SweepOffline.
 	SweepStaleRoster(ctx context.Context, cutoff time.Time) (int64, error)
+}
+
+// PricingStore is the externalized rate card (model_pricing): per-model,
+// per-runtime USD-per-Mtok rates changeable as data, without a recompile.
+// Resolution semantics live in SelectRate (pricing.go), shared by every
+// backend so the chain is implemented once.
+type PricingStore interface {
+	// ResolveRate prices model for runtime at instant at (zero = now) through
+	// the exact -> longest-prefix -> class chain, preferring a variant "1m"
+	// row for a "[1m]"-labelled model. ErrNotFound when no row matches: the
+	// caller decides how loudly to price it at $0, never the store.
+	ResolveRate(ctx context.Context, runtime, model string, at time.Time) (ModelRate, error)
+
+	// ListRates returns rate rows ordered by (runtime, match_kind, model_key,
+	// variant, valid_from). See RateFilter for narrowing.
+	ListRates(ctx context.Context, filter RateFilter) ([]ModelRate, error)
+
+	// UpsertRate inserts a new rate row and returns its id. WP2 semantics are
+	// insert-only: a row is never updated in place, so history is untouched; a
+	// rate change is a new row with a later ValidFrom (the newer row shadows
+	// the older in ResolveRate). A second row for the same (runtime,
+	// match_kind, model_key, variant, valid_from) returns ErrConflict. WP3
+	// turns this into close-and-insert.
+	UpsertRate(ctx context.Context, rate ModelRate) (int64, error)
+
+	// CloseRate ends an open-ended rate row's validity at validTo (exclusive):
+	// the one mutation a rate row ever sees, and the primitive WP3's
+	// close-and-insert is built on. ErrNotFound when id is unknown;
+	// ErrPrecondition when the row is already closed or validTo is not after
+	// its valid_from. It cannot tell whether usage has already priced against
+	// the row (no ledger linkage until WP3's rate_id), so that guard is the
+	// caller's to add.
+	CloseRate(ctx context.Context, id int64, validTo time.Time) error
+}
+
+// ReconciliationStore is the read-only hub-side view the OTel cost reconciler
+// checks against the client's own counters: per-session aggregates over
+// token_ledger. Neither method writes, and neither prices anything — they
+// return what the ledger stored, so a pricing defect cannot hide from the
+// check that reads them.
+type ReconciliationStore interface {
+	// ReconcileSessions returns per-session aggregates (SUM of tokens and
+	// cost_usd per model, row count, newest row time) for the given session
+	// ids. Sessions with no ledger rows are absent from the result; repeated
+	// and empty ids are ignored. Rows of every runtime are included, since a
+	// session id belongs to one runtime.
+	ReconcileSessions(ctx context.Context, sessionIDs []string) (map[string]LedgerSession, error)
+
+	// ReconcileSessionsSince lists, ascending and distinct, the ids of sessions
+	// with ledger rows of the given runtime (token_ledger.runtime) timestamped
+	// at or after since. An empty runtime means claude_code, as everywhere else
+	// (NormalizeRateRuntime); the filter keeps a Codex session out of a Claude
+	// verification pass. An unknown runtime matches nothing.
+	ReconcileSessionsSince(ctx context.Context, runtime string, since time.Time) ([]string, error)
 }
 
 // Store is the full persistence surface implemented by every backend. It is
@@ -1068,11 +1129,71 @@ type Store interface {
 	ReviewSweepStore
 	ReportingStore
 	RosterStore
+	PricingStore
+	ReconciliationStore
+	VerificationStore
 	Prober
 
 	// Close releases any underlying handles. Not on wms.Store historically;
 	// surfaced here so callers can clean up without type-asserting.
 	Close() error
+}
+
+// RepricerStore finds and corrects token_ledger rows whose stored cost_usd no
+// longer matches their stamped rate (rate_id).
+type RepricerStore interface {
+	// DriftedRows returns rows with a non-NULL rate_id whose cost_usd differs
+	// from tokens x the model_pricing row's rates by more than 1e-6 USD. The
+	// recomputation is pure SQL, not the Go resolver.
+	DriftedRows(ctx context.Context, filter RepriceFilter) ([]DriftedRow, error)
+
+	// ApplyReprice sets cost_usd to NewCostUSD on each row and journals the
+	// change to reprice_journal, all in one transaction. Returns rows updated.
+	ApplyReprice(ctx context.Context, rows []DriftedRow, reason, operator string) (int64, error)
+
+	// BackfillCandidates returns the distinct (runtime, model) pairs that have
+	// NULL rate_id rows, with a row count per pair, most rows first. Rows with
+	// an empty model are excluded: no rate can resolve them.
+	BackfillCandidates(ctx context.Context, filter RepriceFilter) ([]BackfillCandidate, error)
+
+	// ApplyBackfill stamps rate_id on the NULL-rate_id rows of each mapping's
+	// (runtime, model), narrowed by the same filter BackfillCandidates used,
+	// and journals one reprice_journal row per stamped ledger row (cost
+	// unchanged), all in one transaction. Returns ledger rows updated.
+	ApplyBackfill(ctx context.Context, mappings []BackfillMapping, filter RepriceFilter, reason, operator string) (int64, error)
+}
+
+// BackfillCandidate is one (runtime, model) pair with unstamped ledger rows.
+type BackfillCandidate struct {
+	Runtime string
+	Model   string
+	Count   int
+}
+
+// BackfillMapping assigns a resolved rate row to one (runtime, model) pair.
+type BackfillMapping struct {
+	Runtime string
+	Model   string
+	RateID  int64
+	Count   int
+}
+
+// RepriceFilter narrows DriftedRows; zero values mean no filter.
+type RepriceFilter struct {
+	SessionID string
+	Model     string
+	Since     time.Time
+}
+
+// DriftedRow is one token_ledger row whose stored cost differs from its recompute.
+type DriftedRow struct {
+	SessionID  string
+	MessageID  string
+	Model      string
+	Runtime    string
+	RateID     int64
+	OldCostUSD float64
+	NewCostUSD float64
 }
 
 // StatusSummary is a snapshot of system health metrics returned by GetStatusSummary.

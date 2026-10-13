@@ -222,6 +222,12 @@ schedules `codex-scraper` — cron every 10 minutes on Linux, a launchd
 LaunchAgent (`net.bmj.teamster.codex-scraper`, `StartInterval=600`) on macOS
 — but only if Step 7 actually wired Codex on this remote.
 
+Note: `codex-context-subscriber` (the Codex context-gauge daemon, see
+`CODEX-INSTALL.md`) is hub-only: it is not staged on remotes or client-mode
+installs and has no cron/launchd launcher there, so Codex sessions on a remote
+still show 0 context. The script is stdlib Python and remote-compatible; the
+missing piece is the staging and launcher wiring in `install-remote`.
+
 **`--hookd-mode=external` client-mode installs** (run on the client itself,
 pointed at a hub over HTTP via `--hookd-endpoint`, rather than SSH'd from the
 hub) stage the same Codex components and call `remote-codex-setup.py` the
@@ -437,6 +443,7 @@ refactoring.
 | `/mcp/wms` | POST | JSON-RPC 2.0 | New: WMS MCP |
 | `/telemetry` | POST | JSON | Per-message/token-count cost ledger ingest (Claude Code `token-scraper` and Codex `codex-scraper`, hub or remote) |
 | `/session` | POST | JSON | Codex sessions-row upsert (`codex-scraper`, hub or remote); rejected in read-only mode like `/mcp/*` |
+| `/context` | POST | JSON | Context-window gauge report (Claude Code statusline; Codex `codex-context-subscriber`, hub only for now; posts `runtime=codex` + `context_source=codex_appserver` together) |
 | `/health` | GET | — | Existing |
 | `/` | GET | — | Existing dashboard |
 | `/wms` | GET | — | Existing WMS dashboard |

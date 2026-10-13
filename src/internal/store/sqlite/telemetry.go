@@ -13,9 +13,9 @@ var _ store.TelemetryStore = (*Store)(nil)
 // SQLite's own parameter ceiling (SQLITE_MAX_VARIABLE_NUMBER, 32766 on modern
 // builds) is far more permissive than MySQL's max_allowed_packet-driven
 // limit, but the same chunk size is kept for consistency with the mysql
-// backend and to keep any single statement small (1000*21 = 21000
+// backend and to keep any single statement small (1000*24 = 24000
 // placeholders, well under either engine's ceiling).
-const telemetryColumnsPerRow = 23
+const telemetryColumnsPerRow = 24
 const maxTelemetryRowsPerInsert = 1000
 
 // UpsertTelemetryBatch implements store.TelemetryStore. It chunks rows into
@@ -52,7 +52,7 @@ func (s *Store) upsertTelemetryChunk(ctx context.Context, chunk []store.Telemetr
 		 cache_write_1h, cache_write_5m,
 		 n_text, n_tool_use, n_thinking,
 		 total_input, stop_reason, service_tier, speed,
-		 cost_usd, timestamp, runtime, reasoning_output_tokens)
+		 cost_usd, timestamp, runtime, reasoning_output_tokens, rate_id)
 	VALUES `
 
 	args := make([]interface{}, 0, len(chunk)*telemetryColumnsPerRow)
@@ -63,7 +63,7 @@ func (s *Store) upsertTelemetryChunk(ctx context.Context, chunk []store.Telemetr
 		if runtime == "" {
 			runtime = "claude_code"
 		}
-		placeholders = append(placeholders, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+		placeholders = append(placeholders, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
 		args = append(args,
 			row.SessionID, row.MessageID, row.AgentName, row.Host, row.Username, row.Model,
 			row.InputTokens, row.OutputTokens, row.CacheReadTokens, row.CacheWriteTokens,
@@ -71,6 +71,7 @@ func (s *Store) upsertTelemetryChunk(ctx context.Context, chunk []store.Telemetr
 			row.NText, row.NToolUse, row.NThinking,
 			row.TotalInput, row.StopReason, row.ServiceTier, row.Speed,
 			row.CostUSD, row.Timestamp.UTC(), runtime, row.ReasoningOutputTokens,
+			nullableRateID(row.RateID),
 		)
 	}
 
@@ -111,6 +112,7 @@ func (s *Store) upsertTelemetryChunk(ctx context.Context, chunk []store.Telemetr
 			stop_reason        = CASE WHEN excluded.output_tokens > token_ledger.output_tokens THEN excluded.stop_reason ELSE token_ledger.stop_reason END,
 			cost_usd           = CASE WHEN excluded.output_tokens > token_ledger.output_tokens THEN excluded.cost_usd ELSE token_ledger.cost_usd END,
 			reasoning_output_tokens = CASE WHEN excluded.output_tokens > token_ledger.output_tokens THEN excluded.reasoning_output_tokens ELSE token_ledger.reasoning_output_tokens END,
+			rate_id            = CASE WHEN excluded.output_tokens > token_ledger.output_tokens THEN excluded.rate_id ELSE token_ledger.rate_id END,
 			runtime            = excluded.runtime,
 			output_tokens      = CASE WHEN excluded.output_tokens > token_ledger.output_tokens THEN excluded.output_tokens ELSE token_ledger.output_tokens END`
 
@@ -172,4 +174,11 @@ func resolveAgentFromNames(names []string) string {
 		// empty-stamped row is the lead.
 		return ""
 	}
+}
+
+func nullableRateID(id int64) interface{} {
+	if id == 0 {
+		return nil
+	}
+	return id
 }

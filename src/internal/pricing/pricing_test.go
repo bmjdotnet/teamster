@@ -71,11 +71,11 @@ func TestComputeCostFableClassFallback(t *testing.T) {
 // last-known rate: sonnet → sonnet-tier, haiku → haiku-tier.
 func TestComputeCostFutureModelClassFallback(t *testing.T) {
 	sonnet := ComputeCost("claude-sonnet-4-7", 1_000_000, 0, 0, 0, 0)
-	if math.Abs(sonnet-1_000_000*0.000003) > 1e-6 {
+	if math.Abs(sonnet-1_000_000*0.000002) > 1e-6 {
 		t.Errorf("sonnet-4-7 class fallback got %v, want sonnet-tier", sonnet)
 	}
 	haiku := ComputeCost("claude-haiku-5-0", 1_000_000, 0, 0, 0, 0)
-	if math.Abs(haiku-1_000_000*0.0000008) > 1e-6 {
+	if math.Abs(haiku-1_000_000*0.000001) > 1e-6 {
 		t.Errorf("haiku-5-0 class fallback got %v, want haiku-tier", haiku)
 	}
 	opus := ComputeCost("claude-opus-9-9", 1_000_000, 0, 0, 0, 0)
@@ -249,8 +249,8 @@ func TestComputeCostCacheWrite1hTier(t *testing.T) {
 		cacheWrite1hPerTok float64 // expected $/token for the 1h bucket
 	}{
 		{"claude-opus-4-6", 0.00001},
-		{"claude-sonnet-5", 0.000006},
-		{"claude-haiku-4-5", 0.0000016},
+		{"claude-sonnet-5", 0.000004},
+		{"claude-haiku-4-5", 0.000002},
 		{"claude-fable-5", 0.00002},
 	}
 	for _, c := range cases {
@@ -279,8 +279,8 @@ func TestComputeCostCacheWrite1hInertForOpenAI(t *testing.T) {
 	}
 }
 
-// claude-sonnet-5 now has an exact Known entry (promoted from the sonnet
-// class-fallback, which happened to carry the same rate) — must not log the
+// claude-sonnet-5 has its own exact Known entry at the published $2/$10 rate
+// (corrected 2026-10-03 from the July-verified $3/$15) — must not log the
 // same-class-fallback WARN.
 func TestComputeCostSonnet5ExactEntryNoFallbackWarn(t *testing.T) {
 	var buf bytes.Buffer
@@ -289,7 +289,7 @@ func TestComputeCostSonnet5ExactEntryNoFallbackWarn(t *testing.T) {
 	defer slog.SetDefault(orig)
 
 	got := ComputeCost("claude-sonnet-5", 1000, 500, 200, 100, 0)
-	want := 1000*0.000003 + 500*0.000015 + 200*0.0000003 + 100*0.00000375
+	want := 1000*0.000002 + 500*0.00001 + 200*0.0000002 + 100*0.0000025
 	if math.Abs(got-want) > 1e-12 {
 		t.Errorf("got %v want %v", got, want)
 	}
@@ -337,5 +337,102 @@ func TestComputeCostUnpricedRealModelsLogLoudly(t *testing.T) {
 		if !strings.Contains(buf.String(), "no pricing entry for model") {
 			t.Errorf("%s: expected a loud warning, got: %q", model, buf.String())
 		}
+	}
+}
+
+// The 2026-10-03 pricing-page rates, per Mtok, one bucket at a time, for every
+// Claude entry the rate-correction pass touched or added. Pricing each bucket
+// on its own makes a swapped or mistyped field fail by name.
+func TestComputeCostPublishedRates20261003(t *testing.T) {
+	const mtok = 1_000_000
+	cases := []struct {
+		model                   string
+		in, out, cr, cw5m, cw1h float64 // USD per Mtok
+	}{
+		{"claude-haiku-4-5", 1, 5, 0.10, 1.25, 2},
+		{"claude-sonnet-5", 2, 10, 0.20, 2.50, 4},
+		{"claude-sonnet-5-5", 2, 10, 0.20, 2.50, 4},
+		{"claude-opus-5", 5, 25, 0.50, 6.25, 10},
+		{"claude-opus-5-5", 4, 20, 0.20, 5, 8},
+		{"claude-fable-5", 10, 50, 1, 12.50, 20},
+		{"claude-fable-5-1", 10, 50, 0.25, 12.50, 20},
+	}
+	for _, c := range cases {
+		for _, b := range []struct {
+			name      string
+			got, want float64
+		}{
+			{"input", ComputeCost(c.model, mtok, 0, 0, 0, 0), c.in},
+			{"output", ComputeCost(c.model, 0, mtok, 0, 0, 0), c.out},
+			{"cache_read", ComputeCost(c.model, 0, 0, mtok, 0, 0), c.cr},
+			{"cache_write_5m", ComputeCost(c.model, 0, 0, 0, mtok, 0), c.cw5m},
+			{"cache_write_1h", ComputeCost(c.model, 0, 0, 0, 0, mtok), c.cw1h},
+		} {
+			if math.Abs(b.got-b.want) > 1e-9 {
+				t.Errorf("%s %s: $%v per Mtok, want $%v", c.model, b.name, b.got, b.want)
+			}
+		}
+	}
+}
+
+// claude-fable-5 is a prefix of claude-fable-5-1, and claude-opus-5 of
+// claude-opus-5-5. priceFor's prefix match has no boundary, so only the
+// longest-prefix rule keeps the newer, differently-priced models from being
+// silently priced as their shorter-named neighbors (the latent hazard the
+// dedicated entries exist to close).
+func TestLongestPrefixKeepsNewerVersionsApart(t *testing.T) {
+	const mtok = 1_000_000
+	cacheRead := func(model string) float64 { return ComputeCost(model, 0, 0, mtok, 0, 0) }
+	input := func(model string) float64 { return ComputeCost(model, mtok, 0, 0, 0, 0) }
+	for model, want := range map[string]float64{
+		"claude-fable-5":            1.00,
+		"claude-fable-5-20260801":   1.00,
+		"claude-fable-5-1":          0.25,
+		"claude-fable-5-1-20261001": 0.25,
+	} {
+		if got := cacheRead(model); math.Abs(got-want) > 1e-9 {
+			t.Errorf("%s cache read $%v per Mtok, want $%v", model, got, want)
+		}
+	}
+	for model, want := range map[string]float64{
+		"claude-opus-5":            5,
+		"claude-opus-5-20261001":   5,
+		"claude-opus-5-5":          4,
+		"claude-opus-5-5-20261001": 4,
+	} {
+		if got := input(model); math.Abs(got-want) > 1e-9 {
+			t.Errorf("%s input $%v per Mtok, want $%v", model, got, want)
+		}
+	}
+}
+
+// claude-sonnet-5-5 (Sonnet 5.5) has its own Known entry. Its published rates
+// equal Sonnet 5's today, so price alone cannot show which entry served it;
+// asserting the entry exists is what keeps it from silently following
+// claude-sonnet-5 (a prefix of it) if the two ever diverge. Priced as an exact
+// entry, never through the class fallback.
+func TestSonnet55HasItsOwnEntryAtPublishedRates(t *testing.T) {
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(orig)
+
+	if _, ok := Known["claude-sonnet-5-5"]; !ok {
+		t.Fatal("claude-sonnet-5-5 must have its own Known entry, not rely on the claude-sonnet-5 prefix")
+	}
+	const mtok = 1_000_000
+	for name, got := range map[string]float64{
+		"input":      ComputeCost("claude-sonnet-5-5", mtok, 0, 0, 0, 0) / 2,
+		"output":     ComputeCost("claude-sonnet-5-5", 0, mtok, 0, 0, 0) / 10,
+		"cache_read": ComputeCost("claude-sonnet-5-5", 0, 0, mtok, 0, 0) / 0.20,
+		"cw5m":       ComputeCost("claude-sonnet-5-5", 0, 0, 0, mtok, 0) / 2.50,
+		"cw1h":       ComputeCost("claude-sonnet-5-5", 0, 0, 0, 0, mtok) / 4,
+	} {
+		if math.Abs(got-1) > 1e-9 {
+			t.Errorf("sonnet-5-5 %s is not at the published $2/$10/$0.20/$2.50/$4 rate (ratio %v)", name, got)
+		}
+	}
+	if strings.Contains(buf.String(), "same-class fallback") {
+		t.Errorf("sonnet-5-5 priced via the class fallback: %q", buf.String())
 	}
 }

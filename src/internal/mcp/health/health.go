@@ -195,6 +195,8 @@ type agentHealthView struct {
 	TeamName       string  `json:"team_name,omitempty"`
 	Relationship   string  `json:"relationship,omitempty"`
 	ParentRef      *string `json:"parent_ref,omitempty"`
+	AgentID        string  `json:"agent_id,omitempty"`
+	Description    string  `json:"description,omitempty"`
 	Liveness       string  `json:"liveness,omitempty"`
 	ContextFillPct float64 `json:"context_fill_pct"`
 	SessionCostUSD float64 `json:"session_cost_usd"`
@@ -218,6 +220,14 @@ type agentHealthView struct {
 	// canonical tag instead of dim grey.
 	LastActivityTag string `json:"last_activity_tag,omitempty"`
 	CurrentFocus    string `json:"current_focus,omitempty"`
+	// GaugeUpdatedAt is when the collector last wrote this gauge row — the
+	// freshness of cost/tokens (and of context when no statusLine report is
+	// newer). Nil on roster-fallback rows that have no gauge data at all, so
+	// clients can tell "never received" from a measured zero.
+	GaugeUpdatedAt *string `json:"gauge_updated_at,omitempty"`
+	// ContextReportedAt is when a statusLine/subscriber last pushed a
+	// context-window report for this row; nil if none ever arrived.
+	ContextReportedAt *string `json:"context_reported_at,omitempty"`
 	// CompositionJSON lets every list row (not just a per-agent snapshot
 	// fetch) render a composition-colored context bar — ctop's SegmentedBar
 	// used to be selected-row-only because this field was snapshot-only.
@@ -273,11 +283,21 @@ func buildHealthView(g gauge.GaugeRow, rosterEntry *store.RosterEntry, session *
 		ts := g.LastActivityTs.UTC().Format("2006-01-02T15:04:05Z")
 		v.LastActivityTs = &ts
 	}
+	if !g.UpdatedAt.IsZero() {
+		ts := g.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z")
+		v.GaugeUpdatedAt = &ts
+	}
+	if g.ContextReportedAt != nil {
+		ts := g.ContextReportedAt.UTC().Format("2006-01-02T15:04:05Z")
+		v.ContextReportedAt = &ts
+	}
 
 	if rosterEntry != nil {
 		v.TeamName = rosterEntry.TeamName
 		v.Relationship = rosterEntry.Relationship
 		v.ParentRef = rosterEntry.ParentRef
+		v.AgentID = rosterEntry.AgentID
+		v.Description = rosterEntry.Description
 		v.Liveness = mcproster.ComputeLiveness(*rosterEntry, session)
 	}
 
@@ -461,6 +481,8 @@ func handleListAgents(ctx context.Context, mainStore store.Store, gaugeStore gau
 			TeamName:     entry.TeamName,
 			Relationship: entry.Relationship,
 			ParentRef:    entry.ParentRef,
+			AgentID:      entry.AgentID,
+			Description:  entry.Description,
 			Liveness:     mcproster.ComputeLiveness(entry, session),
 		}
 		if session != nil {

@@ -24,6 +24,7 @@ import (
 	"github.com/bmjdotnet/teamster/internal/config"
 	"github.com/bmjdotnet/teamster/internal/logging"
 	"github.com/bmjdotnet/teamster/internal/observability"
+	"github.com/bmjdotnet/teamster/internal/reconciler"
 	"github.com/bmjdotnet/teamster/internal/rollup"
 	"github.com/bmjdotnet/teamster/internal/store"
 	_ "github.com/bmjdotnet/teamster/internal/store/mysql" // registers mysql, mariadb
@@ -76,7 +77,57 @@ func run() int {
 		"with --sweep, --recover-focus, --recover-warmup, --recover-gaps, or --synthesize-focus, perform ZERO writes: log the plan and counts only")
 	countOrphans := flag.Bool("count-orphans", false,
 		"print the number of orphan sessions (unallocated, not yet synthesized, transcript present locally) and exit; used by the sweep-llm timer guard")
+	reprice := flag.Bool("reprice", false,
+		"find token_ledger rows whose cost_usd differs from recomputing via their rate_id; prints a summary and exits (incompatible with other flags)")
+	repriceDryRun := flag.Bool("reprice-dry-run", true,
+		"with --reprice, print the summary only and perform no writes (default); --reprice-apply overrides")
+	repriceBackfill := flag.Bool("reprice-backfill", false,
+		"with --reprice, stamp rate_id on NULL rate_id rows via the rate resolver instead of repricing drift; cost_usd is not changed")
+	repriceApply := flag.Bool("reprice-apply", false,
+		"with --reprice, update drifted rows and journal each change to reprice_journal (requires --reprice-reason)")
+	repriceSession := flag.String("reprice-session", "", "with --reprice, restrict to one session id")
+	repriceModel := flag.String("reprice-model", "", "with --reprice, restrict to one model")
+	repriceSince := flag.Duration("reprice-since", 0, "with --reprice, restrict to rows newer than this duration (e.g. 720h)")
+	repriceReason := flag.String("reprice-reason", "", "with --reprice-apply, the reason recorded in reprice_journal")
 	flag.Parse()
+
+	if *reprice {
+		otherFlags := false
+		flag.Visit(func(f *flag.Flag) {
+			if len(f.Name) < 7 || f.Name[:7] != "reprice" {
+				otherFlags = true
+			}
+		})
+		if otherFlags {
+			fmt.Fprintln(os.Stderr, "--reprice is incompatible with other rollup flags")
+			return 2
+		}
+		if *repriceApply && *repriceReason == "" {
+			fmt.Fprintln(os.Stderr, "--reprice-apply requires --reprice-reason")
+			return 2
+		}
+		explicitDryRun := false
+		flag.Visit(func(f *flag.Flag) {
+			if f.Name == "reprice-dry-run" {
+				explicitDryRun = true
+			}
+		})
+		if *repriceApply && explicitDryRun && *repriceDryRun {
+			fmt.Fprintln(os.Stderr, "--reprice-apply conflicts with --reprice-dry-run=true")
+			return 2
+		}
+	} else {
+		repriceFlagSet := false
+		flag.Visit(func(f *flag.Flag) {
+			if len(f.Name) >= 7 && f.Name[:7] == "reprice" {
+				repriceFlagSet = true
+			}
+		})
+		if repriceFlagSet {
+			fmt.Fprintln(os.Stderr, "--reprice-* flags require --reprice")
+			return 2
+		}
+	}
 
 	if *sweepLLM && !*sweep {
 		fmt.Fprintln(os.Stderr, "--sweep-llm requires --sweep")
@@ -104,6 +155,27 @@ func run() int {
 		return 1
 	}
 	defer st.Close() //nolint:errcheck
+
+	if *reprice {
+		rs, ok := st.(store.RepricerStore)
+		if !ok {
+			logger.Error("store backend does not support repricing")
+			return 1
+		}
+		err := runReprice(ctx, rs, repriceOptions{
+			Backfill: *repriceBackfill,
+			Apply:    *repriceApply,
+			Session:  *repriceSession,
+			Model:    *repriceModel,
+			Since:    *repriceSince,
+			Reason:   *repriceReason,
+		}, os.Stdout)
+		if err != nil {
+			logger.Error("reprice failed", "error", err)
+			return 1
+		}
+		return 0
+	}
 
 	if *countOrphans {
 		sessionIDs, err := st.OrphanSessionsWithTranscript(context.Background(),
@@ -150,12 +222,14 @@ func run() int {
 	// the pass runs allocation + rollup only. Default to the configured
 	// Prometheus port on localhost; allow an explicit override.
 	var otel rollup.OTelSource
+	var prom reconciler.PromReader
 	promURL := os.Getenv("TEAMSTER_PROMETHEUS_URL")
 	if promURL == "" && cfg.PrometheusPort != 0 {
 		promURL = fmt.Sprintf("http://localhost:%d", cfg.PrometheusPort)
 	}
 	if promURL != "" {
 		otel = rollup.NewPromOTel(promURL)
+		prom = reconciler.NewPromHTTP(promURL)
 		logger.Info("reconciliation enabled", "prometheus_url", promURL)
 	} else {
 		logger.Warn("reconciliation disabled: no Prometheus URL")
@@ -164,7 +238,7 @@ func run() int {
 	r := rollup.NewRunner(st, st, st, st, st, st, otel, logger)
 
 	if *sweep {
-		return runSweep(ctx, st, r, cfg, logger, *sweepLLM, *dryRun)
+		return runSweep(ctx, st, r, prom, cfg, logger, *sweepLLM, *dryRun)
 	}
 
 	// Opt-in historical backfill runs before the regular pass: it re-resolves
@@ -267,6 +341,7 @@ func run() int {
 		logger.Error("rollup pass failed", "error", err)
 		return 1
 	}
+	verifyCosts(ctx, st, prom, *dryRun, logger)
 
 	// --recover-focus runs AFTER the normal pass so it operates on freshly-derived
 	// unallocated rows. --dry-run makes it perform zero writes (the live-DB
@@ -388,7 +463,7 @@ func run() int {
 // idempotent — a re-run fixes 0 if nothing new to fix. The pipeline ordering
 // matters: hygiene first (so dangling intervals don't pollute attribution),
 // allocate before recovery (so recovery targets fresh unallocated rows).
-func runSweep(ctx context.Context, st store.Store, r *rollup.Runner, cfg config.Config, logger *slog.Logger, sweepLLM, dryRun bool) int {
+func runSweep(ctx context.Context, st store.Store, r *rollup.Runner, prom reconciler.PromReader, cfg config.Config, logger *slog.Logger, sweepLLM, dryRun bool) int {
 	logger.Info("sweep: starting attribution sweep", "dry_run", dryRun, "sweep_llm", sweepLLM)
 	start := time.Now()
 
@@ -463,6 +538,10 @@ func runSweep(ctx context.Context, st store.Store, r *rollup.Runner, cfg config.
 		return 1
 	}
 	logger.Info("sweep: allocate pass complete")
+
+	// Cost verification only reads the ledger and Prometheus, so it runs here,
+	// before the recovery steps, and still happens if one of them fails.
+	verifyCosts(ctx, st, prom, dryRun, logger)
 
 	// Step 4: Transcript-focus recovery.
 	focusStats, err := r.RecoverFocus(ctx, recoverOpts)
