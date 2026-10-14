@@ -248,6 +248,12 @@ Outcome (branches A/C). If the operator picked an existing Outcome at Q0
 apply any tags not already present with serial `wms_tagEntity` calls per
 session-protocol Step 7d, exactly as documented today.
 
+**Carry the team name forward.** The team name for session-protocol Step
+4a/4b is the `team:<value>` from the confirmed tag map. The dispatched
+skill's Step 4b `registerPeer` call needs it as `team_name`, plus your
+`session_id`. If the tag map has no `team:` key, derive one from the focus
+slug per Step 4a's naming guidance before dispatching.
+
 **Dispatch by following the chosen skill INLINE — do NOT call the Skill tool.**
 `/teamster:solo` and the bootstrap skill both set `disable-model-invocation`,
 so a `Skill(teamster:solo)` / `Skill(teamster:bootstrap)` call **errors**. To

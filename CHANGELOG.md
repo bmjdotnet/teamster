@@ -5,8 +5,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## v0.3.2 (unreleased)
 
+### Added
+- **Team-name nudge.** hookd now nudges a team-mode lead whose roster row has no `team_name`, so ctop shows the team name instead of a `solo·hash` fallback. The hook client sends session mode on the wire (`_mode`); hookd checks the lead's roster row and fires one `additionalContext` nudge per session.
+
 ### Changed
 - **Redesigned tag editor TUI** — tree-based layout with detail pane, modal forms, contextual help, and bold color palette; key descriptions now stored separately from value descriptions (#42).
+- **Team registration is verified on setup.** The bootstrap and start skills now carry the team name into `registerPeer` explicitly and verify the roster row afterward, retrying if the name is empty.
 
 ## v0.3.1
 

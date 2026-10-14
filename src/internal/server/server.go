@@ -146,6 +146,7 @@ type Server struct {
 	pendingMCPMu    sync.Mutex
 	pendingMCPIdent map[string][]mcpIdentity // key: "toolSuffix:entityID", FIFO per key
 	focusNudge      focusNudgeCache
+	teamNameNudge   teamNameNudgeCache
 	pressureNudge   pressureNudgeCache
 	wmsWarnings     wmsWarningQueue
 	rosterLastSeen  lastSeenCache
@@ -493,6 +494,21 @@ func (s *Server) handleEvent(w http.ResponseWriter, r *http.Request) {
 			return s.hasAnyFocusInterval(event.SessionID, agent)
 		}); shouldNudge {
 			resp["additionalContext"] = msg
+		}
+		// Team-name nudge: a team-mode lead (hook client reports _mode=team)
+		// whose roster row has no team_name shows as solo·hash in ctop forever.
+		if event.AgentType == "" && event.SessionID != "" {
+			if mode, _ := data["_mode"].(string); mode == "team" {
+				if msg, shouldNudge := s.teamNameNudge.check(event.SessionID, func() bool {
+					return s.leadHasTeamName(event.SessionID)
+				}); shouldNudge {
+					if existing, ok := resp["additionalContext"].(string); ok && existing != "" {
+						resp["additionalContext"] = existing + "\n\n" + msg
+					} else {
+						resp["additionalContext"] = msg
+					}
+				}
+			}
 		}
 	}
 
@@ -846,6 +862,10 @@ func (s *Server) dispatchObservability(event hook.HookEvent, data map[string]int
 	case "PreToolUse":
 		toolInput := normaliseToolInput(event.ToolInput)
 		switch event.ToolName {
+		case "mcp__roster__" + mcproster.MCPToolRegisterPeer:
+			if hook.StrField(toolInput, "team_name", 128) != "" {
+				s.teamNameNudge.setTeamName(event.SessionID)
+			}
 		// WMS label population uses PreToolUse (not PostToolUse) because Claude Code
 		// does not fire PostToolUse for successful MCP calls. The caller-provides-ID
 		// design means the id is in the tool INPUT, so PreToolUse has all data needed.
@@ -1948,6 +1968,24 @@ func (s *Server) hasAnyFocusInterval(sessionID, agentName string) bool {
 		return false
 	}
 	return has
+}
+
+// leadHasTeamName reports whether the session lead's roster row carries a
+// team_name. Errors count as "has one" so a lookup failure never nudges.
+func (s *Server) leadHasTeamName(sessionID string) bool {
+	if s.obsStore == nil {
+		return true
+	}
+	ctx := context.Background()
+	rid, err := s.obsStore.ResolveRosterID(ctx, sessionID, "")
+	if err != nil {
+		return true
+	}
+	entry, err := s.obsStore.GetRosterEntry(ctx, rid)
+	if err != nil {
+		return true
+	}
+	return entry.TeamName != ""
 }
 
 // agentNameFor converts hook AgentType to the canonical agent_name label.
