@@ -160,7 +160,7 @@ var (
 
 	MetricStyle = lipgloss.NewStyle().Bold(true).Foreground(pMetric)
 
-	GroupStyle = lipgloss.NewStyle().Bold(true).Foreground(pWhite)
+	GroupStyle = lipgloss.NewStyle().Bold(true).Foreground(pPurple)
 
 	KeyNameStyle = lipgloss.NewStyle().Bold(true).Foreground(pAccent)
 

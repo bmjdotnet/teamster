@@ -155,6 +155,7 @@ type TagKeySummary struct {
 	AutoExtract    string   `json:"auto_extract"`
 	Interview      string   `json:"interview"`
 	FacetSource    string   `json:"facet_source"`
+	IsSeed         bool     `json:"is_seed"`
 }
 
 // EntityTag is a tag binding resolved for one entity: the vocabulary fields

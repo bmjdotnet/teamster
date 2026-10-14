@@ -27,7 +27,7 @@ func (s *Store) TagKeys(ctx context.Context) ([]wms.TagKeySummary, error) {
 		SELECT tag_key, category, cardinality, required,
 		       MAX(key_description) AS key_description,
 		       scope, exclusion_group, auto_extract, interview, facet_source,
-		       COUNT(*) AS value_count
+		       COUNT(*) AS value_count, MAX(is_seed) AS is_seed
 		FROM tags
 		GROUP BY tag_key, category, cardinality, required,
 		         scope, exclusion_group, auto_extract, interview, facet_source
@@ -41,16 +41,18 @@ func (s *Store) TagKeys(ctx context.Context) ([]wms.TagKeySummary, error) {
 	var order []string
 	for rows.Next() {
 		var k wms.TagKeySummary
-		var required int
+		var required, isSeed int
 		if err := rows.Scan(&k.Key, &k.Category, &k.Cardinality, &required, &k.Description,
 			&k.Scope, &k.ExclusionGroup, &k.AutoExtract, &k.Interview, &k.FacetSource,
-			&k.ValueCount); err != nil {
+			&k.ValueCount, &isSeed); err != nil {
 			return nil, err
 		}
 		k.Required = required != 0
+		k.IsSeed = isSeed != 0
 		if existing, ok := seen[k.Key]; ok {
 			existing.ValueCount += k.ValueCount
 			existing.Required = existing.Required || k.Required
+			existing.IsSeed = existing.IsSeed || k.IsSeed
 			continue
 		}
 		kCopy := k

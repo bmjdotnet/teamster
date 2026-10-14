@@ -36,6 +36,7 @@ type keyEntry struct {
 	valueCount     int // non-stub, non-retired
 	retiredCount   int
 	createOnApply  bool // only stub rows exist
+	isSeed         bool // false = key retired/demoted
 	lifecycle      bool // category == "lifecycle"
 	values         []*valueEntry
 }
@@ -130,6 +131,7 @@ func buildTree(msg treeLoaded) (groups []*groupEntry, keys map[string]*keyEntry,
 			interview:      sm.Interview,
 			facetSource:    sm.FacetSource,
 			entityCount:    countByKey[sm.Key],
+			isSeed:         sm.IsSeed,
 			lifecycle:      sm.Category == "lifecycle",
 		}
 		keys[sm.Key] = k

@@ -464,14 +464,24 @@ func (m *EditorModel) handleTreeKey(key string) tea.Cmd {
 			if n.key.lifecycle {
 				return m.setStatus(lifecycleBlockMsg)
 			}
+			if !n.key.isSeed {
+				k, st := n.key, m.st
+				req := k.required
+				spec := wms.TagSpec{Key: k.tagKey, Category: k.category, Cardinality: k.cardinality, Description: k.description, Required: &req}
+				return writeCmd(writeDone{status: "restored key " + k.tagKey, selectID: k.id},
+					func(ctx context.Context) error { return st.DefineTag(ctx, spec) })
+			}
 			m.openForm(newConfirmRetireForm(n.key, nil))
 		case nodeValue:
 			if n.key.lifecycle {
 				return m.setStatus(lifecycleBlockMsg)
 			}
-			if !n.value.retired {
-				m.openForm(newConfirmRetireForm(n.key, n.value))
+			if n.value.retired {
+				key, val, st := n.key.tagKey, n.value.value, m.st
+				return writeCmd(writeDone{status: fmt.Sprintf("restored %s = %s", key, val), selectID: n.value.id},
+					func(ctx context.Context) error { return st.UnretireTagValue(ctx, key, val) })
 			}
+			m.openForm(newConfirmRetireForm(n.key, n.value))
 		}
 	}
 	return nil

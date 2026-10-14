@@ -31,8 +31,8 @@ func TestFormTabOrderSkipsLockedAndWraps(t *testing.T) {
 	}
 
 	c := newConfirmRetireForm(&keyEntry{tagKey: "k"}, nil)
-	if c.focus != c.discardSlot() {
-		t.Fatalf("confirm form must start on Cancel")
+	if c.focus != c.saveSlot() {
+		t.Fatalf("confirm form must start on Retire")
 	}
 }
 
@@ -195,8 +195,8 @@ func TestHelpPanelFollowsFocus(t *testing.T) {
 
 	c := newConfirmRetireForm(&keyEntry{tagKey: "k"}, nil)
 	c.layout(68, 24)
-	if !strings.Contains(c.render(), "Keep everything as it is") {
-		t.Errorf("confirm form should show Cancel help first")
+	if !strings.Contains(c.render(), "Demotes the key") {
+		t.Errorf("confirm form should show Retire help first")
 	}
 }
 

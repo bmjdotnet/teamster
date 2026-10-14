@@ -446,6 +446,9 @@ type TagAdminStore interface {
 	// can depend on one narrow interface.
 	RetireTagValue(ctx context.Context, tagKey, tagValue string) error
 
+	// UnretireTagValue clears the retired flag set by RetireTagValue.
+	UnretireTagValue(ctx context.Context, tagKey, tagValue string) error
+
 	// Reads for the CLI/TUI browsers.
 	// TagKeys' summary Description is the key's own description (key_description).
 	TagKeys(ctx context.Context) ([]wms.TagKeySummary, error)

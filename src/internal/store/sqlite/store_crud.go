@@ -605,6 +605,23 @@ func (s *Store) RetireTagValue(ctx context.Context, tagKey, tagValue string) err
 	return nil
 }
 
+// UnretireTagValue clears a single tag value's retired flag (retired=0).
+func (s *Store) UnretireTagValue(ctx context.Context, tagKey, tagValue string) error {
+	if tagKey == "" || tagValue == "" {
+		return fmt.Errorf("UnretireTagValue: tagKey and tagValue are required")
+	}
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE tags SET retired = 0 WHERE tag_key = ? AND tag_value = ?`, tagKey, tagValue)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return store.NotFound("UnretireTagValue", "tag", tagKey+":"+tagValue)
+	}
+	return nil
+}
+
 // UpdateTagValueDescription overwrites the description on ONE (tag_key,
 // tag_value) row. Not-found correctness: like MySQL, RowsAffected counts
 // CHANGED rows, so writing the same description back is a 0-row no-op

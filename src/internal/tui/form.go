@@ -240,7 +240,7 @@ func newEditValueForm(v *valueEntry) *formModel {
 		newTextAreaField("description", "Description", v.description, "When should an agent pick this value?", 1024,
 			"When to apply this specific value — the rubric an agent reads to pick it over its siblings. One paragraph."),
 		newReadOnlyField("retired", "Retired", yesNo(v.retired),
-			"Retired values stay bound to existing entities but are hidden from the vocabulary. Retire with d from the tree; there is no un-retire yet."),
+			"Retired values stay bound to existing entities but are hidden from the vocabulary. Toggle with d from the tree."),
 		newReadOnlyField("seed", "Seed", yesNo(v.isSeed),
 			"seed = part of the declared vocabulary (yaml or DefineTag). not seed = minted on first use or added in this editor."),
 	}
@@ -342,9 +342,9 @@ func newConfirmRetireForm(k *keyEntry, v *valueEntry) *formModel {
 		f.tagValue = v.value
 		f.title = fmt.Sprintf("Retire value: %s = %s", k.tagKey, v.value)
 		f.subtitle = fmt.Sprintf("Hides the value from the vocabulary. Bindings are kept. %d entities carry it.", v.entityCount)
-		f.saveHelp = "Marks the value retired: hidden from the vocabulary, bindings kept. Show retired values with r. No un-retire exists yet."
+		f.saveHelp = "Marks the value retired: hidden from the vocabulary, bindings kept. Show retired values with r; press d on a retired value to restore it."
 	}
-	f.focus = 1
+	f.focus = 0
 	return f
 }
 

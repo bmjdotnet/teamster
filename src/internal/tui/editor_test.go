@@ -129,6 +129,11 @@ func (f *fakeTagStore) RetireTagValue(_ context.Context, key, val string) error 
 	return nil
 }
 
+func (f *fakeTagStore) UnretireTagValue(_ context.Context, key, val string) error {
+	f.rec(fmt.Sprintf("UnretireTagValue(%s,%s)", key, val))
+	return nil
+}
+
 func (f *fakeTagStore) TagValues(context.Context, string) ([]wms.Tag, error)   { return nil, nil }
 func (f *fakeTagStore) TagBindingCount(context.Context, string) (int64, error) { return 0, nil }
 func (f *fakeTagStore) DeleteTagKey(context.Context, string) (int64, error)    { return 0, nil }

@@ -89,6 +89,13 @@ func (m EditorModel) treeRow(n *treeNode, w int, selected bool) string {
 		}
 	}
 
+	on := func(st lipgloss.Style) lipgloss.Style {
+		if selected {
+			return st.Background(pHighBg)
+		}
+		return st
+	}
+
 	var label, badges string
 	suffix := ""
 	count := 0
@@ -106,7 +113,7 @@ func (m EditorModel) treeRow(n *treeNode, w int, selected bool) string {
 			label = "." + strings.TrimPrefix(n.key.tagKey, ns.namespace+".")
 		}
 		if n.key.required {
-			badges = ReqStyle.Render("REQ")
+			badges = on(ReqStyle).Render("REQ")
 		}
 	case nodeValue:
 		label, count = n.value.value, n.value.entityCount
@@ -117,32 +124,31 @@ func (m EditorModel) treeRow(n *treeNode, w int, selected bool) string {
 	}
 	if count > 0 {
 		if badges != "" {
-			badges += " "
+			badges += on(lipgloss.NewStyle()).Render(" ")
 		}
-		badges += MetricStyle.Render(fmt.Sprint(count))
+		badges += on(MetricStyle).Render(fmt.Sprint(count))
 	}
 
-	prefix := indent + DimStyle.Render(glyph)
+	prefix := on(lipgloss.NewStyle()).Render(indent) + on(DimStyle).Render(glyph)
 	avail := w - lipgloss.Width(prefix) - lipgloss.Width(suffix)
 	if badges != "" {
 		avail -= lipgloss.Width(badges) + 1
 	}
 	label = truncate(label, max(avail, 1))
 
-	// The cursor row keeps the node's own colour and adds the selection block.
 	if selected {
-		nameStyle = nameStyle.Bold(true).Background(pHighBg)
+		nameStyle = lipgloss.NewStyle().Bold(true).Foreground(pWhite).Background(pHighBg)
 	}
 	styled := nameStyle.Render(label)
 	if suffix != "" {
-		styled += DimStyle.Render(suffix)
+		styled += on(DimStyle).Render(suffix)
 	}
 	left := prefix + styled
-	if badges == "" {
-		return left
+	pad := max(0, w-lipgloss.Width(left)-lipgloss.Width(badges))
+	if badges != "" {
+		pad = max(1, pad)
 	}
-	pad := max(1, w-lipgloss.Width(left)-lipgloss.Width(badges))
-	return left + strings.Repeat(" ", pad) + badges
+	return left + on(lipgloss.NewStyle()).Render(strings.Repeat(" ", pad)) + badges
 }
 
 func (m EditorModel) renderTree() string {
