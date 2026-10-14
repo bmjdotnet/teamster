@@ -394,6 +394,10 @@ func ProcessEvent(event HookEvent, rawData map[string]interface{}, serverURL, de
 		rawData["_model"] = model
 	}
 
+	if mode := readModeMarker(sessionID, dedupDir); mode != "" {
+		rawData["_mode"] = mode
+	}
+
 	hookEvent := event.HookEventName
 	// Hoisted so post-switch Agent enforcement block can reference them.
 	toolName := event.ToolName

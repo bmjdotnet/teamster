@@ -129,11 +129,18 @@ registerPeer(
 )
 ```
 
+**Verify the registration landed.** After `registerPeer` returns, call
+`getRosterEntry(roster_id=<returned roster_id>)` and confirm `team_name` is
+non-empty. If it is empty (e.g. you omitted `team_name`), re-call
+`registerPeer` with `team_name` and `session_id`. ctop is unreadable without
+it — this is a hard requirement, not optional metadata.
+
 This is NOT the same as the `team` tag on the Outcome (Step 7d) — that is
 WMS-domain work attribution. This is operational identity: it makes the
 team name visible in ctop, the health API, and roster scoping. Both must
 be set. Call `registerPeer` exactly once per session — do not repeat it if
-you arrived here via `/teamster:start` having already called it.
+you arrived here via `/teamster:start` having already called it (the
+verify-and-retry above is the only exception).
 
 ## Step 5 — Load WMS tools
 

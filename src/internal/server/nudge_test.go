@@ -359,3 +359,43 @@ func TestReaperSweep_InvalidatesNudgeCacheOnlyWhenPhase3ClosedSomething(t *testi
 		}
 	})
 }
+
+func TestTeamNameNudgeCache_NoTeamName_NudgesOnce(t *testing.T) {
+	var c teamNameNudgeCache
+	dbCalled := 0
+	dbCheck := func() bool { dbCalled++; return false }
+
+	msg, ok := c.check("sess1", dbCheck)
+	if !ok || msg != teamNameNudgeText {
+		t.Fatalf("expected team-name nudge, got %q ok=%v", msg, ok)
+	}
+	if _, ok := c.check("sess1", dbCheck); ok {
+		t.Fatal("should stop after teamNameNudgeMaxCount")
+	}
+	if dbCalled != 1 {
+		t.Fatalf("expected 1 DB call, got %d", dbCalled)
+	}
+}
+
+func TestTeamNameNudgeCache_HasTeamName_NoNudge(t *testing.T) {
+	var c teamNameNudgeCache
+	if _, ok := c.check("sess1", func() bool { return true }); ok {
+		t.Fatal("should not nudge when roster has a team_name")
+	}
+}
+
+func TestTeamNameNudgeCache_SetTeamName_StopsNudge(t *testing.T) {
+	var c teamNameNudgeCache
+	c.setTeamName("sess1")
+	if _, ok := c.check("sess1", func() bool { return false }); ok {
+		t.Fatal("should not nudge after setTeamName")
+	}
+}
+
+func TestTeamNameNudgeCache_SessionsIndependent(t *testing.T) {
+	var c teamNameNudgeCache
+	c.setTeamName("sess1")
+	if _, ok := c.check("sess2", func() bool { return false }); !ok {
+		t.Fatal("sess2 should still be nudged")
+	}
+}

@@ -163,3 +163,58 @@ func (c *focusNudgeCache) invalidateAll() {
 	defer c.mu.Unlock()
 	c.state = make(map[string]*nudgeState)
 }
+
+const teamNameNudgeMaxCount = 1
+
+const teamNameNudgeText = "Your session has no team name in the roster (ctop shows solo·hash instead of #team-name). " +
+	"Call registerPeer(agent_name=\"\", runtime=\"claude_code\", relationship=\"lead\", team_name=\"<your-team-name>\", session_id=\"<your-session-uuid>\") to fix it."
+
+// teamNameNudgeCache tracks per-session whether the lead's roster row carries
+// a team_name, so hookd can nudge a team-mode lead that never passed one to
+// registerPeer. Keyed by session_id only: just the lead's team_name matters.
+type teamNameNudgeCache struct {
+	mu    sync.Mutex
+	state map[string]*teamNameNudgeState
+}
+
+type teamNameNudgeState struct {
+	hasTeamName bool
+	nudgeCount  int
+}
+
+func (c *teamNameNudgeCache) setTeamName(sessionID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.state == nil {
+		c.state = make(map[string]*teamNameNudgeState)
+	}
+	c.state[sessionID] = &teamNameNudgeState{hasTeamName: true}
+}
+
+// check returns (teamNameNudgeText, true) when a nudge should be emitted.
+// dbCheck runs only on a cache miss and returns true when the lead's roster
+// row already has a team_name.
+func (c *teamNameNudgeCache) check(sessionID string, dbCheck func() bool) (string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.state == nil {
+		c.state = make(map[string]*teamNameNudgeState)
+	}
+	if s, ok := c.state[sessionID]; ok {
+		if s.hasTeamName || s.nudgeCount >= teamNameNudgeMaxCount {
+			return "", false
+		}
+		s.nudgeCount++
+		return teamNameNudgeText, true
+	}
+	has := dbCheck()
+	ns := &teamNameNudgeState{hasTeamName: has}
+	if !has {
+		ns.nudgeCount = 1
+	}
+	c.state[sessionID] = ns
+	if has {
+		return "", false
+	}
+	return teamNameNudgeText, true
+}
