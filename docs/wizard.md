@@ -193,7 +193,7 @@ that drives Teamster's cost attribution, dashboards, and drill-down analysis.
 ## Two modes
 
 On **first run** (no product values exist in the vocabulary), it launches
-the guided interview wizard. On **subsequent runs**, it opens the 3-column
+the guided interview wizard. On **subsequent runs**, it opens the tree-based
 tag editor.
 
 To re-run the interview after initial setup:
@@ -238,16 +238,26 @@ Selecting an integration seeds its namespace of keys. For example, selecting
 GitHub seeds: `github.owner`, `github.repo`, `github.pr`, `github.issue`,
 `github.milestone`.
 
-## Tag editor (3-column)
+## Tag editor
 
 After initial setup, `teamster setup tags` opens the full-screen editor:
 
-- **Left column** — tag key list (navigate with arrow keys)
-- **Center column** — values for the selected key
-- **Right column** — key metadata (category, cardinality, description)
+- **Tree pane (left)** — groups (Context, integration namespaces, Lifecycle)
+  containing keys, which contain values. Navigate with arrow keys; `→`/`←`
+  expand and collapse, `/` filters, `r` shows retired values.
+- **Detail pane (right)** — metadata for the highlighted node. `tab` focuses
+  it so it can scroll.
+- **Form modal** — `enter` or `e` opens an edit form for the highlighted key
+  or value; `a` adds a value, `A` adds a key, `d` retires (with confirmation),
+  `t` toggles the required flag. In a form, `ctrl+s` saves and `esc` discards.
+  Press `?` for the full key list.
+  Description fields are multi-line, and a help panel in the form explains the
+  focused field.
 
-The editor supports adding products, adding keys and values, retiring keys,
-and re-running the interview.
+A **key description** says what the dimension is for; a **value description**
+says when to apply that value. They are stored separately. Lifecycle keys are
+engine-managed: their vocabulary is locked, but descriptions and the required
+flag are editable.
 
 ## Related: teamster tags CLI
 

@@ -100,7 +100,7 @@ teamster setup tags
 On first run this opens an eight-screen interview: pick which external systems
 you integrate with (GitHub, Jira, and so on), name your products, and review the
 context and lifecycle keys that get seeded. On later runs the same command opens
-a three-column editor. Full walkthrough in [wizard.md](wizard.md) (the
+a tree-based editor. Full walkthrough in [wizard.md](wizard.md) (the
 installer prompts and tag setup sections).
 
 You can also manage tags non-interactively:

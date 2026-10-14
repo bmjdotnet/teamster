@@ -24,11 +24,12 @@ var _ store.TagAdminStore = (*Store)(nil)
 // accumulating ValueCount / OR-ing Required across the rest.
 func (s *Store) TagKeys(ctx context.Context) ([]wms.TagKeySummary, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT tag_key, category, cardinality, required, description,
+		SELECT tag_key, category, cardinality, required,
+		       MAX(key_description) AS key_description,
 		       scope, exclusion_group, auto_extract, interview, facet_source,
 		       COUNT(*) AS value_count
 		FROM tags
-		GROUP BY tag_key, category, cardinality, required, description,
+		GROUP BY tag_key, category, cardinality, required,
 		         scope, exclusion_group, auto_extract, interview, facet_source
 		ORDER BY CASE category WHEN 'lifecycle' THEN 0 ELSE 1 END, tag_key`)
 	if err != nil {
@@ -200,10 +201,10 @@ func (s *Store) AddTagValue(ctx context.Context, key, value, description string)
 	if key == "" || value == "" {
 		return fmt.Errorf("AddTagValue: key and value are required")
 	}
-	var category, cardinality string
+	var category, cardinality, keyDescription string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT category, cardinality FROM tags WHERE tag_key = ? LIMIT 1`, key,
-	).Scan(&category, &cardinality)
+		`SELECT category, cardinality, key_description FROM tags WHERE tag_key = ? LIMIT 1`, key,
+	).Scan(&category, &cardinality, &keyDescription)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return store.NotFound("AddTagValue", "tag key", key)
@@ -211,9 +212,9 @@ func (s *Store) AddTagValue(ctx context.Context, key, value, description string)
 		return err
 	}
 	_, err = s.db.ExecContext(ctx,
-		`INSERT OR IGNORE INTO tags (tag_key, tag_value, is_seed, category, cardinality, description)
-		 VALUES (?, ?, 0, ?, ?, ?)`,
-		key, value, category, cardinality, description,
+		`INSERT OR IGNORE INTO tags (tag_key, tag_value, is_seed, category, cardinality, description, key_description)
+		 VALUES (?, ?, 0, ?, ?, ?, ?)`,
+		key, value, category, cardinality, description, keyDescription,
 	)
 	return err
 }
@@ -254,9 +255,8 @@ func (s *Store) DeleteTagValue(ctx context.Context, key, value string) error {
 	return nil
 }
 
-// UpdateTagDescription overwrites the description shared by every value row
-// of key (the CLI's key-level `tags describe`, distinct from a per-value
-// description write). Not-found correctness: like MySQL, SQLite's
+// UpdateTagDescription overwrites the KEY's description (key_description) on
+// every row of key; per-value description is untouched. Not-found correctness: like MySQL, SQLite's
 // RowsAffected counts CHANGED rows, so writing back the same description is
 // a 0-row no-op indistinguishable from a missing key without an existence
 // check.
@@ -267,7 +267,7 @@ func (s *Store) UpdateTagDescription(ctx context.Context, key, description strin
 	if err := checkTagDescriptionLen(description); err != nil {
 		return err
 	}
-	res, err := s.db.ExecContext(ctx, `UPDATE tags SET description = ? WHERE tag_key = ?`, description, key)
+	res, err := s.db.ExecContext(ctx, `UPDATE tags SET key_description = ? WHERE tag_key = ?`, description, key)
 	if err != nil {
 		return err
 	}
@@ -330,8 +330,8 @@ func (s *Store) SeedTags(ctx context.Context, specs []wms.TagSpec) error {
 func (s *Store) SeedProductValues(ctx context.Context, products []string) error {
 	for _, p := range products {
 		if _, err := s.db.ExecContext(ctx,
-			`INSERT OR IGNORE INTO tags (tag_key, tag_value, is_seed, category, cardinality, description)
-			 VALUES ('product', ?, 0, 'context', 'single', '')`, p,
+			`INSERT OR IGNORE INTO tags (tag_key, tag_value, is_seed, category, cardinality, description, key_description)
+			 SELECT 'product', ?, 0, 'context', 'single', '', COALESCE((SELECT MAX(key_description) FROM tags WHERE tag_key = 'product'), '')`, p,
 		); err != nil {
 			return err
 		}
@@ -344,8 +344,8 @@ func (s *Store) SeedProductValues(ctx context.Context, products []string) error 
 func (s *Store) SeedIntegrationKeys(ctx context.Context, keys []store.IntegrationKey) error {
 	for _, k := range keys {
 		if _, err := s.db.ExecContext(ctx,
-			`INSERT OR IGNORE INTO tags (tag_key, tag_value, is_seed, category, cardinality, description)
-			 VALUES (?, '', 1, 'context', 'single', ?)`, k.Key, k.Description,
+			`INSERT OR IGNORE INTO tags (tag_key, tag_value, is_seed, category, cardinality, description, key_description)
+			 VALUES (?, '', 1, 'context', 'single', ?, ?)`, k.Key, k.Description, k.Description,
 		); err != nil {
 			return err
 		}

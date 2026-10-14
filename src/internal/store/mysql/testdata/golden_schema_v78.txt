@@ -446,6 +446,7 @@ TABLE tags
   COLUMN id type=bigint unsigned null=NO default=<NULL> extra=auto_increment
   COLUMN interview type=varchar(16) null=NO default=propose extra=
   COLUMN is_seed type=tinyint(1) null=NO default=0 extra=
+  COLUMN key_description type=varchar(1024) null=NO default= extra=
   COLUMN required type=tinyint(1) null=NO default=0 extra=
   COLUMN retired type=tinyint(1) null=NO default=0 extra=
   COLUMN scope type=varchar(16) null=NO default= extra=

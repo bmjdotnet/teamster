@@ -100,6 +100,34 @@ func TestDeleteTagValue(t *testing.T) {
 	}
 }
 
+func keySummary(t *testing.T, s *Store, key string) wms.TagKeySummary {
+	t.Helper()
+	keys, err := s.TagKeys(context.Background())
+	if err != nil {
+		t.Fatalf("TagKeys: %v", err)
+	}
+	for _, k := range keys {
+		if k.Key == key {
+			return k
+		}
+	}
+	t.Fatalf("%s not found in TagKeys", key)
+	return wms.TagKeySummary{}
+}
+
+func valueDescriptions(t *testing.T, s *Store, key string) map[string]string {
+	t.Helper()
+	vals, err := s.TagValues(context.Background(), key)
+	if err != nil {
+		t.Fatalf("TagValues: %v", err)
+	}
+	out := map[string]string{}
+	for _, v := range vals {
+		out[v.Value] = v.Description
+	}
+	return out
+}
+
 func TestUpdateTagDescription(t *testing.T) {
 	s, _ := newTestStore(t)
 	ctx := context.Background()
@@ -107,8 +135,18 @@ func TestUpdateTagDescription(t *testing.T) {
 	if err := s.DefineTag(ctx, wms.TagSpec{Key: "described", Category: "context", Cardinality: "single", Values: []string{"a", "b"}}); err != nil {
 		t.Fatalf("DefineTag: %v", err)
 	}
+	if err := s.UpdateTagValueDescription(ctx, "described", "a", "when a"); err != nil {
+		t.Fatalf("UpdateTagValueDescription: %v", err)
+	}
 	if err := s.UpdateTagDescription(ctx, "described", "a key-level rule"); err != nil {
 		t.Fatalf("UpdateTagDescription: %v", err)
+	}
+	if got := keySummary(t, s, "described").Description; got != "a key-level rule" {
+		t.Errorf("key Description = %q, want %q", got, "a key-level rule")
+	}
+	vd := valueDescriptions(t, s, "described")
+	if vd["a"] != "when a" || vd["b"] != "" {
+		t.Errorf("value descriptions = %v, want a=\"when a\" b=\"\"", vd)
 	}
 	// No-op re-write of the same description must not be mistaken for not-found.
 	if err := s.UpdateTagDescription(ctx, "described", "a key-level rule"); err != nil {
@@ -116,6 +154,54 @@ func TestUpdateTagDescription(t *testing.T) {
 	}
 	if err := s.UpdateTagDescription(ctx, "does-not-exist", "x"); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("UpdateTagDescription on missing key: err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestTagKeys_KeyDescriptionNotFirstValue(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+
+	if err := s.DefineTag(ctx, wms.TagSpec{Key: "prio", Description: "what prio is", Values: []string{"p0", "p1"}}); err != nil {
+		t.Fatalf("DefineTag: %v", err)
+	}
+	if err := s.UpdateTagValueDescription(ctx, "prio", "p0", "critical"); err != nil {
+		t.Fatalf("UpdateTagValueDescription: %v", err)
+	}
+	if got := keySummary(t, s, "prio").Description; got != "what prio is" {
+		t.Errorf("key Description = %q, want %q", got, "what prio is")
+	}
+	vd := valueDescriptions(t, s, "prio")
+	if vd["p0"] != "critical" || vd["p1"] != "" {
+		t.Errorf("value descriptions = %v, want p0=critical p1=\"\"", vd)
+	}
+}
+
+func TestAddTagValue_InheritsKeyDescription(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+
+	if err := s.DefineTag(ctx, wms.TagSpec{Key: "inh", Description: "key rubric", Values: []string{"x"}}); err != nil {
+		t.Fatalf("DefineTag: %v", err)
+	}
+	if err := s.AddTagValue(ctx, "inh", "y", ""); err != nil {
+		t.Fatalf("AddTagValue: %v", err)
+	}
+	if got := keySummary(t, s, "inh").Description; got != "key rubric" {
+		t.Errorf("key Description = %q, want unchanged %q", got, "key rubric")
+	}
+	var kd string
+	if err := s.db.QueryRowContext(ctx, `SELECT key_description FROM tags WHERE tag_key = 'inh' AND tag_value = 'y'`).Scan(&kd); err != nil {
+		t.Fatalf("read key_description: %v", err)
+	}
+	if kd != "key rubric" {
+		t.Errorf("new row key_description = %q, want inherited", kd)
+	}
+	d, err := s.TagValueDetail(ctx, "inh", "y")
+	if err != nil {
+		t.Fatalf("TagValueDetail: %v", err)
+	}
+	if d.Description != "" {
+		t.Errorf("new value Description = %q, want empty", d.Description)
 	}
 }
 

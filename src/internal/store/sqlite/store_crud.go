@@ -763,13 +763,13 @@ func (s *Store) DefineTag(ctx context.Context, spec wms.TagSpec) error {
 	}
 	for _, v := range values {
 		if _, err := s.db.ExecContext(ctx,
-			`INSERT INTO tags (tag_key, tag_value, is_seed, category, cardinality, description)
+			`INSERT INTO tags (tag_key, tag_value, is_seed, category, cardinality, key_description)
 			 VALUES (?, ?, 1, ?, ?, ?)
 			 ON CONFLICT(tag_key, tag_value) DO UPDATE SET
 			     is_seed     = 1,
 			     category    = excluded.category,
 			     cardinality = excluded.cardinality,
-			     description = CASE WHEN description = '' THEN excluded.description ELSE description END`,
+			     key_description = CASE WHEN key_description = '' THEN excluded.key_description ELSE key_description END`,
 			spec.Key, v, category, cardinality, spec.Description,
 		); err != nil {
 			return err
@@ -781,6 +781,13 @@ func (s *Store) DefineTag(ctx context.Context, spec wms.TagSpec) error {
 		`UPDATE tags SET cardinality = ? WHERE tag_key = ?`, cardinality, spec.Key,
 	); err != nil {
 		return err
+	}
+	if spec.Description != "" {
+		if _, err := s.db.ExecContext(ctx,
+			`UPDATE tags SET key_description = ? WHERE tag_key = ? AND key_description = ''`, spec.Description, spec.Key,
+		); err != nil {
+			return err
+		}
 	}
 	if spec.Required != nil {
 		if _, err := s.db.ExecContext(ctx,

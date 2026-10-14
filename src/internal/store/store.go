@@ -447,6 +447,7 @@ type TagAdminStore interface {
 	RetireTagValue(ctx context.Context, tagKey, tagValue string) error
 
 	// Reads for the CLI/TUI browsers.
+	// TagKeys' summary Description is the key's own description (key_description).
 	TagKeys(ctx context.Context) ([]wms.TagKeySummary, error)
 	TagValues(ctx context.Context, key string) ([]wms.Tag, error)
 	TagValueDetail(ctx context.Context, key, value string) (TagValueDetail, error)
@@ -457,6 +458,7 @@ type TagAdminStore interface {
 	AddTagValue(ctx context.Context, key, value, description string) error
 	DeleteTagKey(ctx context.Context, key string) (int64, error)
 	DeleteTagValue(ctx context.Context, key, value string) error
+	// UpdateTagDescription is key-level; it never touches per-value descriptions.
 	UpdateTagDescription(ctx context.Context, key, description string) error
 	SetTagRequired(ctx context.Context, key string, required bool) error
 	UpdateTagConventions(ctx context.Context, key, scope, exclusionGroup, autoExtract, interview string) error

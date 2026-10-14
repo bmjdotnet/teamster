@@ -16,7 +16,7 @@ import (
 // head, store.MaxSchemaVersion). When a migration changes the schema,
 // regenerate it with -update-golden below and rename the file and this
 // constant together.
-const goldenSchemaFixture = "testdata/golden_schema_v77.txt"
+const goldenSchemaFixture = "testdata/golden_schema_v78.txt"
 
 // updateGolden regenerates the golden fixture from the pre-refactor migrate()
 // on a fresh database: `go test ./internal/store/mysql/ -run TestGoldenSchema -update-golden`.

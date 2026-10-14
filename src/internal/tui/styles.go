@@ -2,7 +2,8 @@ package tui
 
 import "github.com/charmbracelet/lipgloss"
 
-// Color palette matching hookd dark terminal aesthetic.
+// Legacy palette: fixed dark colours. cmd/ctop consumes these as lipgloss.Color
+// (including in tests), so their type and values must not change.
 var (
 	ColorBg      = lipgloss.Color("#0d1117")
 	ColorText    = lipgloss.Color("#c9d1d9")
@@ -17,75 +18,175 @@ var (
 	ColorMetric  = lipgloss.Color("#39c5cf")
 )
 
+// Adaptive palette, TradeWars-style: saturated 16-colour hues on dark
+// terminals, darker equivalents of the same hues on light ones. Values and
+// user data are the brightest things on screen; labels and chrome are grey.
+// lipgloss queries the terminal background once at first render.
+var (
+	pBg      = lipgloss.AdaptiveColor{Dark: "#000000", Light: "#ffffff"}
+	pText    = lipgloss.AdaptiveColor{Dark: "#e4e4e4", Light: "#1f2328"}
+	pAccent  = lipgloss.AdaptiveColor{Dark: "#55ffff", Light: "#00758a"} // bright cyan: prompts, interactive
+	pPurple  = lipgloss.AdaptiveColor{Dark: "#ff55ff", Light: "#a40e9c"} // magenta: special categories
+	pSuccess = lipgloss.AdaptiveColor{Dark: "#55ff55", Light: "#1a7f37"} // bright green: positive, counts
+	pWarn    = lipgloss.AdaptiveColor{Dark: "#ffaa00", Light: "#9a6700"}
+	pError   = lipgloss.AdaptiveColor{Dark: "#ff5555", Light: "#cf222e"} // bright red: danger
+	pDim     = lipgloss.AdaptiveColor{Dark: "#8a8a8a", Light: "#6e7781"} // grey: structure
+	pBorder  = lipgloss.AdaptiveColor{Dark: "#5a5a5a", Light: "#b8c0c8"}
+	pHighBg  = lipgloss.AdaptiveColor{Dark: "#0000af", Light: "#bcd7ff"} // selection
+	pMetric  = lipgloss.AdaptiveColor{Dark: "#55ff55", Light: "#1a7f37"}
+	pYellow  = lipgloss.AdaptiveColor{Dark: "#ffff55", Light: "#8a6d00"} // bright yellow: values, user data
+	pGold    = lipgloss.AdaptiveColor{Dark: "#b3a000", Light: "#7a6100"} // muted gold: read-only values
+	pWhite   = lipgloss.AdaptiveColor{Dark: "#ffffff", Light: "#000000"} // bright white: headings
+	pBlue    = lipgloss.AdaptiveColor{Dark: "#5f87ff", Light: "#0550ae"}
+
+	ColorKey          = pAccent
+	ColorHelp         = lipgloss.AdaptiveColor{Dark: "#a8a8a8", Light: "#57606a"}
+	ColorFieldBg      = lipgloss.AdaptiveColor{Dark: "#00005f", Light: "#dce8ff"}
+	ColorFieldFocusBg = lipgloss.AdaptiveColor{Dark: "#0000af", Light: "#b6d0ff"}
+	ColorOnAccent     = lipgloss.AdaptiveColor{Dark: "#000000", Light: "#ffffff"}
+	ColorOutcome      = pPurple
+	ColorWorkunit     = pBlue
+)
+
 // Panel border styles.
 var (
 	FocusedBorder = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(ColorAccent)
+			BorderForeground(pAccent)
 
 	UnfocusedBorder = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(ColorBorder)
+			BorderForeground(pBorder)
 
 	DimBorder = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(ColorDim)
+			BorderForeground(pDim)
 )
 
 // Text styles.
 var (
 	TitleStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(ColorAccent)
+			Foreground(pAccent)
 
 	SubtitleStyle = lipgloss.NewStyle().
-			Foreground(ColorDim)
+			Foreground(pDim)
 
 	TextStyle = lipgloss.NewStyle().
-			Foreground(ColorText)
+			Foreground(pText)
 
 	DimStyle = lipgloss.NewStyle().
-			Foreground(ColorDim)
+			Foreground(pDim)
 
 	AccentStyle = lipgloss.NewStyle().
-			Foreground(ColorAccent)
+			Foreground(pAccent)
 
 	BoldAccentStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(ColorAccent)
+			Foreground(pAccent)
 
 	ErrorStyle = lipgloss.NewStyle().
-			Foreground(ColorError)
+			Foreground(pError)
 
 	SuccessStyle = lipgloss.NewStyle().
-			Foreground(ColorSuccess)
+			Foreground(pSuccess)
 
 	LifecycleKeyStyle = lipgloss.NewStyle().
-				Foreground(ColorDim)
+				Foreground(pDim)
 
 	CursorStyle = lipgloss.NewStyle().
-			Foreground(ColorAccent)
+			Foreground(pAccent)
 
 	SelectedStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(ColorAccent).
-			Background(ColorHighBg)
+			Foreground(pAccent).
+			Background(pHighBg)
 
 	CheckedStyle = lipgloss.NewStyle().
-			Foreground(ColorAccent)
+			Foreground(pAccent)
 
 	UncheckedStyle = lipgloss.NewStyle().
-			Foreground(ColorDim)
+			Foreground(pDim)
 
 	ReqStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(ColorWarn)
+			Foreground(lipgloss.Color("#ffffff")).
+			Background(lipgloss.AdaptiveColor{Dark: "#d70000", Light: "#cf222e"}).
+			Padding(0, 1)
 
 	StatusBarStyle = lipgloss.NewStyle().
-			Foreground(ColorDim)
+			Foreground(pDim)
 
 	StepStyle = lipgloss.NewStyle().
-			Foreground(ColorDim)
+			Foreground(pDim)
+
+	FieldLabelStyle = lipgloss.NewStyle().Foreground(ColorHelp).Width(14)
+
+	FieldLabelFocusStyle = lipgloss.NewStyle().Bold(true).Foreground(pAccent).Width(14)
+
+	LockedStyle = lipgloss.NewStyle().Foreground(pDim)
+
+	HeadingStyle = lipgloss.NewStyle().Bold(true).Foreground(pWhite)
+
+	ButtonStyle = lipgloss.NewStyle().Foreground(ColorHelp).Background(lipgloss.AdaptiveColor{Dark: "#3a3a3a", Light: "#d0d7de"}).Padding(0, 2)
+
+	ButtonSaveFocusStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorOnAccent).Background(pSuccess).Padding(0, 2)
+
+	ButtonDangerFocusStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ffffff")).Background(lipgloss.AdaptiveColor{Dark: "#d70000", Light: "#cf222e"}).Padding(0, 2)
+
+	ButtonNeutralFocusStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ffffff")).Background(lipgloss.AdaptiveColor{Dark: "#6c6c6c", Light: "#6e7781"}).Padding(0, 2)
+
+	FieldStyle = lipgloss.NewStyle().Bold(true).Foreground(pYellow).Background(ColorFieldBg)
+
+	FieldFocusStyle = lipgloss.NewStyle().Bold(true).Foreground(pYellow).Background(ColorFieldFocusBg)
+
+	FieldPlaceholderStyle = lipgloss.NewStyle().Foreground(pDim).Background(ColorFieldBg)
+
+	FieldCursorStyle = lipgloss.NewStyle().Reverse(true)
+
+	OverflowStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorKey)
+
+	ChipStyle = lipgloss.NewStyle().Foreground(pYellow).Background(ColorFieldBg).Padding(0, 1)
+
+	ChipFocusStyle = lipgloss.NewStyle().Bold(true).Foreground(pYellow).Background(ColorFieldFocusBg).Padding(0, 1)
+
+	KeyStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorKey)
+
+	HintStyle = lipgloss.NewStyle().Foreground(pDim)
+
+	HelpPanelStyle = lipgloss.NewStyle().Foreground(ColorHelp)
+
+	RuleStyle = lipgloss.NewStyle().Foreground(pBorder)
+
+	MetricStyle = lipgloss.NewStyle().Bold(true).Foreground(pMetric)
+
+	GroupStyle = lipgloss.NewStyle().Bold(true).Foreground(pWhite)
+
+	KeyNameStyle = lipgloss.NewStyle().Bold(true).Foreground(pAccent)
+
+	ValueNameStyle = lipgloss.NewStyle().Bold(true).Foreground(pYellow)
+
+	DetailLabelStyle = lipgloss.NewStyle().Foreground(ColorHelp).Width(14)
+
+	PlaceholderTextStyle = lipgloss.NewStyle().Foreground(pDim).Italic(true)
+
+	BoldTextStyle = lipgloss.NewStyle().Bold(true).Foreground(pWhite)
+
+	WarnStyle = lipgloss.NewStyle().Bold(true).Foreground(pWarn)
+
+	DataStyle = lipgloss.NewStyle().Bold(true).Foreground(pYellow)
+
+	DataDimStyle = lipgloss.NewStyle().Foreground(pGold)
+
+	GoodStyle = lipgloss.NewStyle().Bold(true).Foreground(pSuccess)
+
+	ChromeStyle = lipgloss.NewStyle().Foreground(pAccent)
+
+	HelpHeadingStyle = lipgloss.NewStyle().Bold(true).Foreground(pAccent)
+
+	OutcomeStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorOutcome)
+
+	WorkunitStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorWorkunit)
 )
 
 // HeaderStyle renders a screen title + separator rule.

@@ -1527,4 +1527,29 @@ var migrations = []store.Migration{
 			`ALTER TABLE agent_roster ADD COLUMN description TEXT NOT NULL DEFAULT ''`,
 		},
 	},
+	{
+		// Mirrors mysql v78 "tag-key-description"; numbered 77 for the same
+		// reason roster-description is numbered 76.
+		Version: 77,
+		Name:    "tag-key-description",
+		SQL: []string{
+			`ALTER TABLE tags ADD COLUMN key_description TEXT NOT NULL DEFAULT ''`,
+			`UPDATE tags SET key_description = (
+			    SELECT MIN(s.description) FROM tags s
+			     WHERE s.tag_key = tags.tag_key AND s.tag_value = '' AND s.description <> '')
+			 WHERE key_description = ''
+			   AND EXISTS (SELECT 1 FROM tags s
+			                WHERE s.tag_key = tags.tag_key AND s.tag_value = '' AND s.description <> '')`,
+			`UPDATE tags SET key_description = 'The ongoing product or area of work. Primary aggregation axis.' WHERE tag_key = 'product' AND key_description = ''`,
+			`UPDATE tags SET key_description = 'The specific feature being built.' WHERE tag_key = 'feature' AND key_description = ''`,
+			`UPDATE tags SET key_description = 'The specific bug being fixed.' WHERE tag_key = 'bug' AND key_description = ''`,
+			`UPDATE tags SET key_description = 'Subsystem within a product (e.g. networking, harness, ui).' WHERE tag_key = 'component' AND key_description = ''`,
+			`UPDATE tags SET key_description = 'Urgency: p0=critical, p1=high, p2=normal, p3=low.' WHERE tag_key = 'priority' AND key_description = ''`,
+			`UPDATE tags SET key_description = 'Version or milestone being targeted (semver or milestone slug).' WHERE tag_key = 'product-version' AND key_description = ''`,
+			`UPDATE tags SET key_description = 'Current lifecycle phase of an entity.' WHERE tag_key = 'phase' AND key_description = ''`,
+			`UPDATE tags SET key_description = 'Nature of the work being done.' WHERE tag_key = 'work-type' AND key_description = ''`,
+			`UPDATE tags SET key_description = 'Carries "achieved" on a done entity. "abandoned" is a legacy value written before v0.3.0 (abandonment is now the abandoned status).' WHERE tag_key = 'resolution' AND key_description = ''`,
+			`UPDATE tags SET key_description = 'Archival marker for entities that are no longer active.' WHERE tag_key = 'lifecycle' AND key_description = ''`,
+		},
+	},
 }

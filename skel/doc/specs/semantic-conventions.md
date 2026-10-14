@@ -960,6 +960,10 @@ via `teamster setup tags` (TUI wizard with checkboxes per integration).
 - **single**: at most one value per entity per key. Setting a new value replaces the old one.
 - **multi**: multiple values per entity per key (e.g. `github.issue` can have several values).
 
+### 9.5 Key and Value Descriptions
+
+A key carries a `key_description` (what the dimension is for); each value carries its own `description` (when to apply that value). `teamster tags describe` and the tag editor's key form write the former; `wms_describeTag` and the editor's value form write the latter. Writing one never touches the other.
+
 ---
 
 ## 10. Codex Runtime Conventions

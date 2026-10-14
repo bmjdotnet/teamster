@@ -336,7 +336,7 @@ During development, the script can also be run directly from
 `skel/lib/scripts/install-remote.sh`.
 
 **Post-install:** run `teamster setup tags` to configure the tag keyspace
-via the TUI wizard (8-screen guided flow on first run, 3-column editor
+via the TUI wizard (8-screen guided flow on first run, tree editor
 on subsequent runs). Or use `teamster tags add-key`/`add-value` for
 non-interactive setup. `lib/installrunner.sh` only auto-launches this wizard
 on a **fresh** install (captured as `IS_UPGRADE` before the binary swap) —
@@ -430,7 +430,7 @@ Agent-Teams teammates run as separate top-level sessions (see Pitfalls).
 | `backup` | Backup engine | Standalone binary for systemd timer. Takes timestamped snapshots of MySQL, OTel, and teamster config/state. No sudo. CLI also accessible via `teamster backup` and `teamster restore`. |
 | `relay` | Event relay | Tails hub JSONL, POSTs each line to replica hookd `/event`. Built by installer when `--relay-mode=install`. See `docs/specs/replication.md`. |
 | `teamster tags` | CLI tag management | Subcommands: `list`, `add-key`, `add-value`, `retire`, `describe`. Built into `cmd/teamster/tags.go`. |
-| `teamster setup tags` | TUI tag wizard | Bubbletea-based guided setup for tag keyspace. 8-screen wizard on first run, 3-column editor on subsequent runs. Built from `internal/tui/`. |
+| `teamster setup tags` | TUI tag wizard | Bubbletea-based guided setup for tag keyspace. 8-screen wizard on first run, tree editor on subsequent runs. Built from `internal/tui/`. |
 | `teamster search sessions <query>` | Find sessions by what they worked on | Session-centric: one row per session, matched via outcome/workunit title-description-focus, tag values, or focus intervals/session focus text (`--type`). Filters: `--user`, `--host`, `--status`, `--tag key=value`, `--since <dur>`, `--limit`; `--json` for scripting. Built from `cmd/teamster/search.go` over `wms.SearchSessions`. |
 | `teamster clone <user>@<host>` | Stand up a disposable dev-peer instance | Runs from the source host (R9), pushes outward over SSH — never installs on, migrates, or mutates the source. Pipeline: resolve build → probe target → ship verified source (git archive + scp + content-manifest fingerprint gate) → translate topology (`internal/clonetopology`) → invoke `lib/installrunner.sh` → Stage A verify (`<binary> --version`, blocks the data leg on mismatch) → assert schema version → mask sweep/backup/review-sweep/mcp-scraper timers permanently, four units (R11) → transfer + restore data (`internal/clonedata`) → verify row counts via the `clone_verify_ro` read-only credential (I7) → `teamster start`. `--dry-run`/`--allow-dirty`/`--repo-dir`/`--github-repo`/`--source`/`--ref`/`--fresh-backup` flags. See `skel/doc/specs/architecture.md`'s "Clone" section for the isolation contract (I1–I7). Built from `cmd/teamster/clone.go`, `clone_install.go`, `clone_data.go`. |
 

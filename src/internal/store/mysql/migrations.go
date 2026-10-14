@@ -2190,6 +2190,33 @@ WHERE NOT EXISTS (
 			`ALTER TABLE agent_roster ADD COLUMN description VARCHAR(255) NOT NULL DEFAULT ''`,
 		},
 	},
+	{
+		// key_description is the KEY's own rubric ("what this dimension is for"),
+		// distinct from description (per-value: "when to apply this value").
+		// Denormalized onto every row of a key like category/cardinality/required.
+		// Backfills are fill-if-empty so a re-run is a no-op.
+		Version: 78,
+		Name:    "tag-key-description",
+		Stmts: []string{
+			`ALTER TABLE tags ADD COLUMN key_description VARCHAR(1024) NOT NULL DEFAULT '' AFTER description`,
+			`UPDATE tags t
+			   JOIN (SELECT tag_key, MIN(description) AS d FROM tags
+			         WHERE tag_value = '' AND description <> '' GROUP BY tag_key) s
+			     ON s.tag_key = t.tag_key
+			    SET t.key_description = s.d
+			  WHERE t.key_description = ''`,
+			`UPDATE tags SET key_description = 'The ongoing product or area of work. Primary aggregation axis.' WHERE tag_key = 'product' AND key_description = ''`,
+			`UPDATE tags SET key_description = 'The specific feature being built.' WHERE tag_key = 'feature' AND key_description = ''`,
+			`UPDATE tags SET key_description = 'The specific bug being fixed.' WHERE tag_key = 'bug' AND key_description = ''`,
+			`UPDATE tags SET key_description = 'Subsystem within a product (e.g. networking, harness, ui).' WHERE tag_key = 'component' AND key_description = ''`,
+			`UPDATE tags SET key_description = 'Urgency: p0=critical, p1=high, p2=normal, p3=low.' WHERE tag_key = 'priority' AND key_description = ''`,
+			`UPDATE tags SET key_description = 'Version or milestone being targeted (semver or milestone slug).' WHERE tag_key = 'product-version' AND key_description = ''`,
+			`UPDATE tags SET key_description = 'Current lifecycle phase of an entity.' WHERE tag_key = 'phase' AND key_description = ''`,
+			`UPDATE tags SET key_description = 'Nature of the work being done.' WHERE tag_key = 'work-type' AND key_description = ''`,
+			`UPDATE tags SET key_description = 'Carries "achieved" on a done entity. "abandoned" is a legacy value written before v0.3.0 (abandonment is now the abandoned status).' WHERE tag_key = 'resolution' AND key_description = ''`,
+			`UPDATE tags SET key_description = 'Archival marker for entities that are no longer active.' WHERE tag_key = 'lifecycle' AND key_description = ''`,
+		},
+	},
 }
 
 // mergeProjectToProduct renames `project` tag rows to `product`, handling the

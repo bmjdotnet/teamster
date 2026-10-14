@@ -1358,7 +1358,7 @@ func (s *Store) ReconcileVocabulary(ctx context.Context, specs []wms.TagSpec) er
 // category/cardinality/description, seeding its explicit values (or a ” stub
 // for create-on-apply keys). It is the runtime equivalent of a yaml `tags:`
 // entry. Idempotent: re-defining converges (is_seed=1, category/cardinality
-// refreshed). An existing tag's description is preserved when already set.
+// refreshed). The description is the KEY's (key_description), filled only when empty.
 //
 // It refuses a system-managed key (deny-list): those lifecycle keys are owned
 // by migrations, so letting config/admin overwrite their category/cardinality
@@ -1387,13 +1387,13 @@ func (s *Store) DefineTag(ctx context.Context, spec wms.TagSpec) error {
 	}
 	for _, v := range values {
 		if _, err := s.db.ExecContext(ctx,
-			`INSERT INTO tags (tag_key, tag_value, is_seed, category, cardinality, description)
+			`INSERT INTO tags (tag_key, tag_value, is_seed, category, cardinality, key_description)
 			 VALUES (?, ?, 1, ?, ?, ?)
 			 ON DUPLICATE KEY UPDATE
 			     is_seed     = 1,
 			     category    = VALUES(category),
 			     cardinality = VALUES(cardinality),
-			     description = IF(description = '', VALUES(description), description)`,
+			     key_description = IF(key_description = '', VALUES(key_description), key_description)`,
 			spec.Key, v, category, cardinality, spec.Description,
 		); err != nil {
 			return err
@@ -1405,6 +1405,13 @@ func (s *Store) DefineTag(ctx context.Context, spec wms.TagSpec) error {
 		`UPDATE tags SET cardinality = ? WHERE tag_key = ?`, cardinality, spec.Key,
 	); err != nil {
 		return err
+	}
+	if spec.Description != "" {
+		if _, err := s.db.ExecContext(ctx,
+			`UPDATE tags SET key_description = ? WHERE tag_key = ? AND key_description = ''`, spec.Description, spec.Key,
+		); err != nil {
+			return err
+		}
 	}
 	// required is per-key like cardinality. Only written when the caller set it
 	// (non-nil pointer) — a plain DefineTag that omits Required leaves the flag

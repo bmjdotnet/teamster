@@ -3,6 +3,11 @@
 All notable changes to Teamster are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## v0.3.2 (unreleased)
+
+### Changed
+- **Redesigned tag editor TUI** — tree-based layout with detail pane, modal forms, contextual help, and bold color palette; key descriptions now stored separately from value descriptions (#42).
+
 ## v0.3.1
 
 ### Added
